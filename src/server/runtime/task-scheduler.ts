@@ -626,7 +626,14 @@ export class TaskScheduler {
     }
     this.release(run);
     const workspace = await this.#service.getWorkspace(run.taskId);
-    return workspace.task;
+    if (!run.controller.signal.aborted && workspace.task.status === 'running') {
+      // The loop exited without reaching a terminal state (no pending input
+      // found but the task is neither completed nor waiting). Park visibly
+      // instead of leaving it silently running (spec: no-silent-running).
+      await this.appendLifecycle(run.taskId, 'task_interrupted');
+    }
+    const finalWorkspace = await this.#service.getWorkspace(run.taskId);
+    return finalWorkspace.task;
   }
 
   /**

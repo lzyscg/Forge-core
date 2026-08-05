@@ -130,7 +130,7 @@ const TOOL_SPECS: ForgeToolSpec[] = [
   {
     name: 'submit_final_artifact',
     description:
-      'Ask the system to treat the sealed production package as the final output. Requires finish_production first; pass productionPackageRef "current" only. The system validates finality independently; natural language cannot complete the task. Exactly one dispatch action per turn.',
+      'Submit the sealed production package as the task\x27s final output. Use this when you are approving content as complete and want to finalize the task - this is the ONLY way to complete the task. Do NOT use send_message to say "approved" or "passed" - call this tool instead. Requires finish_production first with source "current_input_artifact" (to seal the received artifact you are approving); pass productionPackageRef "current" only. The system validates finality independently; natural language cannot complete the task. Exactly one dispatch action per turn.',
     promptSnippet:
       'submit_final_artifact(productionPackageRef: "current") — request system final validation of the sealed package',
     parameters: SUBMIT_FINAL_ARTIFACT_PARAMETERS,

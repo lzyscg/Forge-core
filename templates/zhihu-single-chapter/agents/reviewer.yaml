@@ -2,7 +2,7 @@ id: reviewer
 name: 章节审核 Agent
 description: 审读章节正文：首次审读给出可操作返修意见，复审确认问题已修复后申请系统最终交付。
 # 占位模型：真实验收时由脚本复制到工作副本并仅替换该标量（单一 configured 命名空间）。
-model: configured/reviewer-model
+model: deepseek/deepseek-v4-pro
 systemPromptFile: prompts/reviewer-system.md
 skills:
   - id: chapter-review
