@@ -50,13 +50,13 @@ import {
 } from '../src/server/runtime/workspace-tools';
 
 /**
- * Repo root derived from this script's location (apps/forge-core/scripts →
+ * Repo root derived from this script's location (the project root/scripts →
  * three levels up). Relative `--report` paths resolve against the repo root —
  * NOT the process cwd — because `npm run -w` pins cwd to the workspace while
  * the sanitized evidence tree (`forge-core-overnight/evidence/...`) lives at
  * the repo root next to phase-b.json. Absolute `--report` paths still win.
  */
-const PROBE_REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+const PROBE_REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 interface PiProbeArgs {
   provider: string;

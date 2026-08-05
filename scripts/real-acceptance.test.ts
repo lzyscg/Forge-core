@@ -65,14 +65,14 @@ import {
 /* Locations and fixtures                                                      */
 /* -------------------------------------------------------------------------- */
 
-/** apps/forge-core (this file lives in apps/forge-core/scripts). */
+/** the project root (this file lives in the project root/scripts). */
 function workspaceRoot(): string {
   return fileURLToPath(new URL('..', import.meta.url));
 }
 
 /** The committed self-contained acceptance template (plan Phase D Task 1). */
 function committedZhihuTemplateDir(): string {
-  return resolve(workspaceRoot(), '..', '..', 'forge-core', 'templates', ACCEPTANCE_TEMPLATE_ID);
+  return resolve(workspaceRoot(), 'templates', ACCEPTANCE_TEMPLATE_ID);
 }
 
 /** Locates the hoisted tsx CLI script by walking up from the workspace root. */
@@ -120,10 +120,10 @@ function makePreflightEnv(): {
 } {
   const envRoot = freshRoot('forge-acceptance-env-');
   const repoRoot = join(envRoot, 'repo');
-  mkdirSync(join(repoRoot, 'forge-core', 'templates'), { recursive: true });
+  mkdirSync(join(repoRoot, 'templates'), { recursive: true });
   cpSync(
     committedZhihuTemplateDir(),
-    join(repoRoot, 'forge-core', 'templates', ACCEPTANCE_TEMPLATE_ID),
+    join(repoRoot, 'templates', ACCEPTANCE_TEMPLATE_ID),
     { recursive: true },
   );
   const inputPath = join(envRoot, 'input.json');
@@ -460,7 +460,7 @@ describe('real acceptance strict preflight', () => {
 
   it('refuses a missing committed template source', async () => {
     const env = makePreflightEnv();
-    rmSync(join(env.repoRoot, 'forge-core', 'templates', ACCEPTANCE_TEMPLATE_ID), {
+    rmSync(join(env.repoRoot, 'templates', ACCEPTANCE_TEMPLATE_ID), {
       recursive: true,
       force: true,
     });

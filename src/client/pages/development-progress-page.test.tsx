@@ -27,7 +27,7 @@ function evidenceWith(
     outcome: 'passed',
     observedAt: '2026-02-01T00:00:00.000Z',
     commit: 'abc1234',
-    command: 'npm run core:verify-ui',
+    command: 'npm run verify:ui',
     passedCapabilities: CAPABILITIES.map(([id]) => id),
     ...overrides,
   };
@@ -181,7 +181,7 @@ describe('DevelopmentProgressPage', () => {
 
     await userEvent.click(within(row).getByRole('button', { name: '模板列表与详情' }));
 
-    expect(within(row).getByText('npm run core:verify-ui')).toBeVisible();
+    expect(within(row).getByText('npm run verify:ui')).toBeVisible();
     expect(within(row).getByText('2026-02-01T00:00:00.000Z')).toBeVisible();
     expect(within(row).getByText('通过')).toBeVisible();
   });

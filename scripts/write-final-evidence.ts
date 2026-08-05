@@ -26,7 +26,7 @@
  * evidence (UI + backend fields preserved, real acceptance fields appended)
  * is written atomically via temp file + rename.
  *
- * Executed by tsx (`npm run evidence:final` / `npm run core:evidence:final`)
+ * Executed by tsx (`npm run evidence:final` / `npm run evidence:final`)
  * and intentionally outside the tsconfig include set; it imports only the
  * capability registry and evidence helpers from src so capability ids and
  * the evidence merge semantics have a single source of truth.
@@ -42,7 +42,7 @@ import {
 } from '../src/client/mock/development-evidence';
 
 const WORKSPACE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const REPO_ROOT = resolve(WORKSPACE_ROOT, '..', '..');
+const REPO_ROOT = WORKSPACE_ROOT;
 
 /* -------------------------------------------------------------------------- */
 /* Public types                                                                */
@@ -215,8 +215,8 @@ interface BackendReport {
 function parseBackendReport(raw: unknown): BackendReport {
   const record = requireRecord(raw, 'backend');
   if (record['schemaVersion'] !== 1) fail('report backend field "schemaVersion" must be 1');
-  if (record['gate'] !== 'core:verify-backend') {
-    fail('report backend field "gate" must be "core:verify-backend"');
+  if (record['gate'] !== 'verify:backend') {
+    fail('report backend field "gate" must be "verify:backend"');
   }
   requireOutcome(record, 'backend', 'passed');
   const commit = requireCommit(record, 'backend');
@@ -238,8 +238,8 @@ interface RuntimeReport {
 function parseRuntimeReport(raw: unknown): RuntimeReport {
   const record = requireRecord(raw, 'runtime');
   if (record['schemaVersion'] !== 1) fail('report runtime field "schemaVersion" must be 1');
-  if (record['gate'] !== 'core:verify-runtime') {
-    fail('report runtime field "gate" must be "core:verify-runtime"');
+  if (record['gate'] !== 'verify:runtime') {
+    fail('report runtime field "gate" must be "verify:runtime"');
   }
   requireOutcome(record, 'runtime', 'passed');
   const commit = requireCommit(record, 'runtime');

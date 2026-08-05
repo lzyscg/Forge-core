@@ -28,7 +28,7 @@ function evidenceWith(
     outcome: 'passed',
     observedAt: '2026-02-01T00:00:00.000Z',
     commit: 'abc1234',
-    command: 'npm run core:verify-ui',
+    command: 'npm run verify:ui',
     passedCapabilities: [...ALL_THIRTEEN_IDS],
     ...overrides,
   };
@@ -108,7 +108,7 @@ describe('mapDevelopmentEvidence', () => {
       // Phase A hard-codes both real columns; evidence never moves them.
       expect(row.backendConnection).toBe('not_started');
       expect(row.realAcceptance).toBe('not_started');
-      expect(row.command).toBe('npm run core:verify-ui');
+      expect(row.command).toBe('npm run verify:ui');
       expect(row.observedAt).toBe('2026-02-01T00:00:00.000Z');
     }
     expect(rows[0]).toMatchObject({ id: 'templates', label: '模板列表与详情' });
@@ -132,7 +132,7 @@ describe('mapDevelopmentEvidence', () => {
     const rows = mapDevelopmentEvidence(structuredClone(DEVELOPMENT_EVIDENCE_SEED));
     for (const row of rows) {
       expect(row.productShape).toBe('not_started');
-      expect(row.command).toBe('npm run core:verify-ui');
+      expect(row.command).toBe('npm run verify:ui');
       expect(row.observedAt).toBeNull();
     }
     const withUnknown = mapDevelopmentEvidence(
@@ -364,7 +364,7 @@ describe('createMockGateway evidence wiring', () => {
       expect(row.productShape).toBe('not_started');
       expect(row.backendConnection).toBe('not_started');
       expect(row.realAcceptance).toBe('not_started');
-      expect(row.command).toBe('npm run core:verify-ui');
+      expect(row.command).toBe('npm run verify:ui');
       expect(row.observedAt).toBeNull();
     }
   });

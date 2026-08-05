@@ -18,7 +18,7 @@
  *   4. provider + writer/reviewer models must resolve through ModelRuntime
  *      and the provider credential must be configured (boolean only — the
  *      credential value is never read into any report object);
- *   5. the Phase C Pi boundary probe must pass (subprocess `core:probe:pi`,
+ *   5. the Phase C Pi boundary probe must pass (subprocess `probe:pi`,
  *      report at `forge-core-overnight/evidence/sanitized-reports/
  *      pi-boundary.json`);
  *   6. the committed template is copied through a temporary sibling into
@@ -118,11 +118,11 @@ const MODEL_PLACEHOLDER_BY_AGENT = {
   reviewer: 'configured/reviewer-model',
 } as const;
 
-/** apps/forge-core — derived from this script's location (scripts -> one up). */
+/** the project root — derived from this script's location (scripts -> one up). */
 const WORKSPACE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-/** Repo root — three levels up from apps/forge-core/scripts. */
-const RUNNER_REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+/** Repo root — three levels up from the project root/scripts. */
+const RUNNER_REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 /* -------------------------------------------------------------------------- */
 /* CLI arguments                                                                */
@@ -272,7 +272,7 @@ export function defaultRunBoundaryProbe(request: BoundaryProbeRequest): Promise<
       'npm',
       [
         'run',
-        'core:probe:pi',
+        'probe:pi',
         '--',
         '--provider',
         request.providerId,
@@ -736,7 +736,7 @@ export async function runAcceptanceCli(
   const inputPath = resolveAgainstRepo(repoRoot, args.input);
   const reportPath = resolveAgainstRepo(repoRoot, args.report);
   const dataRoot = resolveAgainstRepo(repoRoot, args.dataRoot);
-  const committedTemplateDir = join(repoRoot, 'forge-core', 'templates', ACCEPTANCE_TEMPLATE_ID);
+  const committedTemplateDir = join(repoRoot, 'templates', ACCEPTANCE_TEMPLATE_ID);
 
   let taskInput: Record<string, string>;
   try {

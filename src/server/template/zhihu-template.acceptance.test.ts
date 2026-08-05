@@ -2,7 +2,7 @@
 /**
  * Zhihu single-chapter acceptance template (plan Phase D Task 1 Step 1).
  *
- * Loads the committed, self-contained `forge-core/templates/zhihu-single-chapter`
+ * Loads the committed, self-contained `templates/zhihu-single-chapter`
  * template through the generic Phase B template contract and pins the shape the
  * real acceptance loop depends on: exactly two Agents (`writer`, `reviewer`), an
  * artifact edge writer→reviewer, a message return edge reviewer→writer, and a
@@ -35,7 +35,7 @@ const TEMPLATE_ID = 'zhihu-single-chapter';
 /** The committed template source, resolved relative to this test file. */
 function zhihuTemplateRoot(): string {
   return fileURLToPath(
-    new URL('../../../../../forge-core/templates/zhihu-single-chapter', import.meta.url),
+    new URL('../../../templates/zhihu-single-chapter', import.meta.url),
   );
 }
 

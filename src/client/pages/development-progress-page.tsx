@@ -226,8 +226,8 @@ export function DevelopmentProgressPage() {
       <header className="fc-dev-progress__header">
         <h1 className="fc-page-title">开发进度</h1>
         <p className="fc-dev-progress__disclaimer">
-          产品形态列以最近一次 npm run core:verify-ui 的证据为准，真实后端连接列以最近一次 npm
-          run core:verify-backend 的证据为准，真实验收尚未进行。本页面仅用于开发进度演示，不代表真实生产能力。
+          产品形态列以最近一次 npm run verify:ui 的证据为准，真实后端连接列以最近一次 npm
+          run verify:backend 的证据为准，真实验收尚未进行。本页面仅用于开发进度演示，不代表真实生产能力。
         </p>
         <p className="fc-dev-progress__mode" data-testid="dev-gateway-mode">
           当前数据源：
@@ -266,7 +266,7 @@ export function DevelopmentProgressPage() {
           <section className="fc-dev-matrix-section" aria-label="能力矩阵">
             <h2 className="fc-section-title">能力矩阵</h2>
             <p className="fc-dev-matrix-section__hint">
-              每项能力分三列独立展示；真实后端连接列由 core:verify-backend
+              每项能力分三列独立展示；真实后端连接列由 verify:backend
               证据驱动，真实验收列在真实验收完成前恒为未验收状态。
             </p>
             <ul className="fc-dev-matrix">

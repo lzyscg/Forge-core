@@ -23,7 +23,7 @@
  * "failed", an empty proven subset, exit code 1. A missing or failing Pi
  * boundary report fails the gate (the real-Pi probe is a Gate C hard metric).
  *
- * Executed by tsx (`npm run verify:runtime` / `npm run core:verify-runtime`)
+ * Executed by tsx (`npm run verify:runtime` / `npm run verify:runtime`)
  * and intentionally outside the tsconfig include set; it imports only the
  * capability registry and evidence helpers from src.
  */
@@ -62,7 +62,7 @@ const NPM = IS_WINDOWS ? 'npm.cmd' : 'npm';
 const NPX = IS_WINDOWS ? 'npx.cmd' : 'npx';
 
 const WORKSPACE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const REPO_ROOT = resolve(WORKSPACE_ROOT, '..', '..');
+const REPO_ROOT = WORKSPACE_ROOT;
 const EVIDENCE_PATH = resolve(WORKSPACE_ROOT, 'public', 'development-evidence.json');
 const REPORT_DIR = resolve(REPO_ROOT, 'forge-core-overnight', 'evidence', 'sanitized-reports');
 const REPORT_PATH = resolve(REPORT_DIR, 'phase-c.json');
@@ -275,8 +275,8 @@ function main(): void {
   mkdirSync(REPORT_DIR, { recursive: true });
   const report = {
     schemaVersion: 1,
-    gate: 'core:verify-runtime',
-    command: 'npm run core:verify-runtime',
+    gate: 'verify:runtime',
+    command: 'npm run verify:runtime',
     observedAt: new Date().toISOString(),
     commit: readCommit(),
     outcome: backendOutcome,

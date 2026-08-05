@@ -38,7 +38,7 @@ const HOST = '127.0.0.1';
 const NOT_FOUND_MESSAGE = 'forge-core: no resource at this path';
 
 /**
- * apps/forge-core — located by walking up from this module until the
+ * the project root — located by walking up from this module until the
  * workspace package root (the directory owning package.json + index.html).
  * Works identically from `src/server/*.ts` (tsx dev, two levels below) and
  * from `dist/server/server/*.js` (compiled artifact, three levels below),

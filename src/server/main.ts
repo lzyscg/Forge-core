@@ -3,7 +3,7 @@
  *
  * Reads explicit roots from the environment and fails loud without echoing
  * any configured value. Run with tsx: `npm run dev` in the workspace (or
- * `npm run core:dev` from the repository root).
+ * `npm run npm run dev` from the repository root).
  *
  * Environment-only switches (never exposed through the UI or the HTTP API):
  * - `FORGE_CORE_MODE` development | production | test (test = API routes

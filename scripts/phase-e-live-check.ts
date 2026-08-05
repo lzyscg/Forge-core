@@ -19,7 +19,7 @@
  * hashes/lengths/booleans are printed — never artifact bodies or thinking
  * text. Screenshots land in forge-core-overnight/evidence/screenshots/.
  *
- * Run from apps/forge-core:  npx tsx scripts/phase-e-live-check.ts
+ * Run from the project root:  npx tsx scripts/phase-e-live-check.ts
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -43,8 +43,8 @@ const TASK_NAME = '阶段E真实轻验收任务';
 /* ------------------------------ path anchors ----------------------------- */
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
-const workspaceRoot = resolve(scriptDir, '..'); // apps/forge-core
-const repoRoot = resolve(workspaceRoot, '..', '..');
+const workspaceRoot = resolve(scriptDir, '..'); // the project root
+const repoRoot = workspaceRoot;
 const dataRoot = join(repoRoot, 'data', 'forge-core-live');
 const templateRoot = join(repoRoot, 'data', 'forge-core-live-templates');
 const screenshotDir = join(repoRoot, 'forge-core-overnight', 'evidence', 'screenshots');

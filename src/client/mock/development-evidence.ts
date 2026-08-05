@@ -47,7 +47,7 @@ export const DEVELOPMENT_EVIDENCE_SEED: DevelopmentEvidenceFile = {
   outcome: 'not_run',
   observedAt: null,
   commit: null,
-  command: 'npm run core:verify-ui',
+  command: 'npm run verify:ui',
   passedCapabilities: [],
 };
 

@@ -130,11 +130,11 @@ const TERMINAL_TASK_STATUSES: ReadonlySet<string> = new Set([
   'corrupt',
 ]);
 
-/** apps/forge-core — derived from this script's location (scripts -> one up). */
+/** the project root — derived from this script's location (scripts -> one up). */
 const WORKSPACE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-/** Repo root — three levels up from apps/forge-core/scripts. */
-const RUNNER_REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+/** Repo root — three levels up from the project root/scripts. */
+const RUNNER_REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 /* -------------------------------------------------------------------------- */
 /* Child-process lifecycle (shared by the fake harness and the real run)       */
@@ -941,7 +941,7 @@ export async function runRecoveryAcceptanceCli(
   const inputPath = resolveAgainstRepo(repoRoot, args.input);
   const reportPath = resolveAgainstRepo(repoRoot, args.report);
   const dataRoot = resolveAgainstRepo(repoRoot, args.dataRoot);
-  const committedTemplateDir = join(repoRoot, 'forge-core', 'templates', ACCEPTANCE_TEMPLATE_ID);
+  const committedTemplateDir = join(repoRoot, 'templates', ACCEPTANCE_TEMPLATE_ID);
 
   let taskInput: Record<string, string>;
   try {

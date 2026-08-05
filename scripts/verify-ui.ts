@@ -187,7 +187,7 @@ function main(): void {
     outcome,
     observedAt: new Date().toISOString(),
     commit: readCommit(),
-    command: 'npm run core:verify-ui',
+    command: 'npm run verify:ui',
     passedCapabilities,
   };
   // Read-modify-write: keep the backend gate's persisted fields intact.

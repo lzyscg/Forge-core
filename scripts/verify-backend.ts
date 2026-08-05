@@ -24,7 +24,7 @@
  * non-negotiable), exit code 1. Gate B ceiling: this script can never mark
  * anything `verified` (spec §15.3).
  *
- * Executed by tsx (`npm run verify:backend` / `npm run core:verify-backend`)
+ * Executed by tsx (`npm run verify:backend` / `npm run verify:backend`)
  * and intentionally outside the tsconfig include set; it imports only the
  * capability registry and evidence helpers from src.
  */
@@ -63,7 +63,7 @@ const NPM = IS_WINDOWS ? 'npm.cmd' : 'npm';
 const NPX = IS_WINDOWS ? 'npx.cmd' : 'npx';
 
 const WORKSPACE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const REPO_ROOT = resolve(WORKSPACE_ROOT, '..', '..');
+const REPO_ROOT = WORKSPACE_ROOT;
 const EVIDENCE_PATH = resolve(WORKSPACE_ROOT, 'public', 'development-evidence.json');
 const REPORT_DIR = resolve(REPO_ROOT, 'forge-core-overnight', 'evidence', 'sanitized-reports');
 const REPORT_PATH = resolve(REPORT_DIR, 'phase-b.json');
@@ -200,8 +200,8 @@ function main(): void {
   mkdirSync(REPORT_DIR, { recursive: true });
   const report = {
     schemaVersion: 1,
-    gate: 'core:verify-backend',
-    command: 'npm run core:verify-backend',
+    gate: 'verify:backend',
+    command: 'npm run verify:backend',
     observedAt: new Date().toISOString(),
     commit: readCommit(),
     outcome: backendOutcome,

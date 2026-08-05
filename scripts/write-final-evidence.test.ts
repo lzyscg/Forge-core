@@ -29,7 +29,7 @@ import {
 } from './write-final-evidence';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = resolve(SCRIPT_DIR, '..', '..', '..');
+const REPO_ROOT = resolve(SCRIPT_DIR, '..');
 
 const ALL_CAPABILITY_IDS: string[] = CAPABILITIES.map(([id]) => id);
 /**
@@ -53,10 +53,10 @@ const PHASE_B_SIX = [
   'artifacts',
 ];
 /** Commits recorded by the real sanitized reports (all ancestors of HEAD). */
-const BACKEND_REPORT_COMMIT = '7fa66df0e21a2b22a8973703484d18b3f71ffea3';
-const RUNTIME_REPORT_COMMIT = '95609b1779a17136eb3467b4154b3682fb1a077b';
-const REAL_LOOP_REPORT_COMMIT = 'eccbd8f868dbc02ea5204093e0cfa178ff66ef91';
-const RECOVERY_REPORT_COMMIT = 'b06b6fe613eda97e500797cad1294d2fcfc964e8';
+const BACKEND_REPORT_COMMIT = headCommit();
+const RUNTIME_REPORT_COMMIT = headCommit();
+const REAL_LOOP_REPORT_COMMIT = headCommit();
+const RECOVERY_REPORT_COMMIT = headCommit();
 /** A SHA that exists in no history: must always fail the ancestry check. */
 const STALE_COMMIT = 'ffffffffffffffffffffffffffffffffffffffff';
 
@@ -85,7 +85,7 @@ function uiEvidenceReport(options: UiReportOptions = {}): Record<string, unknown
     outcome: options.outcome ?? 'passed',
     observedAt: '2026-08-03T07:30:00.000Z',
     commit: options.commit === undefined ? headCommit() : options.commit,
-    command: 'npm run core:verify-ui',
+    command: 'npm run verify:ui',
     passedCapabilities: options.passedCapabilities ?? [...ALL_CAPABILITY_IDS],
     backendOutcome: 'passed',
     backendConnectedCapabilities: [...ALL_CAPABILITY_IDS],
@@ -101,8 +101,8 @@ interface BackendReportOptions {
 function backendReport(options: BackendReportOptions = {}): Record<string, unknown> {
   return {
     schemaVersion: 1,
-    gate: 'core:verify-backend',
-    command: 'npm run core:verify-backend',
+    gate: 'verify:backend',
+    command: 'npm run verify:backend',
     observedAt: '2026-08-03T07:31:00.000Z',
     commit: options.commit === undefined ? BACKEND_REPORT_COMMIT : options.commit,
     outcome: options.outcome ?? 'passed',
@@ -127,8 +127,8 @@ interface RuntimeReportOptions {
 function runtimeReport(options: RuntimeReportOptions = {}): Record<string, unknown> {
   return {
     schemaVersion: 1,
-    gate: 'core:verify-runtime',
-    command: 'npm run core:verify-runtime',
+    gate: 'verify:runtime',
+    command: 'npm run verify:runtime',
     observedAt: '2026-08-03T07:32:00.000Z',
     commit: options.commit === undefined ? RUNTIME_REPORT_COMMIT : options.commit,
     outcome: options.outcome ?? 'passed',

@@ -59,14 +59,14 @@ import {
 /* Locations and shared fixtures                                               */
 /* -------------------------------------------------------------------------- */
 
-/** apps/forge-core (this file lives in apps/forge-core/scripts). */
+/** the project root (this file lives in the project root/scripts). */
 function workspaceRoot(): string {
   return fileURLToPath(new URL('..', import.meta.url));
 }
 
 /** The committed self-contained acceptance template (plan Phase D Task 1). */
 function committedZhihuTemplateDir(): string {
-  return resolve(workspaceRoot(), '..', '..', 'forge-core', 'templates', ACCEPTANCE_TEMPLATE_ID);
+  return resolve(workspaceRoot(), 'templates', ACCEPTANCE_TEMPLATE_ID);
 }
 
 const createdRoots: string[] = [];
@@ -615,10 +615,10 @@ function makeRecoveryCliEnv(): {
 } {
   const envRoot = freshRoot('forge-recovery-env-');
   const repoRoot = join(envRoot, 'repo');
-  mkdirSync(join(repoRoot, 'forge-core', 'templates'), { recursive: true });
+  mkdirSync(join(repoRoot, 'templates'), { recursive: true });
   cpSync(
     committedZhihuTemplateDir(),
-    join(repoRoot, 'forge-core', 'templates', ACCEPTANCE_TEMPLATE_ID),
+    join(repoRoot, 'templates', ACCEPTANCE_TEMPLATE_ID),
     { recursive: true },
   );
   const inputPath = join(envRoot, 'input.json');
