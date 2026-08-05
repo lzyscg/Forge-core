@@ -1,0 +1,17 @@
+# 双 Agent 协作模板（测试 fixture 数据，仅用于服务器模板模块测试）
+name: 双 Agent 协作模板
+description: 两位 Agent 通过消息边与产物边协作，产出单一终稿。
+inputFields:
+  - id: source-material
+    label: 原始素材
+    kind: textarea
+    required: true
+    description: 本次生产所依据的素材摘要
+  - id: style-note
+    label: 风格备注
+    kind: text
+    required: false
+    description: 可选的风格约束
+finalArtifact:
+  name: 终稿
+  format: markdown

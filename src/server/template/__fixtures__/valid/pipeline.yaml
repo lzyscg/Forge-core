@@ -1,0 +1,16 @@
+# 合法连线与最终出口（测试 fixture 数据）
+agents:
+  - writer
+  - reviewer
+routes:
+  - from: writer
+    to: reviewer
+    kind: artifact
+    label: 提交初稿
+  - from: reviewer
+    to: writer
+    kind: message
+    label: 退回意见
+finalOutput:
+  submitters:
+    - reviewer

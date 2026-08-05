@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "outcome": "passed",
+  "observedAt": "2026-08-03T20:34:34.143Z",
+  "commit": "a173c389cdd452c8fb4c5d0810ae3eec7306793d",
+  "command": "npm run core:verify-ui",
+  "passedCapabilities": [
+    "templates",
+    "template_reload",
+    "task_creation",
+    "task_recovery",
+    "workspace",
+    "lifecycle",
+    "retry",
+    "skills",
+    "artifacts",
+    "final_output",
+    "process_trace",
+    "agent_workspace",
+    "task_clone"
+  ],
+  "backendOutcome": "passed",
+  "backendConnectedCapabilities": [
+    "templates",
+    "template_reload",
+    "task_creation",
+    "task_recovery",
+    "workspace",
+    "artifacts",
+    "lifecycle",
+    "retry",
+    "skills",
+    "final_output",
+    "process_trace",
+    "agent_workspace",
+    "task_clone"
+  ],
+  "realAcceptanceOutcome": "passed",
+  "realAcceptanceVerifiedCapabilities": [
+    "templates",
+    "template_reload",
+    "task_creation",
+    "task_recovery",
+    "workspace",
+    "lifecycle",
+    "retry",
+    "skills",
+    "artifacts",
+    "final_output"
+  ]
+}

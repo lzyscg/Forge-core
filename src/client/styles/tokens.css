@@ -1,0 +1,18 @@
+/* Fixed Phase A visual tokens — do not rename; pages reference these only. */
+:root {
+  --fc-bg: #f7f3ec;
+  --fc-surface: #fffaf2;
+  --fc-surface-strong: #f1e8dc;
+  --fc-text: #2d2926;
+  --fc-muted: #746b62;
+  --fc-border: #d9cfc2;
+  --fc-accent: #c96442;
+  --fc-accent-soft: #f1d5c8;
+  --fc-success: #52785c;
+  --fc-warning: #a26a2e;
+  --fc-danger: #a54b43;
+  --fc-radius-sm: 8px;
+  --fc-radius-md: 14px;
+  --fc-shadow: 0 10px 30px rgb(72 54 42 / 8%);
+  --fc-focus: 0 0 0 3px rgb(201 100 66 / 28%);
+}

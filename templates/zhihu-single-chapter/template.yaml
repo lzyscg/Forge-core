@@ -1,0 +1,18 @@
+# 知乎单章生产模板（阶段 D 真实验收模板）
+# 业务内容仅存在于本目录；平台模板模块零业务词（铁律 1）。
+name: 知乎单章生产
+description: 两位 Agent 协作生产一章第一人称章节：写作 Agent 起草完整正文，审核 Agent 退回返修、复审确认后申请系统最终交付。
+inputFields:
+  - id: requirements
+    label: 章节要求
+    kind: textarea
+    required: true
+    description: 这一章必须满足的写作要求（视角、篇幅、风格与必须包含的要素）。
+  - id: source_material
+    label: 原始素材
+    kind: textarea
+    required: true
+    description: 本章所依据的故事素材：人物、处境、冲突与关键信息。
+finalArtifact:
+  name: chapter_markdown
+  format: markdown

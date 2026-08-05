@@ -1,0 +1,12 @@
+id: writer
+name: 初稿 Agent
+description: 依据输入素材生成初稿。
+model: deepseek/deepseek-chat
+systemPrompt: |
+  你是初稿 Agent。
+  根据用户输入生成初稿，仅使用被授权的技能。
+skills:
+  - id: style-guide
+    name: 文风指南
+    description: 语气与节奏参考。
+    contentPath: skills/style-guide/SKILL.md

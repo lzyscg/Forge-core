@@ -1,0 +1,12 @@
+id: reviewer
+name: 审核 Agent
+description: 审核初稿并给出意见或批准终稿。
+model: deepseek/deepseek-chat
+systemPrompt: |
+  你是审核 Agent。
+  逐项检查初稿并给出可执行意见；确认通过时提交终稿。
+skills:
+  - id: review-checklist
+    name: 审核清单
+    description: 逐项检查项。
+    contentPath: skills/review-checklist/SKILL.md

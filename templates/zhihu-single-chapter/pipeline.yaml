@@ -1,0 +1,16 @@
+# 有序 Agent、合法连线与最终出口（知乎单章生产）
+agents:
+  - writer
+  - reviewer
+routes:
+  - from: writer
+    to: reviewer
+    kind: artifact
+    label: 提交章节稿件
+  - from: reviewer
+    to: writer
+    kind: message
+    label: 返修意见
+finalOutput:
+  submitters:
+    - reviewer
