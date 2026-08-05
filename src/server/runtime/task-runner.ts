@@ -349,6 +349,89 @@ function artifactHandOffInputText(title: string, content: string): string {
 }
 
 /**
+ * Derives a display-only turn-state prefix from the committed event
+ * history and frozen template routes. Injected before inputText so the
+ * model knows which turn it is, what route delivered the input, and what
+ * it dispatched last time - without having to infer state from history.
+ * Platform-generic: agent names and route labels come from the frozen
+ * template config, never hardcoded (iron rule 1).
+ */
+function buildTurnStatePrefix(
+  events: readonly TaskEvent[],
+  agentId: string,
+  frozen: FrozenTemplate,
+  inputNodeId: string,
+): string {
+  // Count previous turns for this agent (agent_input events before the current one).
+  let turnCount = 0;
+  for (const event of events) {
+    if (event.type === 'agent_input' && event.node.agentId === agentId && event.id !== inputNodeId) {
+      turnCount += 1;
+    }
+  }
+
+  // Find the route that delivered the current input.
+  let incomingLabel: string | null = null;
+  let incomingKind: string | null = null;
+  let incomingFromAgent: string | null = null;
+  for (const event of events) {
+    if (event.type === 'route_executed' && event.route.toNodeId === inputNodeId) {
+      incomingLabel = event.route.label;
+      incomingKind = event.route.kind;
+      // Find the source agent by matching fromNodeId to an agent_result.
+      const fromNode = events.find(
+        (e) => e.type === 'agent_result' && e.id === event.route.fromNodeId,
+      );
+      if (fromNode && fromNode.type === 'agent_result') {
+        const sourceAgent = frozen.agents.find((a) => a.id === fromNode.node.agentId);
+        incomingFromAgent = sourceAgent?.name ?? fromNode.node.agentId;
+      }
+      break;
+    }
+  }
+
+  // Find the agent's previous outgoing route.
+  let prevLabel: string | null = null;
+  let prevKind: string | null = null;
+  let prevToAgent: string | null = null;
+  for (const event of events) {
+    if (event.type !== 'route_executed') continue;
+    const fromNode = events.find(
+      (e) => e.type === 'agent_result' && e.id === event.route.fromNodeId,
+    );
+    if (fromNode && fromNode.type === 'agent_result' && fromNode.node.agentId === agentId) {
+      prevLabel = event.route.label;
+      prevKind = event.route.kind;
+      // Find target agent name from frozen routes.
+      const route = frozen.routes.find(
+        (r) => r.from === agentId && r.kind === event.route.kind,
+      );
+      if (route) {
+        const targetAgent = frozen.agents.find((a) => a.id === route.to);
+        prevToAgent = targetAgent?.name ?? route.to;
+      }
+    }
+  }
+
+  // Assemble the state string.
+  const parts: string[] = [`[回合状态] 第 ${turnCount + 1} 次执行。`];
+
+  if (prevLabel !== null && prevToAgent !== null) {
+    const noun = prevKind === 'message' ? '消息' : '产物';
+    parts.push(`上一次通过「${prevLabel}」路线向「${prevToAgent}」发送了${noun}。`);
+  }
+
+  if (incomingLabel !== null && incomingFromAgent !== null) {
+    const noun = incomingKind === 'message' ? '消息' : '产物';
+    parts.push(`本次通过「${incomingLabel}」路线收到来自「${incomingFromAgent}」的${noun}。`);
+  } else if (turnCount === 0) {
+    parts.push('本次输入为初始输入。');
+  }
+
+  return parts.join(' ');
+}
+
+/**
  * The display-only failed phase written with failure-path traces (plan
  * 2026-08-04 Task 5). The message is the public attempt-failure text — never
  * a raw provider cause (iron rule 6).
@@ -482,6 +565,12 @@ export class TaskRunner {
           content: handOff.content,
           sourceNodeId: handOff.meta.sourceNodeId,
         };
+      }
+      const statePrefix = buildTurnStatePrefix(events, agentId, frozen, inputNodeId);
+      if (statePrefix.length > 0) {
+        inputText = `${statePrefix}
+
+${inputText}`;
       }
       const turnInput: AgentTurnInput = {
         taskId,
