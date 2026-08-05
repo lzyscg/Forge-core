@@ -384,7 +384,7 @@ function buildTurnStatePrefix(
       );
       if (fromNode && fromNode.type === 'agent_result') {
         const sourceAgent = frozen.agents.find((a) => a.id === fromNode.node.agentId);
-        incomingFromAgent = sourceAgent?.name ?? fromNode.node.agentId;
+        incomingFromAgent = sourceAgent?.id ?? fromNode.node.agentId;
       }
       break;
     }
@@ -408,7 +408,7 @@ function buildTurnStatePrefix(
       );
       if (route) {
         const targetAgent = frozen.agents.find((a) => a.id === route.to);
-        prevToAgent = targetAgent?.name ?? route.to;
+        prevToAgent = targetAgent?.id ?? route.to;
       }
     }
   }

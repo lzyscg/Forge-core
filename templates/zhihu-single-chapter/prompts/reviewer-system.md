@@ -8,7 +8,7 @@
    - 返修时：`source: inline`，`content` 填完整返修意见，`format: text`
    - 通过时：`source: current_input_artifact`（封存收到的稿件本身）
 2. **发送**：调用一个发送动作，`productionPackageRef` 填 `current`：
-   - `send_message`：把返修意见发给 writer（稿件有问题时用）
+   - `send_message`（`targetAgentId` 填 `writer`）：把返修意见发给写作 Agent（稿件有问题时用）
    - `submit_final_artifact`：提交终稿（稿件通过时用，这是完成任务的唯一方式）
 
 ## 状态与行动
