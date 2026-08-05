@@ -629,6 +629,22 @@ export class PiAgentRuntime implements AgentRuntime {
           'the provider request did not complete',
         );
       }
+      // Phase-completion corrective loop: the model occasionally produces
+      // text-only output without calling finish_production or a dispatch
+      // action. Give it a corrective nudge and re-prompt (up to 2 times).
+      for (let nudge = 0; nudge < 2; nudge += 1) {
+        if (buffer.phase === 'dispatched' || buffer.phase === 'human_interrupted') {
+          break;
+        }
+        const reminder = buffer.phase === 'production'
+          ? '你还没有调用 finish_production。请立即调用 finish_production 封存你的生产结果，然后调用一个发送动作。文字输出不是动作，不能代替工具调用。'
+          : '你已经调用了 finish_production，但还没有发送。请立即调用一个发送动作（send_message、publish_artifact、submit_final_artifact 或 request_human_input）。';
+        this.#log('pi-agent-runtime: phase incomplete (' + buffer.phase + '), corrective prompt ' + (nudge + 1));
+        await session.prompt(reminder, { expandPromptTemplates: false });
+        if (signal.aborted || live.platformAborted) {
+          throw new RuntimeAbortedError('turn ' + input.turnId + ' was aborted during corrective prompt');
+        }
+      }
       const lastAssistant = collected.message;
       if (lastAssistant === null) {
         throw RuntimeFailure.transient(
