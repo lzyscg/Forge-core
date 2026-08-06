@@ -93,6 +93,24 @@ async function waitForSlotRelease(gateway: ForgeCoreGateway, taskId: string): Pr
   }
 }
 
+/**
+ * Waits (non-mutating, bounded) until a started/resumed task leaves the
+ * transient `running` projection, then reports the rest status it settled
+ * into. Live-loop implementations park seam-rested tasks `interrupted`
+ * (visible parking — no silent running); loop-less implementations stay
+ * `running` until the deadline and report that rest shape at once.
+ */
+async function waitForRest(gateway: ForgeCoreGateway, taskId: string): Promise<string> {
+  const deadline = Date.now() + 2000;
+  for (;;) {
+    const status = (await gateway.getWorkspace(taskId)).task.status;
+    if (status !== 'running' || Date.now() > deadline) {
+      return status;
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+  }
+}
+
 export function runForgeCoreGatewayContract(
   createGateway: () => GatewayContractFactoryResult,
 ): void {
@@ -277,25 +295,48 @@ export function runForgeCoreGatewayContract(
           return;
         }
 
-        expect((await gateway.getWorkspace(created.id)).task.status).toBe('running');
+        // Live-loop implementations park the seam-rested task `interrupted`
+        // (visible parking, no silent running); loop-less ones rest at
+        // `running`. Both rest shapes keep every guard below honest.
+        const restAfterStart = await waitForRest(gateway, created.id);
+        expect(['running', 'interrupted']).toContain(restAfterStart);
 
-        await expect(gateway.startTask(created.id)).rejects.toMatchObject({
-          code: 'TASK_ALREADY_RUNNING',
-        });
+        if (restAfterStart === 'running') {
+          await expect(gateway.startTask(created.id)).rejects.toMatchObject({
+            code: 'TASK_ALREADY_RUNNING',
+          });
+        } else {
+          await expect(gateway.startTask(created.id)).rejects.toMatchObject({
+            code: 'INVALID_TRANSITION',
+          });
+        }
 
         await gateway.stopTask(created.id);
         expect((await gateway.getWorkspace(created.id)).task.status).toBe('stopped');
 
         await gateway.resumeTask(created.id);
-        expect((await gateway.getWorkspace(created.id)).task.status).toBe('running');
-        // The acceptance loop may still hold the single slot while it settles
-        // the seeded first node; wait for the release before pinning the
-        // projected-status conflict (no-op for implementations without a loop).
-        await waitForSlotRelease(gateway, created.id);
+        const restAfterResume = await waitForRest(gateway, created.id);
+        expect(['running', 'interrupted']).toContain(restAfterResume);
 
-        await expect(gateway.resumeTask(created.id)).rejects.toMatchObject({
-          code: 'INVALID_TRANSITION',
-        });
+        if (restAfterResume === 'running') {
+          // The acceptance loop may still hold the single slot while it settles
+          // the seeded first node; wait for the release before pinning the
+          // projected-status conflict (no-op for implementations without a loop).
+          await waitForSlotRelease(gateway, created.id);
+
+          await expect(gateway.resumeTask(created.id)).rejects.toMatchObject({
+            code: 'INVALID_TRANSITION',
+          });
+        } else {
+          // Parked at the committed boundary: retry/answer stay guarded while
+          // resume remains the one legal lifecycle move.
+          await expect(gateway.retryTask(created.id)).rejects.toMatchObject({
+            code: 'INVALID_TRANSITION',
+          });
+          await expect(gateway.answerHuman(created.id, '契约套件回答')).rejects.toMatchObject({
+            code: 'INVALID_TRANSITION',
+          });
+        }
 
         await gateway.stopTask(created.id);
         await expect(gateway.retryTask(created.id)).rejects.toMatchObject({

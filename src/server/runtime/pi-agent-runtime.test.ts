@@ -23,8 +23,10 @@ import { ActionBuffer } from './action-buffer';
 import { RuntimeAbortedError, RuntimeFailure } from './agent-runtime';
 import { FORGE_ACTION_NAMES, FORGE_ACTION_NAME_SET } from './forge-actions';
 import {
+  MAX_CORRECTIVE_NUDGES,
   PI_RUNTIME_ERROR_CODES,
   parsePiModelSpec,
+  sealedPhaseReminder,
   type PiAgentRuntime,
 } from './pi-agent-runtime';
 import { assertNoDiscoveredResources, createForgeResourceLoader } from './pi-resource-loader';
@@ -34,6 +36,9 @@ import {
   createDeferred,
   createPiHarness,
   finishProductionProposal,
+  publishPackageProposal,
+  publisherContract,
+  reviewerContract,
   sampleTurnInput,
   sendMessageProposal,
 } from './test-support';
@@ -94,9 +99,18 @@ describe('adapter configuration (plan Phase E Task 2: five production + three wo
     const harness = createPiHarness({ coreCwd: tempCwd() });
     const input = sampleTurnInput({ inputText: 'neutral verbatim input' });
     await harness.runtime.run(input, freshSignal());
-    expect(harness.session.promptCalls).toEqual([
-      { text: 'neutral verbatim input', options: { expandPromptTemplates: false } },
-    ]);
+    // The turn input rides verbatim; the text-only reply leaves the phase
+    // incomplete, so the bounded corrective nudges follow — every prompt
+    // call keeps template expansion disabled.
+    expect(harness.session.promptCalls[0]).toEqual({
+      text: 'neutral verbatim input',
+      options: { expandPromptTemplates: false },
+    });
+    expect(harness.session.promptCalls).toHaveLength(1 + MAX_CORRECTIVE_NUDGES);
+    for (const call of harness.session.promptCalls) {
+      expect(call.options).toEqual({ expandPromptTemplates: false });
+    }
+    expect(harness.session.promptCalls[1].text).toContain('finish_production');
   });
 
   it('resolves the frozen agent model spec through the injected resolver', async () => {
@@ -192,7 +206,13 @@ describe('turn completion', () => {
   it('returns null usage when the provider reports none', async () => {
     const harness = createPiHarness({
       coreCwd: tempCwd(),
-      script: [{ text: 'done', omitUsage: true }],
+      // One entry per prompt: the text-only replies draw the two corrective
+      // nudges, and none of the responses reports usage.
+      script: [
+        { text: 'done', omitUsage: true },
+        { text: 'done', omitUsage: true },
+        { text: 'done', omitUsage: true },
+      ],
     });
     const result = await harness.runtime.run(sampleTurnInput(), freshSignal());
     expect(result.usage).toBeNull();
@@ -348,7 +368,13 @@ describe('failure and abort boundaries', () => {
     const deferred = createDeferred<void>();
     const harness = createPiHarness({
       coreCwd: tempCwd(),
-      script: [{ deferred, text: 'first' }, { text: 'second' }],
+      // The deferred text-only reply draws the two corrective nudges; every
+      // scripted response keeps the same public text.
+      script: [
+        { deferred, text: 'first' },
+        { text: 'first' },
+        { text: 'first' },
+      ],
     });
     const first = harness.runtime.run(sampleTurnInput(), freshSignal());
     await expect(harness.runtime.run(sampleTurnInput({ turnId: 'turn-2' }), freshSignal()))
@@ -436,6 +462,15 @@ describe('hidden thinking and secret exclusion (plan Phase E Task 2 rewrite)', (
     const harness = createPiHarness({
       coreCwd: tempCwd(),
       script: [{
+        // The dispatch completes the phase so no corrective nudge runs and
+        // the trace stays exactly one thinking entry plus the tool steps.
+        toolCalls: [
+          {
+            name: 'finish_production',
+            args: { source: 'inline', content: 'sealed', format: 'text' },
+          },
+          { name: 'publish_artifact', args: { productionPackageRef: 'current' } },
+        ],
         text: 'public answer',
         extraContent: [{
           type: 'thinking',
@@ -516,17 +551,24 @@ describe('turn trace capture (plan Phase E Task 2)', () => {
   it('orders a single turn trace as thinking -> tool_call -> tool_result -> text', async () => {
     const harness = createPiHarness({
       coreCwd: tempCwd(),
-      script: [{
-        toolCalls: [{ name: 'write_workspace', args: { path: 'draft/v1.md', content: '正文' } }],
-        text: 'public final answer',
-        extraContent: [{ type: 'thinking', thinking: 'planning the draft' }],
-      }],
+      // The workspace-only reply leaves the phase incomplete, so the two
+      // corrective nudges append their scripted text replies to the trace.
+      script: [
+        {
+          toolCalls: [{ name: 'write_workspace', args: { path: 'draft/v1.md', content: '正文' } }],
+          text: 'public final answer',
+          extraContent: [{ type: 'thinking', thinking: 'planning the draft' }],
+        },
+        { text: 'correcting' },
+        { text: 'correcting' },
+      ],
     });
     const result = await harness.runtime.run(sampleTurnInput(), freshSignal());
     // Chronological: tools execute before the final message (whose thinking
-    // block therefore lands between the tool steps and the public text).
+    // block therefore lands between the tool steps and the public text); the
+    // nudge replies follow as plain text entries.
     expect(result.trace.map((entry) => entry.kind))
-      .toEqual(['tool_call', 'tool_result', 'thinking', 'text']);
+      .toEqual(['tool_call', 'tool_result', 'thinking', 'text', 'text', 'text']);
     expect(result.trace[0]).toEqual({
       kind: 'tool_call',
       toolName: 'write_workspace',
@@ -541,11 +583,16 @@ describe('turn trace capture (plan Phase E Task 2)', () => {
   it('accumulates thinking from every assistant message, including inter-tool-call turns', async () => {
     const harness = createPiHarness({
       coreCwd: tempCwd(),
-      script: [{
-        intermediateThinking: ['planning before tool one', 'reasoning between tools'],
-        toolCalls: [{ name: 'write_workspace', args: { path: 'a.md', content: 'one' } }],
-        text: 'final answer',
-      }],
+      script: [
+        {
+          intermediateThinking: ['planning before tool one', 'reasoning between tools'],
+          toolCalls: [{ name: 'write_workspace', args: { path: 'a.md', content: 'one' } }],
+          text: 'final answer',
+        },
+        // Corrective-nudge replies: text-only, no thinking blocks.
+        { text: 'correcting' },
+        { text: 'correcting' },
+      ],
     });
     const result = await harness.runtime.run(sampleTurnInput(), freshSignal());
     const thinking = result.trace.filter((entry) => entry.kind === 'thinking');
@@ -553,24 +600,33 @@ describe('turn trace capture (plan Phase E Task 2)', () => {
       'planning before tool one',
       'reasoning between tools',
     ]);
-    expect(result.trace[result.trace.length - 1]).toEqual({ kind: 'text', text: 'final answer' });
+    const texts = result.trace
+      .filter((entry) => entry.kind === 'text')
+      .map((entry) => (entry as { text: string }).text);
+    expect(texts).toEqual(['final answer', 'correcting', 'correcting']);
   });
 
   it('collects an independent ordered trace for each of two turns', async () => {
     const harness = createPiHarness({
       coreCwd: tempCwd(),
-      script: [{
-        toolCalls: [{ name: 'write_workspace', args: { path: 'a.md', content: 'one' } }],
-        text: 'turn reply',
-        extraContent: [{ type: 'thinking', thinking: 'turn thinking' }],
-      }],
+      // Each run's fresh session replays the same script: the workspace-only
+      // reply plus the two corrective-nudge replies.
+      script: [
+        {
+          toolCalls: [{ name: 'write_workspace', args: { path: 'a.md', content: 'one' } }],
+          text: 'turn reply',
+          extraContent: [{ type: 'thinking', thinking: 'turn thinking' }],
+        },
+        { text: 'correcting' },
+        { text: 'correcting' },
+      ],
     });
     const first = await harness.runtime.run(sampleTurnInput({ turnId: 'turn-1' }), freshSignal());
     const second = await harness.runtime.run(sampleTurnInput({ turnId: 'turn-2' }), freshSignal());
     expect(first.trace.map((entry) => entry.kind))
-      .toEqual(['tool_call', 'tool_result', 'thinking', 'text']);
+      .toEqual(['tool_call', 'tool_result', 'thinking', 'text', 'text', 'text']);
     expect(second.trace.map((entry) => entry.kind))
-      .toEqual(['tool_call', 'tool_result', 'thinking', 'text']);
+      .toEqual(['tool_call', 'tool_result', 'thinking', 'text', 'text', 'text']);
     // The two traces are distinct array instances, not a shared reference.
     expect(first.trace).not.toBe(second.trace);
   });
@@ -578,10 +634,20 @@ describe('turn trace capture (plan Phase E Task 2)', () => {
   it('returns a text-only trace for a plain reply and an empty trace stays empty', async () => {
     const harness = createPiHarness({
       coreCwd: tempCwd(),
-      script: [{ text: 'just text' }],
+      // One entry per prompt: the plain replies draw the two corrective
+      // nudges, and every assistant message stays text-only.
+      script: [
+        { text: 'just text' },
+        { text: 'just text' },
+        { text: 'just text' },
+      ],
     });
     const result = await harness.runtime.run(sampleTurnInput(), freshSignal());
-    expect(result.trace).toEqual([{ kind: 'text', text: 'just text' }]);
+    expect(result.trace).toEqual([
+      { kind: 'text', text: 'just text' },
+      { kind: 'text', text: 'just text' },
+      { kind: 'text', text: 'just text' },
+    ]);
   });
 
   it('captures production tool calls in the trace too', async () => {
@@ -820,11 +886,14 @@ describe('live streaming patches (plan C realtime streaming)', () => {
       coreCwd: tempCwd(),
       script: [{
         streaming: { thinkingChunks: ['hmm'], textChunks: ['he', 'llo'] },
+        // Finish + dispatch complete the phase, so no corrective nudge runs
+        // and the patch stream stays exactly the scripted shape.
         toolCalls: [
           {
             name: 'finish_production',
             args: { source: 'inline', content: 'sealed body', format: 'text' },
           },
+          { name: 'publish_artifact', args: { productionPackageRef: 'current' } },
         ],
         text: 'hello',
       }],
@@ -840,6 +909,8 @@ describe('live streaming patches (plan C realtime streaming)', () => {
       { agentId: 'agent-alpha', turnId: 'turn-1', thinking: 'hmm', text: 'hello' },
       { agentId: 'agent-alpha', turnId: 'turn-1', toolStarted: 'finish_production' },
       { agentId: 'agent-alpha', turnId: 'turn-1', toolFinished: 'finish_production' },
+      { agentId: 'agent-alpha', turnId: 'turn-1', toolStarted: 'publish_artifact' },
+      { agentId: 'agent-alpha', turnId: 'turn-1', toolFinished: 'publish_artifact' },
       { agentId: 'agent-alpha', turnId: 'turn-1', finished: true },
     ]);
   });
@@ -878,9 +949,118 @@ describe('live streaming patches (plan C realtime streaming)', () => {
   it('runs unchanged when no onLive sink is supplied', async () => {
     const harness = createPiHarness({
       coreCwd: tempCwd(),
-      script: [{ streaming: { textChunks: ['he', 'llo'] }, text: 'hello' }],
+      // One entry per prompt: the text-only replies draw the two corrective
+      // nudges; the final public text stays the scripted one.
+      script: [
+        { streaming: { textChunks: ['he', 'llo'] }, text: 'hello' },
+        { text: 'hello' },
+        { text: 'hello' },
+      ],
     });
     const result = await harness.runtime.run(sampleTurnInput(), freshSignal());
     expect(result.publicText).toBe('hello');
+  });
+});
+
+describe('corrective nudge loop (plan 2026-08-06)', () => {
+  const finishOnlyCall = {
+    name: 'finish_production',
+    args: { source: 'inline', content: 'sealed body', format: 'text' },
+  };
+  const publishCall = {
+    name: 'publish_artifact',
+    args: { productionPackageRef: 'current' },
+  };
+
+  it('seals the reminder text: generic for null contracts, contract-named otherwise', () => {
+    const generic = sealedPhaseReminder(null);
+    expect(generic).toContain('send_message');
+    expect(generic).toContain('publish_artifact');
+    expect(generic).toContain('submit_final_artifact');
+    expect(generic).toContain('request_human_input');
+
+    const publisher = sealedPhaseReminder(publisherContract('agent-beta'));
+    expect(publisher).toContain('publish_artifact');
+    expect(publisher).toContain('request_human_input');
+    expect(publisher).not.toContain('send_message');
+    expect(publisher).not.toContain('submit_final_artifact');
+
+    const reviewer = sealedPhaseReminder(reviewerContract('agent-alpha'));
+    expect(reviewer).toContain('send_message');
+    expect(reviewer).toContain('submit_final_artifact');
+    expect(reviewer).not.toContain('publish_artifact');
+  });
+
+  it('re-prompts a text-only turn at most MAX_CORRECTIVE_NUDGES times', async () => {
+    expect(MAX_CORRECTIVE_NUDGES).toBe(2);
+    const harness = createPiHarness({
+      coreCwd: tempCwd(),
+      script: [
+        { text: 'I wrote the content.', usage: { input: 10, output: 20 } },
+        { text: 'Still just talking.', usage: { input: 10, output: 20 } },
+        { text: 'Talking again.', usage: { input: 10, output: 20 } },
+      ],
+    });
+    const result = await harness.runtime.run(sampleTurnInput(), freshSignal());
+    // One initial prompt plus exactly MAX_CORRECTIVE_NUDGES corrective nudges.
+    expect(harness.session.promptCalls).toHaveLength(1 + MAX_CORRECTIVE_NUDGES);
+    expect(harness.session.promptCalls[1].text).toContain('finish_production');
+    // The Turn still completes; the empty action set is the runner's problem.
+    expect(result.publicText).toBe('Talking again.');
+    expect(result.actions).toEqual([]);
+  });
+
+  it('stops nudging once the turn completes its dispatch', async () => {
+    const harness = createPiHarness({
+      coreCwd: tempCwd(),
+      script: [
+        { text: 'Content without actions.', usage: { input: 10, output: 20 } },
+        { toolCalls: [finishOnlyCall, publishCall], text: 'done', usage: { input: 10, output: 20 } },
+      ],
+    });
+    const result = await harness.runtime.run(sampleTurnInput(), freshSignal());
+    expect(harness.session.promptCalls).toHaveLength(2);
+    expect(result.actions).toEqual([
+      finishProductionProposal({ content: 'sealed body', format: 'text' }),
+      publishPackageProposal(),
+    ]);
+  });
+
+  it('the sealed-phase reminder names only the contract-allowed dispatch actions', async () => {
+    const harness = createPiHarness({
+      coreCwd: tempCwd(),
+      script: [
+        { toolCalls: [finishOnlyCall], text: 'sealed, not dispatched', usage: { input: 10, output: 20 } },
+        { text: 'Still hesitating.', usage: { input: 10, output: 20 } },
+        { toolCalls: [publishCall], text: 'done', usage: { input: 10, output: 20 } },
+      ],
+    });
+    await harness.runtime.run(sampleTurnInput(), freshSignal());
+    expect(harness.session.promptCalls).toHaveLength(3);
+    const nudge = harness.session.promptCalls[1].text;
+    // sampleTurnInput carries the publisher contract: publish_artifact is the
+    // only allowed dispatch, plus the always-legal request_human_input.
+    expect(nudge).toContain('publish_artifact');
+    expect(nudge).toContain('request_human_input');
+    expect(nudge).not.toContain('send_message');
+  });
+
+  it('falls back to the generic sealed reminder when the contract is null', async () => {
+    const input = sampleTurnInput();
+    const harness = createPiHarness({
+      coreCwd: tempCwd(),
+      script: [
+        { toolCalls: [finishOnlyCall], text: 'sealed', usage: { input: 10, output: 20 } },
+        { text: 'Hesitating.', usage: { input: 10, output: 20 } },
+        { toolCalls: [publishCall], text: 'done', usage: { input: 10, output: 20 } },
+      ],
+    });
+    await harness.runtime.run(
+      sampleTurnInput({ agent: { ...input.agent, turnContract: null } }),
+      freshSignal(),
+    );
+    const nudge = harness.session.promptCalls[1].text;
+    expect(nudge).toContain('send_message');
+    expect(nudge).toContain('submit_final_artifact');
   });
 });

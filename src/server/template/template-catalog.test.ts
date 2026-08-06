@@ -254,6 +254,41 @@ describe('TemplateCatalog', () => {
     expect(restarted.get('test-template')?.version).toBe(v1);
   });
 
+  it('normalizes legacy cached manifests with scalar targets into candidate sets', async () => {
+    const { paths, catalog } = await makeCatalog([{ fixture: 'valid', id: 'test-template' }]);
+    const cacheDir = join(paths.templateCacheRoot, 'test-template');
+    const hash = readdirSync(cacheDir).find((name) => /^[0-9a-f]{64}$/.test(name));
+    expect(hash).toBeDefined();
+    // Rewrite the cached manifest with a pre-change scalar target (the shape
+    // written by older versions); invalid_using_cache must normalize it.
+    const manifestPath = join(cacheDir, hash as string, 'manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+      agents: Array<{
+        id: string;
+        turnContract: { dispatch: { targets: Record<string, unknown> } } | null;
+      }>;
+    };
+    const writer = manifest.agents.find((agent) => agent.id === 'writer');
+    if (writer?.turnContract) {
+      writer.turnContract.dispatch.targets.publish_artifact = 'reviewer';
+    }
+    writeFileSync(manifestPath, JSON.stringify(manifest), 'utf8');
+
+    // Break the source so the catalog boots from the legacy cache.
+    writeFileSync(
+      join(paths.templateSource('test-template'), 'pipeline.yaml'),
+      'agents: 12\nroutes: []\nfinalOutput:\n  submitters: []\n',
+      'utf8',
+    );
+    const restarted = new TemplateCatalog(paths);
+    await restarted.initialize();
+    expect(restarted.get('test-template')?.status).toBe('invalid_using_cache');
+    const frozen = restarted.getFrozen('test-template');
+    expect(frozen?.agents.find((agent) => agent.id === 'writer')?.turnContract?.dispatch.targets).toEqual({
+      publish_artifact: ['reviewer'],
+    });
+  });
+
   it('recovers the cached version when current.json is corrupt', async () => {
     const { paths, catalog } = await makeCatalog([{ fixture: 'valid', id: 'test-template' }]);
     const v1 = catalog.get('test-template')?.version;

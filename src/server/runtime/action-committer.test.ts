@@ -480,6 +480,69 @@ describe('ActionCommitter contract conformance (spec §6)', () => {
   });
 });
 
+describe('ActionCommitter multi-target dispatch candidate sets (plan 2026-08-06)', () => {
+  /** Builds a context whose contract dispatches to a custom candidate set. */
+  function contextWithTargets(
+    agentId: 'writer' | 'reviewer',
+    targets: NonNullable<CommitContext['turnContract']>['dispatch']['targets'],
+  ): CommitContext {
+    const base = buildCommitContext(env, agentId);
+    const contract = base.turnContract;
+    if (contract === null) {
+      throw new Error('the fixture contract is null');
+    }
+    return {
+      ...base,
+      turnContract: { ...contract, dispatch: { ...contract.dispatch, targets } },
+    };
+  }
+
+  it('accepts send_message to any agent inside the declared candidate set', async () => {
+    // writer is both the declared message route target and one of the two
+    // candidates; the commit must pass the route AND the candidate check.
+    const result = await committer.validateAndCommit(
+      contextWithTargets('reviewer', { send_message: ['writer', 'producer'] }),
+      [
+        finishInline({ format: 'text', artifactType: null, title: null }),
+        { type: 'send_message', targetAgentId: 'writer', productionPackageRef: 'current' },
+      ],
+    );
+    expect(result.committedEvents.some((event) => event.type === 'route_executed')).toBe(true);
+  });
+
+  it('rejects send_message to an agent outside the candidate set even on a declared route', async () => {
+    // writer IS the declared route target, but the candidate set excludes it.
+    await expect(
+      committer.validateAndCommit(
+        contextWithTargets('reviewer', { send_message: ['producer'] }),
+        [
+          finishInline({ format: 'text', artifactType: null, title: null }),
+          { type: 'send_message', targetAgentId: 'writer', productionPackageRef: 'current' },
+        ],
+      ),
+    ).rejects.toMatchObject({ code: 'ROUTE_NOT_ALLOWED', retryable: false });
+  });
+
+  it('accepts publish_artifact when at least one candidate matches a declared artifact route', async () => {
+    // writer's only artifact route ends at reviewer; reviewer is in the set.
+    await expect(
+      committer.validateAndCommit(
+        contextWithTargets('writer', { publish_artifact: ['reviewer', 'editor'] }),
+        [finishInline(), PUBLISH_CURRENT],
+      ),
+    ).resolves.toMatchObject({ publishedVersions: [1] });
+  });
+
+  it('rejects publish_artifact when no candidate matches any artifact route', async () => {
+    await expect(
+      committer.validateAndCommit(
+        contextWithTargets('writer', { publish_artifact: ['editor'] }),
+        [finishInline(), PUBLISH_CURRENT],
+      ),
+    ).rejects.toMatchObject({ code: 'ROUTE_NOT_ALLOWED', retryable: false });
+  });
+});
+
 describe('ActionCommitter authorization, routes and final (kept rules)', () => {
   it('rejects an undeclared route without committing any action', async () => {
     // reviewer may send messages, but only to writer — never an unknown agent.

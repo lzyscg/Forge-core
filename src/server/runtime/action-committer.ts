@@ -593,7 +593,11 @@ export class ActionCommitter {
     };
   }
 
-  /** Declared message route plus the contract target must both agree. */
+  /**
+   * Declared message route plus the contract candidate set must both agree
+   * (plan 2026-08-06: the dispatch target may be any agent in the declared
+   * candidate set; empty sets cannot exist — the validator rejects them).
+   */
   private assertMessageRouteAllowed(context: CommitContext, targetAgentId: string): void {
     const declared = context.declaredRoutes.some(
       (route) =>
@@ -607,8 +611,8 @@ export class ActionCommitter {
         '消息目标不在模板声明的合法连线之内。',
       );
     }
-    const contractTarget = context.turnContract?.dispatch.targets.send_message;
-    if (contractTarget !== undefined && contractTarget !== targetAgentId) {
+    const contractTargets = context.turnContract?.dispatch.targets.send_message;
+    if (contractTargets !== undefined && !contractTargets.includes(targetAgentId)) {
       throw new CommitFailure(
         COMMIT_ERROR_CODES.ROUTE_NOT_ALLOWED,
         '消息目标不符合模板回合契约声明的发送对象。',
@@ -618,7 +622,8 @@ export class ActionCommitter {
 
   /**
    * Publish routing stays automatic along every declared artifact route of
-   * the publisher; the contract target (when declared) must be one of them.
+   * the publisher; when the contract declares candidates, at least one
+   * artifact route must end at a candidate (plan 2026-08-06).
    */
   private assertPublishRouteAllowed(context: CommitContext): void {
     const artifactRoutes = context.declaredRoutes.filter(
@@ -630,10 +635,10 @@ export class ActionCommitter {
         '模板没有为该 Agent 声明任何产物连线，无法发布产物。',
       );
     }
-    const contractTarget = context.turnContract?.dispatch.targets.publish_artifact;
+    const contractTargets = context.turnContract?.dispatch.targets.publish_artifact;
     if (
-      contractTarget !== undefined &&
-      !artifactRoutes.some((route) => route.to === contractTarget)
+      contractTargets !== undefined &&
+      !artifactRoutes.some((route) => contractTargets.includes(route.to))
     ) {
       throw new CommitFailure(
         COMMIT_ERROR_CODES.ROUTE_NOT_ALLOWED,

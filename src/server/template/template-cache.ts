@@ -30,7 +30,7 @@ import {
 import { dirname, join } from 'node:path';
 import type { CorePaths } from '../storage/core-paths';
 import { loadTemplateDirectory } from './template-loader';
-import { TEMPLATE_ERROR_CODES, TemplateError, type FrozenTemplate } from './template-schema';
+import { TEMPLATE_ERROR_CODES, TemplateError, type FrozenAgentConfig, type FrozenTemplate } from './template-schema';
 
 const TMP_PREFIX = '.tmp-';
 
@@ -115,6 +115,37 @@ function isManifestFrozen(value: unknown): value is ManifestJson {
   );
 }
 
+/**
+ * Normalizes legacy cached manifests (plan 2026-08-06): pre-change manifests
+ * store dispatch targets as scalar ids; coerce them to one-element candidate
+ * sets so downstream consumers (the committer's includes check, the turn
+ * checklist) always see arrays — a raw scalar would break
+ * `String.prototype.includes` substring semantics.
+ */
+function normalizeManifestTargets(frozen: FrozenTemplate): FrozenTemplate {
+  return {
+    ...frozen,
+    agents: frozen.agents.map((agent) => {
+      const contract = agent.turnContract;
+      if (contract === null) {
+        return agent;
+      }
+      const targets: NonNullable<FrozenAgentConfig['turnContract']>['dispatch']['targets'] = {};
+      for (const [intent, value] of Object.entries(contract.dispatch.targets)) {
+        if (typeof value === 'string') {
+          targets[intent as keyof typeof targets] = [value];
+        } else if (Array.isArray(value)) {
+          targets[intent as keyof typeof targets] = value as string[];
+        }
+      }
+      return {
+        ...agent,
+        turnContract: { ...contract, dispatch: { ...contract.dispatch, targets } },
+      };
+    }),
+  };
+}
+
 async function readManifest(versionRoot: string): Promise<CachedVersion | null> {
   try {
     const raw = await readFile(join(versionRoot, 'manifest.json'), 'utf8');
@@ -123,7 +154,7 @@ async function readManifest(versionRoot: string): Promise<CachedVersion | null> 
       return null;
     }
     const { cachedAt, ...frozen } = manifest;
-    return { frozen, cachedAt, versionRoot };
+    return { frozen: normalizeManifestTargets(frozen), cachedAt, versionRoot };
   } catch {
     return null;
   }

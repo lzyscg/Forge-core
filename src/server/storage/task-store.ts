@@ -153,6 +153,15 @@ export class TaskStore {
 
   private readonly catalog: TemplateCatalog;
 
+  /**
+   * In-memory frozen-snapshot cache (plan 2026-08-06): a task snapshot is
+   * immutable once frozen, so repeated reads may serve the cached object.
+   * The scheduler consults it every guard iteration; without the cache each
+   * read re-parses every snapshot YAML/prompt/skill and recomputes the
+   * SHA-256 hash. Evicted on deleteTask.
+   */
+  private readonly frozenCache = new Map<string, FrozenTemplate>();
+
   constructor(paths: CorePaths, catalog: TemplateCatalog) {
     this.paths = paths;
     this.catalog = catalog;
@@ -197,6 +206,12 @@ export class TaskStore {
    * scheduler gates the task), never corrupt.
    */
   async readFrozenTemplate(taskId: string): Promise<FrozenTemplate> {
+    // Cache check BEFORE readTaskRecord: a deleted task must observe the
+    // eviction and surface TASK_NOT_FOUND, never a stale snapshot.
+    const cached = this.frozenCache.get(taskId);
+    if (cached !== undefined) {
+      return cached;
+    }
     const record = await this.readTaskRecord(taskId);
     const snapshotRoot = this.paths.taskSnapshotRoot(taskId);
     let frozen: FrozenTemplate;
@@ -220,7 +235,9 @@ export class TaskStore {
     }
     // Identity comes from the immutable task record; the loader only knows
     // the snapshot directory name.
-    return { ...frozen, id: record.templateId, sourcePath: snapshotRoot };
+    const resolved: FrozenTemplate = { ...frozen, id: record.templateId, sourcePath: snapshotRoot };
+    this.frozenCache.set(taskId, resolved);
+    return resolved;
   }
 
   /** Reads the immutable `task.json`, mapping damage to public codes. */
@@ -300,6 +317,7 @@ export class TaskStore {
         '检查该任务的本地任务目录后重试。',
       );
     }
+    this.frozenCache.delete(taskId);
   }
 
   /**

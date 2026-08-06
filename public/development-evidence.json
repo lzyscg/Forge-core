@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "outcome": "passed",
-  "observedAt": "2026-08-03T20:34:34.143Z",
-  "commit": "a173c389cdd452c8fb4c5d0810ae3eec7306793d",
-  "command": "npm run core:verify-ui",
+  "observedAt": "2026-08-06T07:44:28.497Z",
+  "commit": "522942a4e9650ce3cf9130cf377be891a82c8945",
+  "command": "npm run verify:ui",
   "passedCapabilities": [
     "templates",
     "template_reload",

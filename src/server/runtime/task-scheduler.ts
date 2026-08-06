@@ -25,6 +25,11 @@
  *   plus a fresh confirmed input for the requesting agent, then continues the
  *   loop (the agent's rebuilt public history carries the Q&A — the same
  *   continuing-session semantics, spec §6.3).
+ * - No-progress guard (plan 2026-08-06): at the head of every loop iteration
+ *   the scheduler evaluates committed progress since the last human answer;
+ *   exceeding `PROGRESS_POLICY` commits one synthetic human request under the
+ *   last dispatcher and parks the task in `waiting_human`, and the loop never
+ *   runs a Turn while a human question is unanswered.
  * - `stop` bumps the run generation and aborts SYNCHRONOUSLY before any
  *   await, waits bounded disposal and appends `task_stopped`; a Turn whose
  *   result lands strictly after the abort commits nothing (spec §7.2).
@@ -59,6 +64,12 @@ import { isTurnContractSupported } from '../template/template-schema';
 import { RuntimeAbortedError } from './agent-runtime';
 import type { AgentRuntime } from './agent-runtime';
 import type { AcceptanceStopHook } from '../acceptance-boundary';
+import {
+  evaluateProgress,
+  PROGRESS_GUARD_QUESTION,
+  PROGRESS_POLICY,
+  type ProgressPolicy,
+} from './progress-guard';
 import { MAX_AUTO_RETRIES, autoRetryDelayMs } from './retry-policy';
 import type { TaskRunner } from './task-runner';
 
@@ -132,6 +143,16 @@ const ACTIVE_STATUSES: ReadonlySet<TaskStatus> = new Set([
 ]);
 
 /**
+ * Statuses `shutdown` marks interrupted: active states whose in-flight work
+ * the process actually loses. A task waiting for a human holds no in-flight
+ * Turn and must stay answerable (plan 2026-08-06 D5).
+ */
+const INTERRUPTIBLE_STATUSES: ReadonlySet<TaskStatus> = new Set([
+  'running',
+  'retryable_failure',
+]);
+
+/**
  * Every projected status process-restart recovery may touch (review F3):
  * the active trio plus never-started `ready` and already-`interrupted`
  * tasks, because the legacy incompatibility gate must reach all of them —
@@ -186,6 +207,11 @@ export interface TaskSchedulerOptions {
   runtime: AgentRuntime;
   /** Retry timing hooks; production defaults unless tests inject their own. */
   retryPolicy?: RetryPolicyHooks;
+  /**
+   * No-progress limits (plan 2026-08-06); production defaults unless tests
+   * inject their own.
+   */
+  progressPolicy?: ProgressPolicy;
   /**
    * Acceptance-only boundary seam (plan Phase D Task 4; process harness,
    * never the production API/UI). Consulted after each successfully
@@ -248,6 +274,8 @@ export class TaskScheduler {
 
   readonly #retrySleep: (ms: number, signal: AbortSignal) => Promise<void>;
 
+  readonly #progressPolicy: ProgressPolicy;
+
   readonly #acceptanceStopAfterCommit: AcceptanceStopHook | undefined;
 
   #current: ActiveRun | null = null;
@@ -262,6 +290,7 @@ export class TaskScheduler {
     this.#maxAutoRetries = policy.maxAutoRetries ?? MAX_AUTO_RETRIES;
     this.#retryDelayMs = policy.delayMs ?? ((retryNumber) => autoRetryDelayMs(retryNumber));
     this.#retrySleep = policy.sleep ?? defaultRetrySleep;
+    this.#progressPolicy = options.progressPolicy ?? PROGRESS_POLICY;
     this.#acceptanceStopAfterCommit = options.acceptanceStopAfterCommit;
   }
 
@@ -363,7 +392,10 @@ export class TaskScheduler {
    * was actually started (a `task_started`/`task_resumed` event exists) but
    * carries no terminal event receives `task_interrupted`. Tasks that only
    * hold confirmed inputs were never in flight and stay untouched; corrupt
-   * and terminal tasks are never modified. Returns the interrupted ids.
+   * and terminal tasks are never modified. Tasks parked in `waiting_human`
+   * hold no in-flight Turn and are skipped so their pending question stays
+   * answerable across restarts (plan 2026-08-06 D5). Returns the interrupted
+   * ids.
    *
    * Incompatibility gate (plan 2026-08-04 Task 3, spec §7.3; widened by
    * review F3): ANY recoverable task whose frozen snapshot lacks a supported
@@ -379,6 +411,12 @@ export class TaskScheduler {
     const interrupted: string[] = [];
     for (const summary of summaries) {
       if (!RECOVERABLE_STATUSES.has(summary.status)) {
+        continue;
+      }
+      // A task waiting for a human holds no in-flight Turn: a restart must
+      // keep it exactly where it is so `answer` stays reachable (plan
+      // 2026-08-06 D5; parking it interrupted deadlocked the question).
+      if (summary.status === 'waiting_human') {
         continue;
       }
       // Corrupt tasks stay isolated: identity/snapshot reads that throw leave
@@ -447,7 +485,7 @@ export class TaskScheduler {
       await withTimeout(run.promise, SHUTDOWN_WAIT_MS, 'shutdown').catch(() => undefined);
       try {
         const workspace = await this.#service.getWorkspace(run.taskId);
-        if (ACTIVE_STATUSES.has(workspace.task.status)) {
+        if (INTERRUPTIBLE_STATUSES.has(workspace.task.status)) {
           await this.appendLifecycle(run.taskId, 'task_interrupted');
         }
       } catch {
@@ -561,13 +599,20 @@ export class TaskScheduler {
 
   /**
    * The run loop: one `runNext` at a time until a rest state (spec §3.3),
-   * with bounded automatic retry of retryable failures (spec §7.1).
+   * with bounded automatic retry of retryable failures (spec §7.1). The
+   * no-progress guard is evaluated at the HEAD of every iteration (plan
+   * 2026-08-06): one check site covers post-commit continuation and every
+   * restart/stop-resume re-entry, and the loop never runs a Turn while a
+   * human question is unanswered.
    */
   private async execute(run: ActiveRun): Promise<TaskSummary> {
     let autoRetries = 0;
     try {
       for (;;) {
         if (run.controller.signal.aborted) {
+          break;
+        }
+        if (await this.guardNoProgress(run.taskId)) {
           break;
         }
         const result = await this.#runner.runNext(run.taskId, run.controller.signal, {
@@ -634,6 +679,90 @@ export class TaskScheduler {
     }
     const finalWorkspace = await this.#service.getWorkspace(run.taskId);
     return finalWorkspace.task;
+  }
+
+  /**
+   * No-progress guard (plan 2026-08-06), evaluated at the head of every loop
+   * iteration over committed events alone (deterministic across restarts).
+   * An unanswered human request ALWAYS halts the loop — a Turn must never run
+   * while a question is pending. An exceeded progress limit commits exactly
+   * one synthetic human request under the last dispatcher and halts too, so
+   * a structurally legal but spinning task parks visibly in waiting_human
+   * instead of turning forever. Returns true when the loop must break.
+   */
+  private async guardNoProgress(taskId: string): Promise<boolean> {
+    const committed = await this.#service.events.read(taskId);
+    const events = committed.map((entry) => entry.event);
+    const evaluation = evaluateProgress(events, await this.effectiveProgressPolicy(taskId));
+    if (evaluation.hasUnansweredHumanRequest) {
+      return true;
+    }
+    if (!evaluation.exceeded) {
+      return false;
+    }
+    // Exceeding the limit requires at least one committed result, so a
+    // dispatcher exists; stay inert defensively rather than guess one.
+    if (evaluation.lastDispatchAgentId !== null) {
+      await this.appendProgressGuardRequest(taskId, events, evaluation.lastDispatchAgentId);
+    }
+    return true;
+  }
+
+  /**
+   * The progress policy for one task (plan 2026-08-06): the frozen snapshot's
+   * template-declared budget when present, else the scheduler-injected
+   * policy. Reads ride the TaskStore snapshot cache; a damaged snapshot
+   * falls back to the injected policy so the guard never blocks on it.
+   */
+  private async effectiveProgressPolicy(taskId: string): Promise<ProgressPolicy> {
+    try {
+      const frozen = await this.#service.tasks.readFrozenTemplate(taskId);
+      return frozen.budget ?? this.#progressPolicy;
+    } catch {
+      return this.#progressPolicy;
+    }
+  }
+
+  /**
+   * Commits the guard's one synthetic human request (mirrors the
+   * `appendHumanAnswer` synthesis pattern): the node names the last
+   * dispatcher, carries the frozen platform question and the next sequence.
+   * The projector folds it into `waiting_human` + `pendingHumanQuestion`, so
+   * the existing answer flow resumes the task with a fresh progress window —
+   * no new event type or status (contracts stay frozen).
+   */
+  private async appendProgressGuardRequest(
+    taskId: string,
+    events: readonly TaskEvent[],
+    agentId: string,
+  ): Promise<void> {
+    const frozen = await this.#service.tasks.readFrozenTemplate(taskId);
+    const agentName = frozen.agents.find((agent) => agent.id === agentId)?.name ?? agentId;
+    let sequence = 0;
+    for (const event of events) {
+      if ('node' in event) {
+        sequence = Math.max(sequence, event.node.sequence);
+      }
+      if ('route' in event) {
+        sequence = Math.max(sequence, event.route.sequence);
+      }
+    }
+    await this.#service.events.append(taskId, {
+      id: randomUUID(),
+      at: new Date().toISOString(),
+      type: 'human_requested',
+      node: {
+        sequence: sequence + 1,
+        agentId,
+        kind: 'human_request',
+        title: agentName,
+        body: PROGRESS_GUARD_QUESTION,
+        status: 'confirmed',
+        attemptCount: 1,
+        artifactVersion: null,
+      },
+      question: PROGRESS_GUARD_QUESTION,
+    });
   }
 
   /**

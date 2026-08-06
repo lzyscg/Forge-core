@@ -275,7 +275,10 @@ describe('typed JSON API', () => {
 
     const resumed = await client.request('POST', `/api/tasks/${task.id}/resume`);
     expect(resumed.status).toBe(202);
-    expect((resumed.body as TaskSummary).status).toBe('running');
+    // Resuming over the unanswered human question returns the task to
+    // waiting_human (plan 2026-08-06): the loop never runs a Turn while a
+    // question is pending, and `answer` must stay reachable.
+    expect((resumed.body as TaskSummary).status).toBe('waiting_human');
 
     // The 202 acceptance keeps the one-slot loop running in the background;
     // retry probes the slot until it frees and then pins the projected-status

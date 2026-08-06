@@ -22,7 +22,7 @@
  * Neutral identities only (iron rule 1); fixture agent ids appear exclusively
  * in test data.
  */
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { RuntimeFailure } from './agent-runtime';
@@ -38,6 +38,7 @@ import {
   type SchedulerEnvironment,
 } from './test-support';
 import { downgradeTaskSnapshotToLegacy, makeEventNode, makeTaskEvent } from '../test-support';
+import { PROGRESS_GUARD_QUESTION } from './progress-guard';
 import type { ArtifactStore } from '../storage/artifact-store';
 import { TraceStore } from '../storage/trace-store';
 import { ActionCommitter } from './action-committer';
@@ -346,9 +347,11 @@ describe('TaskScheduler resume, retry and answer', () => {
     await harness.scheduler.stop(harness.taskId);
 
     const resumed = await harness.scheduler.resume(harness.taskId);
-    // The interrupted turn committed its result; nothing is pending, so the
-    // loop quiesces with the task still projected as running (resumable).
-    expect(resumed.status).toBe('running');
+    // The turn committed a human request before the stop; resuming over an
+    // unanswered question returns the task to waiting_human (never running —
+    // the loop never executes a Turn while a question is pending), so the
+    // request stays answerable (plan 2026-08-06).
+    expect(resumed.status).toBe('waiting_human');
     const committed = await harness.environment.events.read(harness.taskId);
     expect(committed.map((entry) => entry.event.type)).toContain('task_resumed');
     await expect(harness.scheduler.resume(harness.taskId)).rejects.toMatchObject({
@@ -749,9 +752,10 @@ describe('TaskScheduler acceptance boundary seam (plan Phase D Task 4)', () => {
     });
 
     const summary = await scheduler.start(taskId);
-    // The loop halted exactly at the confirmed boundary: the task stays
-    // active (no terminal event) and the hook was consulted exactly once.
-    expect(summary.status).toBe('running');
+    // The loop halted exactly at the confirmed boundary and the hook was
+    // consulted exactly once; the visible-parking policy then parks the
+    // no-longer-executing task interrupted (resumable — no silent running).
+    expect(summary.status).toBe('interrupted');
     expect(hookTaskIds).toEqual([taskId]);
     const workspace = await environment.service.getWorkspace(taskId);
     expect(workspace.artifacts.map((artifact) => artifact.version)).toEqual([1]);
@@ -816,6 +820,249 @@ describe('TaskScheduler acceptance boundary seam (plan Phase D Task 4)', () => {
     const summary = await scheduler.start(taskId);
     expect(summary.status).toBe('completed');
     expect(hookTaskIds).toEqual([]);
+  });
+});
+
+describe('TaskScheduler progress guard (plan 2026-08-06)', () => {
+  /** Builds a scheduler over the harness service with an injected policy. */
+  function guardedScheduler(harness: SchedulerHarness, maxTurnsSinceHumanAnswer: number): TaskScheduler {
+    return new TaskScheduler({
+      service: harness.environment.service,
+      runner: harness.environment.service.runner,
+      runtime: harness.recording,
+      progressPolicy: { maxTurnsSinceHumanAnswer },
+    });
+  }
+
+  const humanRequestedEvents = async (harness: SchedulerHarness) =>
+    (await harness.environment.events.read(harness.taskId)).filter(
+      (entry) => entry.event.type === 'human_requested',
+    );
+
+  it('parks a spinning rejection loop as waiting_human with one synthesized request', async () => {
+    const harness = await schedulerHarness({
+      writer: [
+        { kind: 'result', publicText: '初稿 V1', actions: publishTurnActions('初稿 V1') },
+        { kind: 'result', publicText: '初稿 V2', actions: publishTurnActions('初稿 V2') },
+      ],
+      reviewer: [
+        { kind: 'result', publicText: '退回意见一', actions: reviewMessageTurnActions('请修改一') },
+        { kind: 'result', publicText: '退回意见二', actions: reviewMessageTurnActions('请修改二') },
+      ],
+    });
+    const scheduler = guardedScheduler(harness, 3);
+
+    const summary = await scheduler.start(harness.taskId);
+    expect(summary.status).toBe('waiting_human');
+
+    // Four committed Turns tripped the limit; the guard stopped the loop
+    // BEFORE a fifth ever ran.
+    expect(harness.fake.countInvocations('writer')).toBe(2);
+    expect(harness.fake.countInvocations('reviewer')).toBe(2);
+
+    const requests = await humanRequestedEvents(harness);
+    expect(requests).toHaveLength(1);
+    const request = requests[0]?.event;
+    if (request?.type !== 'human_requested') {
+      throw new Error('expected a human_requested event');
+    }
+    // The question is asked under the LAST dispatcher (the spinning reviewer).
+    expect(request.node.agentId).toBe('reviewer');
+    expect(request.question).toBe(PROGRESS_GUARD_QUESTION);
+
+    const workspace = await harness.environment.service.getWorkspace(harness.taskId);
+    expect(workspace.pendingHumanQuestion).toBe(PROGRESS_GUARD_QUESTION);
+  });
+
+  it('never double-appends when an unanswered request already exists', async () => {
+    const harness = await schedulerHarness({
+      writer: [
+        { kind: 'result', publicText: '初稿 V1', actions: publishTurnActions('初稿 V1') },
+        { kind: 'result', publicText: '初稿 V2', actions: publishTurnActions('初稿 V2') },
+      ],
+      reviewer: [
+        { kind: 'result', publicText: '退回意见一', actions: reviewMessageTurnActions('请修改一') },
+        { kind: 'result', publicText: '退回意见二', actions: reviewMessageTurnActions('请修改二') },
+      ],
+    });
+    const scheduler = guardedScheduler(harness, 2);
+    const parked = await scheduler.start(harness.taskId);
+    expect(parked.status).toBe('waiting_human');
+
+    // stop + resume re-enters the loop with the unanswered request still
+    // committed: the guard breaks immediately, appending nothing and running
+    // no Turn.
+    await scheduler.stop(harness.taskId);
+    await scheduler.resume(harness.taskId);
+
+    expect(await humanRequestedEvents(harness)).toHaveLength(1);
+    // The guard tripped right after the writer's second publish (the third
+    // committed Turn), before the reviewer's scripted second Turn could run.
+    expect(harness.fake.countInvocations('writer')).toBe(2);
+    expect(harness.fake.countInvocations('reviewer')).toBe(1);
+  });
+
+  it('answer resets the window and runs the task to completion', async () => {
+    const harness = await schedulerHarness({
+      writer: [
+        { kind: 'result', publicText: '初稿 V1', actions: publishTurnActions('初稿 V1') },
+        { kind: 'result', publicText: '初稿 V2', actions: publishTurnActions('初稿 V2') },
+      ],
+      reviewer: [
+        { kind: 'result', publicText: '退回意见一', actions: reviewMessageTurnActions('请修改一') },
+        { kind: 'result', publicText: '终稿提交', actions: submitReceivedArtifactTurnActions },
+      ],
+    });
+    const scheduler = guardedScheduler(harness, 2);
+    const parked = await scheduler.start(harness.taskId);
+    expect(parked.status).toBe('waiting_human');
+
+    // The human answer resets the progress window; the reviewer's pending
+    // artifact hand-off (committed before the guard fired) runs first and
+    // reaches the system final gate under the fresh budget.
+    const answered = await scheduler.answer(harness.taskId, '复审并提交');
+    expect(answered.status).toBe('completed');
+    const workspace = await harness.environment.service.getWorkspace(harness.taskId);
+    expect(workspace.artifacts.at(-1)?.final).toBe(true);
+    expect(await humanRequestedEvents(harness)).toHaveLength(1);
+  });
+
+  it('healthy completion under the limit commits no guard request', async () => {
+    const harness = await schedulerHarness({
+      writer: [
+        { kind: 'result', publicText: '初稿 V1', actions: publishTurnActions('初稿 V1') },
+        { kind: 'result', publicText: '初稿 V2', actions: publishTurnActions('初稿 V2') },
+      ],
+      reviewer: [
+        { kind: 'result', publicText: '退回意见', actions: reviewMessageTurnActions('请修改') },
+        { kind: 'result', publicText: '终稿提交', actions: submitReceivedArtifactTurnActions },
+      ],
+    });
+    // The production scheduler carries the default policy (limit 8); four
+    // committed Turns never trip it.
+    const summary = await harness.scheduler.start(harness.taskId);
+    expect(summary.status).toBe('completed');
+    expect(await humanRequestedEvents(harness)).toHaveLength(0);
+  });
+
+  it('restart keeps the parked task waiting_human and answerable', async () => {
+    const harness = await schedulerHarness({
+      writer: [
+        { kind: 'result', publicText: '初稿 V1', actions: publishTurnActions('初稿 V1') },
+        { kind: 'result', publicText: '初稿 V2', actions: publishTurnActions('初稿 V2') },
+      ],
+      reviewer: [
+        { kind: 'result', publicText: '退回意见一', actions: reviewMessageTurnActions('请修改一') },
+        { kind: 'result', publicText: '终稿提交', actions: submitReceivedArtifactTurnActions },
+      ],
+    });
+    const scheduler = guardedScheduler(harness, 2);
+    const parked = await scheduler.start(harness.taskId);
+    expect(parked.status).toBe('waiting_human');
+
+    // A fresh scheduler over the same roots simulates the restart: recovery
+    // must leave the waiting task untouched so `answer` stays reachable.
+    const restarted = new TaskScheduler({
+      service: harness.environment.service,
+      runner: harness.environment.service.runner,
+      runtime: harness.recording,
+      progressPolicy: { maxTurnsSinceHumanAnswer: 2 },
+    });
+    const interrupted = await restarted.recoverInterruptedTasks();
+    expect(interrupted).not.toContain(harness.taskId);
+    expect((await harness.environment.service.getWorkspace(harness.taskId)).task.status).toBe(
+      'waiting_human',
+    );
+
+    const answered = await restarted.answer(harness.taskId, '复审并提交');
+    expect(answered.status).toBe('completed');
+  });
+
+  it('recovery leaves a model-requested waiting task untouched and answerable', async () => {
+    const harness = await schedulerHarness({}, { seedWriterInput: false });
+    const waiting = await harness.environment.createTask();
+    await harness.environment.events.append(waiting, makeTaskEvent({ type: 'task_started' }));
+    await harness.environment.seedAgentInput(waiting, 'writer', '开始生产');
+    await harness.environment.events.append(
+      waiting,
+      makeTaskEvent({
+        type: 'agent_result',
+        node: makeEventNode({
+          sequence: 2,
+          agentId: 'writer',
+          kind: 'result',
+          title: '结果',
+          body: '需要确认',
+        }),
+      }),
+    );
+    await harness.environment.events.append(
+      waiting,
+      makeTaskEvent({
+        type: 'human_requested',
+        node: makeEventNode({
+          sequence: 3,
+          agentId: 'writer',
+          kind: 'human_request',
+          title: '人工请求',
+          body: '是否继续？',
+        }),
+        question: '是否继续？',
+      }),
+    );
+
+    const interrupted = await harness.scheduler.recoverInterruptedTasks();
+    expect(interrupted).not.toContain(waiting);
+    const workspace = await harness.environment.service.getWorkspace(waiting);
+    expect(workspace.task.status).toBe('waiting_human');
+    expect(workspace.pendingHumanQuestion).toBe('是否继续？');
+  });
+
+  it('a template-declared budget overrides the scheduler-injected policy', async () => {
+    const fake = new FakeAgentRuntime({
+      scripts: {
+        writer: [
+          { kind: 'result', publicText: '初稿 V1', actions: publishTurnActions('初稿 V1') },
+          { kind: 'result', publicText: '初稿 V2', actions: publishTurnActions('初稿 V2') },
+        ],
+        reviewer: [
+          { kind: 'result', publicText: '退回意见一', actions: reviewMessageTurnActions('请修改一') },
+          { kind: 'result', publicText: '退回意见二', actions: reviewMessageTurnActions('请修改二') },
+        ],
+      },
+    });
+    const recording = new RecordingRuntime(fake);
+    const environment = await createSchedulerEnvironment({
+      runtime: recording,
+      patchTemplate: (templateDir) => {
+        writeFileSync(
+          join(templateDir, 'pipeline.yaml'),
+          `${readFileSync(join(templateDir, 'pipeline.yaml'), 'utf8').trimEnd()}\nbudget:\n  maxTurnsSinceHumanAnswer: 1`,
+          'utf8',
+        );
+      },
+    });
+    const taskId = await environment.createTask();
+    await environment.seedAgentInput(taskId, 'writer', '开始生产');
+    // Injected policy says 8; the frozen template budget 1 must win.
+    const scheduler = new TaskScheduler({
+      service: environment.service,
+      runner: environment.service.runner,
+      runtime: recording,
+      progressPolicy: { maxTurnsSinceHumanAnswer: 8 },
+    });
+
+    const summary = await scheduler.start(taskId);
+    expect(summary.status).toBe('waiting_human');
+    expect(fake.countInvocations('writer')).toBe(1);
+    expect(fake.countInvocations('reviewer')).toBe(1);
+    const requests = (await environment.events.read(taskId)).filter(
+      (entry) => entry.event.type === 'human_requested',
+    );
+    expect(requests).toHaveLength(1);
+    if (requests[0]?.event.type === 'human_requested') {
+      expect(requests[0].event.question).toBe(PROGRESS_GUARD_QUESTION);
+    }
   });
 });
 

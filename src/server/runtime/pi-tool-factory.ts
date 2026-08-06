@@ -114,9 +114,9 @@ const TOOL_SPECS: ForgeToolSpec[] = [
   {
     name: 'send_message',
     description:
-      'Deliver the sealed production package as a public message to another agent declared in the template. Requires finish_production first; pass productionPackageRef "current" and the target only — the message body comes from the sealed package. Exactly one dispatch action per turn.',
+      'Deliver the sealed production package as a public message to one of the agents declared in the template. Requires finish_production first; pass productionPackageRef "current" and targetAgentId — the target must be the agent\'s declared id (e.g. "writer"), never its display name; choose exactly one target from the candidates the task describes. The message body comes from the sealed package. Exactly one dispatch action per turn.',
     promptSnippet:
-      'send_message(targetAgentId, productionPackageRef: "current") — route the sealed package to another agent',
+      'send_message(targetAgentId, productionPackageRef: "current") — route the sealed package to one declared agent by its id',
     parameters: SEND_MESSAGE_PARAMETERS,
   },
   {

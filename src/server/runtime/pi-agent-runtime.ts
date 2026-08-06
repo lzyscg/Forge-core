@@ -30,6 +30,7 @@ import {
   type CreateAgentSessionOptions,
 } from '@earendil-works/pi-coding-agent';
 import type { TraceEntry } from '../../shared/contracts';
+import type { TurnContract } from '../template/template-schema';
 import type {
   AgentRuntime,
   AgentRunOptions,
@@ -158,6 +159,33 @@ export function createDefaultModelBindingResolver(): PiModelBindingResolver {
 
 /** Custom-message type used to replay tool-role history entries. */
 const FORGE_TOOL_RESULT_CUSTOM_TYPE = 'forge/tool_result';
+
+/**
+ * Corrective re-prompts allowed when a Turn ends without completing its
+ * production/dispatch phases (plan 2026-08-06; extracted from the hardcoded
+ * loop bound). Models occasionally emit text-only output instead of tool
+ * calls; each nudge is one short provider round-trip.
+ */
+export const MAX_CORRECTIVE_NUDGES = 2;
+
+/** Sealed-phase reminder used when the frozen snapshot carries no contract. */
+const GENERIC_SEALED_PHASE_REMINDER =
+  '你已经调用了 finish_production，但还没有发送。请立即调用一个发送动作（send_message、publish_artifact、submit_final_artifact 或 request_human_input）。';
+
+/**
+ * The sealed-phase corrective reminder naming ONLY the dispatch actions the
+ * agent's frozen turn contract allows (plan 2026-08-06). `request_human_input`
+ * stays a legal post-seal dispatch for every agent (the committer's phase
+ * gate accepts it after sealing), so it is always listed. A null contract
+ * falls back to the generic reminder.
+ */
+export function sealedPhaseReminder(turnContract: TurnContract | null): string {
+  if (turnContract === null) {
+    return GENERIC_SEALED_PHASE_REMINDER;
+  }
+  const options = [...turnContract.dispatch.allowedActions, 'request_human_input'];
+  return `你已经调用了 finish_production，但还没有发送。请立即调用一个发送动作（${options.join('、')}）。`;
+}
 
 /** Custom-message type used for Forge-owned skill context injection. */
 const FORGE_SKILL_CONTEXT_CUSTOM_TYPE = 'forge/skill_context';
@@ -629,20 +657,51 @@ export class PiAgentRuntime implements AgentRuntime {
           'the provider request did not complete',
         );
       }
+      // Provider-level failures and empty responses terminate the Turn
+      // immediately (plan 2026-08-06): a corrective nudge only makes sense
+      // when the provider actually answered but skipped the production/
+      // dispatch phases, never when it errored, aborted or stayed silent.
+      if (collected.message === null) {
+        throw RuntimeFailure.transient(
+          PI_RUNTIME_ERROR_CODES.PROVIDER_NO_RESPONSE,
+          'the provider returned no assistant response',
+        );
+      }
+      if (collected.message.stopReason === 'aborted') {
+        throw new RuntimeAbortedError(`turn ${input.turnId} was aborted by the provider`);
+      }
+      if (collected.message.stopReason === 'error') {
+        throw RuntimeFailure.transient(
+          PI_RUNTIME_ERROR_CODES.PROVIDER_ERROR,
+          'the provider reported an error while completing the turn',
+        );
+      }
       // Phase-completion corrective loop: the model occasionally produces
       // text-only output without calling finish_production or a dispatch
-      // action. Give it a corrective nudge and re-prompt (up to 2 times).
-      for (let nudge = 0; nudge < 2; nudge += 1) {
+      // action. Give it a corrective nudge and re-prompt (bounded by
+      // MAX_CORRECTIVE_NUDGES); the sealed-phase reminder names only the
+      // dispatch actions the agent's turn contract allows.
+      for (let nudge = 0; nudge < MAX_CORRECTIVE_NUDGES; nudge += 1) {
         if (buffer.phase === 'dispatched' || buffer.phase === 'human_interrupted') {
           break;
         }
         const reminder = buffer.phase === 'production'
           ? '你还没有调用 finish_production。请立即调用 finish_production 封存你的生产结果，然后调用一个发送动作。文字输出不是动作，不能代替工具调用。'
-          : '你已经调用了 finish_production，但还没有发送。请立即调用一个发送动作（send_message、publish_artifact、submit_final_artifact 或 request_human_input）。';
+          : sealedPhaseReminder(input.agent.turnContract);
         this.#log('pi-agent-runtime: phase incomplete (' + buffer.phase + '), corrective prompt ' + (nudge + 1));
         await session.prompt(reminder, { expandPromptTemplates: false });
         if (signal.aborted || live.platformAborted) {
           throw new RuntimeAbortedError('turn ' + input.turnId + ' was aborted during corrective prompt');
+        }
+        // A nudge the provider answers with an error or an abort ends the
+        // correction attempts; the final-state checks below surface the
+        // typed failure.
+        const latest = collected.message;
+        if (
+          latest !== null &&
+          (latest.stopReason === 'error' || latest.stopReason === 'aborted')
+        ) {
+          break;
         }
       }
       const lastAssistant = collected.message;

@@ -1,0 +1,27 @@
+id: controller
+name: 总控 Agent
+description: 生产分配中枢：接收业务输入、分配生产任务、验收产物、决定下一跳，唯一提交终稿。
+# 占位模型：真实验收时由脚本复制到工作副本并仅替换该标量（单一 configured 命名空间）。
+model: configured/controller-model
+systemPromptFile: prompts/controller-system.md
+turnContract:
+  version: 1
+  production:
+    completionAction: finish_production
+    output:
+      formats:
+        - markdown
+        - text
+      sources:
+        - inline
+        - current_input_artifact
+  dispatch:
+    cardinality: single
+    allowedActions:
+      - send_message
+      - submit_final_artifact
+    targets:
+      send_message:
+        - writer
+        - reviewer
+    productionPackageRef: current

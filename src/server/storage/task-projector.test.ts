@@ -163,6 +163,42 @@ describe('task-projector', () => {
     expect(answered.nodes.map((node) => node.kind)).toEqual(['human_request', 'human_answer']);
   });
 
+  it('folds a resume over an unanswered question back to waiting_human', async () => {
+    // Plan 2026-08-06: the run loop never executes a Turn while a question
+    // is pending, and `answer` is only reachable from waiting_human — so a
+    // stop/resume cycle over an unanswered request must return to waiting,
+    // never to `running` (which would park the question interrupted).
+    const created = await service.createTask(validTaskRequest());
+    await service.appendTestEvent(created.id, makeTaskEvent({ type: 'task_started' }));
+    await service.appendTestEvent(
+      created.id,
+      makeTaskEvent({
+        type: 'human_requested',
+        node: makeEventNode({ sequence: 1, agentId: 'writer', kind: 'human_request' }),
+        question: '需要确认开头基调。',
+      }),
+    );
+    await service.appendTestEvent(created.id, makeTaskEvent({ type: 'task_stopped' }));
+    await service.appendTestEvent(created.id, makeTaskEvent({ type: 'task_resumed' }));
+
+    const resumed = await service.getWorkspace(created.id);
+    expect(resumed.task.status).toBe('waiting_human');
+    expect(resumed.pendingHumanQuestion).toBe('需要确认开头基调。');
+
+    // An answered question keeps the ordinary resume semantics.
+    await service.appendTestEvent(
+      created.id,
+      makeTaskEvent({
+        type: 'human_answered',
+        node: makeEventNode({ sequence: 2, agentId: 'writer', kind: 'human_answer' }),
+        answer: '保持简洁。',
+      }),
+    );
+    await service.appendTestEvent(created.id, makeTaskEvent({ type: 'task_stopped' }));
+    await service.appendTestEvent(created.id, makeTaskEvent({ type: 'task_resumed' }));
+    expect((await service.getWorkspace(created.id)).task.status).toBe('running');
+  });
+
   it('derives retryable_failure from a non-retryable attempt failure', async () => {
     const created = await service.createTask(validTaskRequest());
     await service.appendTestEvent(created.id, makeTaskEvent({ type: 'task_started' }));

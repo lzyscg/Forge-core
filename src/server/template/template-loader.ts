@@ -30,6 +30,7 @@ import {
   type ValidatedAgentFile,
   type ValidatedPipelineFile,
   type ValidatedTemplateFile,
+  type ValidatedTurnContract,
 } from './template-validator';
 
 const RELOAD_ACTION = '修正模板文件后重新加载模板。';
@@ -160,6 +161,24 @@ interface CanonicalSource {
   agents: Array<ValidatedAgentFile & { skillContents: string[] }>;
 }
 
+/**
+ * Folds one-element candidate sets back to a scalar for hashing (plan
+ * 2026-08-06): `publish_artifact: reviewer` and `publish_artifact: [reviewer]`
+ * are semantically identical, and the fold keeps every existing frozen
+ * snapshot's hash byte-stable — `readFrozenTemplate` re-verifies a snapshot
+ * against its stored templateVersion, and a drifting canonical form would
+ * turn every pre-change task corrupt.
+ */
+function hashCanonicalContract(contract: ValidatedTurnContract): unknown {
+  const targets: Record<string, string | string[]> = {};
+  for (const [intent, list] of Object.entries(contract.dispatch.targets)) {
+    if (list !== undefined) {
+      targets[intent] = list.length === 1 ? list[0] : list;
+    }
+  }
+  return { ...contract, dispatch: { ...contract.dispatch, targets } };
+}
+
 function computeVersionHash(source: CanonicalSource): string {
   const canonical = canonicalize({
     template: source.template,
@@ -167,6 +186,10 @@ function computeVersionHash(source: CanonicalSource): string {
       agents: source.pipeline.agents,
       routes: source.pipeline.routes,
       finalOutput: { submitters: source.pipeline.submitters },
+      // A declared budget is part of the frozen contract; a budget-less
+      // template omits the key so legacy hashes stay reproducible (mirrors
+      // the turnContract omission trick below).
+      ...(source.pipeline.budget !== null ? { budget: source.pipeline.budget } : {}),
     },
     agents: source.agents.map((agent) => ({
       id: agent.id,
@@ -184,7 +207,9 @@ function computeVersionHash(source: CanonicalSource): string {
       // Historical snapshots predate the contract; omitting the key (instead
       // of serializing null) keeps their original version hash reproducible
       // (spec §7.3: frozen snapshots are never rewritten or re-versioned).
-      ...(agent.turnContract !== null ? { turnContract: agent.turnContract } : {}),
+      ...(agent.turnContract !== null
+        ? { turnContract: hashCanonicalContract(agent.turnContract) }
+        : {}),
     })),
   });
   return createHash('sha256').update(JSON.stringify(canonical), 'utf8').digest('hex');
@@ -324,6 +349,7 @@ async function loadValidated(
       format: template.finalArtifact.format,
       submitters: [...pipeline.submitters],
     },
+    budget: pipeline.budget,
     sourcePath,
   };
 }

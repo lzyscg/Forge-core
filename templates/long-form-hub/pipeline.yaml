@@ -1,0 +1,34 @@
+# 有序 Agent、合法连线与最终出口（长篇内容生产 · 混合拓扑）
+# 修订小循环（写作↔审核）走直连固定路由；总控管阶段流转与最终交付。
+# 总控 send_message 使用候选目标集合（多目标分发，plan 2026-08-06）。
+agents:
+  - controller
+  - writer
+  - reviewer
+routes:
+  - from: controller
+    to: writer
+    kind: message
+    label: 分配写作任务
+  - from: controller
+    to: reviewer
+    kind: message
+    label: 派发审读任务
+  - from: writer
+    to: reviewer
+    kind: artifact
+    label: 提交章节稿件
+  - from: reviewer
+    to: writer
+    kind: message
+    label: 退回修改意见
+  - from: reviewer
+    to: controller
+    kind: message
+    label: 审读结论
+finalOutput:
+  submitters:
+    - controller
+# 模板级进度预算（平台上限 32）：本拓扑每轮修订多一跳，健康跑约 4 回合。
+budget:
+  maxTurnsSinceHumanAnswer: 16

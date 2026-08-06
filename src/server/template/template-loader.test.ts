@@ -20,6 +20,7 @@ import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { CorePaths } from '../storage/core-paths';
+import { PROGRESS_POLICY_CEILING } from '../runtime/progress-guard';
 import { loadTemplateDirectory } from './template-loader';
 import { TemplateCatalog } from './template-catalog';
 
@@ -121,6 +122,15 @@ function writeWriterWith(dest: string, contractYaml: string): void {
   writeFileSync(
     join(dest, 'agents/writer.yaml'),
     `id: writer\nname: 初稿 Agent\ndescription: 生成初稿。\nmodel: deepseek/deepseek-chat\nsystemPrompt: |\n  生成初稿。\nskills:\n  - id: style-guide\n    name: 文风指南\n    description: 参考。\n    contentPath: skills/style-guide/SKILL.md\n${contractYaml}`,
+    'utf8',
+  );
+}
+
+/** Rewrites the reviewer agent file body + one contract block. */
+function writeReviewerWith(dest: string, contractYaml: string): void {
+  writeFileSync(
+    join(dest, 'agents/reviewer.yaml'),
+    `id: reviewer\nname: 审核 Agent\ndescription: 审核初稿。\nmodel: deepseek/deepseek-chat\nsystemPrompt: |\n  审核初稿。\nskills:\n  - id: review-checklist\n    name: 审核清单\n    description: 参考。\n    contentPath: skills/review-checklist/SKILL.md\n${contractYaml}`,
     'utf8',
   );
 }
@@ -518,7 +528,8 @@ describe('turnContract requirement (plan 2026-08-04 Task 2, spec §6)', () => {
       dispatch: {
         cardinality: 'single',
         allowedActions: ['publish_artifact'],
-        targets: { publish_artifact: 'reviewer' },
+        // Scalar YAML targets normalize to one-element candidate sets.
+        targets: { publish_artifact: ['reviewer'] },
         productionPackageRef: 'current',
       },
     });
@@ -527,8 +538,58 @@ describe('turnContract requirement (plan 2026-08-04 Task 2, spec §6)', () => {
       dispatch: {
         cardinality: 'single',
         allowedActions: ['send_message', 'submit_final_artifact'],
-        targets: { send_message: 'writer' },
+        targets: { send_message: ['writer'] },
       },
+    });
+  });
+
+  it('accepts a list of candidate targets for one dispatch intent', async () => {
+    const root = makeTempDir('forge-core-t2-targetlist-');
+    const dest = withContracts(copyFixture('valid', 'targetlist', root));
+    writeReviewerWith(
+      dest,
+      REVIEWER_CONTRACT_YAML.replace('send_message: writer', 'send_message: [writer, reviewer]'),
+    );
+    const frozen = await loadTemplateDirectory(dest);
+    const reviewer = frozen.agents.find((agent) => agent.id === 'reviewer');
+    expect(reviewer?.turnContract?.dispatch.targets).toEqual({
+      send_message: ['writer', 'reviewer'],
+    });
+  });
+
+  it('rejects an empty dispatch target list', async () => {
+    const root = makeTempDir('forge-core-t2-emptytargets-');
+    const dest = withContracts(copyFixture('valid', 'emptytargets', root));
+    writeWriterWith(dest, CONTRACT_YAML.replace('publish_artifact: reviewer', 'publish_artifact: []'));
+    await expect(loadTemplateDirectory(dest)).rejects.toMatchObject({
+      code: 'TEMPLATE_INVALID',
+      location: 'agents/writer.yaml',
+    });
+  });
+
+  it('rejects duplicate agents in one dispatch target list', async () => {
+    const root = makeTempDir('forge-core-t2-duptargets-');
+    const dest = withContracts(copyFixture('valid', 'duptargets', root));
+    writeReviewerWith(
+      dest,
+      REVIEWER_CONTRACT_YAML.replace('send_message: writer', 'send_message: [writer, writer]'),
+    );
+    await expect(loadTemplateDirectory(dest)).rejects.toMatchObject({
+      code: 'TEMPLATE_INVALID',
+      location: 'agents/reviewer.yaml',
+    });
+  });
+
+  it('rejects a dispatch target list containing an undeclared agent', async () => {
+    const root = makeTempDir('forge-core-t2-ghostlist-');
+    const dest = withContracts(copyFixture('valid', 'ghostlist', root));
+    writeWriterWith(
+      dest,
+      CONTRACT_YAML.replace('publish_artifact: reviewer', 'publish_artifact: [reviewer, ghost-agent]'),
+    );
+    await expect(loadTemplateDirectory(dest)).rejects.toMatchObject({
+      code: 'TEMPLATE_INVALID',
+      location: 'agents/writer.yaml',
     });
   });
 
@@ -596,5 +657,120 @@ describe('turnContract requirement (plan 2026-08-04 Task 2, spec §6)', () => {
     writeWriterWith(destB, CONTRACT_YAML.replace('formats: [markdown]', 'formats: [text]'));
     const after = await loadTemplateDirectory(destB);
     expect(after.versionHash).not.toBe(before.versionHash);
+  });
+
+  it('hashes a scalar target identically to a one-element target list', async () => {
+    // Plan 2026-08-06 hash fold: scalar ≡ [single] is semantically identical,
+    // and the fold keeps every existing frozen-snapshot hash byte-stable.
+    const rootA = makeTempDir('forge-core-t2-fold-scalar-');
+    const rootB = makeTempDir('forge-core-t2-fold-list-');
+    const destA = withContracts(copyFixture('valid', 'fold-scalar', rootA));
+    const destB = withContracts(copyFixture('valid', 'fold-list', rootB));
+    writeWriterWith(destA, CONTRACT_YAML);
+    writeWriterWith(destB, CONTRACT_YAML.replace('publish_artifact: reviewer', 'publish_artifact: [reviewer]'));
+    expect((await loadTemplateDirectory(destB)).versionHash).toBe(
+      (await loadTemplateDirectory(destA)).versionHash,
+    );
+  });
+
+  it('changes the version hash when a target list gains a second candidate', async () => {
+    const rootA = makeTempDir('forge-core-t2-multitarget-hash-a-');
+    const rootB = makeTempDir('forge-core-t2-multitarget-hash-b-');
+    const destA = withContracts(copyFixture('valid', 'multitarget-a', rootA));
+    const destB = withContracts(copyFixture('valid', 'multitarget-b', rootB));
+    writeWriterWith(destA, CONTRACT_YAML);
+    writeWriterWith(destB, CONTRACT_YAML.replace('publish_artifact: reviewer', 'publish_artifact: [reviewer, writer]'));
+    expect((await loadTemplateDirectory(destB)).versionHash).not.toBe(
+      (await loadTemplateDirectory(destA)).versionHash,
+    );
+  });
+});
+
+describe('template progress budget (plan 2026-08-06)', () => {
+  /** Appends a `budget:` block to a copied fixture's pipeline.yaml. */
+  function withBudget(dest: string, budgetYaml: string): string {
+    writeFileSync(
+      join(dest, 'pipeline.yaml'),
+      `${readFileSync(join(dest, 'pipeline.yaml'), 'utf8').trimEnd()}\n${budgetYaml}`,
+      'utf8',
+    );
+    return dest;
+  }
+
+  const BUDGET_ONE = 'budget:\n  maxTurnsSinceHumanAnswer: 1';
+
+  it('parses a declared progress budget from pipeline.yaml', async () => {
+    const root = makeTempDir('forge-core-budget-parse-');
+    const dest = withBudget(withContracts(copyFixture('valid', 'budget-parse', root)), BUDGET_ONE);
+    const frozen = await loadTemplateDirectory(dest);
+    expect(frozen.budget).toEqual({ maxTurnsSinceHumanAnswer: 1 });
+  });
+
+  it('keeps budget null when pipeline.yaml declares none', async () => {
+    const root = makeTempDir('forge-core-budget-null-');
+    const dest = withContracts(copyFixture('valid', 'budget-null', root));
+    const frozen = await loadTemplateDirectory(dest);
+    expect(frozen.budget).toBeNull();
+  });
+
+  it('rejects a budget above the platform ceiling', async () => {
+    const root = makeTempDir('forge-core-budget-too-big-');
+    const dest = withBudget(
+      withContracts(copyFixture('valid', 'budget-too-big', root)),
+      `budget:\n  maxTurnsSinceHumanAnswer: ${PROGRESS_POLICY_CEILING + 1}`,
+    );
+    await expect(loadTemplateDirectory(dest)).rejects.toMatchObject({
+      code: 'TEMPLATE_INVALID',
+      location: 'pipeline.yaml',
+    });
+  });
+
+  it('rejects budget values that are zero, negative, non-integer or missing', async () => {
+    for (const value of ['0', '-1', '1.5', '{}']) {
+      const root = makeTempDir(`forge-core-budget-bad-${value.replace(/[^0-9]/g, 'x')}-`);
+      const dest = withBudget(
+        withContracts(copyFixture('valid', 'budget-bad', root)),
+        value === '{}' ? 'budget: {}' : `budget:\n  maxTurnsSinceHumanAnswer: ${value}`,
+      );
+      await expect(loadTemplateDirectory(dest)).rejects.toMatchObject({
+        code: 'TEMPLATE_INVALID',
+        location: 'pipeline.yaml',
+      });
+    }
+  });
+
+  it('treats an empty budget block as the platform default', async () => {
+    const root = makeTempDir('forge-core-budget-empty-null-');
+    const dest = withBudget(
+      withContracts(copyFixture('valid', 'budget-empty-null', root)),
+      'budget:',
+    );
+    const frozen = await loadTemplateDirectory(dest);
+    expect(frozen.budget).toBeNull();
+  });
+
+  it('rejects unknown keys inside budget', async () => {
+    const root = makeTempDir('forge-core-budget-unknown-key-');
+    const dest = withBudget(
+      withContracts(copyFixture('valid', 'budget-unknown-key', root)),
+      'budget:\n  maxTurnsSinceHumanAnswer: 4\n  extra: 1',
+    );
+    await expect(loadTemplateDirectory(dest)).rejects.toMatchObject({
+      code: 'TEMPLATE_INVALID',
+      location: 'pipeline.yaml',
+    });
+  });
+
+  it('changes the version hash when a budget is declared', async () => {
+    const rootA = makeTempDir('forge-core-budget-hash-a-');
+    const rootB = makeTempDir('forge-core-budget-hash-b-');
+    const destA = withContracts(copyFixture('valid', 'budget-hash-a', rootA));
+    const destB = withBudget(
+      withContracts(copyFixture('valid', 'budget-hash-b', rootB)),
+      BUDGET_ONE,
+    );
+    expect((await loadTemplateDirectory(destB)).versionHash).not.toBe(
+      (await loadTemplateDirectory(destA)).versionHash,
+    );
   });
 });

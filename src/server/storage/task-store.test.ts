@@ -94,6 +94,30 @@ describe('TaskStore', () => {
     expect((await taskStore.readFrozenTemplate(later.id)).versionHash).toBe(later.templateVersion);
   });
 
+  it('serves repeated frozen-template reads from the in-memory cache', async () => {
+    const { paths, catalog } = await catalogWithOneTemplate();
+    const taskStore = new TaskStore(paths, catalog);
+    const task = await taskStore.create(validTaskRequest());
+    const first = await taskStore.readFrozenTemplate(task.id);
+    expect(first.versionHash).toBe(task.templateVersion);
+    // Corrupt the on-disk snapshot: the cache must serve the second read
+    // instead of re-parsing (plan 2026-08-06, snapshots are immutable).
+    writeFileSync(join(paths.taskSnapshotRoot(task.id), 'template.yaml'), '{broken', 'utf8');
+    const second = await taskStore.readFrozenTemplate(task.id);
+    expect(second.versionHash).toBe(task.templateVersion);
+  });
+
+  it('evicts the cached frozen template on deleteTask', async () => {
+    const { paths, catalog } = await catalogWithOneTemplate();
+    const taskStore = new TaskStore(paths, catalog);
+    const task = await taskStore.create(validTaskRequest());
+    await taskStore.readFrozenTemplate(task.id);
+    await taskStore.deleteTask(task.id);
+    await expect(taskStore.readFrozenTemplate(task.id)).rejects.toMatchObject({
+      code: 'TASK_NOT_FOUND',
+    });
+  });
+
   it('writes the immutable task directory layout with empty events and artifacts', async () => {
     const { paths, catalog } = await catalogWithOneTemplate();
     const taskStore = new TaskStore(paths, catalog);

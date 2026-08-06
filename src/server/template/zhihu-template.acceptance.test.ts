@@ -192,7 +192,7 @@ describe('zhihu single-chapter acceptance template', () => {
       dispatch: {
         cardinality: 'single',
         allowedActions: ['publish_artifact'],
-        targets: { publish_artifact: 'reviewer' },
+        targets: { publish_artifact: ['reviewer'] },
         productionPackageRef: 'current',
       },
     });
@@ -207,7 +207,7 @@ describe('zhihu single-chapter acceptance template', () => {
       dispatch: {
         cardinality: 'single',
         allowedActions: ['send_message', 'submit_final_artifact'],
-        targets: { send_message: 'writer' },
+        targets: { send_message: ['writer'] },
         productionPackageRef: 'current',
       },
     });

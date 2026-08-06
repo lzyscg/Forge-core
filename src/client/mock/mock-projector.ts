@@ -90,7 +90,9 @@ function applyEvent(state: ProjectionState, event: MockTaskEvent): void {
       state.status = 'stopped';
       break;
     case 'task_resumed':
-      state.status = 'running';
+      // Mirrors the server projector (plan 2026-08-06): resuming over an
+      // unanswered question returns to waiting_human, never `running`.
+      state.status = state.pendingHumanQuestion !== null ? 'waiting_human' : 'running';
       break;
     case 'task_interrupted':
       state.status = 'interrupted';

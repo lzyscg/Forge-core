@@ -34,7 +34,7 @@ import { RuntimeAbortedError, RuntimeFailure } from './agent-runtime';
 import { ActionCommitter } from './action-committer';
 import { FakeAgentRuntime, type FakeScriptStep } from './fake-agent-runtime';
 import { SkillService } from './skill-service';
-import { TaskRunner, type RunNextResult } from './task-runner';
+import { buildTurnChecklist, TaskRunner, type RunNextResult } from './task-runner';
 import { WorkspaceStore } from './workspace-store';
 import { RecordingRuntime } from './test-support';
 
@@ -345,7 +345,15 @@ describe('TaskRunner one-node execution', () => {
     expect(turnInput).toBeDefined();
     expect(turnInput?.taskId).toBe(harness.taskId);
     expect(turnInput?.inputNodeId).toBe('ev-input-writer-2');
-    expect(turnInput?.inputText).toBe('第二轮输入');
+    // The turn input composes the derived turn-state prefix, the confirmed
+    // body and the contract checklist (plan 2026-08-06) — history alone stays
+    // the rebuilt public messages below.
+    const frozen = await harness.service.tasks.readFrozenTemplate(harness.taskId);
+    const writer = frozen.agents.find((agent) => agent.id === 'writer');
+    expect(writer).toBeDefined();
+    expect(turnInput?.inputText).toBe(
+      `[回合状态] 第 2 次执行。\n\n第二轮输入\n\n${buildTurnChecklist(writer!, frozen)}`,
+    );
     expect(turnInput?.turnId).toBe('ev-input-writer-2-t1');
     expect(turnInput?.agent.id).toBe('writer');
     expect(turnInput?.publicHistory).toEqual([
@@ -895,5 +903,106 @@ describe('TaskRunner workspace production resolution (plan 2026-08-04 Task 4)', 
     });
     expect(committed.some((entry) => entry.event.type === 'agent_result')).toBe(false);
     expect((await harness.workspace(harness.taskId)).task.status).toBe('retryable_failure');
+  });
+});
+
+describe('TaskRunner per-turn checklist (plan 2026-08-06)', () => {
+  const CHECKLIST_MARKER = '【本回合任务清单】';
+
+  it('derives the publisher checklist from the frozen contract', async () => {
+    const harness = await runnerHarness({});
+    const frozen = await harness.service.tasks.readFrozenTemplate(harness.taskId);
+    const writer = frozen.agents.find((agent) => agent.id === 'writer');
+    expect(writer).toBeDefined();
+
+    const checklist = buildTurnChecklist(writer!, frozen);
+    expect(checklist).toContain(CHECKLIST_MARKER);
+    expect(checklist).toContain('finish_production');
+    // The contract's allowed sources are named, not invented.
+    expect(checklist).toContain('内联（直接提供全文）');
+    expect(checklist).toContain('工作区文件');
+    // The single allowed dispatch names the declared target by id + display name.
+    expect(checklist).toContain('publish_artifact');
+    expect(checklist).toContain('reviewer（审核 Agent）');
+    expect(checklist).not.toContain('send_message');
+    expect(checklist).toContain('文字输出不是动作');
+  });
+
+  it('derives every allowed dispatch option for multi-intent contracts', async () => {
+    const harness = await runnerHarness({});
+    const frozen = await harness.service.tasks.readFrozenTemplate(harness.taskId);
+    const reviewer = frozen.agents.find((agent) => agent.id === 'reviewer');
+    expect(reviewer).toBeDefined();
+
+    const checklist = buildTurnChecklist(reviewer!, frozen);
+    expect(checklist).toContain('调用 send_message 向 writer（初稿 Agent） 发送消息');
+    expect(checklist).toContain('调用 submit_final_artifact 申请系统最终交付');
+    expect(checklist).toContain('当前输入携带的产物');
+  });
+
+  it('joins multiple candidate targets with 或 in the dispatch checklist lines', async () => {
+    const harness = await runnerHarness({});
+    const frozen = await harness.service.tasks.readFrozenTemplate(harness.taskId);
+    const reviewer = frozen.agents.find((agent) => agent.id === 'reviewer');
+    expect(reviewer).toBeDefined();
+    const multiTarget = {
+      ...reviewer!,
+      turnContract: {
+        ...reviewer!.turnContract!,
+        dispatch: {
+          ...reviewer!.turnContract!.dispatch,
+          targets: { send_message: ['writer', 'reviewer'] },
+        },
+      },
+    };
+    const checklist = buildTurnChecklist(multiTarget, frozen);
+    // Every candidate names its agent ID (the dispatch parameter) plus the
+    // display name; multiple candidates join with 或.
+    expect(checklist).toContain('调用 send_message 向 writer（初稿 Agent） 或 reviewer（审核 Agent） 发送消息');
+  });
+
+  it('returns an empty checklist when the snapshot carries no turn contract', async () => {
+    const harness = await runnerHarness({});
+    const frozen = await harness.service.tasks.readFrozenTemplate(harness.taskId);
+    const writer = frozen.agents.find((agent) => agent.id === 'writer');
+    expect(writer).toBeDefined();
+
+    expect(buildTurnChecklist({ ...writer!, turnContract: null }, frozen)).toBe('');
+  });
+
+  it('injects the checklist after the input body, never into events or replayed history', async () => {
+    const harness = await runnerHarness({
+      writer: [writerPublishTurn('初稿 V1'), writerPublishTurn('初稿 V2')],
+      reviewer: [reviewerMessageTurn],
+    });
+    await seedInput(harness, { id: 'ev-input-writer', agentId: 'writer', sequence: 1, body: '开始' });
+
+    await harness.runner.runNext(harness.taskId, harness.controller.signal);
+    await harness.runner.runNext(harness.taskId, harness.controller.signal);
+    await harness.runner.runNext(harness.taskId, harness.controller.signal);
+
+    // Order: turn-state prefix and body first, checklist last (recency).
+    const firstInput = harness.runtime.turnInputs[0].inputText;
+    const bodyIndex = firstInput.indexOf('开始');
+    const checklistIndex = firstInput.indexOf(CHECKLIST_MARKER);
+    expect(bodyIndex).toBeGreaterThan(-1);
+    expect(checklistIndex).toBeGreaterThan(bodyIndex);
+    expect(firstInput.endsWith('文字输出不是动作，不能代替工具调用。')).toBe(true);
+
+    // The checklist never lands in committed events...
+    const committed = await harness.events.read(harness.taskId);
+    for (const entry of committed) {
+      const event = entry.event;
+      if ('node' in event) {
+        expect(event.node.body).not.toContain(CHECKLIST_MARKER);
+        expect(event.node.title).not.toContain(CHECKLIST_MARKER);
+      }
+    }
+    // ...and never re-enters the rebuilt public history of later Turns.
+    for (const turnInput of harness.runtime.turnInputs) {
+      for (const item of turnInput.publicHistory) {
+        expect(item.text).not.toContain(CHECKLIST_MARKER);
+      }
+    }
   });
 });

@@ -9,6 +9,7 @@
  */
 import { parse } from 'yaml';
 import type { InputField } from '../../shared/contracts';
+import { PROGRESS_POLICY_CEILING, type ProgressPolicy } from '../runtime/progress-guard';
 import { TEMPLATE_ERROR_CODES, TemplateError } from './template-schema';
 
 const RELOAD_ACTION = '修正模板文件后重新加载模板。';
@@ -101,6 +102,31 @@ function asSafeId(fileName: string, value: unknown, what: string): string {
   return id;
 }
 
+/**
+ * One dispatch-target declaration: a single id OR a candidate list
+ * (plan 2026-08-06 multi-target dispatch). Both normalize to a non-empty,
+ * duplicate-free id array — the ONLY normalization point for targets, so
+ * historical snapshots with scalar targets stay runnable through the same
+ * path. Lists keep their declared order.
+ */
+function asSafeIdList(fileName: string, value: unknown, what: string): string[] {
+  if (!Array.isArray(value)) {
+    return [asSafeId(fileName, value, what)];
+  }
+  if (value.length === 0) {
+    invalid(fileName, `${what} 至少需要一个候选 Agent。`);
+  }
+  const seen = new Set<string>();
+  const ids = value.map((entry, index) => asSafeId(fileName, entry, `${what}[${index}]`));
+  for (const id of ids) {
+    if (seen.has(id)) {
+      invalid(fileName, `${what} 中 ${id} 重复。`);
+    }
+    seen.add(id);
+  }
+  return ids;
+}
+
 function asEnum<T extends string>(fileName: string, value: unknown, what: string, allowed: readonly T[]): T {
   const text = asString(fileName, value, what, { required: true });
   if (!allowed.includes(text as T)) {
@@ -170,6 +196,12 @@ export interface ValidatedPipelineFile {
   agents: string[];
   routes: ValidatedRoute[];
   submitters: string[];
+  /**
+   * Optional per-template progress budget (plan 2026-08-06): overrides the
+   * scheduler-injected progress policy for every task frozen from this
+   * template. Null when the pipeline declares none.
+   */
+  budget: ProgressPolicy | null;
 }
 
 /** Validates pipeline.yaml: deterministic Agent order, routes and final submitters. */
@@ -215,7 +247,30 @@ export function validatePipelineFile(fileName: string, raw: unknown): ValidatedP
     seenSubmitters.add(submitter);
   }
 
-  return { agents, routes, submitters };
+  // Optional progress budget: an integer turn count within the platform
+  // ceiling, with exactly the one declared key (plan 2026-08-06).
+  let budget: ProgressPolicy | null = null;
+  if ('budget' in root && root.budget !== undefined && root.budget !== null) {
+    const budgetRecord = asRecord(fileName, root.budget, 'budget');
+    for (const key of Object.keys(budgetRecord)) {
+      if (key !== 'maxTurnsSinceHumanAnswer') {
+        invalid(fileName, `budget 只能声明 maxTurnsSinceHumanAnswer，未知键 ${key}。`);
+      }
+    }
+    const turns = budgetRecord.maxTurnsSinceHumanAnswer;
+    if (typeof turns !== 'number' || !Number.isInteger(turns)) {
+      invalid(fileName, 'budget.maxTurnsSinceHumanAnswer 必须是整数。');
+    }
+    if (turns < 1 || turns > PROGRESS_POLICY_CEILING) {
+      invalid(
+        fileName,
+        `budget.maxTurnsSinceHumanAnswer 必须在 1 到 ${PROGRESS_POLICY_CEILING} 之间。`,
+      );
+    }
+    budget = Object.freeze({ maxTurnsSinceHumanAnswer: turns });
+  }
+
+  return { agents, routes, submitters, budget };
 }
 
 export interface ValidatedAgentSkill {
@@ -238,7 +293,14 @@ export interface ValidatedTurnContract {
   dispatch: {
     cardinality: 'single';
     allowedActions: Array<'send_message' | 'publish_artifact' | 'submit_final_artifact'>;
-    targets: Partial<Record<'send_message' | 'publish_artifact' | 'submit_final_artifact', string>>;
+    /**
+     * Candidate target sets per dispatch intent (plan 2026-08-06): one
+     * dispatch action per turn still, but its target may be any agent in the
+     * declared set. Scalar YAML declarations normalize to one-element sets.
+     */
+    targets: Partial<
+      Record<'send_message' | 'publish_artifact' | 'submit_final_artifact', string[]>
+    >;
     productionPackageRef: 'current';
   };
 }
@@ -323,7 +385,7 @@ function validateTurnContract(fileName: string, raw: unknown): ValidatedTurnCont
       if (!seenActions.has(intent)) {
         invalid(fileName, `turnContract.dispatch.targets.${intent} 未在 allowedActions 中声明。`);
       }
-      targets[intent as keyof typeof targets] = asSafeId(
+      targets[intent as keyof typeof targets] = asSafeIdList(
         fileName,
         target,
         `turnContract.dispatch.targets.${intent}`,
@@ -509,14 +571,19 @@ export function validateTurnContractTargets(
     if (agent.turnContract === null) {
       continue; // Historical snapshots carry no contract; nothing to target-check.
     }
-    for (const [intent, target] of Object.entries(agent.turnContract.dispatch.targets)) {
-      if (target !== undefined && !agentIds.has(target)) {
-        throw new TemplateError(
-          TEMPLATE_ERROR_CODES.TEMPLATE_INVALID,
-          `模板 ${agent.fileName}：回合契约发送目标 ${target}（${intent}）不是已声明的 Agent。`,
-          agent.fileName,
-          RELOAD_ACTION,
-        );
+    for (const [intent, targetList] of Object.entries(agent.turnContract.dispatch.targets)) {
+      if (targetList === undefined) {
+        continue;
+      }
+      for (const target of targetList) {
+        if (!agentIds.has(target)) {
+          throw new TemplateError(
+            TEMPLATE_ERROR_CODES.TEMPLATE_INVALID,
+            `模板 ${agent.fileName}：回合契约发送目标 ${target}（${intent}）不是已声明的 Agent。`,
+            agent.fileName,
+            RELOAD_ACTION,
+          );
+        }
       }
     }
   }

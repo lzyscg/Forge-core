@@ -127,7 +127,7 @@ export function publisherContract(targetAgentId: string): TurnContract {
     dispatch: {
       cardinality: 'single',
       allowedActions: ['publish_artifact'],
-      targets: { publish_artifact: targetAgentId },
+      targets: { publish_artifact: [targetAgentId] },
       productionPackageRef: 'current',
     },
   };
@@ -144,7 +144,7 @@ export function reviewerContract(targetAgentId: string): TurnContract {
     dispatch: {
       cardinality: 'single',
       allowedActions: ['send_message', 'submit_final_artifact'],
-      targets: { send_message: targetAgentId },
+      targets: { send_message: [targetAgentId] },
       productionPackageRef: 'current',
     },
   };
@@ -632,6 +632,7 @@ export function frozenSnapshotFixture(): FrozenTemplate {
     name: 'Neutral Fixture',
     description: 'Neutral two-agent frozen snapshot for runtime tests.',
     versionHash: NEUTRAL_FIXTURE_VERSION_HASH,
+    budget: null,
     inputFields: [],
     agents: [
       {
@@ -870,13 +871,22 @@ export interface SchedulerEnvironment {
  */
 export async function createSchedulerEnvironment(options: {
   runtime: AgentRuntime;
+  /**
+   * Optional template source patch (plan 2026-08-06 budget tests): applied
+   * right after the fixture contracts upgrade and before the catalog/
+   * service initialize, so a frozen task snapshot carries the patched
+   * template (snapshots are immutable once frozen).
+   */
+  patchTemplate?: (templateDir: string) => void;
 }): Promise<SchedulerEnvironment> {
   const dataRoot = mkdtempSync(join(tmpdir(), 'forge-core-runner-data-'));
   const templateRoot = mkdtempSync(join(tmpdir(), 'forge-core-runner-templates-'));
   registerRuntimeTestRoot(dataRoot);
   registerRuntimeTestRoot(templateRoot);
-  cpSync(runtimeFixtureDir(), join(templateRoot, RUNTIME_FIXTURE_TEMPLATE_ID), { recursive: true });
-  upgradeFixtureContracts(join(templateRoot, RUNTIME_FIXTURE_TEMPLATE_ID));
+  const templateDir = join(templateRoot, RUNTIME_FIXTURE_TEMPLATE_ID);
+  cpSync(runtimeFixtureDir(), templateDir, { recursive: true });
+  upgradeFixtureContracts(templateDir);
+  options.patchTemplate?.(templateDir);
 
   const paths = CorePaths.create({ dataRoot, templateRoot });
   const service = new CoreService(paths, { runtime: options.runtime });

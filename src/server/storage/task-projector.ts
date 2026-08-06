@@ -170,7 +170,12 @@ function applyEvent(state: ProjectionState, event: TaskEvent): void {
       state.status = 'stopped';
       break;
     case 'task_resumed':
-      state.status = 'running';
+      // A resume over an unanswered human question returns the task to the
+      // waiting state instead of `running` (plan 2026-08-06): the run loop
+      // never executes a Turn while a question is pending, and `answer` is
+      // only reachable from waiting_human — projecting `running` here would
+      // leave the question stranded.
+      state.status = state.pendingHumanQuestion !== null ? 'waiting_human' : 'running';
       break;
     case 'task_interrupted':
       state.status = 'interrupted';

@@ -431,6 +431,69 @@ function buildTurnStatePrefix(
   return parts.join(' ');
 }
 
+/** Platform-neutral display labels for sealed-package sources. */
+const PRODUCTION_SOURCE_LABELS: Readonly<Record<string, string>> = {
+  inline: '内联（直接提供全文）',
+  workspace_file: '工作区文件',
+  current_input_artifact: '当前输入携带的产物',
+};
+
+/**
+ * Derives the display-only per-turn task checklist from the agent's frozen
+ * turn contract (plan 2026-08-06): the contract already fixes the turn's
+ * mandatory shape, so the checklist is a deterministic rendering of it —
+ * produce content, seal with `finish_production`, then exactly one allowed
+ * dispatch. Injected at the END of the turn input to keep the steps salient
+ * for the model; it never becomes an event and never re-enters replayed
+ * history (iron rules 1/2: platform-generic wording, no engineering data).
+ * Legacy snapshots without a contract never execute, so null returns ''.
+ */
+export function buildTurnChecklist(agent: FrozenAgentConfig, frozen: FrozenTemplate): string {
+  const contract = agent.turnContract;
+  if (contract === null) {
+    return '';
+  }
+  const agentNameOf = (agentId: string): string =>
+    frozen.agents.find((candidate) => candidate.id === agentId)?.name ?? agentId;
+  const lines: string[] = ['【本回合任务清单】'];
+  lines.push('1. 产出本回合的内容。');
+  const sourceLabels = contract.production.output.sources.map(
+    (source) => PRODUCTION_SOURCE_LABELS[source] ?? source,
+  );
+  lines.push(`2. 调用 finish_production 封存生产包（source 可选：${sourceLabels.join(' 或 ')}）。`);
+  const dispatchLines = contract.dispatch.allowedActions.map((action) => {
+    const targetIds = contract.dispatch.targets[action] ?? [];
+    // Each candidate renders as `id（显示名）` — the dispatch parameter takes
+    // the agent ID, and naming the ID here stops the model from passing the
+    // display name (plan 2026-08-06 multi-target dispatch).
+    const targetNames =
+      targetIds.length === 0
+        ? null
+        : targetIds.map((id) => `${id}（${agentNameOf(id)}）`).join(' 或 ');
+    if (action === 'send_message') {
+      return targetNames === null
+        ? '调用 send_message 发送消息'
+        : `调用 send_message 向 ${targetNames} 发送消息`;
+    }
+    if (action === 'publish_artifact') {
+      return targetNames === null
+        ? '调用 publish_artifact 发布产物'
+        : `调用 publish_artifact 发布产物（送达 ${targetNames}）`;
+    }
+    return '调用 submit_final_artifact 申请系统最终交付';
+  });
+  if (dispatchLines.length === 1) {
+    lines.push(`3. ${dispatchLines[0]}（恰好一次分发）。`);
+  } else {
+    lines.push('3. 从下列行动中选择一个，恰好完成一次分发：');
+    for (const line of dispatchLines) {
+      lines.push(`   - ${line}`);
+    }
+  }
+  lines.push('完成以上全部步骤本回合才算结束；文字输出不是动作，不能代替工具调用。');
+  return lines.join('\n');
+}
+
 /**
  * The display-only failed phase written with failure-path traces (plan
  * 2026-08-04 Task 5). The message is the public attempt-failure text — never
@@ -571,6 +634,15 @@ export class TaskRunner {
         inputText = `${statePrefix}
 
 ${inputText}`;
+      }
+      // The contract-derived checklist rides at the END of the turn input
+      // (plan 2026-08-06): closest to generation, display-only — it is never
+      // committed and never re-enters the rebuilt public history.
+      const checklist = buildTurnChecklist(agent, frozen);
+      if (checklist.length > 0) {
+        inputText = `${inputText}
+
+${checklist}`;
       }
       const turnInput: AgentTurnInput = {
         taskId,

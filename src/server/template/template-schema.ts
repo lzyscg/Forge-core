@@ -10,6 +10,7 @@
  * actionable hint — never raw causes or absolute paths (iron rule 6).
  */
 import type { InputField } from '../../shared/contracts';
+import type { ProgressPolicy } from '../runtime/progress-guard';
 import type { PublicCoreError } from '../../shared/errors';
 
 /**
@@ -33,8 +34,15 @@ export interface TurnContract {
     cardinality: 'single';
     /** The delivery intents this agent may choose from; exactly one per turn. */
     allowedActions: Array<'send_message' | 'publish_artifact' | 'submit_final_artifact'>;
-    /** Declared target agent per intent (final submission targets the system). */
-    targets: Partial<Record<'send_message' | 'publish_artifact' | 'submit_final_artifact', string>>;
+    /**
+     * Candidate target set per intent (plan 2026-08-06): the turn's one
+     * dispatch may target any agent in the declared set. Scalar template
+     * declarations normalize to one-element sets at load time (final
+     * submission targets the system).
+     */
+    targets: Partial<
+      Record<'send_message' | 'publish_artifact' | 'submit_final_artifact', string[]>
+    >;
     productionPackageRef: 'current';
   };
 }
@@ -64,6 +72,12 @@ export interface FrozenTemplate {
   agents: FrozenAgentConfig[];
   routes: Array<{ from: string; to: string; kind: 'message' | 'artifact'; label: string }>;
   finalOutput: { name: string; format: 'markdown' | 'text'; submitters: string[] };
+  /**
+   * Optional per-template progress budget (plan 2026-08-06): overrides the
+   * scheduler-injected progress policy for every task frozen from this
+   * template; null when the pipeline declares none (platform default).
+   */
+  budget: ProgressPolicy | null;
   sourcePath: string;
 }
 
