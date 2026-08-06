@@ -266,13 +266,13 @@ describe('task-projector', () => {
     await service.appendTestEvent(created.id, makeTaskEvent({ type: 'task_started' }));
     const first = await service.publishTestArtifact(created.id, {
       title: '初稿',
-      content: '初稿正文',
+      files: [{ name: 'content.md', content: '初稿正文' }],
       sourceNodeId: randomUUID(),
       format: 'markdown',
     });
     const second = await service.publishTestArtifact(created.id, {
       title: '终稿',
-      content: '终稿正文',
+      files: [{ name: 'content.md', content: '终稿正文' }],
       sourceNodeId: randomUUID(),
       format: 'markdown',
     });
@@ -330,7 +330,7 @@ describe('task-projector', () => {
     await service.appendTestEvent(created.id, inputEvent);
     await service.publishTestArtifact(created.id, {
       title: '初稿',
-      content: '初稿正文',
+      files: [{ name: 'content.md', content: '初稿正文' }],
       sourceNodeId: inputEvent.id,
       format: 'markdown',
     });

@@ -80,7 +80,7 @@ beforeEach(async () => {
   paths = fixture.paths;
   const tasks = new TaskStore(paths, fixture.catalog);
   events = new EventStore(paths);
-  artifacts = new ArtifactStore(paths);
+  artifacts = new ArtifactStore(paths, events);
   const skills = new SkillService({ paths, tasks, events });
   skillService = skills;
   committer = new ActionCommitter({ events, artifacts, skills });
@@ -313,7 +313,7 @@ describe('ActionCommitter sealed-package dispatch semantics (frozen decision 5)'
       version: published.meta.version,
       title: published.meta.title,
       format: published.meta.format,
-      content: published.content,
+      content: published.files[0].content,
       sourceNodeId: published.meta.sourceNodeId,
     };
     const context = buildCommitContext(env, 'reviewer', { currentInputArtifact: received });

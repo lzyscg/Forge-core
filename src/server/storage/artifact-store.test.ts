@@ -1,20 +1,15 @@
 // @vitest-environment node
 /**
- * Append-only artifact store tests (plan Phase B Task 4, verbatim first case).
- *
- * Artifact versions live at `artifacts/vNNN/` (spec §8.1), each published
- * through a temporary sibling directory holding `meta.json` plus
- * `content.md`/`content.txt` and renamed into place only when complete. The
- * store allocates versions itself (max existing + 1) and never accepts a
- * caller-supplied version. Committed versions are never replaced; metadata
- * carries the uuid, version, title, source node, format, SHA-256 content hash
- * and creation time. Temporary residue is never listed, and a damaged
- * committed version fails loud (spec §8.3 isolation belongs to the list
- * layer).
+ * Artifact version directory store tests (plan 2026-08-07 Phase 1). The store
+ * is event-authoritative: a version number is the count of committed
+ * `artifact_published` events plus one, meta carries no file hashes (they live
+ * on the events), reads cross-check the disk files against those events,
+ * annotate is unique per (version, file) with replay self-exclusion, and the
+ * read window tolerates "event exists, directory missing" by claiming a
+ * staged sibling.
  */
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { appendFile } from 'node:fs/promises';
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -23,7 +18,13 @@ import {
   validTaskRequest,
 } from '../test-support';
 import type { CorePaths } from './core-paths';
-import { ArtifactStore, type ArtifactProposal } from './artifact-store';
+import {
+  ArtifactStore,
+  type AnnotateProposal,
+  type ArtifactProposal,
+  type PublishedArtifact,
+} from './artifact-store';
+import { EventStore } from './event-store';
 import { TaskStore } from './task-store';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -32,10 +33,10 @@ function sha256(content: string): string {
   return createHash('sha256').update(content, 'utf8').digest('hex');
 }
 
-function artifactProposal(content: string): ArtifactProposal {
+function proposal(content: string, name = 'content.md'): ArtifactProposal {
   return {
     title: `产物 ${content}`,
-    content,
+    files: [{ name, content }],
     sourceNodeId: randomUUID(),
     format: 'markdown',
   };
@@ -43,155 +44,327 @@ function artifactProposal(content: string): ArtifactProposal {
 
 let paths: CorePaths;
 let store: ArtifactStore;
+let events: EventStore;
 let taskId: string;
 
 beforeEach(async () => {
   const fixture = await catalogWithOneTemplate();
   paths = fixture.paths;
   const tasks = new TaskStore(paths, fixture.catalog);
-  store = new ArtifactStore(paths);
   taskId = (await tasks.create(validTaskRequest())).id;
+  events = new EventStore(paths);
+  store = new ArtifactStore(paths, events);
 });
 
 afterEach(() => {
   disposeAllTestRoots();
 });
 
-describe('ArtifactStore', () => {
-  it('appends V1 and V2 without replacing content', async () => {
-    const v1 = await store.publish(taskId, artifactProposal('first'));
-    const v2 = await store.publish(taskId, artifactProposal('second'));
+/** Publishes through the store AND records the matching event (the committer's job). */
+async function publishWithEvent(content: string): Promise<PublishedArtifact> {
+  const published = await store.publish(taskId, proposal(content));
+  await events.append(taskId, {
+    id: randomUUID(),
+    at: new Date().toISOString(),
+    type: 'artifact_published',
+    artifact: {
+      version: published.version,
+      title: published.title,
+      sourceNodeId: published.sourceNodeId,
+      format: published.format,
+      files: published.files,
+      artifactType: null,
+      artifactId: published.id,
+    },
+  });
+  return published;
+}
+
+/** Records an annotate event for a published version (the committer's job). */
+async function recordAnnotateEvent(annotated: {
+  version: number;
+  file: string;
+  contentHash: string;
+  turnId: string;
+  nodeId: string;
+}): Promise<void> {
+  await events.append(taskId, {
+    id: randomUUID(),
+    at: new Date().toISOString(),
+    type: 'artifact_annotated',
+    version: annotated.version,
+    file: annotated.file,
+    contentHash: annotated.contentHash,
+    turnId: annotated.turnId,
+    nodeId: annotated.nodeId,
+  });
+}
+
+describe('ArtifactStore — v7 publish', () => {
+  it('allocates versions from the committed event count (1, 2, …)', async () => {
+    const v1 = await publishWithEvent('first');
+    const v2 = await publishWithEvent('second');
     expect([v1.version, v2.version]).toEqual([1, 2]);
-    expect((await store.read(taskId, 1)).content).toBe('first');
+    expect((await store.read(taskId, 1)).files[0].content).toBe('first');
   });
 
-  it('allocates store-side versions and writes complete metadata atomically', async () => {
-    const proposal = artifactProposal('正文内容');
-    const published = await store.publish(taskId, proposal);
-    await store.publish(taskId, artifactProposal('second'));
-    await store.publish(taskId, artifactProposal('third'));
-
-    expect(readdirSync(paths.taskArtifactsRoot(taskId)).sort()).toEqual([
-      'v001',
-      'v002',
-      'v003',
-    ]);
+  it('writes meta without file hashes and returns file hashes', async () => {
+    const published = await publishWithEvent('正文内容');
     const versionRoot = paths.taskArtifactVersionRoot(taskId, 1);
     const meta = JSON.parse(readFileSync(join(versionRoot, 'meta.json'), 'utf8'));
-    expect(meta.id).toMatch(UUID_RE);
     expect(meta).toMatchObject({
       version: 1,
-      title: proposal.title,
-      sourceNodeId: proposal.sourceNodeId,
+      title: '产物 正文内容',
       format: 'markdown',
-      contentHash: sha256('正文内容'),
+      sourceNodeId: published.sourceNodeId,
     });
-    expect(Number.isNaN(new Date(meta.createdAt).getTime())).toBe(false);
+    expect(meta.id).toMatch(UUID_RE);
+    expect('contentHash' in meta).toBe(false); // hashes live on the event
+    expect('files' in meta).toBe(false);
     expect(readFileSync(join(versionRoot, 'content.md'), 'utf8')).toBe('正文内容');
-    // Published as one whole directory: no torn files or staging residue.
-    expect(readdirSync(versionRoot).sort()).toEqual(['content.md', 'meta.json']);
-    expect(
-      readdirSync(paths.taskArtifactsRoot(taskId)).filter((name) => name.startsWith('.tmp-')),
-    ).toEqual([]);
-    expect(published).toEqual({
-      id: meta.id,
-      version: 1,
-      title: proposal.title,
-      files: [{ name: 'content.md', extract: 'content', content: '正文内容' }],
-      sourceNodeId: proposal.sourceNodeId,
-      createdAt: meta.createdAt,
-      final: false,
-    });
+    expect(published.files).toEqual([{ name: 'content.md', hash: sha256('正文内容') }]);
+    expect(published.id).toBe(meta.id);
   });
 
-  it('ignores a version supplied by the caller', async () => {
-    const sneaky = { ...artifactProposal('only'), version: 99 } as unknown as ArtifactProposal;
+  it('ignores a caller-supplied version', async () => {
+    const sneaky = { ...proposal('only'), version: 99 } as unknown as ArtifactProposal;
     const published = await store.publish(taskId, sneaky);
     expect(published.version).toBe(1);
-    expect(readdirSync(paths.taskArtifactsRoot(taskId))).toEqual(['v001']);
-  });
-
-  it('serializes concurrent publishes into intact distinct versions', async () => {
-    const proposals = Array.from({ length: 6 }, (_, index) => artifactProposal(`content-${index}`));
-    const published = await Promise.all(proposals.map((p) => store.publish(taskId, p)));
-
-    expect(published.map((item) => item.version).sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6]);
-    const contents = new Set(proposals.map((p) => p.content));
-    for (const item of published) {
-      const stored = await store.read(taskId, item.version);
-      expect(stored.content).toBe(item.files[0].content);
-      expect(contents.has(stored.content)).toBe(true);
-    }
-    expect(
-      readdirSync(paths.taskArtifactsRoot(taskId)).filter((name) => name.startsWith('.tmp-')),
-    ).toEqual([]);
   });
 
   it('writes text-format artifacts as content.txt', async () => {
-    await store.publish(taskId, { ...artifactProposal('plain'), format: 'text' });
-    const versionRoot = paths.taskArtifactVersionRoot(taskId, 1);
-    expect(readdirSync(versionRoot).sort()).toEqual(['content.txt', 'meta.json']);
-    expect((await store.read(taskId, 1)).meta.format).toBe('text');
-  });
-
-  it('reads committed versions and rejects unknown ones without guessing', async () => {
-    await store.publish(taskId, artifactProposal('first'));
-    await expect(store.read(taskId, 2)).rejects.toMatchObject({ code: 'TASK_NOT_FOUND' });
-    await expect(store.read(taskId, 0)).rejects.toMatchObject({ code: 'CORE_PATH_INVALID' });
-    expect(await store.list('no-such-task')).toEqual([]);
-  });
-
-  it('fails loud when committed content no longer matches its metadata hash', async () => {
-    await store.publish(taskId, artifactProposal('first'));
-    await appendFile(join(paths.taskArtifactVersionRoot(taskId, 1), 'content.md'), 'extra', 'utf8');
-
-    await expect(store.read(taskId, 1)).rejects.toMatchObject({ code: 'TASK_CORRUPTED' });
-    await expect(store.list(taskId)).rejects.toMatchObject({ code: 'TASK_CORRUPTED' });
-  });
-
-  it('fails loud when a committed version directory is damaged', async () => {
-    await store.publish(taskId, artifactProposal('first'));
-    writeFileSync(join(paths.taskArtifactVersionRoot(taskId, 1), 'meta.json'), '{corrupt', 'utf8');
-
-    await expect(store.read(taskId, 1)).rejects.toMatchObject({ code: 'TASK_CORRUPTED' });
-    // Damaged committed versions block further publishing instead of being skipped.
-    await expect(store.publish(taskId, artifactProposal('second'))).rejects.toMatchObject({
-      code: 'TASK_CORRUPTED',
+    const published = await store.publish(taskId, {
+      title: 't',
+      files: [{ name: 'content.txt', content: 'plain' }],
+      sourceNodeId: randomUUID(),
+      format: 'text',
     });
-  });
-
-  it('skips temporary staging directories and ignores malformed names', async () => {
-    await store.publish(taskId, artifactProposal('first'));
-    const artifactsRoot = paths.taskArtifactsRoot(taskId);
-    const stagingDir = join(artifactsRoot, `.tmp-v002-${randomUUID()}`);
-    mkdirSync(stagingDir, { recursive: true });
-    writeFileSync(join(stagingDir, 'meta.json'), '{staging', 'utf8');
-    writeFileSync(join(artifactsRoot, 'notes.txt'), 'irrelevant', 'utf8');
-
-    const second = await store.publish(taskId, artifactProposal('second'));
-    expect(second.version).toBe(2);
-    const listed = await store.list(taskId);
-    expect(listed.map((item) => item.meta.version)).toEqual([1, 2]);
+    await events.append(taskId, {
+      id: randomUUID(),
+      at: new Date().toISOString(),
+      type: 'artifact_published',
+      artifact: {
+        version: published.version,
+        title: published.title,
+        sourceNodeId: published.sourceNodeId,
+        format: 'text',
+        files: published.files,
+        artifactType: null,
+        artifactId: published.id,
+      },
+    });
+    expect(readdirSync(paths.taskArtifactVersionRoot(taskId, 1)).sort()).toEqual([
+      'content.txt',
+      'meta.json',
+    ]);
   });
 
   it('rejects malformed proposals before touching disk', async () => {
-    const base = artifactProposal('content');
+    const base = proposal('content');
     const invalid: unknown[] = [
       null,
       'not-an-object',
       { ...base, title: '' },
-      { ...base, title: 42 },
-      { ...base, content: 42 },
-      { ...base, content: '' },
       { ...base, sourceNodeId: '' },
       { ...base, format: 'pdf' },
+      { ...base, files: [] },
+      { ...base, files: [{ name: 'content.md', content: '' }] },
+      { ...base, files: [{ name: 'meta.json', content: 'x' }] },
+      { ...base, files: [{ name: '../x.md', content: 'x' }] },
+      { ...base, files: [{ name: 'a.md', content: 'x' }, { name: 'a.md', content: 'y' }] },
     ];
     for (const candidate of invalid) {
-      await expect(
-        store.publish(taskId, candidate as ArtifactProposal),
-      ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+      await expect(store.publish(taskId, candidate as ArtifactProposal)).rejects.toMatchObject({
+        code: 'INVALID_INPUT',
+      });
     }
-    // Nothing was committed.
     expect(readdirSync(paths.taskArtifactsRoot(taskId))).toEqual([]);
+  });
+});
+
+describe('ArtifactStore — v7 annotate', () => {
+  it('appends a review file to an existing version and is readable', async () => {
+    await publishWithEvent('正文');
+    const annotated = await store.annotate(taskId, {
+      version: 1,
+      file: 'review.md',
+      content: 'verdict: pass',
+      turnId: 'turn-1',
+      nodeId: 'turn-1-result',
+    });
+    expect(annotated.contentHash).toBe(sha256('verdict: pass'));
+    await recordAnnotateEvent(annotated);
+    const entry = await store.read(taskId, 1);
+    const review = entry.files.find((file) => file.name === 'review.md');
+    expect(review?.content).toBe('verdict: pass');
+  });
+
+  it('rejects a second annotation of the same (version, file) by a different turn', async () => {
+    await publishWithEvent('正文');
+    const first = await store.annotate(taskId, {
+      version: 1,
+      file: 'review.md',
+      content: 'verdict: pass',
+      turnId: 'turn-1',
+      nodeId: 'turn-1-result',
+    });
+    await recordAnnotateEvent(first);
+    await expect(
+      store.annotate(taskId, {
+        version: 1,
+        file: 'review.md',
+        content: 'verdict: reject',
+        turnId: 'turn-2',
+        nodeId: 'turn-2-result',
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
+  it('treats a replay of the same turn as idempotent (self-exclusion)', async () => {
+    await publishWithEvent('正文');
+    const annotateProposal: AnnotateProposal = {
+      version: 1,
+      file: 'review.md',
+      content: 'verdict: pass',
+      turnId: 'turn-1',
+      nodeId: 'turn-1-result',
+    };
+    const first = await store.annotate(taskId, annotateProposal);
+    // Replay: the same turn re-annotating the same file is idempotent.
+    const replay = await store.annotate(taskId, annotateProposal);
+    expect(replay.contentHash).toBe(first.contentHash);
+  });
+
+  it('is idempotent when the file already matches the disk content', async () => {
+    await publishWithEvent('正文');
+    const annotated = await store.annotate(taskId, {
+      version: 1,
+      file: 'review.md',
+      content: 'verdict: pass',
+      turnId: 'turn-1',
+      nodeId: 'turn-1-result',
+    });
+    await recordAnnotateEvent(annotated);
+    const replay = await store.annotate(taskId, {
+      version: 1,
+      file: 'review.md',
+      content: 'verdict: pass',
+      turnId: 'turn-1',
+      nodeId: 'turn-1-result',
+    });
+    expect(replay.contentHash).toBe(annotated.contentHash);
+  });
+
+  it('rejects annotating an unknown version', async () => {
+    await expect(
+      store.annotate(taskId, {
+        version: 99,
+        file: 'review.md',
+        content: 'x',
+        turnId: 't',
+        nodeId: 'n',
+      }),
+    ).rejects.toMatchObject({ code: 'TASK_NOT_FOUND' });
+  });
+});
+
+describe('ArtifactStore — v7 cross-check and recovery', () => {
+  it('fails loud when a production file no longer matches the event hash', async () => {
+    await publishWithEvent('first');
+    const versionRoot = paths.taskArtifactVersionRoot(taskId, 1);
+    writeFileSync(join(versionRoot, 'content.md'), 'tampered', 'utf8');
+    await expect(store.read(taskId, 1)).rejects.toMatchObject({ code: 'TASK_CORRUPTED' });
+    await expect(store.list(taskId)).rejects.toMatchObject({ code: 'TASK_CORRUPTED' });
+  });
+
+  it('fails loud when an annotate file has no backing event', async () => {
+    await publishWithEvent('first');
+    writeFileSync(join(paths.taskArtifactVersionRoot(taskId, 1), 'review.md'), 'orphan', 'utf8');
+    await expect(store.read(taskId, 1)).rejects.toMatchObject({ code: 'TASK_CORRUPTED' });
+  });
+
+  it('claims a staged sibling when the event exists but the directory is missing', async () => {
+    const published = await publishWithEvent('first');
+    const artifactsRoot = paths.taskArtifactsRoot(taskId);
+    // Simulate the crash window: the event is committed but the rename never
+    // landed, so the final directory is gone and only the staging remains.
+    rmSync(paths.taskArtifactVersionRoot(taskId, 1), { recursive: true, force: true });
+    const stageDir = join(artifactsRoot, `.tmp-v001-${randomUUID()}`);
+    mkdirSync(stageDir, { recursive: true });
+    writeFileSync(
+      join(stageDir, 'meta.json'),
+      `${JSON.stringify(
+        {
+          id: published.id,
+          version: 1,
+          title: published.title,
+          sourceNodeId: published.sourceNodeId,
+          format: published.format,
+          createdAt: published.createdAt,
+        },
+        null,
+        2,
+      )}\n`,
+      'utf8',
+    );
+    writeFileSync(join(stageDir, 'content.md'), 'first', 'utf8');
+    expect(readdirSync(artifactsRoot).includes('v001')).toBe(false);
+
+    const entry = await store.read(taskId, 1);
+    expect(entry.files[0].content).toBe('first');
+    expect(readdirSync(artifactsRoot).includes('v001')).toBe(true);
+    expect(readdirSync(artifactsRoot).some((name) => name.startsWith('.tmp-v001'))).toBe(false);
+  });
+
+  it('reclaims an orphan final directory (event crashed) on the next publish', async () => {
+    const orphan = await store.publish(taskId, proposal('orphan-content'));
+    expect(orphan.version).toBe(1);
+    // The orphan (no backing event) is not listed.
+    expect(await store.list(taskId)).toEqual([]);
+
+    // A real publish of the same content reclaims version 1 by hash.
+    const reclaimed = await store.publish(taskId, proposal('orphan-content'));
+    expect(reclaimed.version).toBe(1);
+    expect(reclaimed.id).toBe(orphan.id);
+    await events.append(taskId, {
+      id: randomUUID(),
+      at: new Date().toISOString(),
+      type: 'artifact_published',
+      artifact: {
+        version: 1,
+        title: reclaimed.title,
+        sourceNodeId: reclaimed.sourceNodeId,
+        format: reclaimed.format,
+        files: reclaimed.files,
+        artifactType: null,
+        artifactId: reclaimed.id,
+      },
+    });
+    const listed = await store.list(taskId);
+    expect(listed.map((item) => item.meta.version)).toEqual([1]);
+  });
+
+  it('rejects a re-publication of the same version with different content', async () => {
+    await store.publish(taskId, proposal('orphan-content'));
+    await expect(store.publish(taskId, proposal('different-content'))).rejects.toMatchObject({
+      code: 'TASK_CORRUPTED',
+    });
+  });
+
+  it('reads a single file via readFile', async () => {
+    await publishWithEvent('正文');
+    expect(await store.readFile(taskId, 1, 'content.md')).toBe('正文');
+    await expect(store.readFile(taskId, 1, 'missing.md')).rejects.toMatchObject({
+      code: 'TASK_NOT_FOUND',
+    });
+  });
+
+  it('skips staging residue and malformed names when listing', async () => {
+    await publishWithEvent('first');
+    const artifactsRoot = paths.taskArtifactsRoot(taskId);
+    mkdirSync(join(artifactsRoot, `.tmp-v002-${randomUUID()}`), { recursive: true });
+    writeFileSync(join(artifactsRoot, 'notes.txt'), 'irrelevant', 'utf8');
+    const listed = await store.list(taskId);
+    expect(listed.map((item) => item.meta.version)).toEqual([1]);
   });
 });

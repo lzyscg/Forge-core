@@ -619,13 +619,16 @@ export class TaskRunner {
         // same read supplies the commit context's received-artifact identity
         // (frozen decision 3: the platform resolves current_input_artifact).
         const handOff = await this.artifacts.read(taskId, input.node.inputVersion);
-        inputText = artifactHandOffInputText(handOff.meta.title, handOff.content);
+        const contentFile =
+          handOff.files.find((file) => file.name === 'content.md' || file.name === 'content.txt')
+            ?.content ?? '';
+        inputText = artifactHandOffInputText(handOff.meta.title, contentFile);
         handOffArtifact = {
           artifactId: handOff.meta.id,
           version: handOff.meta.version,
           title: handOff.meta.title,
           format: handOff.meta.format,
-          content: handOff.content,
+          content: contentFile,
           sourceNodeId: handOff.meta.sourceNodeId,
         };
       }

@@ -362,7 +362,7 @@ describe('typed JSON API', () => {
     const task = await createValidTask(client);
     await client.service.publishTestArtifact(task.id, {
       title: '版本一',
-      content: 'first',
+      files: [{ name: 'content.md', content: 'first' }],
       sourceNodeId: 'node-a',
       format: 'markdown',
     });

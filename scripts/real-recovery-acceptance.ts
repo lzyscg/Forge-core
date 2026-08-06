@@ -385,17 +385,19 @@ export function readRecoveryFileProjection(
   const artifacts: RecoveryFileArtifactEntry[] = readdirSync(artifactsRoot)
     .filter((name) => /^v\d{3}$/.test(name))
     .map((name) => {
+      // v7 meta.json carries no file hashes (they live on the events); the
+      // entry's contentHash is filled from the matching artifact_published
+      // event during reconciliation.
       const meta = JSON.parse(readFileSync(join(artifactsRoot, name, 'meta.json'), 'utf8')) as {
         id: string;
         version: number;
         title: string;
         format: 'markdown' | 'text';
         sourceNodeId: string;
-        contentHash: string;
       };
       const contentFile = meta.format === 'markdown' ? 'content.md' : 'content.txt';
       const content = readFileSync(join(artifactsRoot, name, contentFile), 'utf8');
-      return { ...meta, content };
+      return { ...meta, contentHash: '', content };
     })
     .sort((a, b) => a.version - b.version);
 
@@ -511,13 +513,12 @@ export async function reconcileRecoveryViews(
   }
 
   // Artifacts: version/title/sourceNode and content SHA-256 agree across the
-  // file content, the file meta hash, the published event and the projection.
+  // file content, the published event and the projection. v7 carries hashes
+  // on the event (the disk meta has none), so the event is the authority.
   const publishedByEvent = new Map<number, string>();
   for (const entry of projection.events) {
     if (entry.event.type !== 'artifact_published') continue;
     const artifact = (entry.event as unknown as { artifact: Record<string, unknown> }).artifact;
-    // v7 artifact_published carries `files[]` (legacy single contentHash is
-    // normalized away); the first file's hash is the version's content hash.
     const files = Array.isArray(artifact.files) ? (artifact.files as Array<{ hash?: unknown }>) : [];
     const hash = files.length > 0 ? String(files[0]?.hash ?? '') : String(artifact.contentHash ?? '');
     publishedByEvent.set(Number(artifact.version), hash);
@@ -539,19 +540,16 @@ export async function reconcileRecoveryViews(
     if (workspaceArtifact.sourceNodeId !== fileArtifact.sourceNodeId) {
       mismatch.push(`artifact sourceNode disagrees at version ${fileArtifact.version}`);
     }
-    const recomputed = sha256Hex(fileArtifact.content);
-    if (fileArtifact.contentHash !== recomputed) {
+    const diskHash = sha256Hex(fileArtifact.content);
+    const eventHash = publishedByEvent.get(fileArtifact.version);
+    if (eventHash === undefined) {
+      mismatch.push(`artifact_published event missing for version ${fileArtifact.version}`);
+    } else if (diskHash !== eventHash) {
       mismatch.push(`artifact file content hash mismatch at version ${fileArtifact.version}`);
     }
-    if (sha256Hex(workspaceArtifact.files[0].content) !== fileArtifact.contentHash) {
+    if (sha256Hex(workspaceArtifact.files[0]?.content ?? '') !== eventHash) {
       mismatch.push(
         `artifact workspace content hash disagrees at version ${fileArtifact.version}`,
-      );
-    }
-    const publishedHash = publishedByEvent.get(fileArtifact.version);
-    if (publishedHash !== fileArtifact.contentHash) {
-      mismatch.push(
-        `artifact_published hash disagrees with file meta at version ${fileArtifact.version}`,
       );
     }
   }

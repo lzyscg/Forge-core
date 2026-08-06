@@ -993,7 +993,12 @@ export class ActionCommitter {
     }
     const result = await this.artifacts.publish(context.taskId, {
       title: sealedPackage.title,
-      content: sealedPackage.content,
+      files: [
+        {
+          name: sealedPackage.format === 'markdown' ? 'content.md' : 'content.txt',
+          content: sealedPackage.content,
+        },
+      ],
       sourceNodeId: resultEventId,
       format: sealedPackage.format,
     });
@@ -1011,14 +1016,10 @@ export class ActionCommitter {
         title: sealedPackage.title,
         sourceNodeId: resultEventId,
         format: sealedPackage.format,
-        // Phase 0 transitional: one content file per publish (Phase 1/4 make
-        // the store multi-file and the committer carry the full file set).
-        files: [
-          {
-            name: sealedPackage.format === 'markdown' ? 'content.md' : 'content.txt',
-            hash: sha256(sealedPackage.content),
-          },
-        ],
+        // The store allocates the version and the file hashes (spec §8: the
+        // event stream is the authority); Phase 4 carries the full file set
+        // from `finish_production`.
+        files: result.files,
         artifactType: sealedPackage.artifactType,
         artifactId: artifact.artifactId,
       },

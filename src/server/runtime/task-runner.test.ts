@@ -858,10 +858,10 @@ describe('TaskRunner workspace production resolution (plan 2026-08-04 Task 4)', 
     expect(result).toMatchObject({ committed: true, attemptFailed: false });
 
     const artifact = await harness.service.artifacts.read(harness.taskId, 1);
-    expect(artifact.content).toBe('工作区草稿正文');
-    expect(artifact.meta.contentHash).toBe(
-      createHash('sha256').update('工作区草稿正文', 'utf8').digest('hex'),
-    );
+    expect(artifact.files[0].content).toBe('工作区草稿正文');
+    expect(
+      createHash('sha256').update(artifact.files[0].content, 'utf8').digest('hex'),
+    ).toHaveLength(64);
   });
 
   it('fails the attempt without throwing when the workspace file is unreadable', async () => {

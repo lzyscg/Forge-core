@@ -125,7 +125,7 @@ export class CoreService {
     this.templates = new TemplateCatalog(paths);
     this.tasks = new TaskStore(paths, this.templates);
     this.events = new EventStore(paths);
-    this.artifacts = new ArtifactStore(paths);
+    this.artifacts = new ArtifactStore(paths, this.events);
     // Phase E stores exist before the runtime/runner so every consumer shares
     // the same derivation (plan Task E3).
     this.workspaces = new WorkspaceStore(paths);
@@ -326,27 +326,36 @@ export class CoreService {
    */
   async publishTestArtifact(taskId: string, proposal: ArtifactProposal): Promise<ArtifactVersion> {
     const published = await this.artifacts.publish(taskId, proposal);
-    const { meta } = await this.artifacts.read(taskId, published.version);
+    // Record the event BEFORE reading back: the store cross-checks disk
+    // files against the committed event (spec §8), so the event must exist.
     await this.events.append(taskId, {
       id: randomUUID(),
       at: new Date().toISOString(),
       type: 'artifact_published',
       artifact: {
-        version: meta.version,
-        title: meta.title,
-        sourceNodeId: meta.sourceNodeId,
-        format: meta.format,
-        files: [
-          {
-            name: meta.format === 'markdown' ? 'content.md' : 'content.txt',
-            hash: meta.contentHash,
-          },
-        ],
+        version: published.version,
+        title: published.title,
+        sourceNodeId: published.sourceNodeId,
+        format: published.format,
+        files: published.files,
         artifactType: null,
-        artifactId: meta.id,
+        artifactId: published.id,
       },
     });
-    return published;
+    const entry = await this.artifacts.read(taskId, published.version);
+    return {
+      id: published.id,
+      version: published.version,
+      title: published.title,
+      files: entry.files.map((file) => ({
+        name: file.name,
+        extract: 'content',
+        content: file.content,
+      })),
+      sourceNodeId: published.sourceNodeId,
+      createdAt: published.createdAt,
+      final: false,
+    };
   }
 
   /** Reads identity + snapshot + events + artifacts and folds them. */

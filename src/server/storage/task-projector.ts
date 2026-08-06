@@ -67,6 +67,13 @@ interface ProjectionState {
   incompatibleDiagnostic: string | null;
 }
 
+/** Derives a display extract slot from a committed file name (Phase 1 transitional). */
+function extractForFile(name: string): string {
+  if (name === 'review.md') return 'review';
+  if (name === 'revision.md') return 'revision';
+  return 'content';
+}
+
 function createState(): ProjectionState {
   return {
     status: 'ready',
@@ -348,15 +355,14 @@ export function projectTask(
       id: entry.meta.id,
       version: entry.meta.version,
       title: entry.meta.title,
-      // Phase 0 transitional: one `content`-extract slot per version. Phase 6
-      // renders multi-file extract slots (content/review/revision).
-      files: [
-        {
-          name: entry.meta.format === 'markdown' ? 'content.md' : 'content.txt',
-          extract: 'content',
-          content: entry.content,
-        },
-      ],
+      // Map every committed file to a display slot. The extract name derives
+      // from the file name here (Phase 1 transitional); Phase 6 formalizes it
+      // through the template's artifactSchema.
+      files: entry.files.map((file) => ({
+        name: file.name,
+        extract: extractForFile(file.name),
+        content: file.content,
+      })),
       sourceNodeId: entry.meta.sourceNodeId,
       createdAt: entry.meta.createdAt,
       // Finality is decided exclusively by final_submission_accepted, never
