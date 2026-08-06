@@ -1,19 +1,20 @@
 // @vitest-environment node
 /**
  * ActionCommitter tests (plan Phase C Task 3 Steps 1/4/5/6; rebuilt for the
- * production/dispatch turn contract by plan 2026-08-04 Task 4, spec §4/§5.3).
+ * v7 production/operate turn contract by plan 2026-08-07 Phase 2, spec §4/§5.3).
  *
  * The committer validates the complete buffered action set before writing
  * anything — phase order/cardinality of the turn contract, contract
  * conformance, route/authorization/final checks — then commits in the
- * deterministic order agent result → skill loads → sealed-package artifact
- * files/events → routes and target input nodes → human request or final
- * submission. Sealed packages are the ONLY delivery source: dispatch actions
- * carry `productionPackageRef: 'current'` and nothing else. Final output is
- * accepted only after independent system validation; natural language and
- * ordinary publishes never complete a task (spec §6.4). A mid-plan file
- * failure appends a public node failure and never overwrites prior
- * committed items; recommitting the same Turn replays instead of
+ * deterministic order agent result → skill loads → annotate files/events →
+ * sealed-package publication → dispatch route → human request or final
+ * submission. v7 splits production and operate turns: `finish_production` +
+ * `publish_artifact` seals and publishes a new version; `send_message` /
+ * `submit_final_artifact` operate on the input version without sealing.
+ * Final output is accepted only after independent system validation; natural
+ * language and ordinary publishes never complete a task (spec §6.4). A
+ * mid-plan file failure appends a public node failure and never overwrites
+ * prior committed items; recommitting the same Turn replays instead of
  * duplicating.
  *
  * The cases name the agents of the storage-level `valid` template fixture —
@@ -64,7 +65,7 @@ function finishInline(overrides: Record<string, unknown> = {}): Record<string, u
   return {
     type: 'finish_production',
     source: 'inline',
-    content: '封存正文',
+    files: [{ name: 'content.md', content: '封存正文' }],
     format: 'markdown',
     artifactType: '终稿',
     title: '初稿 V1',
@@ -72,8 +73,21 @@ function finishInline(overrides: Record<string, unknown> = {}): Record<string, u
   };
 }
 
-const PUBLISH_CURRENT = { type: 'publish_artifact', productionPackageRef: 'current' } as const;
-const SUBMIT_CURRENT = { type: 'submit_final_artifact', productionPackageRef: 'current' } as const;
+const PUBLISH_CURRENT = { type: 'publish_artifact' } as const;
+const SUBMIT_CURRENT = { type: 'submit_final_artifact' } as const;
+
+/** The `CurrentInputArtifact` the reviewer received via a committed route. */
+function receivedFrom(published: Awaited<ReturnType<ArtifactStore['read']>>): CurrentInputArtifact {
+  return {
+    artifactId: published.meta.id,
+    version: published.meta.version,
+    title: published.meta.title,
+    format: published.meta.format,
+    content: published.files[0].content,
+    sourceNodeId: published.meta.sourceNodeId,
+    humanAuthorized: false,
+  };
+}
 
 beforeEach(async () => {
   const fixture = await catalogWithOneTemplate();
@@ -121,7 +135,7 @@ afterEach(() => {
   disposeAllTestRoots();
 });
 
-describe('ActionCommitter two-phase validation (plan 2026-08-04 Task 4, spec §5.3)', () => {
+describe('ActionCommitter two-phase validation (plan 2026-08-07 Phase 2, spec §5.3)', () => {
   it('rejects an empty action set as AGENT_PHASE_INCOMPLETE with zero writes', async () => {
     const before = await events.read(taskId);
     await expect(committer.validateAndCommit(contextFor('writer'), []))
@@ -139,7 +153,7 @@ describe('ActionCommitter two-phase validation (plan 2026-08-04 Task 4, spec §5
     expect(await events.read(taskId)).toEqual(before);
   });
 
-  it('rejects a dispatch before finish_production as AGENT_PHASE_ORDER_INVALID', async () => {
+  it('rejects publish_artifact before finish_production as AGENT_PHASE_ORDER_INVALID', async () => {
     const before = await events.read(taskId);
     await expect(committer.validateAndCommit(contextFor('writer'), [PUBLISH_CURRENT]))
       .rejects.toMatchObject({ code: 'AGENT_PHASE_ORDER_INVALID', retryable: false });
@@ -160,7 +174,7 @@ describe('ActionCommitter two-phase validation (plan 2026-08-04 Task 4, spec §5
     await expect(
       committer.validateAndCommit(contextFor('reviewer'), [
         finishInline({ format: 'text', artifactType: null, title: null }),
-        { type: 'send_message', targetAgentId: 'writer', productionPackageRef: 'current' },
+        { type: 'send_message', targetAgentId: 'writer', summary: '返修意见' },
         SUBMIT_CURRENT,
       ]),
     ).rejects.toMatchObject({ code: 'AGENT_DISPATCH_CARDINALITY_INVALID', retryable: false });
@@ -171,7 +185,7 @@ describe('ActionCommitter two-phase validation (plan 2026-08-04 Task 4, spec §5
     await expect(
       committer.validateAndCommit(contextFor('writer'), [
         finishInline(),
-        finishInline({ content: '第二次封存' }),
+        finishInline({ files: [{ name: 'content.md', content: '第二次封存' }] }),
         PUBLISH_CURRENT,
       ]),
     ).rejects.toMatchObject({ code: 'AGENT_PHASE_ORDER_INVALID', retryable: false });
@@ -222,17 +236,18 @@ describe('ActionCommitter two-phase validation (plan 2026-08-04 Task 4, spec §5
     expect(await events.read(taskId)).toEqual(before);
   });
 
-  it('rejects request_human_input mid-production (after load_skill, before sealing)', async () => {
-    await expect(
-      committer.validateAndCommit(contextFor('writer'), [
-        { type: 'load_skill', skillId: 'style-guide' },
-        { type: 'request_human_input', question: '现在问？' },
-      ]),
-    ).rejects.toMatchObject({ code: 'AGENT_PHASE_ORDER_INVALID', retryable: false });
+  it('accepts a mid-production human request (F7 flipped)', async () => {
+    const result = await committer.validateAndCommit(contextFor('writer'), [
+      { type: 'load_skill', skillId: 'style-guide' },
+      { type: 'request_human_input', question: '现在问？' },
+    ]);
+    expect(result.waitingHuman).toBe(true);
+    expect(result.phase.state).toBe('waiting_human');
+    expect((await projector.workspace(taskId)).task.status).toBe('waiting_human');
   });
 });
 
-describe('ActionCommitter sealed-package dispatch semantics (frozen decision 5)', () => {
+describe('ActionCommitter v7 production/operate dispatch semantics (frozen decision 5)', () => {
   it('publishes the sealed package for writer and routes the artifact hand-off', async () => {
     const result = await committer.validateAndCommit(contextFor('writer'), [
       finishInline(),
@@ -259,10 +274,9 @@ describe('ActionCommitter sealed-package dispatch semantics (frozen decision 5)'
     expect(inputNode?.inputVersion).toBe(1);
   });
 
-  it('delivers the sealed text as the routed message body for reviewer', async () => {
+  it('delivers the message summary as the routed body for reviewer', async () => {
     const result = await committer.validateAndCommit(contextFor('reviewer'), [
-      finishInline({ content: '请修改第二段。', format: 'text', artifactType: null, title: null }),
-      { type: 'send_message', targetAgentId: 'writer', productionPackageRef: 'current' },
+      { type: 'send_message', targetAgentId: 'writer', summary: '请修改第二段。' },
     ]);
     expect(result.waitingHuman).toBe(false);
     expect(result.nextAgentIds).toEqual(['writer']);
@@ -287,42 +301,23 @@ describe('ActionCommitter sealed-package dispatch semantics (frozen decision 5)'
     expect(workspace.artifacts).toEqual([]);
   });
 
-  it('submits a sealed inline package by publishing then accepting the final', async () => {
-    const result = await committer.validateAndCommit(contextFor('reviewer'), [
-      finishInline({ content: '终稿正文', title: '终稿 V1' }),
-      SUBMIT_CURRENT,
-    ]);
-    expect(result.taskCompleted).toBe(true);
-    expect(result.publishedVersions).toEqual([1]);
-    expect((await projector.workspace(taskId)).artifacts.at(-1)?.final).toBe(true);
-  });
-
-  it('submits a current_input_artifact package through the received artifact', async () => {
-    // Turn 1: writer publishes and the artifact auto-routes to reviewer.
+  it('submits the received input version as the final artifact', async () => {
+    // Turn 1: writer publishes the production package (routes to reviewer).
     const first = await committer.validateAndCommit(contextFor('writer'), [
-      finishInline({ content: '章节正文', title: '章节' }),
+      finishInline({ files: [{ name: 'content.md', content: '终稿正文' }], title: '终稿 V1' }),
       PUBLISH_CURRENT,
     ]);
-    expect(first.nextAgentIds).toEqual(['reviewer']);
+    expect(first.publishedVersions).toEqual([1]);
     const published = await artifacts.read(taskId, first.publishedVersions[0]);
 
-    // Turn 2: reviewer seals the RECEIVED artifact and submits it; the
-    // platform resolves the reference, the model supplies no version.
-    const received: CurrentInputArtifact = {
-      artifactId: published.meta.id,
-      version: published.meta.version,
-      title: published.meta.title,
-      format: published.meta.format,
-      content: published.files[0].content,
-      sourceNodeId: published.meta.sourceNodeId,
-    };
-    const context = buildCommitContext(env, 'reviewer', { currentInputArtifact: received });
-    const second = await committer.validateAndCommit(context, [
-      { type: 'finish_production', source: 'current_input_artifact' },
-      SUBMIT_CURRENT,
-    ]);
-    expect(second.taskCompleted).toBe(true);
-    expect(second.publishedVersions).toEqual([]); // nothing re-published
+    // Turn 2: reviewer submits the received input version unchanged (zero-copy).
+    const context = buildCommitContext(env, 'reviewer', {
+      inputNodeId: 'turn-1-artifact-input-0',
+      currentInputArtifact: receivedFrom(published),
+    });
+    const result = await committer.validateAndCommit(context, [SUBMIT_CURRENT]);
+    expect(result.taskCompleted).toBe(true);
+    expect(result.publishedVersions).toEqual([]); // nothing re-published
     const workspace = await projector.workspace(taskId);
     expect(workspace.task.status).toBe('completed');
     expect(workspace.artifacts).toHaveLength(1);
@@ -330,61 +325,95 @@ describe('ActionCommitter sealed-package dispatch semantics (frozen decision 5)'
     expect(workspace.artifacts.at(-1)?.version).toBe(first.publishedVersions[0]);
   });
 
-  it('rejects current_input_artifact when the input carries no artifact', async () => {
+  it('submits a received input version without re-publishing it', async () => {
+    // The submit accepts the version reached through committed execution; the
+    // committer resolves it from the input node, never by sealing a package.
+    const first = await committer.validateAndCommit(contextFor('writer'), [
+      finishInline({ files: [{ name: 'content.md', content: '章节正文' }], title: '章节' }),
+      PUBLISH_CURRENT,
+    ]);
+    expect(first.nextAgentIds).toEqual(['reviewer']);
+    const published = await artifacts.read(taskId, first.publishedVersions[0]);
+    const second = await committer.validateAndCommit(
+      buildCommitContext(env, 'reviewer', {
+        inputNodeId: 'turn-1-artifact-input-0',
+        currentInputArtifact: receivedFrom(published),
+      }),
+      [SUBMIT_CURRENT],
+    );
+    expect(second.taskCompleted).toBe(true);
+    expect(second.publishedVersions).toEqual([]);
+    const workspace = await projector.workspace(taskId);
+    expect(workspace.artifacts).toHaveLength(1);
+    expect(workspace.artifacts.at(-1)?.final).toBe(true);
+    expect(workspace.artifacts.at(-1)?.version).toBe(first.publishedVersions[0]);
+  });
+
+  it('rejects submit_final_artifact when the input carries no artifact', async () => {
     const before = await events.read(taskId);
     await expect(
-      committer.validateAndCommit(contextFor('reviewer'), [
-        { type: 'finish_production', source: 'current_input_artifact' },
-        SUBMIT_CURRENT,
-      ]),
-    ).rejects.toMatchObject({ code: 'ACTION_SET_INVALID', retryable: false });
+      committer.validateAndCommit(contextFor('reviewer'), [SUBMIT_CURRENT]),
+    ).rejects.toMatchObject({ code: 'FINAL_ARTIFACT_NOT_FOUND', retryable: false });
     expect(await events.read(taskId)).toEqual(before);
   });
 
-  it('accepts a message-only package without publication metadata', async () => {
+  it('accepts a message-only turn without publication metadata', async () => {
     const before = await events.read(taskId);
     await expect(
       committer.validateAndCommit(contextFor('reviewer'), [
-        finishInline({ format: 'text', artifactType: null, title: null }),
-        { type: 'send_message', targetAgentId: 'writer', productionPackageRef: 'current' },
+        { type: 'send_message', targetAgentId: 'writer', summary: '返修意见' },
       ]),
     ).resolves.toMatchObject({ taskCompleted: false });
-    // Message-only packages never stage artifacts.
+    // Message-only turns never stage artifacts.
     expect(await artifacts.list(taskId)).toEqual([]);
     expect((await events.read(taskId)).length).toBe(before.length + 3);
   });
 
-  it('rejects publishing or submitting a package missing publication metadata', async () => {
-    const before = await events.read(taskId);
-    await expect(
-      committer.validateAndCommit(contextFor('writer'), [
-        finishInline({ artifactType: null, title: null }),
-        PUBLISH_CURRENT,
-      ]),
-    ).rejects.toMatchObject({ code: 'ACTION_SET_INVALID', retryable: false });
-    expect(await events.read(taskId)).toEqual(before);
-    expect(await artifacts.list(taskId)).toEqual([]);
-  });
-
-  it('rejects a final submission whose sealed format misses the declaration', async () => {
+  it('rejects annotate_artifact when the input carries no artifact version', async () => {
     const before = await events.read(taskId);
     await expect(
       committer.validateAndCommit(contextFor('reviewer'), [
-        finishInline({ format: 'text' }),
-        SUBMIT_CURRENT,
+        { type: 'annotate_artifact', file: 'review.md', content: '---\nverdict: pass\n---\n意见' },
+        { type: 'send_message', targetAgentId: 'writer', summary: '返修意见' },
       ]),
-    ).rejects.toMatchObject({ code: 'FINAL_DECLARATION_MISMATCH', retryable: false });
+    ).rejects.toMatchObject({ code: 'ANNOTATE_VERSION_MISSING', retryable: false });
     expect(await events.read(taskId)).toEqual(before);
-    expect(await artifacts.list(taskId)).toEqual([]);
   });
 
-  it('rejects a final submission whose sealed type misses the declaration', async () => {
+  it('rejects a final submission whose input version format misses the declaration', async () => {
+    const before = await events.read(taskId);
+    const received: CurrentInputArtifact = {
+      artifactId: 'artifact-a',
+      version: 1,
+      title: '文本终稿',
+      format: 'text',
+      content: '正文',
+      sourceNodeId: 'ev-input-writer',
+      humanAuthorized: false,
+    };
+    const context = buildCommitContext(env, 'reviewer', { currentInputArtifact: received });
     await expect(
-      committer.validateAndCommit(contextFor('reviewer'), [
-        finishInline({ artifactType: '别的类型' }),
-        SUBMIT_CURRENT,
-      ]),
+      committer.validateAndCommit(context, [SUBMIT_CURRENT]),
     ).rejects.toMatchObject({ code: 'FINAL_DECLARATION_MISMATCH', retryable: false });
+    expect(await events.read(taskId)).toEqual(before);
+  });
+
+  it('accepts a human-authorized input version without a committed route chain', async () => {
+    // The scheduler accept path synthesizes the input with humanAuthorized true;
+    // the final closure then needs no committed artifact route (spec §7.1).
+    const received: CurrentInputArtifact = {
+      artifactId: 'artifact-human',
+      version: 1,
+      title: '人工接受的终稿',
+      format: 'markdown',
+      content: '正文',
+      sourceNodeId: 'ev-ghost-producer',
+      humanAuthorized: true,
+    };
+    const context = buildCommitContext(env, 'reviewer', { currentInputArtifact: received });
+    const result = await committer.validateAndCommit(context, [SUBMIT_CURRENT]);
+    expect(result.taskCompleted).toBe(true);
+    expect((await projector.workspace(taskId)).task.status).toBe('completed');
   });
 
   it('rejects an unreachable received artifact at validation with zero writes (review F2)', async () => {
@@ -411,14 +440,12 @@ describe('ActionCommitter sealed-package dispatch semantics (frozen decision 5)'
       title: '来路不明的产物',
       format: 'markdown',
       content: '正文',
-      sourceNodeId: 'ev-ghost-result',
+      sourceNodeId: 'artifact-ghost',
+      humanAuthorized: false,
     };
     const context = buildCommitContext(env, 'reviewer', { currentInputArtifact: received });
     await expect(
-      committer.validateAndCommit(context, [
-        { type: 'finish_production', source: 'current_input_artifact' },
-        SUBMIT_CURRENT,
-      ]),
+      committer.validateAndCommit(context, [SUBMIT_CURRENT]),
     ).rejects.toMatchObject({ code: 'FINAL_NOT_REACHABLE', retryable: false });
     // Nothing at all was written: no agent result, no failure marker.
     expect(await events.read(taskId)).toEqual(before);
@@ -428,11 +455,18 @@ describe('ActionCommitter sealed-package dispatch semantics (frozen decision 5)'
 
 describe('ActionCommitter contract conformance (spec §6)', () => {
   it('rejects a production source the contract does not allow', async () => {
-    // The writer contract allows inline/workspace_file only.
+    // The reviewer contract allows inline only (current_input_artifact is gone).
     await expect(
-      committer.validateAndCommit(contextFor('writer'), [
-        { type: 'finish_production', source: 'current_input_artifact' },
-        PUBLISH_CURRENT,
+      committer.validateAndCommit(contextFor('reviewer'), [
+        {
+          type: 'finish_production',
+          source: 'workspace_file',
+          files: [{ name: 'a.md', workspaceFile: 'draft/a.md' }],
+          format: 'markdown',
+          artifactType: null,
+          title: null,
+        },
+        { type: 'send_message', targetAgentId: 'writer', summary: '返修意见' },
       ]),
     ).rejects.toMatchObject({ code: 'ACTION_SET_INVALID', retryable: false });
   });
@@ -451,7 +485,7 @@ describe('ActionCommitter contract conformance (spec §6)', () => {
     await expect(
       committer.validateAndCommit(contextFor('writer'), [
         finishInline({ format: 'markdown' }),
-        { type: 'send_message', targetAgentId: 'reviewer', productionPackageRef: 'current' },
+        { type: 'send_message', targetAgentId: 'reviewer', summary: '返修意见' },
       ]),
     ).rejects.toMatchObject({ code: 'ACTION_SET_INVALID', retryable: false });
   });
@@ -461,8 +495,7 @@ describe('ActionCommitter contract conformance (spec §6)', () => {
     // though the route check would fail first for unknown agents.
     await expect(
       committer.validateAndCommit(contextFor('reviewer'), [
-        finishInline({ format: 'text', artifactType: null, title: null }),
-        { type: 'send_message', targetAgentId: 'unknown', productionPackageRef: 'current' },
+        { type: 'send_message', targetAgentId: 'unknown', summary: '返修意见' },
       ]),
     ).rejects.toMatchObject({ code: 'ROUTE_NOT_ALLOWED', retryable: false });
   });
@@ -502,10 +535,7 @@ describe('ActionCommitter multi-target dispatch candidate sets (plan 2026-08-06)
     // candidates; the commit must pass the route AND the candidate check.
     const result = await committer.validateAndCommit(
       contextWithTargets('reviewer', { send_message: ['writer', 'producer'] }),
-      [
-        finishInline({ format: 'text', artifactType: null, title: null }),
-        { type: 'send_message', targetAgentId: 'writer', productionPackageRef: 'current' },
-      ],
+      [{ type: 'send_message', targetAgentId: 'writer', summary: '返修意见' }],
     );
     expect(result.committedEvents.some((event) => event.type === 'route_executed')).toBe(true);
   });
@@ -515,10 +545,7 @@ describe('ActionCommitter multi-target dispatch candidate sets (plan 2026-08-06)
     await expect(
       committer.validateAndCommit(
         contextWithTargets('reviewer', { send_message: ['producer'] }),
-        [
-          finishInline({ format: 'text', artifactType: null, title: null }),
-          { type: 'send_message', targetAgentId: 'writer', productionPackageRef: 'current' },
-        ],
+        [{ type: 'send_message', targetAgentId: 'writer', summary: '返修意见' }],
       ),
     ).rejects.toMatchObject({ code: 'ROUTE_NOT_ALLOWED', retryable: false });
   });
@@ -549,8 +576,7 @@ describe('ActionCommitter authorization, routes and final (kept rules)', () => {
     const before = await events.read(taskId);
     await expect(
       committer.validateAndCommit(contextFor('reviewer'), [
-        finishInline({ format: 'text', artifactType: null, title: null }),
-        { type: 'send_message', targetAgentId: 'unknown', productionPackageRef: 'current' },
+        { type: 'send_message', targetAgentId: 'unknown', summary: '返修意见' },
       ]),
     ).rejects.toMatchObject({ code: 'ROUTE_NOT_ALLOWED' });
     expect(await events.read(taskId)).toEqual(before);
@@ -564,10 +590,7 @@ describe('ActionCommitter authorization, routes and final (kept rules)', () => {
     };
     const neutralContextFor = createContextFor(neutralEnv);
     await expect(
-      committer.validateAndCommit(neutralContextFor('agent-alpha'), [
-        finishInline(),
-        SUBMIT_CURRENT,
-      ]),
+      committer.validateAndCommit(neutralContextFor('agent-alpha'), [SUBMIT_CURRENT]),
     ).rejects.toMatchObject({ code: 'FINAL_SUBMITTER_NOT_ALLOWED', retryable: false });
     expect(await events.read('task-neutral')).toEqual([]);
   });
@@ -632,8 +655,7 @@ describe('ActionCommitter system final exit independence', () => {
       publicText: 'final output finished, the task is complete',
     });
     const result = await committer.validateAndCommit(talking, [
-      finishInline({ format: 'text', artifactType: null, title: null }),
-      { type: 'send_message', targetAgentId: 'writer', productionPackageRef: 'current' },
+      { type: 'send_message', targetAgentId: 'writer', summary: '返修意见' },
     ]);
     expect(result.taskCompleted).toBe(false);
     expect((await projector.workspace(taskId)).task.status).not.toBe('completed');
@@ -642,8 +664,8 @@ describe('ActionCommitter system final exit independence', () => {
 
 describe('ActionCommitter mid-plan failure and replay', () => {
   it('appends a public node failure and never overwrites prior items', async () => {
-    const context = buildCommitContext(env, 'reviewer');
-    const actions = [finishInline({ content: '终稿正文', title: '终稿 V1' }), SUBMIT_CURRENT];
+    const context = buildCommitContext(env, 'writer');
+    const actions = [finishInline({ files: [{ name: 'content.md', content: '终稿正文' }], title: '终稿 V1' }), PUBLISH_CURRENT];
 
     // Injected publish failure: deterministic on every platform (POSIX chmod
     // bits do not restrict writes under Windows), and it lands strictly
@@ -679,19 +701,17 @@ describe('ActionCommitter mid-plan failure and replay', () => {
     expect(types).not.toContain('artifact_published');
     expect(types).not.toContain('final_submission_accepted');
     const attemptFailed = failed.find((committed) => committed.event.type === 'agent_attempt_failed');
-    expect(attemptFailed?.event).toMatchObject({ nodeId: 'ev-input-reviewer', retryable: false });
+    expect(attemptFailed?.event).toMatchObject({ nodeId: 'ev-input-writer', retryable: false });
     expect(await artifacts.list(taskId)).toEqual([]);
 
     // Recommitting the same Turn replays committed items instead of
     // duplicating them, then finishes the interrupted plan.
     const replayed: CommitResult = await failingCommitter.validateAndCommit(context, actions);
-    expect(replayed.taskCompleted).toBe(true);
     expect(replayed.publishedVersions).toEqual([1]);
     const after = await events.read(taskId);
     expect(after.filter((committed) => committed.event.type === 'agent_result')).toHaveLength(1);
     expect(after.filter((committed) => committed.event.type === 'artifact_published')).toHaveLength(1);
     expect(await artifacts.list(taskId)).toHaveLength(1);
-    expect((await projector.workspace(taskId)).artifacts.at(-1)?.final).toBe(true);
   });
 
   it('keeps the stable phase error codes non-retryable', async () => {

@@ -32,9 +32,11 @@ import {
   createSchedulerEnvironment,
   disposeRuntimeTestRoots,
   DeferredAgentRuntime,
+  publishFixtureArtifact,
   RecordingRuntime,
   schedulerWithDeferredRuntime,
   schedulerWithFailures,
+  seedAgentInputVersion,
   type SchedulerEnvironment,
 } from './test-support';
 import { downgradeTaskSnapshotToLegacy, makeEventNode, makeTaskEvent } from '../test-support';
@@ -78,49 +80,25 @@ const publishTurnActions = (title: string) => [
   {
     type: 'finish_production' as const,
     source: 'inline' as const,
-    content: `${title} 正文`,
+    files: [{ name: 'content.md', content: `${title} 正文` }],
     format: 'markdown' as const,
     artifactType: '终稿',
     title,
   },
-  { type: 'publish_artifact' as const, productionPackageRef: 'current' as const },
+  { type: 'publish_artifact' as const },
 ];
 
-/** One legal reviewer turn: seal an inline review and send it to writer. */
+/** One legal reviewer turn: send a short message back to the writer. */
 const reviewMessageTurnActions = (review: string) => [
-  {
-    type: 'finish_production' as const,
-    source: 'inline' as const,
-    content: review,
-    format: 'text' as const,
-    artifactType: null,
-    title: null,
-  },
   {
     type: 'send_message' as const,
     targetAgentId: 'writer',
-    productionPackageRef: 'current' as const,
+    summary: review,
   },
 ];
 
-/** Legal final reviewer turn over a received artifact: seal it and submit it. */
-const submitReceivedArtifactTurnActions = [
-  { type: 'finish_production' as const, source: 'current_input_artifact' as const },
-  { type: 'submit_final_artifact' as const, productionPackageRef: 'current' as const },
-];
-
-/** Legal final reviewer turn sealing an inline declaration-aligned package. */
-const submitInlineFinalTurnActions = (title: string) => [
-  {
-    type: 'finish_production' as const,
-    source: 'inline' as const,
-    content: `${title} 正文`,
-    format: 'markdown' as const,
-    artifactType: '终稿',
-    title,
-  },
-  { type: 'submit_final_artifact' as const, productionPackageRef: 'current' as const },
-];
+/** Legal final reviewer turn over a received artifact: submit the input version. */
+const submitReceivedArtifactTurnActions = [{ type: 'submit_final_artifact' as const }];
 
 /** A direct human interrupt: the one action that needs no sealed package. */
 const humanInterruptTurnActions = [{ type: 'request_human_input' as const, question: '是否继续？' }];
@@ -233,15 +211,12 @@ describe('TaskScheduler status validation', () => {
   });
 
   it('rejects starting a completed task with INVALID_TRANSITION', async () => {
-    const harness = await schedulerHarness(
-      {
-        reviewer: [
-          { kind: 'result', publicText: '终稿提交', actions: submitInlineFinalTurnActions('终稿 V1') },
-        ],
-      },
-      { seedWriterInput: false },
-    );
-    await harness.environment.seedAgentInput(harness.taskId, 'reviewer', '直接审核');
+    const harness = await schedulerHarness({
+      writer: [{ kind: 'result', publicText: '初稿 V1', actions: publishTurnActions('终稿 V1') }],
+      reviewer: [
+        { kind: 'result', publicText: '终稿提交', actions: submitReceivedArtifactTurnActions },
+      ],
+    });
     await harness.scheduler.start(harness.taskId);
     await expect(harness.scheduler.start(harness.taskId)).rejects.toMatchObject({
       code: 'INVALID_TRANSITION',
@@ -558,23 +533,22 @@ describe('TaskScheduler human answer continuation (plan Task 5 Step 4)', () => {
   it('answer re-acquires the slot and runs the requesting agent to completion', async () => {
     const fake = new FakeAgentRuntime({
       scripts: {
-        reviewer: [
+        writer: [
           {
             kind: 'result',
             publicText: '需要确认',
             actions: [{ type: 'request_human_input', question: '是否提交终稿？' }],
           },
-          {
-            kind: 'result',
-            publicText: '终稿提交',
-            actions: submitInlineFinalTurnActions('终稿 V1'),
-          },
+          { kind: 'result', publicText: '初稿完成', actions: publishTurnActions('终稿 V1') },
+        ],
+        reviewer: [
+          { kind: 'result', publicText: '终稿提交', actions: submitReceivedArtifactTurnActions },
         ],
       },
     });
     const environment = await createSchedulerEnvironment({ runtime: fake });
     const taskId = await environment.createTask();
-    await environment.seedAgentInput(taskId, 'reviewer', 'neutral opening input');
+    await environment.seedAgentInput(taskId, 'writer', 'neutral opening input');
     const scheduler = environment.service.scheduler;
 
     const waiting = await scheduler.start(taskId);
@@ -584,7 +558,8 @@ describe('TaskScheduler human answer continuation (plan Task 5 Step 4)', () => {
     expect(answered.status).toBe('completed');
     const workspace = await environment.service.getWorkspace(taskId);
     expect(workspace.artifacts.at(-1)?.final).toBe(true);
-    expect(fake.countInvocations('reviewer')).toBe(2);
+    expect(fake.countInvocations('writer')).toBe(2);
+    expect(fake.countInvocations('reviewer')).toBe(1);
   });
 });
 
@@ -788,21 +763,26 @@ describe('TaskScheduler acceptance boundary seam (plan Phase D Task 4)', () => {
 
   it('never consults the seam for uncommitted or terminal Turns', async () => {
     // The fixture declares `reviewer` as the only final submitter, so the
-    // completing Turn belongs to reviewer (seal the package and submit it).
+    // completing Turn belongs to reviewer (submit the received input version).
     const fake = new FakeAgentRuntime({
       scripts: {
         reviewer: [
           {
             kind: 'result',
             publicText: '一次性完成',
-            actions: submitInlineFinalTurnActions('直接终稿'),
+            actions: submitReceivedArtifactTurnActions,
           },
         ],
       },
     });
     const environment = await createSchedulerEnvironment({ runtime: fake });
     const taskId = await environment.createTask();
-    await environment.seedAgentInput(taskId, 'reviewer', '开始生产');
+    const version = await publishFixtureArtifact(environment, taskId, {
+      title: '直接终稿',
+      content: '直接终稿 正文',
+      sourceNodeId: 'fixture-producer-result',
+    });
+    await seedAgentInputVersion(environment, taskId, 'reviewer', '开始生产', version);
 
     const hookTaskIds: string[] = [];
     const scheduler = new TaskScheduler({

@@ -166,9 +166,9 @@ describe('turn completion', () => {
         toolCalls: [
           {
             name: 'finish_production',
-            args: { source: 'inline', content: 'sealed body', format: 'text' },
+            args: { source: 'inline', files: [{ name: 'content.md', content: 'sealed body' }], format: 'text' },
           },
-          { name: 'send_message', args: { targetAgentId: 'agent-beta', productionPackageRef: 'current' } },
+          { name: 'send_message', args: { targetAgentId: 'agent-beta', summary: 'neutral coordination message' } },
         ],
         text: 'public final answer',
         usage: { input: 12, output: 34 },
@@ -178,7 +178,7 @@ describe('turn completion', () => {
     expect(result.turnId).toBe('turn-1');
     expect(result.publicText).toBe('public final answer');
     expect(result.actions).toEqual([
-      finishProductionProposal({ content: 'sealed body', format: 'text' }),
+      finishProductionProposal({ files: [{ name: 'content.md', content: 'sealed body' }], format: 'text' }),
       sendMessageProposal(),
     ]);
     expect(result.usage).toEqual({ inputTokens: 12, outputTokens: 34 });
@@ -191,9 +191,9 @@ describe('turn completion', () => {
         toolCalls: [
           {
             name: 'finish_production',
-            args: { source: 'inline', content: 'sealed', format: 'text' },
+            args: { source: 'inline', files: [{ name: 'content.md', content: 'sealed' }], format: 'text' },
           },
-          { name: 'send_message', args: { targetAgentId: 'agent-beta', productionPackageRef: 'current' } },
+          { name: 'send_message', args: { targetAgentId: 'agent-beta', summary: 'neutral coordination message' } },
         ],
         text: 'done',
       }],
@@ -225,17 +225,17 @@ describe('turn completion', () => {
         toolCalls: [
           {
             name: 'finish_production',
-            args: { source: 'inline', content: 'sealed', format: 'text' },
+            args: { source: 'inline', files: [{ name: 'content.md', content: 'sealed' }], format: 'text' },
           },
-          { name: 'send_message', args: { targetAgentId: '', productionPackageRef: 'current' } },
-          { name: 'send_message', args: { targetAgentId: 'agent-beta', productionPackageRef: 'current' } },
+          { name: 'send_message', args: { targetAgentId: '', summary: 'neutral coordination message' } },
+          { name: 'send_message', args: { targetAgentId: 'agent-beta', summary: 'neutral coordination message' } },
         ],
         text: 'done',
       }],
     });
     const result = await harness.runtime.run(sampleTurnInput(), freshSignal());
     expect(result.actions).toEqual([
-      finishProductionProposal({ content: 'sealed', format: 'text' }),
+      finishProductionProposal({ files: [{ name: 'content.md', content: 'sealed' }], format: 'text' }),
       sendMessageProposal(),
     ]);
     const rejected = harness.toolExecutions[1];
@@ -255,7 +255,7 @@ describe('workspace write gating once sealed (review F1)', () => {
             name: 'finish_production',
             args: {
               source: 'workspace_file',
-              workspaceFile: 'draft/v1.md',
+              files: [{ name: 'v1.md', workspaceFile: 'draft/v1.md' }],
               format: 'text',
               artifactType: 'draft',
               title: '草稿',
@@ -263,7 +263,7 @@ describe('workspace write gating once sealed (review F1)', () => {
           },
           // The model tries to mutate the sealed file in the same turn.
           { name: 'write_workspace', args: { path: 'draft/v1.md', content: '封存后篡改' } },
-          { name: 'publish_artifact', args: { productionPackageRef: 'current' } },
+          { name: 'publish_artifact', args: {} },
         ],
         text: 'done',
       }],
@@ -294,9 +294,9 @@ describe('failure and abort boundaries', () => {
         toolCalls: [
           {
             name: 'finish_production',
-            args: { source: 'inline', content: 'lost', format: 'text' },
+            args: { source: 'inline', files: [{ name: 'content.md', content: 'lost' }], format: 'text' },
           },
-          { name: 'send_message', args: { targetAgentId: 'agent-beta', productionPackageRef: 'current' } },
+          { name: 'send_message', args: { targetAgentId: 'agent-beta', summary: 'neutral coordination message' } },
         ],
         promptError: new Error('provider disconnected'),
       }],
@@ -467,9 +467,9 @@ describe('hidden thinking and secret exclusion (plan Phase E Task 2 rewrite)', (
         toolCalls: [
           {
             name: 'finish_production',
-            args: { source: 'inline', content: 'sealed', format: 'text' },
+            args: { source: 'inline', files: [{ name: 'content.md', content: 'sealed' }], format: 'text' },
           },
-          { name: 'publish_artifact', args: { productionPackageRef: 'current' } },
+          { name: 'publish_artifact', args: {} },
         ],
         text: 'public answer',
         extraContent: [{
@@ -657,9 +657,9 @@ describe('turn trace capture (plan Phase E Task 2)', () => {
         toolCalls: [
           {
             name: 'finish_production',
-            args: { source: 'inline', content: 'sealed', format: 'text' },
+            args: { source: 'inline', files: [{ name: 'content.md', content: 'sealed' }], format: 'text' },
           },
-          { name: 'send_message', args: { targetAgentId: 'agent-beta', productionPackageRef: 'current' } },
+          { name: 'send_message', args: { targetAgentId: 'agent-beta', summary: 'neutral coordination message' } },
         ],
         text: 'routed',
       }],
@@ -676,7 +676,7 @@ describe('turn trace capture (plan Phase E Task 2)', () => {
     expect(result.trace[2]).toEqual({
       kind: 'tool_call',
       toolName: 'send_message',
-      params: { targetAgentId: 'agent-beta', productionPackageRef: 'current' },
+      params: { targetAgentId: 'agent-beta', summary: 'neutral coordination message' },
     });
   });
 });
@@ -696,7 +696,7 @@ describe('forge tool factory', () => {
     expect(send).toBeDefined();
     const sealed = await finish?.execute(
       'tc-0',
-      { source: 'inline', content: 'sealed body', format: 'text' },
+      { source: 'inline', files: [{ name: 'content.md', content: 'sealed body' }], format: 'text' },
       undefined,
       undefined,
       {} as never,
@@ -704,7 +704,7 @@ describe('forge tool factory', () => {
     expect(sealed?.content[0]?.type === 'text' && sealed.content[0].text).toContain('accepted');
     const result = await send?.execute(
       'tc-1',
-      { targetAgentId: 'agent-beta', productionPackageRef: 'current' },
+      { targetAgentId: 'agent-beta', summary: 'neutral coordination message' },
       undefined,
       undefined,
       {} as never,
@@ -714,7 +714,7 @@ describe('forge tool factory', () => {
     expect(text).not.toContain('taskId');
     expect(text).not.toContain('version');
     expect(buffer.snapshot()).toEqual([
-      finishProductionProposal({ content: 'sealed body', format: 'text' }),
+      finishProductionProposal({ files: [{ name: 'content.md', content: 'sealed body' }], format: 'text' }),
       sendMessageProposal(),
     ]);
   });
@@ -725,7 +725,7 @@ describe('forge tool factory', () => {
     const finish = tools.find((tool) => tool.name === 'finish_production');
     await finish?.execute(
       'tc-1',
-      { source: 'inline', content: 'sealed', format: 'text' },
+      { source: 'inline', files: [{ name: 'content.md', content: 'sealed' }], format: 'text' },
       undefined,
       undefined,
       {} as never,
@@ -733,7 +733,7 @@ describe('forge tool factory', () => {
     const send = tools.find((tool) => tool.name === 'send_message');
     const result = await send?.execute(
       'tc-2',
-      { targetAgentId: '', productionPackageRef: 'current' },
+      { targetAgentId: '', summary: 'neutral coordination message' },
       undefined,
       undefined,
       {} as never,
@@ -742,7 +742,7 @@ describe('forge tool factory', () => {
     expect(text).toContain('rejected');
     expect(text).toContain('ACTION_FIELD_INVALID');
     expect(buffer.snapshot()).toEqual([
-      finishProductionProposal({ content: 'sealed', format: 'text' }),
+      finishProductionProposal({ files: [{ name: 'content.md', content: 'sealed' }], format: 'text' }),
     ]);
   });
 
@@ -753,7 +753,7 @@ describe('forge tool factory', () => {
     const finish = tools.find((tool) => tool.name === 'finish_production');
     const result = await finish?.execute(
       'tc-3',
-      { source: 'inline', content: 'late', format: 'text' },
+      { source: 'inline', files: [{ name: 'content.md', content: 'late' }], format: 'text' },
       undefined,
       undefined,
       {} as never,
@@ -891,9 +891,9 @@ describe('live streaming patches (plan C realtime streaming)', () => {
         toolCalls: [
           {
             name: 'finish_production',
-            args: { source: 'inline', content: 'sealed body', format: 'text' },
+            args: { source: 'inline', files: [{ name: 'content.md', content: 'sealed body' }], format: 'text' },
           },
-          { name: 'publish_artifact', args: { productionPackageRef: 'current' } },
+          { name: 'publish_artifact', args: {} },
         ],
         text: 'hello',
       }],
@@ -965,11 +965,11 @@ describe('live streaming patches (plan C realtime streaming)', () => {
 describe('corrective nudge loop (plan 2026-08-06)', () => {
   const finishOnlyCall = {
     name: 'finish_production',
-    args: { source: 'inline', content: 'sealed body', format: 'text' },
+    args: { source: 'inline', files: [{ name: 'content.md', content: 'sealed body' }], format: 'text' },
   };
   const publishCall = {
     name: 'publish_artifact',
-    args: { productionPackageRef: 'current' },
+    args: {},
   };
 
   it('seals the reminder text: generic for null contracts, contract-named otherwise', () => {
@@ -1021,7 +1021,7 @@ describe('corrective nudge loop (plan 2026-08-06)', () => {
     const result = await harness.runtime.run(sampleTurnInput(), freshSignal());
     expect(harness.session.promptCalls).toHaveLength(2);
     expect(result.actions).toEqual([
-      finishProductionProposal({ content: 'sealed body', format: 'text' }),
+      finishProductionProposal({ files: [{ name: 'content.md', content: 'sealed body' }], format: 'text' }),
       publishPackageProposal(),
     ]);
   });

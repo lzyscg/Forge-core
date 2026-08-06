@@ -83,7 +83,7 @@ export function sendMessageProposal(overrides: Partial<SendMessageAction> = {}):
   return {
     type: 'send_message',
     targetAgentId: 'agent-beta',
-    productionPackageRef: 'current',
+    summary: 'neutral coordination message',
     ...overrides,
   };
 }
@@ -95,7 +95,7 @@ export function finishProductionProposal(
   return {
     type: 'finish_production',
     source: 'inline',
-    content: 'neutral sealed production',
+    files: [{ name: 'content.md', content: 'neutral sealed production' }],
     format: 'text',
     artifactType: null,
     title: null,
@@ -105,7 +105,7 @@ export function finishProductionProposal(
 
 /** Neutral `publish_artifact` proposal referencing the sealed package. */
 export function publishPackageProposal(): Extract<ForgeAction, { type: 'publish_artifact' }> {
-  return { type: 'publish_artifact', productionPackageRef: 'current' };
+  return { type: 'publish_artifact' };
 }
 
 /** Deterministic provider usage for sealed Turns. */
@@ -950,6 +950,79 @@ export async function createSchedulerEnvironment(options: {
 }
 
 /**
+ * Publishes one neutral artifact version through the environment's store AND
+ * backs it with the committed `artifact_published` event (spec §8), so the
+ * store's disk↔event cross-check accepts it. Returns the published version.
+ */
+export async function publishFixtureArtifact(
+  environment: SchedulerEnvironment,
+  taskId: string,
+  parts: { title: string; content: string; sourceNodeId: string },
+): Promise<number> {
+  const published = await environment.artifacts.publish(taskId, {
+    title: parts.title,
+    files: [{ name: 'content.md', content: parts.content }],
+    sourceNodeId: parts.sourceNodeId,
+    format: environment.frozen.finalOutput.format,
+  });
+  await environment.events.append(taskId, {
+    id: `ev-artifact-${published.version}`,
+    at: new Date().toISOString(),
+    type: 'artifact_published',
+    artifact: {
+      version: published.version,
+      title: published.title,
+      sourceNodeId: published.sourceNodeId,
+      format: published.format,
+      files: published.files,
+      artifactType: environment.frozen.finalOutput.name,
+      artifactId: published.id,
+    },
+  });
+  return published.version;
+}
+
+/**
+ * Appends one confirmed input node carrying an artifact version the agent must
+ * submit. `humanAuthorized` is true (the scheduler accept path synthesized this
+ * input, spec §7.1) so the final closure needs no committed route chain.
+ */
+export async function seedAgentInputVersion(
+  environment: SchedulerEnvironment,
+  taskId: string,
+  agentId: string,
+  body: string,
+  inputVersion: number,
+): Promise<string> {
+  const committed = await environment.events.read(taskId);
+  let sequence = 0;
+  for (const entry of committed) {
+    if ('node' in entry.event) {
+      sequence = Math.max(sequence, entry.event.node.sequence);
+    }
+  }
+  const id = `ev-input-${randomUUID()}`;
+  const agentName = environment.frozen.agents.find((agent) => agent.id === agentId)?.name ?? agentId;
+  await environment.events.append(taskId, {
+    id,
+    at: new Date().toISOString(),
+    type: 'agent_input',
+    node: {
+      sequence: sequence + 1,
+      agentId,
+      kind: 'input',
+      title: agentName,
+      body,
+      status: 'confirmed',
+      attemptCount: 1,
+      inputVersion,
+      humanAuthorized: true,
+    },
+  });
+  return id;
+}
+
+/**
  * A deferred `AgentRuntime` for one-slot scheduler tests: every `run` blocks
  * (abort-aware) until the test calls `resolveNext`, then applies the agent's
  * scripted step — or a default successful neutral Turn when unscripted. A
@@ -1227,31 +1300,28 @@ export async function schedulerWithFailures(
     throw new Error('test-support: the runtime fixture declares no final submitter');
   }
 
-  // New turn contract sequence (plan 2026-08-04 Task 4): seal one production
-  // package, then exactly one dispatch action referencing it. The final
-  // submitter seals an inline declaration-aligned package and submits it.
+  // New turn contract sequence (plan 2026-08-07 Phase 2): the final submitter
+  // resolves the submitted version from the input node's inputVersion — so the
+  // fixture publishes one neutral version and seeds the submitter's input with
+  // that version (humanAuthorized accept path, spec §7.1). The submitter's
+  // Turn is the single submit dispatch; failures land on that same node.
   const buildScript = (): FakeScriptStep[] => [
     ...codes.filter((code) => code !== 'success').map(scriptedFailureFor),
     {
       kind: 'result',
       publicText: 'neutral completion turn',
-      actions: [
-        {
-          type: 'finish_production',
-          source: 'inline',
-          content: 'neutral final content',
-          format: frozen.finalOutput.format,
-          artifactType: frozen.finalOutput.name,
-          title: 'Neutral Fixture Final',
-        },
-        { type: 'submit_final_artifact', productionPackageRef: 'current' },
-      ],
+      actions: [{ type: 'submit_final_artifact' }],
     },
   ];
   runtime.setScript(submitterId, buildScript());
 
   const taskId = await environment.createTask();
-  await environment.seedAgentInput(taskId, submitterId, 'neutral opening input');
+  const version = await publishFixtureArtifact(environment, taskId, {
+    title: 'Neutral Fixture Final',
+    content: 'neutral final content',
+    sourceNodeId: 'fixture-producer-result',
+  });
+  await seedAgentInputVersion(environment, taskId, submitterId, 'neutral opening input', version);
 
   const scheduler = new TaskScheduler({
     service: environment.service,
@@ -1291,7 +1361,7 @@ export async function schedulerWithFailures(
         at: new Date().toISOString(),
         type: 'task_started',
       });
-      await environment.seedAgentInput(id, submitterId, 'neutral recovery input');
+      await seedAgentInputVersion(environment, id, submitterId, 'neutral recovery input', version);
     },
     async restart() {
       const restartedRuntime = new FakeAgentRuntime();

@@ -1,40 +1,36 @@
 /**
- * All-or-nothing per-Turn action buffer (plan Phase C Task 1 Step 5;
- * phase-aware proposal gate added by plan 2026-08-04 Task 1, spec §4/§5.3).
+ * All-or-nothing per-Turn action buffer (plan 2026-08-07 Phase 2; v7 artifact
+ * version directory schema, spec §4/§5.3).
  *
  * Only a completely successful model Turn may commit actions (global
  * constraint): states flow `open → successful | failed`, and `committed` is
  * terminal. `propose` is only accepted while open; `succeed(publicText,
  * usage)` seals the Turn; `fail` clears every buffered proposal (an abort is
- * equivalent to a failure and is failed by the caller); `commit()` returns a
- * deep-frozen copy exactly once and only from `successful`. A buffer never
- * survives beyond one `run` call — adapters create a fresh buffer per Turn.
+ * equivalent to a failure); `commit()` returns a deep-frozen copy exactly once
+ * and only from `successful`. A buffer never survives beyond one `run` call.
  *
- * On top of the lifecycle, an open buffer tracks the turn's production/
- * dispatch phase and rejects illegal proposals IMMEDIATELY with a stable
- * code (spec §5.3): the pi tool layer surfaces that code to the model so it
- * can self-correct in the same Turn, and the ActionCommitter revalidates the
- * final action set as the non-bypassable boundary. Phase machine:
- * `production` → (finish_production, exactly once) → `sealed` → (exactly one
- * dispatch action) → `dispatched`. `request_human_input` is the only direct
- * interrupt: as the FIRST proposal it terminates the turn without a sealed
- * package; after sealing it counts as the dispatch action. That the
- * interrupt must be the SOLE first action is a frozen decision kept on
- * purpose (review F7); see the gate comment in `assertPhaseTransition`.
- * Completeness is
- * NOT enforced here — a turn that seals without finishing its phases is
- * still committed to the committer, which parks it as a phase failure
- * instead of leaving the task `running` (spec §4.1).
+ * v7 phase machine (production/operate/coordinate turns, spec §4):
+ * - `production` phase: `load_skill`, `read_artifact_version`, `annotate_artifact`
+ *   and `finish_production` are allowed. A production turn seals with
+ *   `finish_production` (→ `sealed`); an operate/coordinate turn may dispatch
+ *   directly from `production` (annotate → dispatch, or dispatch-only).
+ * - `sealed` phase: only one dispatch action (or a human interrupt) may follow.
+ * - `publish_artifact` is only valid after `finish_production` (production
+ *   turns); `forward_input_version`/`send_message`/`submit_final_artifact` are
+ *   valid from `production` (operate/coordinate) or `sealed` (production).
+ * - `request_human_input` may interrupt as the sole first action OR after
+ *   `finish_production`/`annotate_artifact` (F7 flipped, spec §4); it never
+ *   follows a dispatch.
+ * Completeness is NOT enforced here — a turn that never dispatches is still
+ * handed to the committer, which parks it as a phase failure instead of
+ * leaving the task `running` (spec §4.1).
  */
 import type { AgentTurnResult } from './agent-runtime';
 import type { ForgeAction } from './forge-actions';
 
 export type ActionBufferState = 'open' | 'successful' | 'failed' | 'committed';
 
-/**
- * The turn-phase position inside an open (or sealed) buffer. Terminal phases
- * (`dispatched`, `human_interrupted`) reject every further proposal.
- */
+/** The turn-phase position inside an open (or sealed) buffer. */
 export type ActionBufferPhase = 'production' | 'sealed' | 'dispatched' | 'human_interrupted';
 
 export const ACTION_BUFFER_ERROR_CODES = {
@@ -44,14 +40,18 @@ export const ACTION_BUFFER_ERROR_CODES = {
   COMMITTED_ALREADY: 'COMMITTED_ALREADY',
   /** propose/succeed while the buffer is not open. */
   BUFFER_NOT_OPEN: 'BUFFER_NOT_OPEN',
-  /** A dispatch action before sealing, or a production/load_skill action after it. */
+  /** A dispatch action before sealing where sealing was required. */
   PHASE_ORDER_INVALID: 'PHASE_ORDER_INVALID',
   /** A second finish_production in the same Turn. */
   PHASE_FINISH_DUPLICATE: 'PHASE_FINISH_DUPLICATE',
   /** Any action after the Turn already performed its one dispatch/interrupt. */
   PHASE_DISPATCH_DUPLICATE: 'PHASE_DISPATCH_DUPLICATE',
-  /** request_human_input after production work began but before sealing. */
+  /** request_human_input after a dispatch, or production work after it. */
   PHASE_HUMAN_INTERRUPT_INVALID: 'PHASE_HUMAN_INTERRUPT_INVALID',
+  /** annotate_artifact after the package is sealed (operate-only action). */
+  PHASE_ANNOTATE_AFTER_SEAL_INVALID: 'PHASE_ANNOTATE_AFTER_SEAL_INVALID',
+  /** publish_artifact without a preceding finish_production. */
+  PHASE_PUBLISH_WITHOUT_FINISH_INVALID: 'PHASE_PUBLISH_WITHOUT_FINISH_INVALID',
 } as const;
 
 export type ActionBufferErrorCode =
@@ -68,11 +68,20 @@ export class ActionBufferError extends Error {
   }
 }
 
-/** Dispatch actions that deliver the sealed production package. */
-const DELIVERY_ACTION_TYPES: ReadonlySet<ForgeAction['type']> = new Set([
-  'send_message',
+/** Dispatch actions that deliver the turn's one outcome. */
+const DISPATCH_ACTION_TYPES: ReadonlySet<ForgeAction['type']> = new Set([
   'publish_artifact',
+  'forward_input_version',
   'submit_final_artifact',
+  'send_message',
+]);
+
+/** Actions valid only in the production phase (before sealing). */
+const PRODUCTION_PHASE_TYPES: ReadonlySet<ForgeAction['type']> = new Set([
+  'load_skill',
+  'read_artifact_version',
+  'annotate_artifact',
+  'finish_production',
 ]);
 
 export class ActionBuffer {
@@ -105,10 +114,9 @@ export class ActionBuffer {
   }
 
   /**
-   * Accepts one action proposal; only valid while open. Enforces the
-   * production → sealed → one-dispatch phase machine (spec §5.3) and fails
-   * loud with a stable code so the tool layer can hand the model a
-   * correctable rejection.
+   * Accepts one action proposal; only valid while open. Enforces the v7 phase
+   * machine (spec §5.3) and fails loud with a stable code so the tool layer
+   * can hand the model a correctable rejection.
    */
   propose(action: ForgeAction): void {
     if (this.#state === 'committed') {
@@ -141,8 +149,6 @@ export class ActionBuffer {
         `only an open buffer can be sealed (state=${this.#state})`,
       );
     }
-    // publicText/usage are owned by the AgentTurnResult on the caller side;
-    // the buffer only records the seal so commit stays strictly action-only.
     void publicText;
     void usage;
     this.#state = 'successful';
@@ -150,8 +156,8 @@ export class ActionBuffer {
 
   /**
    * Discards every buffered proposal. Valid from `open` and from a sealed
-   * (but uncommitted) buffer so a late abort can still drop actions;
-   * idempotent once failed; rejected after commit.
+   * (but uncommitted) buffer so a late abort can still drop actions; idempotent
+   * once failed; rejected after commit.
    */
   fail(cause: Error): void {
     if (this.#state === 'committed') {
@@ -170,8 +176,8 @@ export class ActionBuffer {
   }
 
   /**
-   * Returns a deep-frozen copy of the sealed proposals, exactly once and
-   * only from `successful`. An unsealed buffer fails the Turn loudly.
+   * Returns a deep-frozen copy of the sealed proposals, exactly once and only
+   * from `successful`. An unsealed buffer fails the Turn loudly.
    */
   commit(): readonly ForgeAction[] {
     if (this.#state === 'committed') {
@@ -197,8 +203,8 @@ export class ActionBuffer {
   }
 
   /**
-   * The production/dispatch phase gate (spec §4.1/§5.3). Throws a coded
-   * ActionBufferError for every illegal transition without buffering the
+   * The v7 production/operate/coordinate phase gate (spec §4.1/§5.3). Throws a
+   * coded ActionBufferError for every illegal transition without buffering the
    * proposal; legal transitions advance `#phase`.
    */
   private assertPhaseTransition(action: ForgeAction): void {
@@ -209,51 +215,58 @@ export class ActionBuffer {
         `turn ${this.turnId} already completed its one dispatch; no further actions are accepted`,
       );
     }
+    if (type === 'request_human_input') {
+      // F7 flipped (spec §4): the direct human interrupt may be the sole first
+      // action OR follow finish_production/annotate_artifact; it never follows
+      // a dispatch. `production` and `sealed` both allow it.
+      this.#phase = 'human_interrupted';
+      return;
+    }
     if (this.#phase === 'production') {
-      if (type === 'request_human_input') {
-        if (this.#proposals.length > 0) {
-          // FROZEN DECISION (review F7, kept on purpose): the direct human
-          // interrupt is strictly the SOLE FIRST action of the turn. Any
-          // production work before it — even one load_skill — rejects it,
-          // and once it interrupts, the turn is terminal. Do not relax this
-          // without a spec change.
+      if (DISPATCH_ACTION_TYPES.has(type)) {
+        if (type === 'publish_artifact') {
+          // publish requires a sealed package (production turn).
           throw new ActionBufferError(
-            ACTION_BUFFER_ERROR_CODES.PHASE_HUMAN_INTERRUPT_INVALID,
-            'request_human_input may only interrupt as the first action of the turn',
+            ACTION_BUFFER_ERROR_CODES.PHASE_PUBLISH_WITHOUT_FINISH_INVALID,
+            'publish_artifact requires finish_production to seal the package first',
           );
         }
-        this.#phase = 'human_interrupted';
+        // forward/send/submit dispatch directly from production (operate turn).
+        this.#phase = 'dispatched';
         return;
-      }
-      if (DELIVERY_ACTION_TYPES.has(type)) {
-        throw new ActionBufferError(
-          ACTION_BUFFER_ERROR_CODES.PHASE_ORDER_INVALID,
-          'dispatch actions require finish_production to seal the production package first',
-        );
       }
       if (type === 'finish_production') {
         this.#phase = 'sealed';
+        return;
       }
-      return; // load_skill stays in the production phase
+      if (PRODUCTION_PHASE_TYPES.has(type)) {
+        return; // load_skill / read_artifact_version / annotate_artifact stay
+      }
+      throw new ActionBufferError(
+        ACTION_BUFFER_ERROR_CODES.PHASE_ORDER_INVALID,
+        `action ${type} is not accepted in the production phase`,
+      );
     }
     // phase === 'sealed'
+    if (DISPATCH_ACTION_TYPES.has(type)) {
+      this.#phase = 'dispatched';
+      return;
+    }
     if (type === 'finish_production') {
       throw new ActionBufferError(
         ACTION_BUFFER_ERROR_CODES.PHASE_FINISH_DUPLICATE,
         `turn ${this.turnId} already sealed its production package`,
       );
     }
-    if (type === 'request_human_input') {
-      this.#phase = 'human_interrupted';
-      return;
-    }
-    if (DELIVERY_ACTION_TYPES.has(type)) {
-      this.#phase = 'dispatched';
-      return;
+    if (type === 'annotate_artifact') {
+      throw new ActionBufferError(
+        ACTION_BUFFER_ERROR_CODES.PHASE_ANNOTATE_AFTER_SEAL_INVALID,
+        'annotate_artifact is an operate-turn action and cannot follow finish_production',
+      );
     }
     throw new ActionBufferError(
       ACTION_BUFFER_ERROR_CODES.PHASE_ORDER_INVALID,
-      'production tools and load_skill are not allowed after the package is sealed',
+      'production tools are not allowed after the package is sealed',
     );
   }
 }

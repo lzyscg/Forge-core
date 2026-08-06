@@ -1,15 +1,15 @@
 // @vitest-environment node
 /**
- * Forge action contract tests for the production/dispatch turn contract
- * (plan 2026-08-04 Task 1 Step 1, spec §4.3/§5.1/§5.2).
+ * Forge action contract tests for the v7 production/operate turn contract
+ * (spec §4.3/§5.1/§5.2, plan 2026-08-07 Phase 2).
  *
- * The closed registry gains `finish_production`: the one action that seals
- * the turn's production package. Dispatch actions (`send_message`,
- * `publish_artifact`, `submit_final_artifact`) carry no content or metadata
- * anymore — only `productionPackageRef: 'current'` plus their target/intent
- * fields; everything delivered comes from the sealed package. Validation
- * stays shape-only: phase order, route and contract checks belong to the
- * ActionBuffer and the ActionCommitter. Platform module, zero business
+ * v7 reshapes the v1 sealed-package model into the production/operate split:
+ * `finish_production(files)` is the only seal action (production turns only)
+ * and seals a multi-file package; dispatch actions carry no
+ * `productionPackageRef` and no content of their own. `submit_final_artifact`
+ * resolves the submitted version from the input node's `inputVersion`.
+ * Validation stays shape-only: phase order, route and contract checks belong
+ * to the ActionBuffer and the ActionCommitter. Platform module, zero business
  * vocabulary (iron rule 1).
  */
 import { describe, expect, it } from 'vitest';
@@ -24,37 +24,56 @@ import {
   type ForgeAction,
 } from './forge-actions';
 
-/** The exact action shapes the plan Task 1 Step 1 pins (verbatim). */
+/** The exact v7 action shapes the contract pins (verbatim). */
 const planShapes: ForgeAction[] = [
-  { type: 'finish_production', source: 'inline', content: 'review', format: 'text', artifactType: null, title: null },
-  { type: 'finish_production', source: 'workspace_file', workspaceFile: 'draft/chapter.md', format: 'markdown', artifactType: 'chapter_markdown', title: '第一章' },
-  { type: 'finish_production', source: 'current_input_artifact' },
-  { type: 'send_message', targetAgentId: 'writer', productionPackageRef: 'current' },
-  { type: 'publish_artifact', productionPackageRef: 'current' },
-  { type: 'submit_final_artifact', productionPackageRef: 'current' },
+  {
+    type: 'finish_production',
+    source: 'inline',
+    files: [{ name: 'content.md', content: 'review' }],
+    format: 'text',
+    artifactType: null,
+    title: null,
+  },
+  {
+    type: 'finish_production',
+    source: 'workspace_file',
+    files: [{ name: 'chapter.md', workspaceFile: 'draft/chapter.md' }],
+    format: 'markdown',
+    artifactType: 'chapter_markdown',
+    title: '第一章',
+  },
+  { type: 'annotate_artifact', file: 'review.md', content: '---\nverdict: pass\n---\n意见' },
+  { type: 'read_artifact_version', file: 'chapter.md' },
+  { type: 'send_message', targetAgentId: 'writer', summary: '返修意见' },
+  { type: 'publish_artifact' },
+  { type: 'forward_input_version', targetAgentId: 'controller' },
+  { type: 'submit_final_artifact' },
 ];
 
 const validSamples: Record<string, ForgeAction> = {
   load_skill: { type: 'load_skill', skillId: 'skill-alpha' },
   finish_inline: planShapes[0],
   finish_workspace: planShapes[1],
-  finish_input_artifact: planShapes[2],
-  send_message: planShapes[3],
-  publish_artifact: planShapes[4],
-  submit_final_artifact: planShapes[5],
+  annotate_artifact: planShapes[2],
+  read_artifact_version: planShapes[3],
+  send_message: planShapes[4],
+  publish_artifact: planShapes[5],
+  forward_input_version: planShapes[6],
+  submit_final_artifact: planShapes[7],
   request_human_input: { type: 'request_human_input', question: 'Which variant should continue?' },
 };
 
 describe('closed action registry (spec §5, plan Task 1)', () => {
-  it('exposes exactly six Forge action names including finish_production', () => {
+  it('exposes exactly nine Forge action names', () => {
     expect([...FORGE_ACTION_NAMES].sort()).toEqual([
-      'finish_production', 'load_skill', 'publish_artifact', 'request_human_input',
+      'annotate_artifact', 'finish_production', 'forward_input_version', 'load_skill',
+      'publish_artifact', 'read_artifact_version', 'request_human_input',
       'send_message', 'submit_final_artifact',
     ]);
   });
 
-  it('locks membership in a read-only six-name set', () => {
-    expect(FORGE_ACTION_NAME_SET.size).toBe(6);
+  it('locks membership in a read-only nine-name set', () => {
+    expect(FORGE_ACTION_NAME_SET.size).toBe(9);
     for (const name of FORGE_ACTION_NAMES) {
       expect(FORGE_ACTION_NAME_SET.has(name)).toBe(true);
     }
@@ -81,14 +100,13 @@ describe('plan Task 1 Step 1 verbatim shapes', () => {
 });
 
 describe('finish_production validation (spec §4.3/§5.1)', () => {
-  it('accepts inline, workspace_file and current_input_artifact sources', () => {
-    expect(validateForgeAction({ type: 'finish_production', source: 'inline', content: 'body' }))
-      .toMatchObject({ source: 'inline', content: 'body', artifactType: null, title: null });
+  it('accepts inline and workspace_file sources', () => {
     expect(validateForgeAction({
-      type: 'finish_production', source: 'workspace_file', workspaceFile: 'draft/v1.md',
-    })).toMatchObject({ source: 'workspace_file', workspaceFile: 'draft/v1.md' });
-    expect(validateForgeAction({ type: 'finish_production', source: 'current_input_artifact' }))
-      .toEqual({ type: 'finish_production', source: 'current_input_artifact' });
+      type: 'finish_production', source: 'inline', files: [{ name: 'content.md', content: 'body' }],
+    })).toMatchObject({ source: 'inline', artifactType: null, title: null });
+    expect(validateForgeAction({
+      type: 'finish_production', source: 'workspace_file', files: [{ name: 'v1.md', workspaceFile: 'draft/v1.md' }],
+    })).toMatchObject({ source: 'workspace_file' });
   });
 
   it('rejects unknown sources', () => {
@@ -98,113 +116,138 @@ describe('finish_production validation (spec §4.3/§5.1)', () => {
       .toThrowError('ACTION_FIELD_INVALID');
   });
 
+  it('rejects the removed current_input_artifact source', () => {
+    expect(() => validateForgeAction({ type: 'finish_production', source: 'current_input_artifact' }))
+      .toThrowError('ACTION_FIELD_INVALID');
+  });
+
   it('rejects unknown formats for inline and workspace_file packages', () => {
     expect(() => validateForgeAction({
-      type: 'finish_production', source: 'inline', content: 'body', format: 'html',
+      type: 'finish_production', source: 'inline', files: [{ name: 'a.md', content: 'body' }], format: 'html',
     })).toThrowError('ACTION_FIELD_INVALID');
   });
 
   it('accepts inline content up to exactly 2 MiB and rejects beyond', () => {
     const exact = 'x'.repeat(FORGE_ACTION_LIMITS.content);
-    expect(validateForgeAction({ type: 'finish_production', source: 'inline', content: exact }).type)
-      .toBe('finish_production');
+    expect(validateForgeAction({
+      type: 'finish_production', source: 'inline', files: [{ name: 'a.md', content: exact }],
+    }).type).toBe('finish_production');
     expect(() => validateForgeAction({
-      type: 'finish_production', source: 'inline', content: `${exact}x`,
+      type: 'finish_production', source: 'inline', files: [{ name: 'a.md', content: `${exact}x` }],
     })).toThrowError('ACTION_FIELD_INVALID');
   });
 
-  it('rejects empty or non-string inline content', () => {
-    expect(() => validateForgeAction({ type: 'finish_production', source: 'inline', content: '' }))
-      .toThrowError('ACTION_FIELD_INVALID');
-    expect(() => validateForgeAction({ type: 'finish_production', source: 'inline', content: 7 }))
-      .toThrowError('ACTION_FIELD_INVALID');
+  it('rejects empty, non-string or missing inline content', () => {
+    expect(() => validateForgeAction({
+      type: 'finish_production', source: 'inline', files: [{ name: 'a.md', content: '' }],
+    })).toThrowError('ACTION_FIELD_INVALID');
+    expect(() => validateForgeAction({
+      type: 'finish_production', source: 'inline', files: [{ name: 'a.md', content: 7 }],
+    })).toThrowError('ACTION_FIELD_INVALID');
+    expect(() => validateForgeAction({
+      type: 'finish_production', source: 'inline', files: [{ name: 'a.md' }],
+    })).toThrowError('ACTION_FIELD_INVALID');
   });
 
   it('keeps artifactType/title nullable and bounded when present', () => {
     const exactId = 'a'.repeat(FORGE_ACTION_LIMITS.id);
     const exactTitle = 't'.repeat(FORGE_ACTION_LIMITS.shortText);
     expect(validateForgeAction({
-      type: 'finish_production', source: 'inline', content: 'body',
+      type: 'finish_production', source: 'inline', files: [{ name: 'a.md', content: 'body' }],
       artifactType: exactId, title: exactTitle,
     })).toMatchObject({ artifactType: exactId, title: exactTitle });
     expect(() => validateForgeAction({
-      type: 'finish_production', source: 'inline', content: 'body', artifactType: `${exactId}a`,
+      type: 'finish_production', source: 'inline', files: [{ name: 'a.md', content: 'body' }], artifactType: `${exactId}a`,
     })).toThrowError('ACTION_FIELD_INVALID');
     expect(() => validateForgeAction({
-      type: 'finish_production', source: 'inline', content: 'body', title: `${exactTitle}t`,
+      type: 'finish_production', source: 'inline', files: [{ name: 'a.md', content: 'body' }], title: `${exactTitle}t`,
     })).toThrowError('ACTION_FIELD_INVALID');
     expect(() => validateForgeAction({
-      type: 'finish_production', source: 'inline', content: 'body', artifactType: '',
+      type: 'finish_production', source: 'inline', files: [{ name: 'a.md', content: 'body' }], artifactType: '',
     })).toThrowError('ACTION_FIELD_INVALID');
   });
 
-  it('rejects content or format keys on a current_input_artifact package', () => {
+  it('requires a non-empty, unique files array', () => {
     expect(() => validateForgeAction({
-      type: 'finish_production', source: 'current_input_artifact', content: 'body',
-    })).toThrowError('ACTION_UNKNOWN_KEY');
+      type: 'finish_production', source: 'inline', files: [],
+    })).toThrowError('ACTION_FIELD_INVALID');
     expect(() => validateForgeAction({
-      type: 'finish_production', source: 'current_input_artifact', format: 'markdown',
-    })).toThrowError('ACTION_UNKNOWN_KEY');
+      type: 'finish_production', source: 'inline', files: [{ name: 'a.md', content: 'x' }, { name: 'a.md', content: 'y' }],
+    })).toThrowError('ACTION_FIELD_INVALID');
   });
 
   it('rejects workspaceFile refs that are absolute, escaping or oversized', () => {
     const base = { type: 'finish_production', source: 'workspace_file' } as const;
-    expect(() => validateForgeAction({ ...base, workspaceFile: '/abs/draft.md' }))
+    expect(() => validateForgeAction({ ...base, files: [{ name: 'a.md', workspaceFile: '/abs/draft.md' }] }))
       .toThrowError('ACTION_FIELD_INVALID');
-    expect(() => validateForgeAction({ ...base, workspaceFile: 'a/../b.md' }))
+    expect(() => validateForgeAction({ ...base, files: [{ name: 'a.md', workspaceFile: 'a/../b.md' }] }))
       .toThrowError('ACTION_FIELD_INVALID');
-    expect(() => validateForgeAction({ ...base, workspaceFile: '' }))
+    expect(() => validateForgeAction({ ...base, files: [{ name: 'a.md', workspaceFile: '' }] }))
       .toThrowError('ACTION_FIELD_INVALID');
     const exact = `draft/${'x'.repeat(PUBLISH_WORKSPACE_FILE_MAX_LENGTH - 'draft/'.length)}`;
     expect(exact.length).toBe(PUBLISH_WORKSPACE_FILE_MAX_LENGTH);
-    expect(validateForgeAction({ ...base, workspaceFile: exact }))
-      .toMatchObject({ workspaceFile: exact });
-    expect(() => validateForgeAction({ ...base, workspaceFile: `${exact}x` }))
+    expect(validateForgeAction({ ...base, files: [{ name: 'a.md', workspaceFile: exact }] }))
+      .toMatchObject({ source: 'workspace_file' });
+    expect(() => validateForgeAction({ ...base, files: [{ name: 'a.md', workspaceFile: `${exact}x` }] }))
       .toThrowError('ACTION_FIELD_INVALID');
   });
 
   it('rejects a workspace_file package without a workspaceFile ref', () => {
-    expect(() => validateForgeAction({ type: 'finish_production', source: 'workspace_file' }))
-      .toThrowError('ACTION_FIELD_INVALID');
+    expect(() => validateForgeAction({
+      type: 'finish_production', source: 'workspace_file', files: [{ name: 'a.md' }],
+    })).toThrowError('ACTION_FIELD_INVALID');
   });
 });
 
-describe('dispatch actions reference the sealed package (spec §5.2)', () => {
+describe('dispatch actions carry no productionPackageRef (spec §5.2)', () => {
   it.each([
-    ['send_message', { type: 'send_message', targetAgentId: 'writer' }],
+    ['send_message', { type: 'send_message', targetAgentId: 'writer', summary: '返修意见' }],
     ['publish_artifact', { type: 'publish_artifact' }],
+    ['forward_input_version', { type: 'forward_input_version', targetAgentId: 'controller' }],
     ['submit_final_artifact', { type: 'submit_final_artifact' }],
   ] as Array<[string, Record<string, unknown>]>)(
-    '%s requires productionPackageRef to be exactly current',
+    '%s accepts the v7 shape and rejects the removed productionPackageRef',
     (_name, action) => {
-      expect(() => validateForgeAction(action)).toThrowError('ACTION_FIELD_INVALID');
-      expect(() => validateForgeAction({ ...action, productionPackageRef: 'latest' }))
-        .toThrowError('ACTION_FIELD_INVALID');
-      expect(validateForgeAction({ ...action, productionPackageRef: 'current' }))
-        .toMatchObject({ productionPackageRef: 'current' });
+      expect(validateForgeAction(action)).toEqual(action);
+      expect(() => validateForgeAction({ ...action, productionPackageRef: 'current' }))
+        .toThrowError('ACTION_UNKNOWN_KEY');
     },
   );
 
   it('rejects legacy content/metadata fields on dispatch actions', () => {
     expect(() => validateForgeAction({
-      type: 'send_message', targetAgentId: 'writer', productionPackageRef: 'current', message: 'x',
+      type: 'send_message', targetAgentId: 'writer', summary: 'x', message: 'y',
     })).toThrowError('ACTION_UNKNOWN_KEY');
-    expect(() => validateForgeAction({
-      type: 'publish_artifact', productionPackageRef: 'current', content: 'body',
-    })).toThrowError('ACTION_UNKNOWN_KEY');
-    expect(() => validateForgeAction({
-      type: 'submit_final_artifact', productionPackageRef: 'current', artifactRef: 'latest',
-    })).toThrowError('ACTION_UNKNOWN_KEY');
+    expect(() => validateForgeAction({ type: 'publish_artifact', content: 'body' }))
+      .toThrowError('ACTION_UNKNOWN_KEY');
+    expect(() => validateForgeAction({ type: 'submit_final_artifact', artifactRef: 'latest' }))
+      .toThrowError('ACTION_UNKNOWN_KEY');
   });
 
-  it('keeps send_message targetAgentId bounded', () => {
+  it('keeps send_message targetAgentId and summary bounded', () => {
     const exact = 'a'.repeat(FORGE_ACTION_LIMITS.id);
-    expect(validateForgeAction({
-      type: 'send_message', targetAgentId: exact, productionPackageRef: 'current',
-    })).toMatchObject({ targetAgentId: exact });
-    expect(() => validateForgeAction({
-      type: 'send_message', targetAgentId: `${exact}a`, productionPackageRef: 'current',
-    })).toThrowError('ACTION_FIELD_INVALID');
+    expect(validateForgeAction({ type: 'send_message', targetAgentId: exact, summary: 's' }))
+      .toMatchObject({ targetAgentId: exact });
+    expect(() => validateForgeAction({ type: 'send_message', targetAgentId: `${exact}a`, summary: 's' }))
+      .toThrowError('ACTION_FIELD_INVALID');
+    const exactSummary = 'x'.repeat(FORGE_ACTION_LIMITS.shortText);
+    expect(validateForgeAction({ type: 'send_message', targetAgentId: 'writer', summary: exactSummary }).type)
+      .toBe('send_message');
+    expect(() => validateForgeAction({ type: 'send_message', targetAgentId: 'writer', summary: `${exactSummary}x` }))
+      .toThrowError('ACTION_FIELD_INVALID');
+  });
+
+  it('keeps annotate_artifact content bounded and forward_input_version target bounded', () => {
+    const exact = 'x'.repeat(FORGE_ACTION_LIMITS.content);
+    expect(validateForgeAction({ type: 'annotate_artifact', file: 'review.md', content: exact }).type)
+      .toBe('annotate_artifact');
+    expect(() => validateForgeAction({ type: 'annotate_artifact', file: 'review.md', content: `${exact}x` }))
+      .toThrowError('ACTION_FIELD_INVALID');
+    const exactId = 'a'.repeat(FORGE_ACTION_LIMITS.id);
+    expect(validateForgeAction({ type: 'forward_input_version', targetAgentId: exactId }).type)
+      .toBe('forward_input_version');
+    expect(() => validateForgeAction({ type: 'forward_input_version', targetAgentId: `${exactId}a` }))
+      .toThrowError('ACTION_FIELD_INVALID');
   });
 
   it('keeps request_human_input question bounded at 16 KiB', () => {
@@ -241,7 +284,7 @@ describe('action boundary invariants (spec §6.2, unchanged)', () => {
       }
     };
     attempt({ type: 'delete_history' });
-    attempt({ type: 'send_message', targetAgentId: 'writer', productionPackageRef: 'current', trace: 'y' });
+    attempt({ type: 'send_message', targetAgentId: 'writer', summary: 'x', trace: 'y' });
     attempt(null);
     attempt('send_message');
     attempt([]);

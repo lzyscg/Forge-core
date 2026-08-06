@@ -14,36 +14,54 @@ import type { ProgressPolicy } from '../runtime/progress-guard';
 import type { PublicCoreError } from '../../shared/errors';
 
 /**
- * The per-agent turn contract of the production/dispatch model (plan
- * 2026-08-04, spec §6). Every current template agent declares one: the
- * production phase must end with `finish_production` sealing a package from
- * an allowed source/format, then exactly one allowed dispatch action
- * delivers that sealed package (`productionPackageRef: current`). Historical
- * frozen snapshots without a supported contract are non-runnable (spec §7.3).
+ * The per-agent turn contract of the v7 production/operate/coordinate model
+ * (plan 2026-08-07, spec §15). A production turn declares `production` and
+ * dispatches `publish_artifact`; an operate turn declares `annotate` and
+ * dispatches `forward_input_version`/`send_message`/`submit_final_artifact`;
+ * a coordinate (dispatch-only) turn declares neither and only dispatches.
+ * `request_human_input` may interrupt any turn. The v2 shape drops the v1
+ * `productionPackageRef`/`cardinality` (kept optional here so legacy v1
+ * snapshots still type-check until Phase 3 rewrites the fixtures).
  */
 export interface TurnContract {
-  version: 1;
-  production: {
-    completionAction: 'finish_production';
+  version: 1 | 2;
+  production?: {
+    completionAction?: 'finish_production';
     output: {
       formats: Array<'markdown' | 'text'>;
       sources: Array<'inline' | 'workspace_file' | 'current_input_artifact'>;
     };
+    /** v2: the files a production turn seals. */
+    files?: string[];
+  };
+  /** v2: present => the agent may annotate these files (operate turn). */
+  annotate?: {
+    files: string[];
   };
   dispatch: {
-    cardinality: 'single';
+    /** Kept for v1 compatibility; v2 is always single. */
+    cardinality?: 'single';
     /** The delivery intents this agent may choose from; exactly one per turn. */
-    allowedActions: Array<'send_message' | 'publish_artifact' | 'submit_final_artifact'>;
+    allowedActions: Array<
+      | 'send_message'
+      | 'publish_artifact'
+      | 'submit_final_artifact'
+      | 'forward_input_version'
+      | 'request_human_input'
+    >;
     /**
-     * Candidate target set per intent (plan 2026-08-06): the turn's one
-     * dispatch may target any agent in the declared set. Scalar template
-     * declarations normalize to one-element sets at load time (final
-     * submission targets the system).
+     * Candidate target set per intent: the turn's one dispatch may target any
+     * agent in the declared set. Scalar template declarations normalize to
+     * one-element sets at load time.
      */
     targets: Partial<
-      Record<'send_message' | 'publish_artifact' | 'submit_final_artifact', string[]>
+      Record<
+        'send_message' | 'publish_artifact' | 'submit_final_artifact' | 'forward_input_version',
+        string[]
+      >
     >;
-    productionPackageRef: 'current';
+    /** Kept for v1 compatibility; v2 dispatch actions carry no package ref. */
+    productionPackageRef?: 'current';
   };
 }
 
@@ -87,7 +105,9 @@ export interface FrozenTemplate {
  * executed — the scheduler gates them into `incompatible` (spec §7.3).
  */
 export function isTurnContractSupported(frozen: FrozenTemplate): boolean {
-  return frozen.agents.every((agent) => agent.turnContract !== null && agent.turnContract.version === 1);
+  return frozen.agents.every(
+    (agent) => agent.turnContract !== null && (agent.turnContract.version === 1 || agent.turnContract.version === 2),
+  );
 }
 
 /**

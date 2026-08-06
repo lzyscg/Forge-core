@@ -37,6 +37,7 @@ import { SkillService } from './skill-service';
 import { buildTurnChecklist, TaskRunner, type RunNextResult } from './task-runner';
 import { WorkspaceStore } from './workspace-store';
 import { RecordingRuntime } from './test-support';
+import type { FrozenAgentConfig } from '../template/template-schema';
 
 afterEach(() => {
   disposeAllTestRoots();
@@ -130,30 +131,20 @@ const writerPublishTurn = (title: string, content = '初稿正文'): FakeScriptS
     {
       type: 'finish_production',
       source: 'inline',
-      content,
+      files: [{ name: 'content.md', content }],
       format: 'markdown',
       artifactType: '终稿',
       title,
     },
-    { type: 'publish_artifact', productionPackageRef: 'current' },
+    { type: 'publish_artifact' },
   ],
 });
 
-/** One legal reviewer turn: seal an inline review and message it to writer. */
+/** One legal reviewer turn: send a short message back to the writer. */
 const reviewerMessageTurn: FakeScriptStep = {
   kind: 'result',
   publicText: '审读完成',
-  actions: [
-    {
-      type: 'finish_production',
-      source: 'inline',
-      content: '请修改第二段。',
-      format: 'text',
-      artifactType: null,
-      title: null,
-    },
-    { type: 'send_message', targetAgentId: 'writer', productionPackageRef: 'current' },
-  ],
+  actions: [{ type: 'send_message', targetAgentId: 'writer', summary: '请修改第二段。' }],
 };
 
 describe('TaskRunner legal next step (plan Task 4 Step 1 verbatim)', () => {
@@ -498,12 +489,12 @@ describe('TaskRunner attempt outcomes', () => {
             {
               type: 'finish_production',
               source: 'inline',
-              content: '封存正文',
-              format: 'text',
+              files: [{ name: 'content.md', content: '封存正文' }],
+              format: 'markdown',
               artifactType: null,
               title: null,
             },
-            { type: 'send_message', targetAgentId: 'unknown', productionPackageRef: 'current' },
+            { type: 'send_message', targetAgentId: 'unknown', summary: '返修意见' },
           ],
         },
       ],
@@ -565,26 +556,18 @@ describe('TaskRunner attempt outcomes', () => {
 
   it('reports task completion only through the system final gate', async () => {
     const harness = await runnerHarness({
+      writer: [writerPublishTurn('终稿 V1', '终稿正文')],
       reviewer: [
         {
           kind: 'result',
           publicText: '终稿提交',
-          actions: [
-            {
-              type: 'finish_production',
-              source: 'inline',
-              content: '终稿正文',
-              format: 'markdown',
-              artifactType: '终稿',
-              title: '终稿 V1',
-            },
-            { type: 'submit_final_artifact', productionPackageRef: 'current' },
-          ],
+          actions: [{ type: 'submit_final_artifact' }],
         },
       ],
     });
-    await seedInput(harness, { id: 'ev-input-reviewer', agentId: 'reviewer', sequence: 1, body: '审核' });
+    await seedInput(harness, { id: 'ev-input-writer', agentId: 'writer', sequence: 1, body: '开始' });
 
+    await harness.runner.runNext(harness.taskId, harness.controller.signal); // writer publishes, routes to reviewer
     const result = await harness.runner.runNext(harness.taskId, harness.controller.signal);
     expect(result).toMatchObject({ committed: true, taskCompleted: true, waitingHuman: false });
     const workspace = await harness.workspace(harness.taskId);
@@ -592,20 +575,17 @@ describe('TaskRunner attempt outcomes', () => {
     expect(workspace.artifacts.at(-1)?.final).toBe(true);
   });
 
-  it('submits a current_input_artifact package through the received hand-off', async () => {
-    // writer publishes V1 (auto-routed), reviewer seals the RECEIVED artifact
-    // and submits it as final — the platform resolves the reference, no new
-    // artifact version is published (plan 2026-08-04 frozen decision 3/5).
+  it('submits the received hand-off artifact as final without re-publishing', async () => {
+    // writer publishes V1 (auto-routed), reviewer submits the RECEIVED input
+    // version as final — the platform resolves the version from the input node,
+    // no new artifact version is published (frozen decision 3/5).
     const harness = await runnerHarness({
       writer: [writerPublishTurn('章节 V1', '章节正文')],
       reviewer: [
         {
           kind: 'result',
           publicText: '审核通过，提交原稿。',
-          actions: [
-            { type: 'finish_production', source: 'current_input_artifact' },
-            { type: 'submit_final_artifact', productionPackageRef: 'current' },
-          ],
+          actions: [{ type: 'submit_final_artifact' }],
         },
       ],
     });
@@ -622,16 +602,13 @@ describe('TaskRunner attempt outcomes', () => {
     expect(workspace.artifacts.at(-1)?.files[0].content).toBe('章节正文');
   });
 
-  it('fails the attempt when current_input_artifact is sealed without a received artifact', async () => {
+  it('fails the attempt when submit_final_artifact runs without a received artifact', async () => {
     const harness = await runnerHarness({
       reviewer: [
         {
           kind: 'result',
-          publicText: '引用不存在的产物',
-          actions: [
-            { type: 'finish_production', source: 'current_input_artifact' },
-            { type: 'submit_final_artifact', productionPackageRef: 'current' },
-          ],
+          publicText: '提交不存在的产物',
+          actions: [{ type: 'submit_final_artifact' }],
         },
       ],
     });
@@ -714,7 +691,7 @@ describe('TaskRunner retry budget (plan Task 5 Step 3)', () => {
           kind: 'result',
           publicText: '非法动作',
           actions: [
-            { type: 'send_message', targetAgentId: 'unknown', productionPackageRef: 'current' },
+            { type: 'send_message', targetAgentId: 'unknown', summary: '返修意见' },
           ],
         },
       ],
@@ -750,12 +727,12 @@ describe('TaskRunner final turn-trace recording (plan 2026-08-04 Task 5)', () =>
             {
               type: 'finish_production',
               source: 'inline',
-              content: '封存正文',
+              files: [{ name: 'content.md', content: '封存正文' }],
               format: 'markdown',
               artifactType: '终稿',
               title: '初稿 V1',
             },
-            { type: 'publish_artifact', productionPackageRef: 'current' },
+            { type: 'publish_artifact' },
           ],
         },
       ],
@@ -841,12 +818,12 @@ describe('TaskRunner workspace production resolution (plan 2026-08-04 Task 4)', 
             {
               type: 'finish_production',
               source: 'workspace_file',
-              workspaceFile: 'draft/v1.md',
+              files: [{ name: 'content.md', workspaceFile: 'draft/v1.md' }],
               format: 'markdown',
               artifactType: '终稿',
               title: '工作区 V1',
             },
-            { type: 'publish_artifact', productionPackageRef: 'current' },
+            { type: 'publish_artifact' },
           ],
         },
       ],
@@ -874,12 +851,12 @@ describe('TaskRunner workspace production resolution (plan 2026-08-04 Task 4)', 
             {
               type: 'finish_production',
               source: 'workspace_file',
-              workspaceFile: 'missing/draft.md',
+              files: [{ name: 'content.md', workspaceFile: 'missing/draft.md' }],
               format: 'markdown',
               artifactType: '终稿',
               title: '工作区 V1',
             },
-            { type: 'publish_artifact', productionPackageRef: 'current' },
+            { type: 'publish_artifact' },
           ],
         },
       ],
@@ -921,23 +898,36 @@ describe('TaskRunner per-turn checklist (plan 2026-08-06)', () => {
     // The contract's allowed sources are named, not invented.
     expect(checklist).toContain('内联（直接提供全文）');
     expect(checklist).toContain('工作区文件');
-    // The single allowed dispatch names the declared target by id + display name.
     expect(checklist).toContain('publish_artifact');
-    expect(checklist).toContain('reviewer（审核 Agent）');
+    // Production turns publish without naming the target in the checklist.
     expect(checklist).not.toContain('send_message');
     expect(checklist).toContain('文字输出不是动作');
   });
 
-  it('derives every allowed dispatch option for multi-intent contracts', async () => {
+  it('derives every allowed dispatch option for v2 operate contracts', async () => {
     const harness = await runnerHarness({});
     const frozen = await harness.service.tasks.readFrozenTemplate(harness.taskId);
     const reviewer = frozen.agents.find((agent) => agent.id === 'reviewer');
     expect(reviewer).toBeDefined();
 
-    const checklist = buildTurnChecklist(reviewer!, frozen);
+    // A v2 operate contract (no production; annotate present) renders the
+    // annotate steps and every allowed operate dispatch.
+    const operateReviewer: FrozenAgentConfig = {
+      ...reviewer!,
+      turnContract: {
+        version: 2,
+        annotate: { files: ['review.md'] },
+        dispatch: {
+          cardinality: 'single',
+          allowedActions: ['send_message', 'submit_final_artifact'],
+          targets: { send_message: ['writer'] },
+        },
+      },
+    };
+    const checklist = buildTurnChecklist(operateReviewer, frozen);
+    expect(checklist).toContain('annotate_artifact');
     expect(checklist).toContain('调用 send_message 向 writer（初稿 Agent） 发送消息');
-    expect(checklist).toContain('调用 submit_final_artifact 申请系统最终交付');
-    expect(checklist).toContain('当前输入携带的产物');
+    expect(checklist).toContain('调用 submit_final_artifact 提交终稿');
   });
 
   it('joins multiple candidate targets with 或 in the dispatch checklist lines', async () => {
@@ -945,12 +935,14 @@ describe('TaskRunner per-turn checklist (plan 2026-08-06)', () => {
     const frozen = await harness.service.tasks.readFrozenTemplate(harness.taskId);
     const reviewer = frozen.agents.find((agent) => agent.id === 'reviewer');
     expect(reviewer).toBeDefined();
-    const multiTarget = {
+    const multiTarget: FrozenAgentConfig = {
       ...reviewer!,
       turnContract: {
-        ...reviewer!.turnContract!,
+        version: 2,
+        annotate: { files: ['review.md'] },
         dispatch: {
-          ...reviewer!.turnContract!.dispatch,
+          cardinality: 'single',
+          allowedActions: ['send_message', 'submit_final_artifact'],
           targets: { send_message: ['writer', 'reviewer'] },
         },
       },

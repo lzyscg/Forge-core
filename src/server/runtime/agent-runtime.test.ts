@@ -26,7 +26,7 @@ function finishInline(): ForgeAction {
   return {
     type: 'finish_production',
     source: 'inline',
-    content: 'sealed production body',
+    files: [{ name: 'content.md', content: 'sealed production body' }],
     format: 'text',
     artifactType: null,
     title: null,
@@ -34,9 +34,10 @@ function finishInline(): ForgeAction {
 }
 
 describe('Forge runtime contract (plan Phase C Task 1 Step 1)', () => {
-  it('exposes exactly six Forge action names including finish_production', () => {
+  it('exposes exactly nine Forge action names including finish_production', () => {
     expect([...FORGE_ACTION_NAMES].sort()).toEqual([
-      'finish_production', 'load_skill', 'publish_artifact', 'request_human_input',
+      'annotate_artifact', 'finish_production', 'forward_input_version', 'load_skill',
+      'publish_artifact', 'read_artifact_version', 'request_human_input',
       'send_message', 'submit_final_artifact',
     ]);
   });
@@ -50,8 +51,8 @@ describe('Forge runtime contract (plan Phase C Task 1 Step 1)', () => {
     expect(buffer.snapshot()).toEqual([]);
   });
 
-  it('locks membership in a read-only six-name set', () => {
-    expect(FORGE_ACTION_NAME_SET.size).toBe(6);
+  it('locks membership in a read-only nine-name set', () => {
+    expect(FORGE_ACTION_NAME_SET.size).toBe(9);
     for (const name of FORGE_ACTION_NAMES) {
       expect(FORGE_ACTION_NAME_SET.has(name)).toBe(true);
     }

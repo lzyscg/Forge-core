@@ -10,7 +10,28 @@
 - **legacy 兼容**：v1 在途任务 gate 为 `incompatible(SCHEMA_V2_REQUIRED)` 只读；event-store 读取期 transform 归一旧事件（artifactVersion→inputVersion、contentHash→files、缺省 humanAuthorized=false、缺省 source=agent_request）使其不 CORRUPTED。
 - **真实验收**：`scripts/real-acceptance.ts` 硬编码 zhihu-single-chapter（Phase 3 删除）。Phase 7 将写 dedicated long-form-hub 验收脚本（3 agent：controller/writer/reviewer 占位符替换）。
 
-## Phase 1 — 存储层
+## Phase 2 — 动作与工具
+
+（已完成；tsc 0 错误，35 server test files / 635 tests 绿）
+
+### 做了什么
+- `forge-actions.ts` 重写为 v7 **9 动作注册表**：`load_skill`、多文件 `finish_production`、`annotate_artifact`、`read_artifact_version`、`publish_artifact`、`forward_input_version`、`submit_final_artifact`、`send_message(summary)`、`request_human_input`。
+- 删除 dispatch 的 `productionPackageRef` 与 finish 的 `current_input_artifact`；模型不再传版本/工程元数据。
+- `action-buffer.ts` 支持 production / operate / coordinate 三种形态；operate/coordinate 可直接 dispatch；`request_human_input` 按 v7 F7 可在生产/标注后中断，但 dispatch 后拒绝；publish 必须先 finish。
+- `pi-tool-factory.ts` 暴露 9 个工具；新增 artifact file reader；工具描述包含 v7 阶段/参数约束；读工具不进入 action buffer。
+- `action-committer.ts` 重写 v7 提交序：agent_result(inputNodeId+dispatchKind) → skills → annotate → publish/files/routes → forward/send → submit/human；新增 route/forward/annotate/reachability 校验与 humanAuthorized 放宽。
+- `task-runner.ts` 处理多文件 workspace_file、inputVersion handoff、v7 checklist；`TurnPhaseDispatchAction` 加 forward。
+- `template-schema.ts` 扩展 TurnContract v2 类型（Phase 3 将实施严格 validator）。
+- 全部 server 测试 fixtures 迁移到新动作形状；新增测试 helper `publishFixtureArtifact` / `seedAgentInputVersion`。
+
+### 关键决策
+- 当前保留 v1 fixture contract 的宽松 TypeScript 兼容，严格 v2 形状及 production/annotate/dispatch-only 推导留 Phase 3 validator。
+- `send_message.summary` 作为消息正文；inputVersion 仅沿事件节点传播，不由模型携带。
+- `read_artifact_version` 是纯读工具，不进入 ActionBuffer，不产生 committed action。
+
+### 问题与解决
+- v7 action shape 影响 server 35 个测试文件；通过集中迁移 fixture builders，再逐一修正 submit-from-inputVersion、workspace_file files[]、humanAuthorized 输入。
+
 
 （已完成；tsc 0 错误，1093/1093 测试绿，含新增 14 条 artifact-store v7 测试）
 

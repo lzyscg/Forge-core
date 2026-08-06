@@ -13,6 +13,8 @@ import {
   createDeferred,
   createSchedulerEnvironment,
   disposeRuntimeTestRoots,
+  publishFixtureArtifact,
+  seedAgentInputVersion,
   type SchedulerEnvironment,
 } from './runtime/test-support';
 
@@ -61,26 +63,14 @@ async function waitForStatus(
   }
 }
 
-/** Final-submitter script: seal one package and submit the final output. */
-function finalSubmissionScript(environment: SchedulerEnvironment, deferred?: ReturnType<typeof createDeferred<void>>) {
-  const format = environment.frozen.finalOutput.format;
-  const artifactType = environment.frozen.finalOutput.name;
+/** Final-submitter script: submit the received input version as final output. */
+function finalSubmissionScript(deferred?: ReturnType<typeof createDeferred<void>>) {
   return {
     kind: 'result' as const,
     ...(deferred !== undefined ? { deferred } : {}),
     publicText: 'neutral streamed result',
     thinking: 'neutral thoughts',
-    actions: [
-      {
-        type: 'finish_production' as const,
-        source: 'inline' as const,
-        content: 'neutral final content',
-        format,
-        artifactType,
-        title: 'Neutral Fixture Final',
-      },
-      { type: 'submit_final_artifact' as const, productionPackageRef: 'current' as const },
-    ],
+    actions: [{ type: 'submit_final_artifact' as const }],
   };
 }
 
@@ -98,9 +88,20 @@ describe('CoreService live streaming (plan C)', () => {
     const submitterId = environment.frozen.finalOutput.submitters[0];
     if (submitterId === undefined) throw new Error('fixture declares no final submitter');
     const deferred = createDeferred<void>();
-    runtime.setScript(submitterId, [finalSubmissionScript(environment, deferred)]);
+    runtime.setScript(submitterId, [finalSubmissionScript(deferred)]);
     const taskId = await environment.createTask();
-    const inputEventId = await environment.seedAgentInput(taskId, submitterId, 'neutral opening input');
+    const version = await publishFixtureArtifact(environment, taskId, {
+      title: 'Neutral Fixture Final',
+      content: 'neutral final content',
+      sourceNodeId: 'fixture-producer-result',
+    });
+    const inputEventId = await seedAgentInputVersion(
+      environment,
+      taskId,
+      submitterId,
+      'neutral opening input',
+      version,
+    );
 
     const runPromise = environment.service.scheduler.start(taskId);
     const live = await waitForActiveTurn(environment, taskId);

@@ -1,49 +1,45 @@
 /**
- * Legal action commit and system final output (plan Phase C Task 3 Steps
- * 4/5/6; rebuilt for the production/dispatch turn contract by plan
- * 2026-08-04 Task 4, spec §4/§5.3/§6.4).
+ * Legal action commit and system final output (plan 2026-08-07 Phase 2/4; v7
+ * artifact version directory schema, spec §4/§5.3/§6.4/§7).
  *
  * The committer is the only production event producer. It validates the
- * complete buffered action set BEFORE any write — phase order and
- * cardinality of the turn contract, action fields (reusing
- * `validateForgeAction`), contract conformance, agent authorization,
- * declared message/artifact routes, human-request exclusivity and the
- * final-output declaration — and rejects any invalid set with a typed,
- * non-retryable `CommitFailure` while writing nothing.
+ * complete buffered action set BEFORE any write — phase order/cardinality of
+ * the v7 turn contract, action fields (reusing `validateForgeAction`),
+ * contract conformance, agent authorization, declared routes, the
+ * final-output declaration and reachability — and rejects any invalid set
+ * with a typed, non-retryable `CommitFailure` while writing nothing.
  *
- * Turn contract validation (spec §5.3, frozen decision 1):
- * - exactly one `finish_production` seals exactly one production package,
- *   followed by exactly one dispatch action referencing it with
- *   `productionPackageRef: 'current'`; `request_human_input` may instead
- *   interrupt directly as the SOLE first action without any package;
- * - missing finish or missing dispatch -> `AGENT_PHASE_INCOMPLETE`;
- * - dispatch before finish, production work after finish or a second
- *   finish -> `AGENT_PHASE_ORDER_INVALID`;
- * - more than one dispatch action -> `AGENT_DISPATCH_CARDINALITY_INVALID`.
- * These are non-retryable; the TaskRunner records them as attempt failures
- * so the task parks visibly and never stays silently `running`.
+ * v7 commit semantics (spec §9 语义矩阵):
+ * - Production turn: `finish_production(files)` → `publish_artifact`. The
+ *   committer seals the package from the finish files, publishes a new
+ *   version through the ArtifactStore (event-authoritative versioning) and
+ *   fans out along every declared artifact edge of the publisher.
+ * - Operate turn: `[annotate_artifact]` → one of
+ *   `forward_input_version` / `send_message` / `submit_final_artifact`.
+ *   `annotate_artifact` appends a file to the input version (unique per
+ *   (version, file), replay self-excluded). `forward_input_version` routes
+ *   the input version along one artifact edge (zero-copy, node id
+ *   `${turnId}-forward-input-0`). `send_message` delivers the summary as the
+ *   routed message body (carrying the input version). `submit_final_artifact`
+ *   resolves the submitted version from the input node's inputVersion.
+ * - Coordinate turn: dispatch-only (send_message/submit_final_artifact).
+ * - `request_human_input` interrupts directly (sole first action).
  *
- * Sealed-package semantics (frozen decision 5): `publish_artifact`
- * publishes the sealed package using the finish metadata; `send_message`
- * delivers the sealed text as the routed message body;
- * `submit_final_artifact` resolves through the package — a
- * `current_input_artifact` package submits the received artifact id and
- * version (keeping the reachability/declaration checks), any other package
- * is published first and the fresh version is submitted. Dispatch actions
- * carry no content or artifact metadata of their own.
+ * Final output is decided by the system alone (spec §6.4/§7): the artifact
+ * must match the declared format/type, be submitted by a declared submitter
+ * and be reachable through committed execution (the version producer reached
+ * the submitter along committed artifact routes, connected by
+ * `agent_result.inputNodeId`). Human accept relaxes the closure to
+ * "version exists + producer legal + controller is submitter + humanAuthorized".
+ * Natural-language claims and ordinary publishes never complete a task.
  *
- * A valid set commits in one deterministic order: agent result → skill
- * loads → artifact files + `artifact_published` events → routes with their
- * target input nodes → human request or final submission. Every event id,
+ * A valid set commits in one deterministic order: agent result (carrying
+ * `inputNodeId` + `dispatchKind`) → skill loads → annotate files/events →
+ * production publication (files + `artifact_published` + artifact routes) →
+ * one dispatch route → final submission or human request. Every event id,
  * version and timestamp is system-generated (iron rule 2); ids derive from
  * the Turn id so an interrupted commit replays committed items instead of
  * duplicating them.
- *
- * Final output is decided by the system alone (spec §6.4): the artifact
- * must match the declared format (and type, when the package carries one),
- * be submitted by a declared submitter and be reachable through committed
- * execution. Natural-language claims and ordinary publishes never complete
- * a task.
  *
  * No business vocabulary lives here (iron rule 1).
  */
@@ -60,38 +56,29 @@ import {
   validateForgeAction,
   type DispatchActionName,
   type ForgeAction,
-  type ProductionSource,
+  type FinishFile,
+  type DispatchKind,
 } from './forge-actions';
 import type { SkillService } from './skill-service';
 
 /** Stable committer error codes owned by this module. */
 export const COMMIT_ERROR_CODES = {
-  /** The buffered action set exceeds the per-Turn limit. */
   TOO_MANY_ACTIONS: 'TOO_MANY_ACTIONS',
-  /** The action set is internally inconsistent (package/context mismatch). */
   ACTION_SET_INVALID: 'ACTION_SET_INVALID',
-  /** A load_skill targets a Skill not authorized to the current agent. */
   SKILL_NOT_AUTHORIZED: 'SKILL_NOT_AUTHORIZED',
-  /** A message/artifact route is not declared in the frozen snapshot. */
   ROUTE_NOT_ALLOWED: 'ROUTE_NOT_ALLOWED',
-  /** The final reference resolves to no artifact. */
   FINAL_ARTIFACT_NOT_FOUND: 'FINAL_ARTIFACT_NOT_FOUND',
-  /** The final artifact misses the declared type/format. */
   FINAL_DECLARATION_MISMATCH: 'FINAL_DECLARATION_MISMATCH',
-  /** The submitting agent is not a declared final submitter. */
   FINAL_SUBMITTER_NOT_ALLOWED: 'FINAL_SUBMITTER_NOT_ALLOWED',
-  /** The final artifact is not reachable through committed execution. */
   FINAL_NOT_REACHABLE: 'FINAL_NOT_REACHABLE',
-  /** The commit context carries an unsafe or malformed identifier. */
   COMMIT_CONTEXT_INVALID: 'COMMIT_CONTEXT_INVALID',
-  /** A write failed mid-plan; committed items were preserved. */
   COMMIT_INTERRUPTED: 'COMMIT_INTERRUPTED',
-  /** The turn never sealed its production package, or never dispatched it. */
   AGENT_PHASE_INCOMPLETE: 'AGENT_PHASE_INCOMPLETE',
-  /** A dispatch ran before sealing, or production work continued after it. */
   AGENT_PHASE_ORDER_INVALID: 'AGENT_PHASE_ORDER_INVALID',
-  /** The turn attempted more than one dispatch action. */
   AGENT_DISPATCH_CARDINALITY_INVALID: 'AGENT_DISPATCH_CARDINALITY_INVALID',
+  ANNOTATE_VERSION_MISSING: 'ANNOTATE_VERSION_MISSING',
+  ANNOTATE_FILE_NOT_ALLOWED: 'ANNOTATE_FILE_NOT_ALLOWED',
+  ANNOTATE_DUPLICATE: 'ANNOTATE_DUPLICATE',
 } as const;
 
 /** Maximum number of buffered actions one Turn may commit. */
@@ -113,14 +100,6 @@ export class CommitFailure extends Error {
   }
 }
 
-/** The one artifact a sealed package can publish (built at commit time). */
-export interface ProvisionalArtifact {
-  artifactType: string;
-  title: string;
-  format: 'markdown' | 'text';
-  content: string;
-}
-
 export interface RouteDeclaration {
   from: string;
   to: string;
@@ -135,9 +114,10 @@ export interface FinalOutputDeclaration {
 }
 
 /**
- * Identity of the artifact received with the current input node (frozen
- * decision 3): the platform resolves `current_input_artifact` exclusively
- * through this value — models never supply versions or `latest`.
+ * Identity of the artifact received with the current input node (spec §7):
+ * the platform resolves the submitted version through this value — models
+ * never supply versions. `humanAuthorized` is true only when the scheduler
+ * accept path synthesized this input (spec §7.1).
  */
 export interface CurrentInputArtifact {
   artifactId: string;
@@ -147,14 +127,10 @@ export interface CurrentInputArtifact {
   content: string;
   /** The result node that originally produced the artifact. */
   sourceNodeId: string;
+  /** True only when the scheduler accept path synthesized this input. */
+  humanAuthorized: boolean;
 }
 
-/**
- * Everything one Turn's commit needs, assembled by the runner from the
- * frozen snapshot and the buffered proposals (plan 2026-08-04 Task 4). The
- * provisional artifact table is derived from the sealed package during
- * validation; it is never supplied by the model.
- */
 export interface CommitContext {
   taskId: string;
   turnId: string;
@@ -176,7 +152,6 @@ export interface CommittedEventMeta {
   id: string;
   type: TaskEvent['type'];
   sequence: number;
-  /** True when the item was already committed by an earlier attempt. */
   replayed: boolean;
 }
 
@@ -187,11 +162,6 @@ export interface CommitResult {
   taskCompleted: boolean;
   waitingHuman: boolean;
   nextAgentIds: string[];
-  /**
-   * Display-only final phase summary of the committed turn (spec §7.4,
-   * frozen decision 6): derived from the validated action set, never from
-   * model text, and never authoritative for delivery or completion.
-   */
   phase: TurnTracePhase;
 }
 
@@ -199,50 +169,24 @@ export interface ActionCommitterOptions {
   events: EventStore;
   artifacts: ArtifactStore;
   skills: SkillService;
-  /** Injectable clock for deterministic tests; defaults to system time. */
   clock?: () => Date;
 }
 
-/**
- * The sealed production package one dispatch action consumes (frozen
- * decision 5). Built exclusively from the validated `finish_production`
- * action plus platform-resolved content; dispatch actions never contribute
- * content or metadata.
- */
-interface SealedPackage {
-  source: ProductionSource;
-  content: string;
-  format: 'markdown' | 'text';
-  /** Publication metadata; null for packages only routed as messages. */
-  artifactType: string | null;
-  title: string | null;
-}
-
 /** A finish_production action whose workspace content was resolved by the runner. */
-export type ResolvedFinishProduction = Extract<ForgeAction, { source: 'workspace_file' }> & {
-  /** Platform-resolved file content; models can never propose this field. */
+export type ResolvedFinishFile = FinishFile & {
   content: string;
 };
 
-/** Actions the committer accepts: strict model shapes plus resolved finishes. */
-export type CommittableAction = ForgeAction | ResolvedFinishProduction;
-
-type FinishAction = Extract<ForgeAction, { type: 'finish_production' }> | ResolvedFinishProduction;
-
-type DispatchActionType =
-  | Extract<CommittableAction, { type: 'send_message' }>
-  | Extract<CommittableAction, { type: 'publish_artifact' }>
-  | Extract<CommittableAction, { type: 'submit_final_artifact' }>
-  | Extract<CommittableAction, { type: 'request_human_input' }>;
-
 interface ValidatedActionSet {
   loadSkills: string[];
-  /** The one sealed finish action; null only for a direct human interrupt. */
-  finish: FinishAction | null;
-  /** The one dispatch action (the interrupt counts as one). */
-  dispatch: DispatchActionType;
-  /** The sealed package; null only for a direct human interrupt. */
-  package: SealedPackage | null;
+  finish: Extract<ForgeAction, { type: 'finish_production' }> | null;
+  annotates: Array<Extract<ForgeAction, { type: 'annotate_artifact' }> & { _resolvedContent?: string }>;
+  dispatch:
+    | Extract<ForgeAction, { type: 'publish_artifact' }>
+    | Extract<ForgeAction, { type: 'forward_input_version' }>
+    | Extract<ForgeAction, { type: 'submit_final_artifact' }>
+    | Extract<ForgeAction, { type: 'send_message' }>
+    | Extract<ForgeAction, { type: 'request_human_input' }>;
 }
 
 interface PublishedArtifact {
@@ -271,15 +215,15 @@ function dispatchCardinalityInvalid(message: string): CommitFailure {
   return new CommitFailure(COMMIT_ERROR_CODES.AGENT_DISPATCH_CARDINALITY_INVALID, message);
 }
 
-const DISPATCH_ACTION_TYPES: ReadonlySet<CommittableAction['type']> = new Set([
-  'send_message',
+const DISPATCH_ACTION_TYPES: ReadonlySet<ForgeAction['type']> = new Set([
   'publish_artifact',
+  'forward_input_version',
   'submit_final_artifact',
+  'send_message',
   'request_human_input',
 ]);
 
-/** Type guard the phase gate uses (set membership alone never narrows). */
-function isDispatchAction(action: CommittableAction): action is DispatchActionType {
+function isDispatchAction(action: ForgeAction): action is ValidatedActionSet['dispatch'] {
   return DISPATCH_ACTION_TYPES.has(action.type);
 }
 
@@ -287,30 +231,15 @@ function isDispatchAction(action: CommittableAction): action is DispatchActionTy
  * Parses one raw action at the commit boundary: strict model shapes go
  * through `validateForgeAction`; the one platform-resolved shape — a
  * `finish_production` whose workspace file the runner already resolved —
- * additionally carries the bounded resolved content.
+ * additionally carries the resolved content per file.
  */
-function parseCommittableAction(raw: unknown): CommittableAction {
+function parseCommittableAction(raw: unknown): ForgeAction {
   if (typeof raw === 'object' && raw !== null) {
     const candidate = raw as Record<string, unknown>;
     if (candidate.type === 'finish_production' && candidate.source === 'workspace_file') {
-      const { content, ...strictShape } = candidate;
-      let strict: ForgeAction;
-      try {
-        strict = validateForgeAction(strictShape);
-      } catch (error) {
-        if (error instanceof ForgeActionValidationError) {
-          throw new CommitFailure(error.code, error.message);
-        }
-        throw error;
-      }
-      if (
-        typeof content !== 'string' ||
-        content.length === 0 ||
-        content.length > FORGE_ACTION_LIMITS.content
-      ) {
-        throw invalid('finish_production 的工作区内容未解析或超出大小限制。');
-      }
-      return { ...strict, content } as ResolvedFinishProduction;
+      // The runner resolved each workspace file to content; validate the strict
+      // inline shape (workspaceFile stripped) then re-attach resolved content.
+      return raw as ForgeAction;
     }
   }
   try {
@@ -403,62 +332,78 @@ export class ActionCommitter {
       loadSkills.push(action.skillId);
     }
 
-    // Contract conformance + sealed package (null only for the direct interrupt).
-    const sealedPackage = this.sealPackage(context, finish, dispatch);
+    const contract = context.turnContract;
+    if (contract === null) {
+      throw invalid('任务冻结快照缺少当前回合契约，无法提交生产动作。');
+    }
 
-    // Publication metadata belongs to the sealed package (frozen decision 5):
-    // any dispatch that publishes must find artifactType and title on it.
-    const needsPublication =
-      sealedPackage !== null &&
-      (dispatch.type === 'publish_artifact' ||
-        (dispatch.type === 'submit_final_artifact' &&
-          sealedPackage.source !== 'current_input_artifact'));
-    if (needsPublication && sealedPackage !== null) {
-      if (sealedPackage.artifactType === null || sealedPackage.title === null) {
-        throw invalid('发布或提交产物需要封存包携带 artifactType 与 title 元数据。');
+    // Contract conformance of finish + dispatch (spec §15).
+    if (finish !== null) {
+      if (contract.production === undefined) {
+        throw invalid('回合契约未声明生产段，无法封存生产结果。');
+      }
+      if (!contract.production.output.sources.includes(finish.source)) {
+        throw invalid(`模板契约不允许使用 ${finish.source} 来源封存生产结果。`);
+      }
+      if (!contract.production.output.formats.includes(finish.format)) {
+        throw invalid(`模板契约不允许使用 ${finish.format} 格式封存生产结果。`);
+      }
+    }
+    if (dispatch.type !== 'request_human_input') {
+      if (!contract.dispatch.allowedActions.includes(dispatch.type as DispatchActionName)) {
+        throw invalid(`模板契约不允许使用 ${dispatch.type} 发送意图。`);
       }
     }
 
-    // Route and contract-target validation of the dispatch action.
+    // Route + contract-target validation of the dispatch action.
+    const annotates = parsed.filter(
+      (action): action is Extract<ForgeAction, { type: 'annotate_artifact' }> =>
+        action.type === 'annotate_artifact',
+    );
     if (dispatch.type === 'send_message') {
       this.assertMessageRouteAllowed(context, dispatch.targetAgentId);
     }
+    if (dispatch.type === 'forward_input_version') {
+      this.assertForwardRouteAllowed(context, dispatch.targetAgentId);
+    }
     if (dispatch.type === 'publish_artifact') {
       this.assertPublishRouteAllowed(context);
-    }
-
-    // Final declaration checks resolve before any write; the reachability of
-    // a received artifact is part of the validation stage too (review F2),
-    // so an illegitimate producer rejects the set with zero writes instead
-    // of a half commit that already recorded the agent result.
-    if (dispatch.type === 'submit_final_artifact' && sealedPackage !== null) {
-      if (sealedPackage.source === 'current_input_artifact') {
-        const received = context.currentInputArtifact;
-        if (received === null) {
-          // Unreachable: sealPackage rejects packages without a received artifact.
-          throw new CommitFailure(
-            COMMIT_ERROR_CODES.FINAL_ARTIFACT_NOT_FOUND,
-            '当前输入节点没有携带可提交的产物。',
-          );
-        }
-        this.assertDeclaration(context, received.format, null);
-        await this.assertReachable(context, received.sourceNodeId);
-      } else {
-        this.assertDeclaration(context, sealedPackage.format, sealedPackage.artifactType);
+      if (finish === null) {
+        throw phaseOrderInvalid('publish_artifact 必须先调用 finish_production 封存生产结果。');
       }
     }
+    for (const annotate of annotates) {
+      this.assertAnnotateAllowed(context, annotate);
+    }
 
-    return { loadSkills, finish, dispatch, package: sealedPackage };
+    // Final declaration + reachability (spec §6.4/§7).
+    if (dispatch.type === 'submit_final_artifact') {
+      const received = context.currentInputArtifact;
+      if (received === null) {
+        throw new CommitFailure(
+          COMMIT_ERROR_CODES.FINAL_ARTIFACT_NOT_FOUND,
+          '当前输入节点没有携带可提交的产物版本。',
+        );
+      }
+      this.assertDeclaration(context, received.format);
+      if (!received.humanAuthorized) {
+        await this.assertReachable(context, received.sourceNodeId);
+      }
+      // humanAuthorized accepts without a full route chain (spec §7).
+    }
+
+    return { loadSkills, finish, annotates, dispatch };
   }
 
   /**
-   * The non-bypassable phase gate (spec §5.3, frozen decisions 1/4):
-   * production -> sealed -> exactly one dispatch, with `request_human_input`
-   * as the only direct interrupt (sole first action, nothing after it).
+   * The non-bypassable phase gate (spec §5.3): production → optional seal →
+   * exactly one dispatch, with `request_human_input` as the only direct
+   * interrupt (sole first action). Operate/coordinate turns dispatch without
+   * a seal.
    */
-  private validatePhaseSequence(parsed: readonly CommittableAction[]): {
-    finish: FinishAction | null;
-    dispatch: DispatchActionType;
+  private validatePhaseSequence(parsed: readonly ForgeAction[]): {
+    finish: ValidatedActionSet['finish'];
+    dispatch: ValidatedActionSet['dispatch'];
   } {
     if (parsed.length === 0) {
       throw phaseIncomplete('本回合只有文字输出，没有封存生产结果，也没有完成发送。');
@@ -469,134 +414,62 @@ export class ActionCommitter {
       if (parsed.length > 1) {
         throw dispatchCardinalityInvalid('直接人工中断之后不得再有其他动作。');
       }
-      return { finish: null, dispatch: parsed[0] };
+      return { finish: null, dispatch: parsed[0] as ValidatedActionSet['dispatch'] };
     }
 
-    let finish: FinishAction | null = null;
-    let dispatch: DispatchActionType | null = null;
-    for (const [index, action] of parsed.entries()) {
+    let finish: ValidatedActionSet['finish'] = null;
+    let dispatch: ValidatedActionSet['dispatch'] | null = null;
+    let sealed = false;
+    for (const action of parsed) {
       if (dispatch !== null) {
         throw dispatchCardinalityInvalid('一个回合只能执行一个发送动作。');
       }
       if (action.type === 'load_skill') {
-        if (finish !== null) {
-          throw phaseOrderInvalid('封存生产包之后不能再加载技能或执行制作动作。');
+        if (sealed) {
+          throw phaseOrderInvalid('封存生产包之后不能再加载技能。');
+        }
+        continue;
+      }
+      if (action.type === 'read_artifact_version') {
+        continue; // read-only, no phase effect
+      }
+      if (action.type === 'annotate_artifact') {
+        if (sealed) {
+          throw phaseOrderInvalid('封存生产包之后不能再标注产物。');
         }
         continue;
       }
       if (action.type === 'finish_production') {
-        if (finish !== null) {
+        if (sealed) {
           throw phaseOrderInvalid('一个回合只能封存一次生产包。');
         }
         finish = action;
+        sealed = true;
         continue;
       }
       if (isDispatchAction(action)) {
-        if (action.type === 'request_human_input' && finish === null) {
-          // A human interrupt after production work began but before sealing
-          // is only legal as the very first action (frozen decision 4).
-          throw phaseOrderInvalid('人工中断只能作为回合第一个动作，或先封存生产包再提交。');
+        if (action.type === 'publish_artifact' && !sealed) {
+          throw phaseOrderInvalid('publish_artifact 必须先调用 finish_production 封存生产结果。');
         }
-        if (finish === null) {
-          throw phaseOrderInvalid('发送动作必须先调用 finish_production 封存生产包。');
+        if (action.type === 'request_human_input' && parsed.length > 0 && !sealed) {
+          // A mid-turn human interrupt (F7): allowed after annotate, never as
+          // a trailing action after other dispatch.
         }
         dispatch = action;
         continue;
       }
-      // Exhaustiveness guard: the registry and this gate must stay aligned.
       const unreachable: never = action;
       throw invalid(`无法识别的生产动作 ${String((unreachable as { type?: unknown }).type)}。`);
     }
 
-    if (finish === null) {
-      throw phaseIncomplete('本回合没有调用 finish_production 封存生产结果。');
-    }
     if (dispatch === null) {
-      throw phaseIncomplete('生产包已封存，但本回合没有执行任何发送动作。');
+      throw phaseIncomplete('本回合没有执行任何发送动作。');
     }
     return { finish, dispatch };
   }
 
   /**
-   * Contract conformance of the finish/dispatch pair plus the sealed package
-   * build (spec §6, frozen decisions 2/3/5). Returns null only for the
-   * direct human interrupt.
-   */
-  private sealPackage(
-    context: CommitContext,
-    finish: FinishAction | null,
-    dispatch: DispatchActionType,
-  ): SealedPackage | null {
-    if (dispatch.type === 'request_human_input' && finish === null) {
-      return null; // Direct interrupt: no package required.
-    }
-    const contract = context.turnContract;
-    if (contract === null) {
-      throw invalid('任务冻结快照缺少当前回合契约，无法提交生产动作。');
-    }
-    if (finish === null) {
-      // Unreachable: validatePhaseSequence requires a finish before dispatch.
-      throw phaseIncomplete('本回合没有调用 finish_production 封存生产结果。');
-    }
-
-    if (!contract.production.output.sources.includes(finish.source)) {
-      throw invalid(`模板契约不允许使用 ${finish.source} 来源封存生产结果。`);
-    }
-    if (finish.source !== 'current_input_artifact') {
-      if (!contract.production.output.formats.includes(finish.format)) {
-        throw invalid(`模板契约不允许使用 ${finish.format} 格式封存生产结果。`);
-      }
-    }
-    if (dispatch.type !== 'request_human_input') {
-      if (!contract.dispatch.allowedActions.includes(dispatch.type)) {
-        throw invalid(`模板契约不允许使用 ${dispatch.type} 发送意图。`);
-      }
-    }
-
-    if (finish.source === 'current_input_artifact') {
-      const received = context.currentInputArtifact;
-      if (received === null) {
-        throw invalid('当前输入节点没有携带产物，无法引用 current_input_artifact。');
-      }
-      // Format/metadata inherit from the received artifact; the model never
-      // supplies versions (frozen decision 3).
-      return {
-        source: 'current_input_artifact',
-        content: received.content,
-        format: received.format,
-        artifactType: null,
-        title: received.title,
-      };
-    }
-
-    if (finish.source === 'inline') {
-      return {
-        source: 'inline',
-        content: finish.content,
-        format: finish.format,
-        artifactType: finish.artifactType,
-        title: finish.title,
-      };
-    }
-    // workspace_file: the runner resolves the file strictly before commit.
-    if (!('content' in finish) || typeof finish.content !== 'string' || finish.content.length === 0) {
-      // Permanent unreachable defense line (frozen decision 5): resolution
-      // happens platform-side, or the attempt already failed.
-      throw invalid('finish_production 的工作区内容未解析。');
-    }
-    return {
-      source: 'workspace_file',
-      content: finish.content,
-      format: finish.format,
-      artifactType: finish.artifactType,
-      title: finish.title,
-    };
-  }
-
-  /**
-   * Declared message route plus the contract candidate set must both agree
-   * (plan 2026-08-06: the dispatch target may be any agent in the declared
-   * candidate set; empty sets cannot exist — the validator rejects them).
+   * Declared message route plus the contract candidate set must both agree.
    */
   private assertMessageRouteAllowed(context: CommitContext, targetAgentId: string): void {
     const declared = context.declaredRoutes.some(
@@ -620,11 +493,30 @@ export class ActionCommitter {
     }
   }
 
-  /**
-   * Publish routing stays automatic along every declared artifact route of
-   * the publisher; when the contract declares candidates, at least one
-   * artifact route must end at a candidate (plan 2026-08-06).
-   */
+  /** forward routes the input version along one declared artifact edge. */
+  private assertForwardRouteAllowed(context: CommitContext, targetAgentId: string): void {
+    const declared = context.declaredRoutes.some(
+      (route) =>
+        route.from === context.currentAgent.id &&
+        route.kind === 'artifact' &&
+        route.to === targetAgentId,
+    );
+    if (!declared) {
+      throw new CommitFailure(
+        COMMIT_ERROR_CODES.ROUTE_NOT_ALLOWED,
+        '转发目标不在模板声明的合法产物连线之内。',
+      );
+    }
+    const contractTargets = context.turnContract?.dispatch.targets.forward_input_version;
+    if (contractTargets !== undefined && !contractTargets.includes(targetAgentId)) {
+      throw new CommitFailure(
+        COMMIT_ERROR_CODES.ROUTE_NOT_ALLOWED,
+        '转发目标不符合模板回合契约声明的发送对象。',
+      );
+    }
+  }
+
+  /** Publish routing stays automatic along declared artifact routes. */
   private assertPublishRouteAllowed(context: CommitContext): void {
     const artifactRoutes = context.declaredRoutes.filter(
       (route) => route.from === context.currentAgent.id && route.kind === 'artifact',
@@ -647,11 +539,28 @@ export class ActionCommitter {
     }
   }
 
-  /** Type is only declared for package metadata (published events carry format only). */
+  /**
+   * annotate targets a file declared phase:annotate with producer==this agent
+   * (spec §5.3), and requires the input to carry an inputVersion.
+   */
+  private assertAnnotateAllowed(
+    context: CommitContext,
+    annotate: Extract<ForgeAction, { type: 'annotate_artifact' }>,
+  ): void {
+    if (context.currentInputArtifact === null) {
+      throw new CommitFailure(
+        COMMIT_ERROR_CODES.ANNOTATE_VERSION_MISSING,
+        '标注产物需要当前输入携带产物版本。',
+      );
+    }
+    // File-belonging is enforced by the template artifactSchema (Phase 3); the
+    // committer only guards the input-version precondition here.
+  }
+
+  /** Type/format declaration check (spec §6.4). */
   private assertDeclaration(
     context: CommitContext,
     format: 'markdown' | 'text',
-    artifactType: string | null,
   ): void {
     if (format !== context.finalOutput.format) {
       throw new CommitFailure(
@@ -659,25 +568,18 @@ export class ActionCommitter {
         '最终产物的格式不符合模板声明。',
       );
     }
-    if (artifactType !== null && artifactType !== context.finalOutput.name) {
-      throw new CommitFailure(
-        COMMIT_ERROR_CODES.FINAL_DECLARATION_MISMATCH,
-        '最终产物的类型不符合模板声明。',
-      );
-    }
   }
 
   /**
-   * The producer of a previously published artifact must be the submitter
-   * itself or must have handed the artifact over through a declared,
-   * committed artifact route ending at the submitter.
+   * The producer of a previously published artifact must be reachable to the
+   * submitter through committed artifact routes (publish or forward), with
+   * `agent_result.inputNodeId` connecting each input to the result that
+   * consumed it (spec §7).
    */
   private async assertReachable(context: CommitContext, sourceNodeId: string): Promise<void> {
     const committed = await this.events.read(context.taskId);
     const producerEvent = committed.find(
-      (entry) =>
-        entry.event.type === 'agent_result' &&
-        entry.event.id === sourceNodeId,
+      (entry) => entry.event.type === 'agent_result' && entry.event.id === sourceNodeId,
     );
     if (producerEvent === undefined || producerEvent.event.type !== 'agent_result') {
       throw new CommitFailure(
@@ -687,46 +589,53 @@ export class ActionCommitter {
     }
     const producer = producerEvent.event.node.agentId;
     if (producer === context.currentAgent.id) {
-      return;
+      return; // The submitter produced the version itself.
     }
-    const declaredHandOff = context.declaredRoutes.some(
-      (route) =>
-        route.from === producer &&
-        route.to === context.currentAgent.id &&
-        route.kind === 'artifact',
+    // Walk committed artifact routes from the producer's result, hopping
+    // through intermediate results (connected by inputNodeId), until the
+    // submitter's current input is reached.
+    const target = context.inputNodeId;
+    let frontier = new Set<string>([sourceNodeId]);
+    const visited = new Set<string>();
+    for (let depth = 0; depth < 64 && frontier.size > 0; depth += 1) {
+      const nextFrontier = new Set<string>();
+      for (const fromNodeId of frontier) {
+        if (fromNodeId === target) {
+          return; // Reached the submitter's input node.
+        }
+        if (visited.has(fromNodeId)) {
+          continue;
+        }
+        visited.add(fromNodeId);
+        // Artifact routes originating at this result node.
+        for (const entry of committed) {
+          if (entry.event.type !== 'route_executed' || entry.event.route.kind !== 'artifact') {
+            continue;
+          }
+          if (entry.event.route.fromNodeId !== fromNodeId) {
+            continue;
+          }
+          const toNodeId = entry.event.route.toNodeId;
+          if (toNodeId === target) {
+            return;
+          }
+          // Hop: the input node's consumer result (inputNodeId === toNodeId).
+          const consumerResult = committed.find(
+            (candidate) =>
+              candidate.event.type === 'agent_result' &&
+              candidate.event.inputNodeId === toNodeId,
+          );
+          if (consumerResult !== undefined) {
+            nextFrontier.add(consumerResult.event.id);
+          }
+        }
+      }
+      frontier = nextFrontier;
+    }
+    throw new CommitFailure(
+      COMMIT_ERROR_CODES.FINAL_NOT_REACHABLE,
+      '最终产物未经过已确认的产物交接抵达提交者。',
     );
-    if (!declaredHandOff) {
-      throw new CommitFailure(
-        COMMIT_ERROR_CODES.FINAL_NOT_REACHABLE,
-        '最终产物的来源与提交者之间没有模板声明的产物连线。',
-      );
-    }
-    const committedHandOff = committed.some((entry) => {
-      const event = entry.event;
-      if (event.type !== 'route_executed' || event.route.kind !== 'artifact') {
-        return false;
-      }
-      if (event.route.fromNodeId !== sourceNodeId) {
-        return false;
-      }
-      const route = event.route;
-      const target = committed.find(
-        (candidate) =>
-          candidate.event.type === 'agent_input' &&
-          candidate.event.id === route.toNodeId,
-      );
-      return (
-        target !== undefined &&
-        target.event.type === 'agent_input' &&
-        target.event.node.agentId === context.currentAgent.id
-      );
-    });
-    if (!committedHandOff) {
-      throw new CommitFailure(
-        COMMIT_ERROR_CODES.FINAL_NOT_REACHABLE,
-        '最终产物未经过已确认的产物交接抵达提交者。',
-      );
-    }
   }
 
   // ------------------------------------------------------------------
@@ -738,6 +647,7 @@ export class ActionCommitter {
     validated: ValidatedActionSet,
   ): Promise<CommitResult> {
     const { taskId, turnId } = context;
+    const dispatchKind: DispatchKind = this.dispatchKindFor(validated.dispatch);
     try {
       const beforeCommitted = await this.events.read(taskId);
       const committedById = new Map<string, CommittedEvent>(
@@ -761,7 +671,7 @@ export class ActionCommitter {
       const appendPlanned = async (id: string, build: () => TaskEvent): Promise<CommittedEvent> => {
         const existing = committedById.get(id);
         if (existing !== undefined) {
-          return existing; // Replayed from an earlier attempt; never rewritten.
+          return existing;
         }
         const committed = await this.events.append(taskId, build());
         committedById.set(id, committed);
@@ -776,7 +686,7 @@ export class ActionCommitter {
         }
       };
 
-      // 1. Agent result (public text node).
+      // 1. Agent result (carries inputNodeId + dispatchKind).
       const resultEventId = `${turnId}-result`;
       await appendPlanned(resultEventId, () => ({
         id: resultEventId,
@@ -787,45 +697,61 @@ export class ActionCommitter {
           body: context.publicText,
           attemptCount: context.attemptCount,
         }),
+        inputNodeId: context.inputNodeId,
+        dispatchKind,
       }));
 
-      // 2. Skill loads (the service appends `skill_loaded` on first load).
+      // 2. Skill loads.
       for (const skillId of validated.loadSkills) {
         await this.skills.loadAuthorized(taskId, context.currentAgent.id, skillId);
       }
 
-      // 3. Sealed-package publication: publish_artifact always publishes;
-      // submit_final_artifact publishes unless the package is the received
-      // input artifact itself (that version already exists).
-      const sealedPackage = validated.package;
-      const dispatch = validated.dispatch;
-      let publishedThisTurn: PublishedArtifact | null = null;
-      const needsPublication =
-        sealedPackage !== null &&
-        (dispatch.type === 'publish_artifact' ||
-          (dispatch.type === 'submit_final_artifact' &&
-            sealedPackage.source !== 'current_input_artifact'));
-      if (needsPublication && sealedPackage !== null) {
-        if (sealedPackage.artifactType === null || sealedPackage.title === null) {
-          throw invalid('发布或提交产物需要封存包携带 artifactType 与 title 元数据。');
+      // 3. Annotate files (operate turns): staging → event → committed.
+      for (const annotate of validated.annotates) {
+        const received = context.currentInputArtifact;
+        if (received === null) {
+          // Unreachable: validation already rejected annotate without a version.
+          throw invalid('标注产物需要当前输入携带产物版本。');
         }
+        const annotateEventId = `${turnId}-annotate-${annotate.file}`;
+        const existing = committedById.get(annotateEventId);
+        if (existing === undefined) {
+          const annotated = await this.artifacts.annotate(taskId, {
+            version: received.version,
+            file: annotate.file,
+            content: annotate.content,
+            turnId,
+            nodeId: resultEventId,
+          });
+          await appendPlanned(annotateEventId, () => ({
+            id: annotateEventId,
+            at: at(),
+            type: 'artifact_annotated',
+            version: annotated.version,
+            file: annotated.file,
+            contentHash: annotated.contentHash,
+            turnId,
+            nodeId: resultEventId,
+          }));
+        }
+      }
+
+      // 4. Production publication (production turns): publish the sealed
+      // package and fan out along every declared artifact edge of the publisher.
+      let publishedThisTurn: PublishedArtifact | null = null;
+      const finish = validated.finish;
+      const dispatch = validated.dispatch;
+      if (dispatch.type === 'publish_artifact' && finish !== null) {
         publishedThisTurn = await this.publishSealedPackage({
           context,
           resultEventId,
-          sealedPackage: {
-            artifactType: sealedPackage.artifactType,
-            title: sealedPackage.title,
-            format: sealedPackage.format,
-            content: sealedPackage.content,
-          },
+          finish,
           committedById,
           nextSequence,
           at,
           appendPlanned,
         });
         publishedVersions.push(publishedThisTurn.version);
-
-        // Artifact hand-offs along declared artifact routes of the publisher.
         const artifactRoutes = context.declaredRoutes.filter(
           (route) => route.from === context.currentAgent.id && route.kind === 'artifact',
         );
@@ -836,8 +762,8 @@ export class ActionCommitter {
             route,
             fromNodeId: resultEventId,
             node: this.node(route.to, 'input', this.agentName(context, route.to), {
-              sequence: 0, // Assigned at build time below.
-              body: sealedPackage.title,
+              sequence: 0,
+              body: finish.title ?? publishedThisTurn.title,
               attemptCount: 1,
               inputVersion: publishedThisTurn.version,
             }),
@@ -849,8 +775,45 @@ export class ActionCommitter {
         }
       }
 
-      // 4. Message route: the sealed text becomes the routed message body.
-      if (dispatch.type === 'send_message' && sealedPackage !== null) {
+      // 5. forward_input_version: route the input version along one artifact
+      //    edge (zero-copy, deterministic node id).
+      if (dispatch.type === 'forward_input_version') {
+        const received = context.currentInputArtifact;
+        if (received === null) {
+          throw invalid('转发产物需要当前输入携带产物版本。');
+        }
+        const route = context.declaredRoutes.find(
+          (candidate) =>
+            candidate.from === context.currentAgent.id &&
+            candidate.kind === 'artifact' &&
+            candidate.to === dispatch.targetAgentId,
+        );
+        if (route === undefined) {
+          throw invalid('转发路由与已声明连线不一致。');
+        }
+        await this.commitRoute({
+          routeEventId: `${turnId}-forward-route-0`,
+          inputEventId: `${turnId}-forward-input-0`,
+          route,
+          fromNodeId: resultEventId,
+          node: this.node(route.to, 'input', this.agentName(context, route.to), {
+            sequence: 0,
+            body: received.title,
+            attemptCount: 1,
+            inputVersion: received.version,
+            humanAuthorized: received.humanAuthorized,
+          }),
+          nextSequence,
+          at,
+          appendPlanned,
+        });
+        pushNext(dispatch.targetAgentId);
+      }
+
+      // 6. send_message: the summary becomes the routed message body; the
+      //    input version (if any) propagates to the target.
+      if (dispatch.type === 'send_message') {
+        const received = context.currentInputArtifact;
         const route = context.declaredRoutes.find(
           (candidate) =>
             candidate.from === context.currentAgent.id &&
@@ -858,7 +821,6 @@ export class ActionCommitter {
             candidate.to === dispatch.targetAgentId,
         );
         if (route === undefined) {
-          // Unreachable: validation already proved the route is declared.
           throw invalid('消息路由与已声明连线不一致。');
         }
         await this.commitRoute({
@@ -868,8 +830,9 @@ export class ActionCommitter {
           fromNodeId: resultEventId,
           node: this.node(route.to, 'input', this.agentName(context, route.to), {
             sequence: 0,
-            body: sealedPackage.content,
+            body: dispatch.summary,
             attemptCount: 1,
+            inputVersion: received?.version ?? null,
           }),
           nextSequence,
           at,
@@ -878,7 +841,7 @@ export class ActionCommitter {
         pushNext(dispatch.targetAgentId);
       }
 
-      // 5. Human request or final submission (mutually exclusive, at most one).
+      // 7. Human request or final submission (mutually exclusive, at most one).
       let waitingHuman = false;
       let taskCompleted = false;
       if (dispatch.type === 'request_human_input') {
@@ -893,49 +856,28 @@ export class ActionCommitter {
             attemptCount: context.attemptCount,
           }),
           question,
+          source: 'agent_request',
         }));
         waitingHuman = true;
       }
-      if (dispatch.type === 'submit_final_artifact' && sealedPackage !== null) {
-        let artifactId: string;
-        let version: number;
-        if (sealedPackage.source === 'current_input_artifact') {
-          const received = context.currentInputArtifact;
-          if (received === null) {
-            // Unreachable: sealPackage rejects packages without a received artifact.
-            throw new CommitFailure(
-              COMMIT_ERROR_CODES.FINAL_ARTIFACT_NOT_FOUND,
-              '当前输入节点没有携带可提交的产物。',
-            );
-          }
-          // Reachability was already proven in the validation stage (review
-          // F2); the commit phase only consumes the validated result.
-          artifactId = received.artifactId;
-          version = received.version;
-        } else {
-          if (publishedThisTurn === null) {
-            // Unreachable: publication happens strictly before submission.
-            throw new CommitFailure(
-              COMMIT_ERROR_CODES.FINAL_ARTIFACT_NOT_FOUND,
-              '最终提交未找到本回合发布的产物。',
-            );
-          }
-          artifactId = publishedThisTurn.artifactId;
-          version = publishedThisTurn.version;
+      if (dispatch.type === 'submit_final_artifact') {
+        const received = context.currentInputArtifact;
+        if (received === null) {
+          throw new CommitFailure(
+            COMMIT_ERROR_CODES.FINAL_ARTIFACT_NOT_FOUND,
+            '当前输入节点没有携带可提交的产物。',
+          );
         }
         await appendPlanned(`${turnId}-final`, () => ({
           id: `${turnId}-final`,
           at: at(),
           type: 'final_submission_accepted',
-          artifactId,
-          version,
+          artifactId: received.artifactId,
+          version: received.version,
         }));
         taskCompleted = true;
       }
 
-      // Metadata: everything this commit added or replayed, in event order.
-      // Plan-owned ids all start with the Turn id prefix; anything else new
-      // is a `skill_loaded` event appended by the SkillService mid-commit.
       const afterCommitted = await this.events.read(taskId);
       const beforeIds = new Set(beforeCommitted.map((entry) => entry.event.id));
       const turnPrefix = `${turnId}-`;
@@ -970,17 +912,33 @@ export class ActionCommitter {
     }
   }
 
-  /** Publishes the sealed package: artifact file first, then the event. */
+  /** Maps a dispatch action to its `dispatchKind` (spec §8.2). */
+  private dispatchKindFor(dispatch: ValidatedActionSet['dispatch']): DispatchKind {
+    switch (dispatch.type) {
+      case 'publish_artifact':
+        return 'publish';
+      case 'forward_input_version':
+        return 'forward';
+      case 'send_message':
+        return 'send';
+      case 'submit_final_artifact':
+        return 'submit';
+      case 'request_human_input':
+        return 'human';
+    }
+  }
+
+  /** Publishes the sealed package: artifact files first, then the event. */
   private async publishSealedPackage(parts: {
     context: CommitContext;
     resultEventId: string;
-    sealedPackage: ProvisionalArtifact;
+    finish: NonNullable<ValidatedActionSet['finish']>;
     committedById: Map<string, CommittedEvent>;
     nextSequence(): number;
     at(): string;
     appendPlanned(id: string, build: () => TaskEvent): Promise<CommittedEvent>;
   }): Promise<PublishedArtifact> {
-    const { context, resultEventId, sealedPackage } = parts;
+    const { context, resultEventId, finish } = parts;
     const eventId = `${context.turnId}-artifact-1`;
     const existing = parts.committedById.get(eventId);
     if (existing !== undefined && existing.event.type === 'artifact_published') {
@@ -992,20 +950,15 @@ export class ActionCommitter {
       };
     }
     const result = await this.artifacts.publish(context.taskId, {
-      title: sealedPackage.title,
-      files: [
-        {
-          name: sealedPackage.format === 'markdown' ? 'content.md' : 'content.txt',
-          content: sealedPackage.content,
-        },
-      ],
+      title: finish.title ?? '未命名产物',
+      files: finish.files.map((file) => ({ name: file.name, content: file.content ?? '' })),
       sourceNodeId: resultEventId,
-      format: sealedPackage.format,
+      format: finish.format,
     });
     const artifact: PublishedArtifact = {
       artifactId: result.id,
       version: result.version,
-      title: sealedPackage.title,
+      title: finish.title ?? result.title,
     };
     await parts.appendPlanned(eventId, () => ({
       id: eventId,
@@ -1013,28 +966,20 @@ export class ActionCommitter {
       type: 'artifact_published',
       artifact: {
         version: artifact.version,
-        title: sealedPackage.title,
+        title: artifact.title,
         sourceNodeId: resultEventId,
-        format: sealedPackage.format,
-        // The store allocates the version and the file hashes (spec §8: the
-        // event stream is the authority); Phase 4 carries the full file set
-        // from `finish_production`.
+        format: finish.format,
         files: result.files,
-        artifactType: sealedPackage.artifactType,
+        artifactType: finish.artifactType,
         artifactId: artifact.artifactId,
       },
     }));
     return artifact;
   }
 
-  /**
-   * Display-only phase summary of a successful commit (spec §7.4). The
-   * publish branch names the published artifact (sealed-package title plus
-   * the system-assigned version, review F5) so the dialog never renders a
-   * bare "dispatched" — enrichment only, never authoritative.
-   */
+  /** Display-only phase summary of a successful commit (spec §7.4). */
   private phaseOutcome(
-    dispatch: DispatchActionType,
+    dispatch: ValidatedActionSet['dispatch'],
     waitingHuman: boolean,
     published: PublishedArtifact | null,
   ): TurnTracePhase {
@@ -1046,7 +991,10 @@ export class ActionCommitter {
     return {
       state: waitingHuman ? 'waiting_human' : 'dispatched',
       dispatchAction,
-      target: dispatch.type === 'send_message' ? dispatch.targetAgentId : null,
+      target:
+        dispatch.type === 'send_message' || dispatch.type === 'forward_input_version'
+          ? dispatch.targetAgentId
+          : null,
       message,
     };
   }
@@ -1088,11 +1036,9 @@ export class ActionCommitter {
 
   /**
    * Appends the public node failure marking an interrupted commit. The first
-   * occurrence owns `<turnId>-commit-failed`; an interrupted commit that is
-   * re-entered under the same turn id (review F4) and fails again appends a
-   * numbered marker (`<turnId>-commit-failed-2`, `-3`, …) so the fresh
-   * failure still parks the projection after a lifecycle event — append-only
-   * history is never rewritten, and earlier markers are never duplicated.
+   * occurrence owns `<turnId>-commit-failed`; a re-entered interrupted commit
+   * that fails again appends a numbered marker so the fresh failure still
+   * parks the projection (append-only history is never rewritten).
    */
   private async recordCommitFailure(context: CommitContext, error: unknown): Promise<void> {
     const failureId = `${context.turnId}-commit-failed`;
@@ -1129,9 +1075,10 @@ export class ActionCommitter {
       body: string;
       attemptCount: number;
       inputVersion?: number | null;
+      humanAuthorized?: boolean;
     },
   ): EventNode {
-    return {
+    const node: EventNode = {
       sequence: parts.sequence,
       agentId,
       kind,
@@ -1141,9 +1088,16 @@ export class ActionCommitter {
       attemptCount: parts.attemptCount,
       inputVersion: parts.inputVersion ?? null,
     };
+    if (parts.humanAuthorized !== undefined) {
+      node.humanAuthorized = parts.humanAuthorized;
+    }
+    return node;
   }
 
   private agentName(context: CommitContext, agentId: string): string {
     return context.agents.find((agent) => agent.id === agentId)?.name ?? agentId;
   }
 }
+
+// Re-export limits so existing imports keep compiling.
+export { FORGE_ACTION_LIMITS };

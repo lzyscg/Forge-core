@@ -341,12 +341,12 @@ export async function startApiTestClient(
                 {
                   type: 'finish_production',
                   source: 'inline',
-                  content: '契约套件初稿正文',
+                  files: [{ name: 'content.md', content: '契约套件初稿正文' }],
                   format: 'markdown',
                   artifactType: '终稿',
                   title: '契约套件初稿',
                 },
-                { type: 'publish_artifact', productionPackageRef: 'current' },
+                { type: 'publish_artifact' },
               ],
             },
           ],
@@ -356,17 +356,9 @@ export async function startApiTestClient(
               publicText: '契约套件返修意见。',
               actions: [
                 {
-                  type: 'finish_production',
-                  source: 'inline',
-                  content: '契约套件返修意见',
-                  format: 'text',
-                  artifactType: null,
-                  title: null,
-                },
-                {
                   type: 'send_message',
                   targetAgentId: 'writer',
-                  productionPackageRef: 'current',
+                  summary: '契约套件返修意见',
                 },
               ],
             },

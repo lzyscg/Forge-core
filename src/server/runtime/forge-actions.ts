@@ -1,62 +1,84 @@
 /**
- * The closed Forge production action registry (plan Phase C Task 1 Steps
- * 1/4, spec §6.1; reshaped by plan 2026-08-04 Task 1 for the
- * production/dispatch turn contract, spec §4.3/§5.1/§5.2). Exactly six
- * actions exist platform-wide; templates never plug in local commands,
- * scripts, MCP or arbitrary external tools.
+ * The closed Forge production action registry (plan 2026-08-07 Phase 2; v7
+ * artifact version directory schema). Exactly nine actions exist
+ * platform-wide; templates never plug in local commands, scripts, MCP or
+ * arbitrary external tools.
  *
- * Turn contract shape: one turn seals exactly one production package via
- * `finish_production` (inline content, a private workspace file, or a
- * platform-resolved reference to the turn's received input artifact) and
- * then performs exactly one dispatch action that references the sealed
- * package with `productionPackageRef: 'current'`. Dispatch actions carry
- * no content or artifact metadata — everything delivered comes from the
- * sealed package. Phase order, cardinality, route and contract checks are
- * enforced by the ActionBuffer (immediate, model-correctable) and the
- * ActionCommitter (atomic, non-bypassable); this module validates shapes
- * only.
+ * v7 reshapes the v1 sealed-package model into the production/operate split
+ * (spec §4):
+ * - `finish_production(files)` seals a multi-file production package (the
+ *   only seal action; production turns only). `current_input_artifact` is no
+ *   longer a finish source — `submit_final_artifact` resolves the submitted
+ *   version directly from the input node's `inputVersion`.
+ * - `publish_artifact` publishes the sealed package along every declared
+ *   artifact edge of the publisher (production turns only).
+ * - `annotate_artifact(file, content)` annotates one file of the input
+ *   version (operate turns; atomic, unique per (version, file)).
+ * - `forward_input_version(targetAgentId)` forwards the input version along
+ *   one artifact edge (operate turns; zero-copy).
+ * - `send_message(targetAgentId, summary)` delivers a short coordination
+ *   message (operate/coordinate turns; the body is the summary, not a sealed
+ *   package).
+ * - `submit_final_artifact` submits the input version as the final output
+ *   (operate/coordinate turns; zero-copy from inputVersion).
+ * - `request_human_input(question)` interrupts any turn.
+ * - `read_artifact_version(file)` is a read-only tool (returns content, never
+ *   buffered or committed).
  *
+ * Dispatch actions carry no `productionPackageRef` and no content/metadata of
+ * their own — everything published comes from the sealed `finish_production`
+ * package; everything submitted/forwarded comes from the inputVersion.
  * `validateForgeAction` enforces the runtime-action boundary (spec §6.2):
- * actions carry only non-empty, bounded content fields — question/title
- * ≤ 16 KiB, package content ≤ 2 MiB, identifiers ≤ 128 characters — and
- * never engineering metadata: any object presenting a task id, event id,
- * version, timestamp or filesystem-path key is rejected outright. Those
- * values are assigned by the platform at commit time, never by the model
- * (iron rule 1).
+ * actions carry only non-empty, bounded content fields and never engineering
+ * metadata (task/event ids, versions, timestamps, paths) — those are
+ * platform-assigned at commit time (iron rule 1).
  */
-
 import { isAbsolute } from 'node:path';
 
 export type ForgeActionName =
   | 'load_skill'
   | 'finish_production'
-  | 'send_message'
+  | 'annotate_artifact'
+  | 'read_artifact_version'
   | 'publish_artifact'
+  | 'forward_input_version'
   | 'submit_final_artifact'
+  | 'send_message'
   | 'request_human_input';
 
 /**
- * The closed six-name registry. Typed as a plain array so the verbatim
- * contract test may call `.sort()`; consumers must treat it as read-only —
- * `FORGE_ACTION_NAME_SET` is the frozen membership view used internally.
+ * The closed nine-name registry. Typed as a plain array so the verbatim
+ * contract test may call `.sort()`; consumers must treat it as read-only.
  */
 export const FORGE_ACTION_NAMES: ForgeActionName[] = [
   'load_skill',
   'finish_production',
-  'send_message',
+  'annotate_artifact',
+  'read_artifact_version',
   'publish_artifact',
+  'forward_input_version',
   'submit_final_artifact',
+  'send_message',
   'request_human_input',
 ];
 
 /** Frozen membership view of the closed registry. */
 export const FORGE_ACTION_NAME_SET: ReadonlySet<ForgeActionName> = new Set(FORGE_ACTION_NAMES);
 
-/** The one production-package reference a dispatch action may carry. */
-export const PRODUCTION_PACKAGE_REF = 'current' as const;
+/** Where a sealed production file's content comes from (spec §15). */
+export type ProductionSource = 'inline' | 'workspace_file';
 
-/** Where a sealed production package's content comes from (spec §4.3). */
-export type ProductionSource = 'inline' | 'workspace_file' | 'current_input_artifact';
+/** One file a `finish_production` package seals. */
+export interface FinishFile {
+  name: string;
+  /** Present for `inline` sources; resolved by the runner for `workspace_file`. */
+  content?: string;
+  /** Present for `workspace_file` sources; resolved to content before commit. */
+  workspaceFile?: string;
+}
+
+/** The dispatch kind a turn performed (spec §8.2). */
+export type DispatchKind = 'publish' | 'forward' | 'send' | 'submit' | 'human';
 
 /** Discriminated union of every action a model Turn may propose (verbatim). */
 export type ForgeAction =
@@ -64,55 +86,57 @@ export type ForgeAction =
   | {
       type: 'finish_production';
       source: 'inline';
-      /** Sealed package body; resolved from the model's own production. */
-      content: string;
+      files: FinishFile[];
       format: 'markdown' | 'text';
-      /** Publication metadata; null for packages only routed as messages. */
       artifactType: string | null;
       title: string | null;
     }
   | {
       type: 'finish_production';
       source: 'workspace_file';
-      /** Relative private-workspace file; resolved to content before commit. */
-      workspaceFile: string;
+      files: FinishFile[];
       format: 'markdown' | 'text';
       artifactType: string | null;
       title: string | null;
     }
-  | {
-      type: 'finish_production';
-      /**
-       * Seals the artifact received with the current input node. The
-       * platform resolves the reference; the model never supplies versions.
-       */
-      source: 'current_input_artifact';
-    }
-  | { type: 'send_message'; targetAgentId: string; productionPackageRef: typeof PRODUCTION_PACKAGE_REF }
-  | { type: 'publish_artifact'; productionPackageRef: typeof PRODUCTION_PACKAGE_REF }
-  | { type: 'submit_final_artifact'; productionPackageRef: typeof PRODUCTION_PACKAGE_REF }
+  | { type: 'annotate_artifact'; file: string; content: string }
+  | { type: 'read_artifact_version'; file: string }
+  | { type: 'publish_artifact' }
+  | { type: 'forward_input_version'; targetAgentId: string }
+  | { type: 'submit_final_artifact' }
+  | { type: 'send_message'; targetAgentId: string; summary: string }
   | { type: 'request_human_input'; question: string };
 
-/** The four actions that end the production phase and deliver the package. */
+/** The five actions that end a turn as its one dispatch. */
 export type DispatchAction = Extract<
   ForgeAction,
-  { type: 'send_message' } | { type: 'publish_artifact' } | { type: 'submit_final_artifact' } | { type: 'request_human_input' }
+  | { type: 'publish_artifact' }
+  | { type: 'forward_input_version' }
+  | { type: 'submit_final_artifact' }
+  | { type: 'send_message' }
+  | { type: 'request_human_input' }
 >;
 
 export type DispatchActionName = DispatchAction['type'];
 
+/** `request_human_input` may interrupt as the sole first action or after seal. */
+export type InterruptAction = Extract<ForgeAction, { type: 'request_human_input' }>;
+
 /** Bounded field sizes for runtime actions (character counts). */
 export const FORGE_ACTION_LIMITS = {
-  /** question / title */
+  /** question / title / summary */
   shortText: 16 * 1024,
-  /** package content */
+  /** package content (per file) */
   content: 2 * 1024 * 1024,
-  /** skillId / targetAgentId / artifactType */
+  /** skillId / targetAgentId / artifactType / file name */
   id: 128,
 } as const;
 
 /** Maximum length of a sealed `workspaceFile` relative-path reference. */
 export const PUBLISH_WORKSPACE_FILE_MAX_LENGTH = 512;
+
+/** Maximum number of files one `finish_production` may seal. */
+export const MAX_FINISH_FILES = 16;
 
 /**
  * Engineering keys that runtime actions must never carry. Versions, ids,
@@ -201,29 +225,40 @@ function assertOnlyKeys(action: ForgeActionName, obj: Record<string, unknown>, a
 }
 
 /**
- * Validates a sealed `workspaceFile` reference at the action boundary: a
- * non-empty relative path of bounded length with no `..` segment. Deeper
- * containment/safety checks happen where the file is resolved (plan Task E3).
+ * Validates a sealed `workspaceFile` reference: a non-empty relative path of
+ * bounded length with no `..` segment. Deeper containment checks happen where
+ * the file is resolved.
  */
-function assertWorkspaceFileRef(value: unknown): string {
+function assertWorkspaceFileRef(action: ForgeActionName, value: unknown): string {
   if (typeof value !== 'string') {
-    invalidField('finish_production', 'workspaceFile', 'must be a string');
+    invalidField(action, 'workspaceFile', 'must be a string');
   }
   if (value.length === 0) {
-    invalidField('finish_production', 'workspaceFile', 'must not be empty');
+    invalidField(action, 'workspaceFile', 'must not be empty');
   }
   if (value.length > PUBLISH_WORKSPACE_FILE_MAX_LENGTH) {
     invalidField(
-      'finish_production',
+      action,
       'workspaceFile',
       `exceeds the ${PUBLISH_WORKSPACE_FILE_MAX_LENGTH} character limit`,
     );
   }
   if (isAbsolute(value)) {
-    invalidField('finish_production', 'workspaceFile', 'must be a relative workspace path');
+    invalidField(action, 'workspaceFile', 'must be a relative workspace path');
   }
   if (value.split('/').some((segment) => segment === '..')) {
-    invalidField('finish_production', 'workspaceFile', "must not contain '..' segments");
+    invalidField(action, 'workspaceFile', "must not contain '..' segments");
+  }
+  return value;
+}
+
+/** A safe, single-segment file name (no traversal, no reserved names). */
+function assertFileName(action: ForgeActionName, field: string, value: unknown): string {
+  if (typeof value !== 'string' || value.length === 0) {
+    invalidField(action, field, 'must be a non-empty file name');
+  }
+  if (value.includes('/') || value.includes('\\') || value.includes('..') || value === 'meta.json') {
+    invalidField(action, field, 'must be a plain file name');
   }
   return value;
 }
@@ -236,44 +271,54 @@ function assertFormat(action: ForgeActionName, value: unknown): 'markdown' | 'te
   return resolved;
 }
 
-/** Dispatch actions reference the sealed package with exactly `current`. */
-function assertProductionPackageRef(action: ForgeActionName, value: unknown): typeof PRODUCTION_PACKAGE_REF {
-  if (value !== PRODUCTION_PACKAGE_REF) {
-    invalidField(action, 'productionPackageRef', "must be exactly 'current'");
+/** Validates the files array of a `finish_production` package. */
+function validateFinishFiles(
+  action: ForgeActionName,
+  source: 'inline' | 'workspace_file',
+  raw: unknown,
+): FinishFile[] {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    invalidField(action, 'files', 'must be a non-empty array');
   }
-  return PRODUCTION_PACKAGE_REF;
+  if (raw.length > MAX_FINISH_FILES) {
+    invalidField(action, 'files', `exceeds the ${MAX_FINISH_FILES} file limit`);
+  }
+  const seen = new Set<string>();
+  const files: FinishFile[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      invalidField(action, 'files', 'entries must be objects');
+    }
+    const obj = entry as Record<string, unknown>;
+    assertOnlyKeys(action, obj, ['name', 'content', 'workspaceFile']);
+    const name = assertFileName(action, 'files.name', obj.name);
+    if (seen.has(name)) {
+      invalidField(action, 'files', 'names must be unique');
+    }
+    seen.add(name);
+    if (source === 'inline') {
+      const content = requireString(action, 'files.content', obj.content, FORGE_ACTION_LIMITS.content);
+      files.push({ name, content });
+    } else {
+      const workspaceFile = assertWorkspaceFileRef(action, obj.workspaceFile);
+      files.push({ name, workspaceFile });
+    }
+  }
+  return files;
 }
 
 function validateFinishProduction(obj: Record<string, unknown>): ForgeAction {
   const action: ForgeActionName = 'finish_production';
-  const source = obj.source;
-  if (source === 'inline') {
-    assertOnlyKeys(action, obj, ['type', 'source', 'content', 'format', 'artifactType', 'title']);
-    return {
-      type: action,
-      source,
-      content: requireString(action, 'content', obj.content, FORGE_ACTION_LIMITS.content),
-      format: assertFormat(action, obj.format),
-      artifactType: optionalString(action, 'artifactType', obj.artifactType, FORGE_ACTION_LIMITS.id),
-      title: optionalString(action, 'title', obj.title, FORGE_ACTION_LIMITS.shortText),
-    };
+  const source = obj.source === 'workspace_file' ? 'workspace_file' : 'inline';
+  if (obj.source !== undefined && source !== obj.source && obj.source !== 'inline') {
+    invalidField(action, 'source', "must be 'inline' or 'workspace_file'");
   }
-  if (source === 'workspace_file') {
-    assertOnlyKeys(action, obj, ['type', 'source', 'workspaceFile', 'format', 'artifactType', 'title']);
-    return {
-      type: action,
-      source,
-      workspaceFile: assertWorkspaceFileRef(obj.workspaceFile),
-      format: assertFormat(action, obj.format),
-      artifactType: optionalString(action, 'artifactType', obj.artifactType, FORGE_ACTION_LIMITS.id),
-      title: optionalString(action, 'title', obj.title, FORGE_ACTION_LIMITS.shortText),
-    };
-  }
-  if (source === 'current_input_artifact') {
-    assertOnlyKeys(action, obj, ['type', 'source']);
-    return { type: action, source };
-  }
-  invalidField(action, 'source', "must be 'inline', 'workspace_file' or 'current_input_artifact'");
+  assertOnlyKeys(action, obj, ['type', 'source', 'files', 'format', 'artifactType', 'title']);
+  const files = validateFinishFiles(action, source, obj.files);
+  const format = assertFormat(action, obj.format);
+  const artifactType = optionalString(action, 'artifactType', obj.artifactType, FORGE_ACTION_LIMITS.id);
+  const title = optionalString(action, 'title', obj.title, FORGE_ACTION_LIMITS.shortText);
+  return { type: action, source, files, format, artifactType, title };
 }
 
 /**
@@ -312,26 +357,39 @@ export function validateForgeAction(input: unknown): ForgeAction {
     case 'finish_production': {
       return validateFinishProduction(obj);
     }
-    case 'send_message': {
-      assertOnlyKeys(action, obj, ['type', 'targetAgentId', 'productionPackageRef']);
+    case 'annotate_artifact': {
+      assertOnlyKeys(action, obj, ['type', 'file', 'content']);
+      return {
+        type: action,
+        file: assertFileName(action, 'file', obj.file),
+        content: requireString(action, 'content', obj.content, FORGE_ACTION_LIMITS.content),
+      };
+    }
+    case 'read_artifact_version': {
+      assertOnlyKeys(action, obj, ['type', 'file']);
+      return { type: action, file: assertFileName(action, 'file', obj.file) };
+    }
+    case 'publish_artifact': {
+      assertOnlyKeys(action, obj, ['type']);
+      return { type: action };
+    }
+    case 'forward_input_version': {
+      assertOnlyKeys(action, obj, ['type', 'targetAgentId']);
       return {
         type: action,
         targetAgentId: requireString(action, 'targetAgentId', obj.targetAgentId, FORGE_ACTION_LIMITS.id),
-        productionPackageRef: assertProductionPackageRef(action, obj.productionPackageRef),
-      };
-    }
-    case 'publish_artifact': {
-      assertOnlyKeys(action, obj, ['type', 'productionPackageRef']);
-      return {
-        type: action,
-        productionPackageRef: assertProductionPackageRef(action, obj.productionPackageRef),
       };
     }
     case 'submit_final_artifact': {
-      assertOnlyKeys(action, obj, ['type', 'productionPackageRef']);
+      assertOnlyKeys(action, obj, ['type']);
+      return { type: action };
+    }
+    case 'send_message': {
+      assertOnlyKeys(action, obj, ['type', 'targetAgentId', 'summary']);
       return {
         type: action,
-        productionPackageRef: assertProductionPackageRef(action, obj.productionPackageRef),
+        targetAgentId: requireString(action, 'targetAgentId', obj.targetAgentId, FORGE_ACTION_LIMITS.id),
+        summary: requireString(action, 'summary', obj.summary, FORGE_ACTION_LIMITS.shortText),
       };
     }
     case 'request_human_input': {
@@ -339,7 +397,6 @@ export function validateForgeAction(input: unknown): ForgeAction {
       return { type: action, question: requireString(action, 'question', obj.question, FORGE_ACTION_LIMITS.shortText) };
     }
     default: {
-      // Exhaustiveness guard: the registry and this switch must stay aligned.
       const unreachable: never = action;
       throw new ForgeActionValidationError(
         ACTION_VALIDATION_CODES.ACTION_TYPE_UNKNOWN,

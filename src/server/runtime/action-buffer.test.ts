@@ -30,7 +30,7 @@ function finishInline(content = 'sealed review'): ForgeAction {
   return {
     type: 'finish_production',
     source: 'inline',
-    content,
+    files: [{ name: 'content.md', content }],
     format: 'text',
     artifactType: null,
     title: null,
@@ -38,7 +38,7 @@ function finishInline(content = 'sealed review'): ForgeAction {
 }
 
 function publishPackage(): ForgeAction {
-  return { type: 'publish_artifact', productionPackageRef: 'current' };
+  return { type: 'publish_artifact' };
 }
 
 function humanRequest(question = 'Which variant should continue?'): ForgeAction {
@@ -138,17 +138,27 @@ describe('ActionBuffer happy path', () => {
 });
 
 describe('ActionBuffer phase gate (spec §4.1/§5.3)', () => {
-  it('rejects a dispatch action before finish_production (PHASE_ORDER_INVALID)', () => {
+  it('rejects publish_artifact before finish_production (PHASE_PUBLISH_WITHOUT_FINISH_INVALID)', () => {
     const buffer = new ActionBuffer('turn-1');
-    expect(() => buffer.propose(sendMessageProposal()))
-      .toThrowError(ACTION_BUFFER_ERROR_CODES.PHASE_ORDER_INVALID);
     expect(() => buffer.propose(publishPackage()))
-      .toThrowError(ACTION_BUFFER_ERROR_CODES.PHASE_ORDER_INVALID);
-    expect(() => buffer.propose({ type: 'submit_final_artifact', productionPackageRef: 'current' }))
-      .toThrowError(ACTION_BUFFER_ERROR_CODES.PHASE_ORDER_INVALID);
+      .toThrowError(ACTION_BUFFER_ERROR_CODES.PHASE_PUBLISH_WITHOUT_FINISH_INVALID);
     // The rejected proposal never entered the buffer.
     expect(buffer.snapshot()).toEqual([]);
     expect(buffer.phase).toBe('production');
+  });
+
+  it('dispatches operate actions directly from production without sealing', () => {
+    const sendBuffer = new ActionBuffer('turn-1');
+    sendBuffer.propose(sendMessageProposal());
+    expect(sendBuffer.phase).toBe('dispatched');
+
+    const submitBuffer = new ActionBuffer('turn-2');
+    submitBuffer.propose({ type: 'submit_final_artifact' });
+    expect(submitBuffer.phase).toBe('dispatched');
+
+    const forwardBuffer = new ActionBuffer('turn-3');
+    forwardBuffer.propose({ type: 'forward_input_version', targetAgentId: 'controller' });
+    expect(forwardBuffer.phase).toBe('dispatched');
   });
 
   it('rejects a second finish_production (PHASE_FINISH_DUPLICATE)', () => {
@@ -179,30 +189,30 @@ describe('ActionBuffer phase gate (spec §4.1/§5.3)', () => {
     expect(buffer.snapshot()).toHaveLength(2);
   });
 
-  it('rejects request_human_input after production work began (PHASE_HUMAN_INTERRUPT_INVALID)', () => {
+  it('accepts request_human_input after production-phase work (F7 flipped)', () => {
     const buffer = new ActionBuffer('turn-1');
     buffer.propose(loadSkill());
-    expect(() => buffer.propose(humanRequest()))
-      .toThrowError(ACTION_BUFFER_ERROR_CODES.PHASE_HUMAN_INTERRUPT_INVALID);
-    expect(buffer.phase).toBe('production');
+    buffer.propose(humanRequest());
+    expect(buffer.phase).toBe('human_interrupted');
+    buffer.succeed('interrupted turn', null);
+    expect(buffer.commit()).toEqual([loadSkill(), humanRequest()]);
   });
 
-  it('pins the frozen decision: request_human_input is strictly the sole first action (review F7)', () => {
-    // Intentional strict semantics (frozen decision, kept by design): the
-    // direct human interrupt may ONLY open the turn — any production work
-    // before it (even one load_skill) rejects it, and once it interrupts,
-    // nothing else may follow in the turn.
-    const rejected = new ActionBuffer('turn-strict-1');
-    rejected.propose(loadSkill());
-    expect(() => rejected.propose(humanRequest())).toThrowError(
-      ACTION_BUFFER_ERROR_CODES.PHASE_HUMAN_INTERRUPT_INVALID,
-    );
-    expect(rejected.phase).toBe('production');
-    expect(rejected.snapshot()).toEqual([loadSkill()]);
-
-    const accepted = new ActionBuffer('turn-strict-2');
+  it('pins the frozen decision: request_human_input follows seal but never a dispatch (F7)', () => {
+    // The direct human interrupt may follow finish_production/annotate_artifact
+    // (F7 flipped), but never a dispatch — once the turn dispatches, no further
+    // action (including the interrupt) is accepted.
+    const accepted = new ActionBuffer('turn-accepted-1');
+    accepted.propose(finishInline());
     accepted.propose(humanRequest());
     expect(accepted.phase).toBe('human_interrupted');
+
+    const afterDispatch = new ActionBuffer('turn-with-dispatch');
+    afterDispatch.propose(sendMessageProposal());
+    expect(() => afterDispatch.propose(humanRequest())).toThrowError(
+      ACTION_BUFFER_ERROR_CODES.PHASE_DISPATCH_DUPLICATE,
+    );
+
     // After the interrupt the turn is terminal: every further proposal is
     // rejected, production actions included.
     for (const proposal of [loadSkill(), finishInline(), sendMessageProposal(), humanRequest()]) {
@@ -211,7 +221,7 @@ describe('ActionBuffer phase gate (spec §4.1/§5.3)', () => {
       );
     }
     accepted.succeed('interrupted turn', null);
-    expect(accepted.commit()).toEqual([humanRequest()]);
+    expect(accepted.commit()).toEqual([finishInline(), humanRequest()]);
   });
 
   it('rejects every action after the direct human interrupt (PHASE_DISPATCH_DUPLICATE)', () => {
@@ -232,7 +242,7 @@ describe('ActionBuffer phase gate (spec §4.1/§5.3)', () => {
     } catch (error) {
       expect(error).toBeInstanceOf(ActionBufferError);
       expect((error as ActionBufferError).code)
-        .toBe(ACTION_BUFFER_ERROR_CODES.PHASE_ORDER_INVALID);
+        .toBe(ACTION_BUFFER_ERROR_CODES.PHASE_PUBLISH_WITHOUT_FINISH_INVALID);
     }
   });
 

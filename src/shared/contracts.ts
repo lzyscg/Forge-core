@@ -144,6 +144,7 @@ export type TurnPhaseState =
 export type TurnPhaseDispatchAction =
   | 'send_message'
   | 'publish_artifact'
+  | 'forward_input_version'
   | 'submit_final_artifact'
   | 'request_human_input';
 

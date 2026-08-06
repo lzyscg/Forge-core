@@ -24,34 +24,23 @@ const publishTurnActions = (title: string) => [
   {
     type: 'finish_production' as const,
     source: 'inline' as const,
-    content: `${title} body`,
+    files: [{ name: 'content.md', content: `${title} body` }],
     format: 'markdown' as const,
     artifactType: '终稿',
     title,
   },
-  { type: 'publish_artifact' as const, productionPackageRef: 'current' as const },
+  { type: 'publish_artifact' as const },
 ];
 
-/** Legal final reviewer turn over a received artifact: seal it and submit it. */
-const submitReceivedArtifactTurnActions = [
-  { type: 'finish_production' as const, source: 'current_input_artifact' as const },
-  { type: 'submit_final_artifact' as const, productionPackageRef: 'current' as const },
-];
+/** Legal final reviewer turn over a received artifact: submit the input version. */
+const submitReceivedArtifactTurnActions = [{ type: 'submit_final_artifact' as const }];
 
-/** One legal reviewer turn: seal an inline review and send it to the writer. */
+/** One legal reviewer turn: send a short message back to the writer. */
 const reviewMessageTurnActions = (review: string) => [
-  {
-    type: 'finish_production' as const,
-    source: 'inline' as const,
-    content: review,
-    format: 'text' as const,
-    artifactType: null,
-    title: null,
-  },
   {
     type: 'send_message' as const,
     targetAgentId: 'writer',
-    productionPackageRef: 'current' as const,
+    summary: review,
   },
 ];
 

@@ -456,38 +456,66 @@ export function buildTurnChecklist(agent: FrozenAgentConfig, frozen: FrozenTempl
   const agentNameOf = (agentId: string): string =>
     frozen.agents.find((candidate) => candidate.id === agentId)?.name ?? agentId;
   const lines: string[] = ['【本回合任务清单】'];
-  lines.push('1. 产出本回合的内容。');
-  const sourceLabels = contract.production.output.sources.map(
-    (source) => PRODUCTION_SOURCE_LABELS[source] ?? source,
-  );
-  lines.push(`2. 调用 finish_production 封存生产包（source 可选：${sourceLabels.join(' 或 ')}）。`);
-  const dispatchLines = contract.dispatch.allowedActions.map((action) => {
-    const targetIds = contract.dispatch.targets[action] ?? [];
-    // Each candidate renders as `id（显示名）` — the dispatch parameter takes
-    // the agent ID, and naming the ID here stops the model from passing the
-    // display name (plan 2026-08-06 multi-target dispatch).
-    const targetNames =
-      targetIds.length === 0
-        ? null
-        : targetIds.map((id) => `${id}（${agentNameOf(id)}）`).join(' 或 ');
-    if (action === 'send_message') {
-      return targetNames === null
-        ? '调用 send_message 发送消息'
-        : `调用 send_message 向 ${targetNames} 发送消息`;
+
+  const isProduction = contract.production !== undefined;
+  const isOperate = contract.annotate !== undefined;
+  const targetsOf = (action: string): string[] => {
+    const map = contract.dispatch.targets as Record<string, string[] | undefined>;
+    return map[action] ?? [];
+  };
+  const renderTargets = (action: string): string | null => {
+    const ids = targetsOf(action);
+    if (ids.length === 0) {
+      return null;
     }
-    if (action === 'publish_artifact') {
-      return targetNames === null
-        ? '调用 publish_artifact 发布产物'
-        : `调用 publish_artifact 发布产物（送达 ${targetNames}）`;
-    }
-    return '调用 submit_final_artifact 申请系统最终交付';
-  });
-  if (dispatchLines.length === 1) {
-    lines.push(`3. ${dispatchLines[0]}（恰好一次分发）。`);
+    return ids.map((id) => `${id}（${agentNameOf(id)}）`).join(' 或 ');
+  };
+
+  if (isProduction) {
+    const sourceLabels = (contract.production!.output.sources ?? []).map(
+      (source) => PRODUCTION_SOURCE_LABELS[source] ?? source,
+    );
+    lines.push('1. 产出本回合的内容。');
+    lines.push(
+      `2. 调用 finish_production 封存生产包（source 可选：${sourceLabels.join(' 或 ')}）。`,
+    );
+    lines.push('3. 调用 publish_artifact 发布产物（恰好一次分发）。');
+  } else if (isOperate) {
+    lines.push('1. 如需审读，调用 read_artifact_version 读取输入版本文件。');
+    lines.push('2. 调用 annotate_artifact 标注输入版本文件（如审核意见）。');
+    lines.push('3. 执行恰好一次分发（见下方行动）。');
   } else {
-    lines.push('3. 从下列行动中选择一个，恰好完成一次分发：');
-    for (const line of dispatchLines) {
-      lines.push(`   - ${line}`);
+    lines.push('1. 执行恰好一次分发（见下方行动）。');
+  }
+
+  const dispatchLines = contract.dispatch.allowedActions
+    .filter((action) => action !== 'request_human_input')
+    .map((action) => {
+      const targetNames = renderTargets(action);
+      if (action === 'send_message') {
+        return targetNames === null
+          ? '调用 send_message 发送消息'
+          : `调用 send_message 向 ${targetNames} 发送消息`;
+      }
+      if (action === 'publish_artifact') {
+        return targetNames === null
+          ? '调用 publish_artifact 发布产物'
+          : `调用 publish_artifact 发布产物（送达 ${targetNames}）`;
+      }
+      if (action === 'forward_input_version') {
+        return targetNames === null
+          ? '调用 forward_input_version 转发输入版本'
+          : `调用 forward_input_version 向 ${targetNames} 转发输入版本`;
+      }
+      return '调用 submit_final_artifact 提交终稿';
+    });
+  if (!isProduction && dispatchLines.length > 0) {
+    if (dispatchLines.length === 1) {
+      lines.push(`   - ${dispatchLines[0]}`);
+    } else {
+      for (const line of dispatchLines) {
+        lines.push(`   - ${line}`);
+      }
     }
   }
   lines.push('完成以上全部步骤本回合才算结束；文字输出不是动作，不能代替工具调用。');
@@ -630,6 +658,7 @@ export class TaskRunner {
           format: handOff.meta.format,
           content: contentFile,
           sourceNodeId: handOff.meta.sourceNodeId,
+          humanAuthorized: input.node.humanAuthorized ?? false,
         };
       }
       const statePrefix = buildTurnStatePrefix(events, agentId, frozen, inputNodeId);
@@ -893,18 +922,36 @@ ${checklist}`;
         resolved.push(action);
         continue;
       }
-      let content: string;
-      try {
-        content = await this.workspaces.readFile(taskId, agentId, action.workspaceFile);
-      } catch (error) {
-        const message =
-          error instanceof RuntimeFailure ? error.message : '工作区文件不可读。';
-        await this.appendAttemptFailure(taskId, turnId, inputNodeId, message, false);
-        return null;
+      const resolvedFiles = [];
+      for (const file of action.files) {
+        const workspaceFile = file.workspaceFile;
+        if (workspaceFile === undefined) {
+          await this.appendAttemptFailure(
+            taskId,
+            turnId,
+            inputNodeId,
+            'finish_production 工作区文件引用缺失。',
+            false,
+          );
+          return null;
+        }
+        try {
+          const content = await this.workspaces.readFile(taskId, agentId, workspaceFile);
+          resolvedFiles.push({ name: file.name, content });
+        } catch (error) {
+          const message =
+            error instanceof RuntimeFailure ? error.message : '工作区文件不可读。';
+          await this.appendAttemptFailure(taskId, turnId, inputNodeId, message, false);
+          return null;
+        }
       }
-      // Platform-resolved shape consumed by the committer: the strict action
-      // fields plus the bounded file content (never model-supplied).
-      resolved.push({ ...action, content } as ForgeAction);
+      // Platform-resolved shape consumed by the committer: inline files with
+      // content (never model-supplied for workspace_file sources).
+      resolved.push({
+        ...action,
+        source: 'inline',
+        files: resolvedFiles,
+      } as ForgeAction);
     }
     return resolved;
   }
