@@ -80,7 +80,7 @@ describe('six deterministic scripts', () => {
     expect(workspace.task.status).toBe('completed');
     expect(workspace.artifacts.map((item) => item.version)).toEqual([1]);
     expect(workspace.artifacts[0].final).toBe(true);
-    expect(workspace.artifacts[0].content).toBe(templateFixture.sampleArtifacts.v1.content);
+    expect(workspace.artifacts[0].files[0]?.content).toBe(templateFixture.sampleArtifacts.v1.content);
     expect(maximumConcurrentActiveAgents(harness.events(task.id))).toBe(1);
   });
 
@@ -93,8 +93,8 @@ describe('six deterministic scripts', () => {
     expect(workspace.nodes).toHaveLength(9);
     expect(workspace.executedRoutes).toHaveLength(3);
     const [v1, v2] = workspace.artifacts;
-    expect(v1.content).toBe(templateFixture.sampleArtifacts.v1.content);
-    expect(v2.content).toBe(templateFixture.sampleArtifacts.v2.content);
+    expect(v1.files[0]?.content).toBe(templateFixture.sampleArtifacts.v1.content);
+    expect(v2.files[0]?.content).toBe(templateFixture.sampleArtifacts.v2.content);
     expect(v1.final).toBe(false);
     expect(v2.final).toBe(true);
     // The return route is a message edge back to the writer lane.
@@ -244,7 +244,7 @@ describe('bootstrap, one-slot and generation guards', () => {
           body: templateFixture.sampleInput[template.inputFields[0].id],
           status: 'active',
           attemptCount: 1,
-          artifactVersion: null,
+          inputVersion: null,
         },
       },
       {
@@ -259,7 +259,7 @@ describe('bootstrap, one-slot and generation guards', () => {
           body: templateFixture.sampleArtifacts.v1.content,
           status: 'confirmed',
           attemptCount: 1,
-          artifactVersion: null,
+          inputVersion: null,
         },
       },
     ];
@@ -387,7 +387,7 @@ describe('script validation', () => {
           { kind: 'input', delayMs: 500, agentId: WRITER_AGENT_ID, title: 't', body: 'b' },
           { kind: 'result', delayMs: 500, agentId: WRITER_AGENT_ID, title: 't', body: 'b' },
           { kind: 'artifact', delayMs: 500, sourceNodeRef: `${WRITER_AGENT_ID}:result`, title: 't', contentFixture: 'v1' },
-          { kind: 'final', delayMs: 500, artifactVersion: 1 },
+          { kind: 'final', delayMs: 500, inputVersion: 1 },
         ]),
         template,
       ),
@@ -439,7 +439,7 @@ describe('script validation', () => {
         { kind: 'input', delayMs: 500, agentId: WRITER_AGENT_ID, title: 't', body: 'b' },
         { kind: 'result', delayMs: 500, agentId: WRITER_AGENT_ID, title: 't', body: 'b' },
         { kind: 'artifact', delayMs: 500, sourceNodeRef: `${WRITER_AGENT_ID}:result`, title: 't', contentFixture: 'v1' },
-        { kind: 'final', delayMs: 500, artifactVersion: 2 },
+        { kind: 'final', delayMs: 500, inputVersion: 2 },
       ]),
       template,
     );
@@ -502,7 +502,7 @@ describe('skill steps and turn traces (plan Task E4 Step 1)', () => {
       body: MOCK_SKILLS[SKILL_CHAPTER_WRITING_ID].versionHash.slice(0, 12),
       status: 'confirmed',
       attemptCount: 1,
-      artifactVersion: null,
+      inputVersion: null,
       turnId: null, // loaded before the writer's first result
     });
     const writerResult = workspace.nodes.find(

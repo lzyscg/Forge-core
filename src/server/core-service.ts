@@ -336,7 +336,14 @@ export class CoreService {
         title: meta.title,
         sourceNodeId: meta.sourceNodeId,
         format: meta.format,
-        contentHash: meta.contentHash,
+        files: [
+          {
+            name: meta.format === 'markdown' ? 'content.md' : 'content.txt',
+            hash: meta.contentHash,
+          },
+        ],
+        artifactType: null,
+        artifactId: meta.id,
       },
     });
     return published;

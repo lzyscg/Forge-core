@@ -26,7 +26,7 @@ const resultNode: WorkspaceNode = {
   body: '正文内容。',
   status: 'confirmed',
   attemptCount: 1,
-  artifactVersion: 1,
+  inputVersion: 1,
   turnId: 'turn-1',
 };
 
@@ -39,7 +39,7 @@ const skillNode: WorkspaceNode = {
   body: '8f3a2b1c4d5e',
   status: 'confirmed',
   attemptCount: 1,
-  artifactVersion: null,
+  inputVersion: null,
   turnId: 'turn-1',
 };
 

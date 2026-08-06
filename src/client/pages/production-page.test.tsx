@@ -426,7 +426,7 @@ function workspaceWithSkillAndTurnIds(): TaskWorkspace {
     body: '8f3a2b1c4d5e',
     status: 'confirmed',
     attemptCount: 1,
-    artifactVersion: null,
+    inputVersion: null,
     turnId: null,
   };
   return { ...ws, nodes: [...withTurnIds, skillNode] };

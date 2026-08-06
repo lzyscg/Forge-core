@@ -246,15 +246,7 @@ export class ArtifactStore {
   private async publishExclusive(
     taskId: string,
     proposal: ArtifactProposal,
-  ): Promise<{
-    id: string;
-    version: number;
-    title: string;
-    content: string;
-    sourceNodeId: string;
-    createdAt: string;
-    final: false;
-  }> {
+  ): Promise<ArtifactVersion> {
     // Publishing under an unknown task would invent a task directory; refuse.
     try {
       const taskStat = await stat(this.paths.taskRoot(taskId));
@@ -300,11 +292,20 @@ export class ArtifactStore {
       }
       throw corrupt('产物版本发布失败。');
     }
+    // Phase 0 transitional: the store still physically writes a single
+    // content file; the contract carries it as one `content`-extract slot.
+    // Phase 1 makes the store multi-file with event-authoritative versions.
     return {
       id: meta.id,
       version: meta.version,
       title: meta.title,
-      content: proposal.content,
+      files: [
+        {
+          name: CONTENT_FILE_NAME[proposal.format],
+          extract: 'content',
+          content: proposal.content,
+        },
+      ],
       sourceNodeId: meta.sourceNodeId,
       createdAt: meta.createdAt,
       final: false,

@@ -1,0 +1,14 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "forge-core-http",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "set -a; [ -f .env ] && . ./.env; set +a; export FORGE_CORE_DATA_ROOT=$PWD/data FORGE_CORE_TEMPLATE_ROOT=/tmp/forge-demo-templates FORGE_CORE_PORT=3210 VITE_FORGE_CORE_MODE=http; exec npm run dev"
+      ],
+      "port": 3210
+    }
+  ]
+}

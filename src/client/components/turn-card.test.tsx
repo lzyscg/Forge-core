@@ -24,7 +24,7 @@ function member(partial: Partial<WorkspaceNode> & Pick<WorkspaceNode, 'id' | 'ki
     body: `${partial.id}-body`,
     status: 'confirmed',
     attemptCount: 1,
-    artifactVersion: null,
+    inputVersion: null,
     turnId: null,
     ...partial,
   };
@@ -42,7 +42,7 @@ function fullGroup(): TurnGroup {
       sequence: 2,
       turnId: 't1',
       attemptCount: 2,
-      artifactVersion: 1,
+      inputVersion: 1,
     }),
     skills: [member({ id: 's1', kind: 'skill', sequence: 2, turnId: 't1', title: 'skill-rhyme' })],
     status: 'confirmed',

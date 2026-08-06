@@ -371,7 +371,7 @@ describe('typed JSON API', () => {
     expect(response.status).toBe(200);
     const artifact = response.body as ArtifactVersion;
     expect(artifact.version).toBe(1);
-    expect(artifact.content).toBe('first');
+    expect(artifact.files[0].content).toBe('first');
     expect(artifact.final).toBe(false);
 
     const missing = await client.get(`/api/tasks/${task.id}/artifacts/2`);

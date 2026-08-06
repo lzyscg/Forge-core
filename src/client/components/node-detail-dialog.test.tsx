@@ -38,7 +38,7 @@ describe('NodeDetailDialog', () => {
   });
 
   it('shows 无 when the node has no associated artifact version', () => {
-    renderDialog({ node: { ...node, artifactVersion: null }, agentName: '章节审核' });
+    renderDialog({ node: { ...node, inputVersion: null }, agentName: '章节审核' });
     const dialog = screen.getByRole('dialog');
     expect(dialog.textContent).toContain('无');
   });

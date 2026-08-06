@@ -30,7 +30,7 @@ function seedNode(id: string, agentId: string): WorkspaceNode {
     body: 'sample body',
     status: 'active',
     attemptCount: 1,
-    artifactVersion: null,
+    inputVersion: null,
   };
 }
 

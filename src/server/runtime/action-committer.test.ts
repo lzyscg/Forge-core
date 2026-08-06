@@ -249,14 +249,14 @@ describe('ActionCommitter sealed-package dispatch semantics (frozen decision 5)'
     });
     const workspace = await projector.workspace(taskId);
     expect(workspace.artifacts).toHaveLength(1);
-    expect(workspace.artifacts[0].content).toBe('封存正文');
+    expect(workspace.artifacts[0].files[0].content).toBe('封存正文');
     expect(workspace.executedRoutes).toHaveLength(1);
     expect(workspace.executedRoutes[0].kind).toBe('artifact');
     const inputNode = workspace.nodes.find(
       (node) => node.id === workspace.executedRoutes[0].toNodeId,
     );
     expect(inputNode?.agentId).toBe('reviewer');
-    expect(inputNode?.artifactVersion).toBe(1);
+    expect(inputNode?.inputVersion).toBe(1);
   });
 
   it('delivers the sealed text as the routed message body for reviewer', async () => {

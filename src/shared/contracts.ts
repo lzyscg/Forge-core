@@ -92,7 +92,19 @@ export interface WorkspaceNode {
   body: string;
   status: 'confirmed' | 'active' | 'failed';
   attemptCount: number;
-  artifactVersion: number | null;
+  /**
+   * The artifact version this input node carries (spec §8.1; was
+   * `artifactVersion`). Propagated along routes at dispatch time; null for
+   * non-artifact inputs. Legacy events read back through the normalize
+   * transform carry the migrated value here.
+   */
+  inputVersion: number | null;
+  /**
+   * True only when the platform's human-accept path synthesized this input
+   * (spec §7.1). Absent → false. The committer never sets it; only the
+   * scheduler accept path may.
+   */
+  humanAuthorized?: boolean;
   /**
    * The Turn that produced this node's observable content (result/skill
    * nodes carry a value; everything else stays null). Lets the canvas fetch
@@ -172,11 +184,23 @@ export interface WorkspaceRoute {
   label: string;
 }
 
+/**
+ * One file slot of an artifact version (spec §3.4). `extract` names the
+ * template-declared extract slot (content/review/revision); `content` carries
+ * the file body for display. Legacy single-file versions degrade to one
+ * `content`-extract slot.
+ */
+export interface ArtifactFile {
+  name: string;
+  extract: string;
+  content: string;
+}
+
 export interface ArtifactVersion {
   id: string;
   version: number;
   title: string;
-  content: string;
+  files: ArtifactFile[];
   sourceNodeId: string;
   createdAt: string;
   final: boolean;

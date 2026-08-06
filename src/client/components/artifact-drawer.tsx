@@ -71,7 +71,7 @@ export function ArtifactDrawer({
             <div className="fc-artifact-preview-wrap">
               <h3 className="fc-artifact-title">{selected.title}</h3>
               <div className="fc-artifact-preview" data-testid="artifact-preview">
-                {selected.content.split(/\n{2,}/).map((paragraph, index) => (
+                {(selected.files[0]?.content ?? '').split(/\n{2,}/).map((paragraph: string, index: number) => (
                   // Paragraph index keys are fine: the chain is append-only.
                   <p key={index}>{paragraph}</p>
                 ))}

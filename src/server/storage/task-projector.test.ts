@@ -296,7 +296,7 @@ describe('task-projector', () => {
     expect(accepted.task.status).toBe('completed');
     expect(accepted.artifacts.find((artifact) => artifact.id === second.id)?.final).toBe(true);
     expect(accepted.artifacts.find((artifact) => artifact.id === first.id)?.final).toBe(false);
-    expect(accepted.artifacts.find((artifact) => artifact.id === second.id)?.content).toBe(
+    expect(accepted.artifacts.find((artifact) => artifact.id === second.id)?.files[0].content).toBe(
       '终稿正文',
     );
   });
@@ -399,7 +399,7 @@ describe('task-projector phase E: turn ids and skill nodes', () => {
       body: 's1',
       status: 'confirmed',
       attemptCount: 1,
-      artifactVersion: null,
+      inputVersion: null,
       turnId: 'in-t1',
     });
     // A skill load never changes the projected task status.
@@ -423,7 +423,7 @@ describe('task-projector phase E: turn ids and skill nodes', () => {
       title: 's2',
       status: 'confirmed',
       attemptCount: 1,
-      artifactVersion: null,
+      inputVersion: null,
       turnId: null,
     });
   });

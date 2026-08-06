@@ -839,7 +839,7 @@ export class ActionCommitter {
               sequence: 0, // Assigned at build time below.
               body: sealedPackage.title,
               attemptCount: 1,
-              artifactVersion: publishedThisTurn.version,
+              inputVersion: publishedThisTurn.version,
             }),
             nextSequence,
             at,
@@ -1011,7 +1011,16 @@ export class ActionCommitter {
         title: sealedPackage.title,
         sourceNodeId: resultEventId,
         format: sealedPackage.format,
-        contentHash: sha256(sealedPackage.content),
+        // Phase 0 transitional: one content file per publish (Phase 1/4 make
+        // the store multi-file and the committer carry the full file set).
+        files: [
+          {
+            name: sealedPackage.format === 'markdown' ? 'content.md' : 'content.txt',
+            hash: sha256(sealedPackage.content),
+          },
+        ],
+        artifactType: sealedPackage.artifactType,
+        artifactId: artifact.artifactId,
       },
     }));
     return artifact;
@@ -1118,7 +1127,7 @@ export class ActionCommitter {
       sequence: number;
       body: string;
       attemptCount: number;
-      artifactVersion?: number | null;
+      inputVersion?: number | null;
     },
   ): EventNode {
     return {
@@ -1129,7 +1138,7 @@ export class ActionCommitter {
       body: parts.body,
       status: 'confirmed',
       attemptCount: parts.attemptCount,
-      artifactVersion: parts.artifactVersion ?? null,
+      inputVersion: parts.inputVersion ?? null,
     };
   }
 

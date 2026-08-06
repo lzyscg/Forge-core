@@ -142,7 +142,7 @@ function seedNode(
     body: 'sample body',
     status: 'active',
     attemptCount: 1,
-    artifactVersion: null,
+    inputVersion: null,
     ...overrides,
   };
 }
@@ -227,7 +227,7 @@ function buildCompletedEvents(): MockTaskEvent[] {
         id: 'artifact-seed-v1',
         version: 1,
         title: v1.title,
-        content: v1.content,
+        files: [{ name: 'content.md', extract: 'content', content: v1.content }],
         sourceNodeId: 'node-seed-writer-result',
         createdAt: at(7),
         final: false,

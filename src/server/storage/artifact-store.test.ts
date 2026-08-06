@@ -97,7 +97,7 @@ describe('ArtifactStore', () => {
       id: meta.id,
       version: 1,
       title: proposal.title,
-      content: '正文内容',
+      files: [{ name: 'content.md', extract: 'content', content: '正文内容' }],
       sourceNodeId: proposal.sourceNodeId,
       createdAt: meta.createdAt,
       final: false,
@@ -119,7 +119,7 @@ describe('ArtifactStore', () => {
     const contents = new Set(proposals.map((p) => p.content));
     for (const item of published) {
       const stored = await store.read(taskId, item.version);
-      expect(stored.content).toBe(item.content);
+      expect(stored.content).toBe(item.files[0].content);
       expect(contents.has(stored.content)).toBe(true);
     }
     expect(

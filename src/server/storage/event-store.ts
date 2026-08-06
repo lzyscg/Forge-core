@@ -22,7 +22,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import type { CorePaths } from './core-paths';
 import { parseEventFileName } from './core-paths';
 import { STORAGE_ERROR_CODES, StorageError, writeNewAtomic } from './atomic-file';
-import { validateTaskEvent, type TaskEvent } from './task-events';
+import { validateTaskEvent, normalizeLegacyEvent, type TaskEvent } from './task-events';
 
 const TMP_PREFIX = '.tmp-';
 
@@ -105,7 +105,7 @@ async function readCommittedFile(
   }
   let event: TaskEvent;
   try {
-    event = validateTaskEvent(value);
+    event = validateTaskEvent(normalizeLegacyEvent(value));
   } catch {
     throw corrupt('已提交事件未通过规范事件校验。');
   }

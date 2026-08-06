@@ -89,8 +89,8 @@ function ProductionWorkspace({ workspace }: { workspace: TaskWorkspace }) {
     (nodeId: string) => {
       setSelectedNodeId(nodeId);
       const node = workspace.nodes.find((item) => item.id === nodeId);
-      if (node && node.artifactVersion !== null) {
-        setSelectedVersion(node.artifactVersion);
+      if (node && node.inputVersion !== null) {
+        setSelectedVersion(node.inputVersion);
       }
     },
     [workspace.nodes],

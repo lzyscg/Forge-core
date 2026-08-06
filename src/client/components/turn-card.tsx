@@ -60,7 +60,7 @@ export function TurnCard({
   const highlighted = highlightedNodeId !== null && memberIds.has(highlightedNodeId);
 
   const attempts = members.reduce((max, member) => Math.max(max, member.attemptCount), 1);
-  const artifactVersion = group.result?.artifactVersion ?? null;
+  const inputVersion = group.result?.inputVersion ?? null;
   const primary = group.result ?? group.input ?? null;
   const hasDetail = group.input !== undefined || group.result !== undefined;
 
@@ -116,8 +116,8 @@ export function TurnCard({
         <span className="fc-turn__agent">{agentName}</span>
         <StatusChip tone={nodeStatusTone(group.status)} label={nodeStatusLabel(group.status)} />
         {attempts > 1 ? <span className="fc-turn__attempts">尝试 {attempts} 次</span> : null}
-        {artifactVersion !== null ? (
-          <span className="fc-turn__version">产物 V{artifactVersion}</span>
+        {inputVersion !== null ? (
+          <span className="fc-turn__version">产物 V{inputVersion}</span>
         ) : null}
         {group.skills.length > 0 ? (
           <span className="fc-turn__skills">

@@ -478,7 +478,7 @@ export async function reconcileRecoveryViews(
       workspaceNode.kind !== fileNode.kind ||
       workspaceNode.status !== fileNode.status ||
       workspaceNode.attemptCount !== fileNode.attemptCount ||
-      workspaceNode.artifactVersion !== (fileNode.artifactVersion ?? null)
+      workspaceNode.inputVersion !== (fileNode.inputVersion ?? null)
     ) {
       mismatch.push(`node fields disagree for ${entry.event.id}`);
     }
@@ -516,7 +516,11 @@ export async function reconcileRecoveryViews(
   for (const entry of projection.events) {
     if (entry.event.type !== 'artifact_published') continue;
     const artifact = (entry.event as unknown as { artifact: Record<string, unknown> }).artifact;
-    publishedByEvent.set(Number(artifact.version), String(artifact.contentHash));
+    // v7 artifact_published carries `files[]` (legacy single contentHash is
+    // normalized away); the first file's hash is the version's content hash.
+    const files = Array.isArray(artifact.files) ? (artifact.files as Array<{ hash?: unknown }>) : [];
+    const hash = files.length > 0 ? String(files[0]?.hash ?? '') : String(artifact.contentHash ?? '');
+    publishedByEvent.set(Number(artifact.version), hash);
   }
   if (projection.artifacts.length !== workspace.artifacts.length) {
     mismatch.push(
@@ -539,7 +543,7 @@ export async function reconcileRecoveryViews(
     if (fileArtifact.contentHash !== recomputed) {
       mismatch.push(`artifact file content hash mismatch at version ${fileArtifact.version}`);
     }
-    if (sha256Hex(workspaceArtifact.content) !== fileArtifact.contentHash) {
+    if (sha256Hex(workspaceArtifact.files[0].content) !== fileArtifact.contentHash) {
       mismatch.push(
         `artifact workspace content hash disagrees at version ${fileArtifact.version}`,
       );
@@ -836,7 +840,7 @@ export function buildRecoveryReport(facts: RecoveryReportFacts): Record<string, 
   const artifacts = [...(workspace?.artifacts ?? [])].sort((a, b) => a.version - b.version);
   const artifactVersions = artifacts.map((artifact) => ({
     version: artifact.version,
-    contentHash: sha256Hex(artifact.content),
+    contentHash: sha256Hex(artifact.files[0].content),
     final: artifact.final,
   }));
   const finalArtifact = artifacts.find((artifact) => artifact.final) ?? null;
@@ -859,7 +863,7 @@ export function buildRecoveryReport(facts: RecoveryReportFacts): Record<string, 
     executedRouteKinds,
     artifactVersions,
     finalArtifactVersion: finalArtifact === null ? null : finalArtifact.version,
-    finalArtifactHash: finalArtifact === null ? null : sha256Hex(finalArtifact.content),
+    finalArtifactHash: finalArtifact === null ? null : sha256Hex(finalArtifact.files[0]?.content ?? ''),
     restartCount: facts.restartCount,
     interruptedObserved: facts.interruptedObserved,
     boundaryStops: facts.boundaryStops,

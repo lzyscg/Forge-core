@@ -117,7 +117,7 @@ describe('evaluateProgress', () => {
       }),
       makeTaskEvent({ type: 'retry_scheduled', nodeId: 'node-1', delayMs: 1000, attempt: 2 }),
       makeTaskEvent({ type: 'route_executed', route: { sequence: 2, fromNodeId: 'a', toNodeId: 'b', kind: 'message', label: '路由' } }),
-      makeTaskEvent({ type: 'artifact_published', artifact: { version: 1, title: '产物', sourceNodeId: 'a', format: 'markdown', contentHash: '0'.repeat(64) } }),
+      makeTaskEvent({ type: 'artifact_published', artifact: { version: 1, title: '产物', sourceNodeId: 'a', format: 'markdown', files: [{ name: 'content.md', hash: '0'.repeat(64) }], artifactType: null, artifactId: null } }),
       makeTaskEvent({ type: 'skill_loaded', skillId: 'skill-1' }),
       agentResult('agent-a'),
       makeTaskEvent({ type: 'task_stopped' }),

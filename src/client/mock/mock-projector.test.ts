@@ -35,7 +35,7 @@ function makeNode(
     body: 'sample body',
     status: 'active',
     attemptCount: 1,
-    artifactVersion: null,
+    inputVersion: null,
     ...overrides,
   };
 }
@@ -198,7 +198,7 @@ describe('projectMockWorkspace', () => {
       id: 'art-1',
       version: 1,
       title: 'V1',
-      content: 'first version',
+      files: [{ name: 'content.md', extract: 'content', content: 'first version' }],
       sourceNodeId: 'n1',
       createdAt: '2026-01-01T00:00:05.000Z',
       final: true,
@@ -207,7 +207,7 @@ describe('projectMockWorkspace', () => {
       id: 'art-2',
       version: 2,
       title: 'V2',
-      content: 'second version',
+      files: [{ name: 'content.md', extract: 'content', content: 'second version' }],
       sourceNodeId: 'n3',
       createdAt: '2026-01-01T00:00:08.000Z',
       final: true,
@@ -305,7 +305,7 @@ describe('projectMockWorkspace', () => {
           id: 'art-1',
           version: 1,
           title: 'V1',
-          content: 'done',
+          files: [{ name: 'content.md', extract: 'content', content: 'done' }],
           sourceNodeId: 'n1',
           createdAt: '2026-01-01T00:00:03.000Z',
           final: false,
@@ -385,7 +385,7 @@ describe('skill_loaded folding (plan Task E4 Step 1)', () => {
       body: 'abcdef123456',
       status: 'confirmed',
       attemptCount: 1,
-      artifactVersion: null,
+      inputVersion: null,
       turnId: 'turn-task-1',
     });
     expect(workspace.nodes.map((node) => node.id)).toEqual(['n1', 'n2', 'n3']);
@@ -423,7 +423,7 @@ describe('skill_loaded folding (plan Task E4 Step 1)', () => {
       id: 'art-1',
       version: 1,
       title: 'V1',
-      content: 'done',
+      files: [{ name: 'content.md', extract: 'content', content: 'done' }],
       sourceNodeId: 'n1',
       createdAt: '2026-01-01T00:00:03.000Z',
       final: false,

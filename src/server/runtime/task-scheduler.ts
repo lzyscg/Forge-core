@@ -759,7 +759,7 @@ export class TaskScheduler {
         body: PROGRESS_GUARD_QUESTION,
         status: 'confirmed',
         attemptCount: 1,
-        artifactVersion: null,
+        inputVersion: null,
       },
       question: PROGRESS_GUARD_QUESTION,
     });
@@ -856,7 +856,7 @@ export class TaskScheduler {
         body: lines.join('\n'),
         status: 'confirmed',
         attemptCount: 1,
-        artifactVersion: null,
+        inputVersion: null,
       },
     });
   }
@@ -918,7 +918,7 @@ export class TaskScheduler {
         body: answer,
         status: 'confirmed',
         attemptCount: 1,
-        artifactVersion: null,
+        inputVersion: null,
       },
       answer,
     });
@@ -934,7 +934,7 @@ export class TaskScheduler {
         body: answer,
         status: 'confirmed',
         attemptCount: 1,
-        artifactVersion: null,
+        inputVersion: null,
       },
     });
   }

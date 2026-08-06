@@ -67,8 +67,8 @@ function NodeButton({ node, row, selected, highlighted, onSelect }: NodeButtonPr
         {node.attemptCount > 1 ? (
           <span className="fc-node__attempts">尝试 {node.attemptCount} 次</span>
         ) : null}
-        {node.artifactVersion !== null ? (
-          <span className="fc-node__version">产物 V{node.artifactVersion}</span>
+        {node.inputVersion !== null ? (
+          <span className="fc-node__version">产物 V{node.inputVersion}</span>
         ) : null}
       </span>
     </button>

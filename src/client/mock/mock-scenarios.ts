@@ -49,7 +49,7 @@ export type ScenarioStep =
   | { kind: 'transient_failure'; delayMs: number; nodeRef: string; attempt: number }
   | { kind: 'manual_failure'; delayMs: number; nodeRef: string }
   | { kind: 'human_request'; delayMs: number; agentId: string; question: string }
-  | { kind: 'final'; delayMs: number; artifactVersion: number };
+  | { kind: 'final'; delayMs: number; inputVersion: number };
 
 export interface MockScenarioDefinition {
   id: MockScenarioId;
@@ -150,9 +150,9 @@ export function validateMockScenario(
         named.add(`${step.agentId}:human`);
         break;
       case 'final':
-        if (step.artifactVersion < 1 || step.artifactVersion > publishedArtifacts) {
+        if (step.inputVersion < 1 || step.inputVersion > publishedArtifacts) {
           errors.push(
-            `${where} 接受的版本 ${step.artifactVersion} 尚未发布（此前仅发布 ${publishedArtifacts} 个）。`,
+            `${where} 接受的版本 ${step.inputVersion} 尚未发布（此前仅发布 ${publishedArtifacts} 个）。`,
           );
         }
         break;
@@ -261,7 +261,7 @@ const reviewReturnSteps: ScenarioStep[] = [
     body: templateFixture.sampleApprovalNote,
     phase: submittedFinalPhase,
   },
-  { kind: 'final', delayMs: 450, artifactVersion: 2 },
+  { kind: 'final', delayMs: 450, inputVersion: 2 },
 ];
 
 export const MOCK_SCENARIOS: Record<MockScenarioId, MockScenarioDefinition> = {
@@ -292,7 +292,7 @@ export const MOCK_SCENARIOS: Record<MockScenarioId, MockScenarioDefinition> = {
         body: templateFixture.sampleApprovalNote,
         phase: submittedFinalPhase,
       },
-      { kind: 'final', delayMs: 450, artifactVersion: 1 },
+      { kind: 'final', delayMs: 450, inputVersion: 1 },
     ],
   },
   review_return_v2: {
@@ -327,7 +327,7 @@ export const MOCK_SCENARIOS: Record<MockScenarioId, MockScenarioDefinition> = {
         body: templateFixture.sampleApprovalNote,
         phase: submittedFinalPhase,
       },
-      { kind: 'final', delayMs: 450, artifactVersion: 1 },
+      { kind: 'final', delayMs: 450, inputVersion: 1 },
     ],
   },
   manual_retry: {
@@ -358,7 +358,7 @@ export const MOCK_SCENARIOS: Record<MockScenarioId, MockScenarioDefinition> = {
         body: templateFixture.sampleApprovalNote,
         phase: submittedFinalPhase,
       },
-      { kind: 'final', delayMs: 450, artifactVersion: 1 },
+      { kind: 'final', delayMs: 450, inputVersion: 1 },
     ],
   },
   human_input: {
@@ -387,7 +387,7 @@ export const MOCK_SCENARIOS: Record<MockScenarioId, MockScenarioDefinition> = {
         body: templateFixture.sampleApprovalNote,
         phase: submittedFinalPhase,
       },
-      { kind: 'final', delayMs: 450, artifactVersion: 1 },
+      { kind: 'final', delayMs: 450, inputVersion: 1 },
     ],
   },
   refresh_recovery: {

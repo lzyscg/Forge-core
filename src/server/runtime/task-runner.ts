@@ -613,12 +613,12 @@ export class TaskRunner {
       const loadedSkills = await this.skills.loadedSkillsFor(taskId, agentId);
       let inputText = input.node.body;
       let handOffArtifact: CurrentInputArtifact | null = null;
-      if (input.node.artifactVersion !== null) {
+      if (input.node.inputVersion !== null) {
         // Artifact hand-off: the route node body carries only the title; the
         // receiving agent's Turn must carry the full artifact content. The
         // same read supplies the commit context's received-artifact identity
         // (frozen decision 3: the platform resolves current_input_artifact).
-        const handOff = await this.artifacts.read(taskId, input.node.artifactVersion);
+        const handOff = await this.artifacts.read(taskId, input.node.inputVersion);
         inputText = artifactHandOffInputText(handOff.meta.title, handOff.content);
         handOffArtifact = {
           artifactId: handOff.meta.id,

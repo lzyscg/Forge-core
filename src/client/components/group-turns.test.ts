@@ -16,7 +16,7 @@ function node(
     body: `${partial.id}-body`,
     status: 'confirmed',
     attemptCount: 1,
-    artifactVersion: null,
+    inputVersion: null,
     turnId: null,
     ...partial,
   };

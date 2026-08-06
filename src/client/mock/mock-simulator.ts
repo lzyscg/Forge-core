@@ -250,7 +250,7 @@ export function createMockSimulator(
           attemptCount: isInput
             ? 1
             : (context.attemptCounts.get(inputRef(step.agentId)) ?? 1),
-          artifactVersion: null,
+          inputVersion: null,
           turnId,
         };
         deps.append(taskId, { type: isInput ? 'agent_input' : 'agent_result', at, node });
@@ -274,7 +274,7 @@ export function createMockSimulator(
           body: step.versionHash.slice(0, 12),
           status: 'confirmed',
           attemptCount: 1,
-          artifactVersion: null,
+          inputVersion: null,
           turnId: context.lastResultTurnId,
         };
         deps.append(taskId, { type: 'skill_loaded', at, node });
@@ -303,7 +303,7 @@ export function createMockSimulator(
           id: artifactIdFor(taskId, version),
           version,
           title: step.title,
-          content: deps.resolveContent(step.contentFixture),
+          files: [{ name: 'content.md', extract: 'content', content: deps.resolveContent(step.contentFixture) }],
           sourceNodeId,
           createdAt: at,
           final: false,
@@ -335,7 +335,7 @@ export function createMockSimulator(
           body: step.question,
           status: 'active',
           attemptCount: 1,
-          artifactVersion: null,
+          inputVersion: null,
         };
         deps.append(taskId, { type: 'human_requested', at, node, question: step.question });
         break;
@@ -344,7 +344,7 @@ export function createMockSimulator(
         deps.append(taskId, {
           type: 'final_accepted',
           at,
-          artifactId: artifactIdFor(taskId, step.artifactVersion),
+          artifactId: artifactIdFor(taskId, step.inputVersion),
         });
         break;
     }
@@ -521,7 +521,7 @@ export function createMockSimulator(
           body: answer,
           status: 'confirmed',
           attemptCount: 1,
-          artifactVersion: null,
+          inputVersion: null,
         },
         answer,
       });

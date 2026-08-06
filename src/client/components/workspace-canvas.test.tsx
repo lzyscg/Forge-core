@@ -37,7 +37,7 @@ function extraNode(id: string, sequence: number, status: WorkspaceNode['status']
     body: 'body',
     status,
     attemptCount: 1,
-    artifactVersion: null,
+    inputVersion: null,
   };
 }
 
@@ -149,7 +149,7 @@ describe('WorkspaceCanvas', () => {
           body: '问题',
           status: 'active',
           attemptCount: 1,
-          artifactVersion: null,
+          inputVersion: null,
         },
       ],
     };
@@ -193,7 +193,7 @@ describe('WorkspaceCanvas', () => {
       body: 'hash',
       status: 'confirmed',
       attemptCount: 1,
-      artifactVersion: null,
+      inputVersion: null,
       turnId: null,
     };
     const onSelectNode = vi.fn();

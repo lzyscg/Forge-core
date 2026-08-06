@@ -284,7 +284,7 @@ export function createHttpGateway(options: HttpGatewayOptions = {}): ForgeCoreGa
               payload = null;
             }
             if (Value.Check(taskWorkspaceSchema, payload)) {
-              const workspace = payload as TaskWorkspace;
+              const workspace = payload as unknown as TaskWorkspace;
               knownTaskIds.add(taskId);
               const digest = workspaceDigest(workspace);
               if (lastDigest === null) {

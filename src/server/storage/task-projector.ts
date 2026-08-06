@@ -87,10 +87,14 @@ function createState(): ProjectionState {
 const RESULT_ID_SUFFIX = '-result';
 
 /** Public diagnostic for one incompatibility reason (iron rules 1/6). */
-function incompatibleDiagnosticFor(reason: 'TURN_CONTRACT_REQUIRED'): string {
+function incompatibleDiagnosticFor(
+  reason: 'TURN_CONTRACT_REQUIRED' | 'SCHEMA_V2_REQUIRED',
+): string {
   switch (reason) {
     case 'TURN_CONTRACT_REQUIRED':
       return '任务冻结快照缺少当前回合契约，无法继续运行；可查看历史内容或使用当前模板克隆重建。';
+    case 'SCHEMA_V2_REQUIRED':
+      return '任务冻结快照使用旧版产物契约，无法继续运行；可查看历史内容或使用当前模板克隆重建。';
     default: {
       const unreachable: never = reason;
       return `任务冻结快照不兼容（${String(unreachable)}），无法继续运行。`;
@@ -108,7 +112,7 @@ function toWorkspaceNode(eventId: string, node: EventNode, turnId: string | null
     body: node.body,
     status: node.status,
     attemptCount: node.attemptCount,
-    artifactVersion: node.artifactVersion,
+    inputVersion: node.inputVersion,
     // Result nodes carry the Turn id derived from their event id; skill
     // nodes receive the most recent result's turn id; every other node
     // stays null so the canvas never requests a trace it cannot have.
@@ -155,7 +159,7 @@ function markFailedAttempt(state: ProjectionState, nodeId: string): void {
     body: '',
     status: 'failed',
     attemptCount: 1,
-    artifactVersion: null,
+    inputVersion: null,
     turnId: null,
   });
 }
@@ -262,7 +266,7 @@ function applyEvent(state: ProjectionState, event: TaskEvent): void {
         body: event.skillId,
         status: 'confirmed',
         attemptCount: 1,
-        artifactVersion: null,
+        inputVersion: null,
         turnId: state.lastResultTurnId,
       });
       break;
@@ -338,13 +342,21 @@ export function projectTask(
       a.sequence - b.sequence || (orderIndex.get(a.id) ?? 0) - (orderIndex.get(b.id) ?? 0),
   );
   const executedRoutes = [...state.routes].sort((a, b) => a.sequence - b.sequence);
-  const artifactVersions: ArtifactVersion[] = [...artifacts]
+  const inputVersions: ArtifactVersion[] = [...artifacts]
     .sort((a, b) => a.meta.version - b.meta.version)
     .map((entry) => ({
       id: entry.meta.id,
       version: entry.meta.version,
       title: entry.meta.title,
-      content: entry.content,
+      // Phase 0 transitional: one `content`-extract slot per version. Phase 6
+      // renders multi-file extract slots (content/review/revision).
+      files: [
+        {
+          name: entry.meta.format === 'markdown' ? 'content.md' : 'content.txt',
+          extract: 'content',
+          content: entry.content,
+        },
+      ],
       sourceNodeId: entry.meta.sourceNodeId,
       createdAt: entry.meta.createdAt,
       // Finality is decided exclusively by final_submission_accepted, never
@@ -360,7 +372,7 @@ export function projectTask(
     declaredRoutes: task.frozenTemplate.routes.map((route) => ({ ...route })),
     nodes,
     executedRoutes,
-    artifacts: artifactVersions,
+    artifacts: inputVersions,
     pendingHumanQuestion: state.pendingHumanQuestion,
   };
 }

@@ -156,7 +156,7 @@ export const workspaceNodeSchema = Type.Object({
   body: Type.String(),
   status: Type.Union([Type.Literal('confirmed'), Type.Literal('active'), Type.Literal('failed')]),
   attemptCount: Type.Integer({ minimum: 1 }),
-  artifactVersion: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()]),
+  inputVersion: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()]),
   // Optional: records persisted before Phase E never carried the field.
   turnId: Type.Optional(Type.Union([Type.String(), Type.Null()])),
 });
@@ -170,11 +170,17 @@ export const workspaceRouteSchema = Type.Object({
   label: Type.String(),
 });
 
-export const artifactVersionSchema = Type.Object({
+export const inputVersionSchema = Type.Object({
   id: Type.String(),
   version: Type.Integer({ minimum: 1 }),
   title: Type.String(),
-  content: Type.String(),
+  files: Type.Array(
+    Type.Object({
+      name: Type.String(),
+      extract: Type.String(),
+      content: Type.String(),
+    }),
+  ),
   sourceNodeId: Type.String(),
   createdAt: Type.String(),
   final: Type.Boolean(),
@@ -206,7 +212,7 @@ export const mockTaskEventSchema = Type.Union([
   Type.Object({
     type: Type.Literal('artifact_published'),
     at: Type.String(),
-    artifact: artifactVersionSchema,
+    artifact: inputVersionSchema,
   }),
   Type.Object({
     type: Type.Literal('human_requested'),

@@ -76,7 +76,7 @@ function markFailedAttempt(state: ProjectionState, nodeId: string): void {
     body: '',
     status: 'failed',
     attemptCount: 1,
-    artifactVersion: null,
+    inputVersion: null,
     turnId: null,
   });
 }

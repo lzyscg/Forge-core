@@ -73,7 +73,7 @@ export function NodeDetailDialog({ node, agentName, onClose }: NodeDetailDialogP
           <div className="fc-node-detail__meta-row">
             <dt>关联版本</dt>
             <dd className="fc-node-detail__value">
-              {node.artifactVersion !== null ? `V${node.artifactVersion}` : '无'}
+              {node.inputVersion !== null ? `V${node.inputVersion}` : '无'}
             </dd>
           </div>
         </dl>

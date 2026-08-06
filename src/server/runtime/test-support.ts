@@ -939,7 +939,7 @@ export async function createSchedulerEnvironment(options: {
           body,
           status: 'confirmed',
           attemptCount: 1,
-          artifactVersion: null,
+          inputVersion: null,
         },
       };
       await service.events.append(taskId, event);

@@ -147,7 +147,7 @@ const workspaceNodeSchema = Type.Object({
     Type.Literal('failed'),
   ]),
   attemptCount: Type.Integer({ minimum: 1 }),
-  artifactVersion: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()]),
+  inputVersion: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()]),
   // Optional: projections from before Phase E never carried the field.
   turnId: Type.Optional(Type.Union([Type.String(), Type.Null()])),
 });
@@ -165,7 +165,13 @@ export const artifactVersionSchema = Type.Object({
   id: Type.String(),
   version: Type.Integer({ minimum: 1 }),
   title: Type.String(),
-  content: Type.String(),
+  files: Type.Array(
+    Type.Object({
+      name: Type.String(),
+      extract: Type.String(),
+      content: Type.String(),
+    }),
+  ),
   sourceNodeId: Type.String(),
   createdAt: Type.String(),
   final: Type.Boolean(),

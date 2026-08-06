@@ -619,7 +619,7 @@ describe('TaskRunner attempt outcomes', () => {
     expect(workspace.task.status).toBe('completed');
     expect(workspace.artifacts).toHaveLength(1); // nothing re-published
     expect(workspace.artifacts.at(-1)?.final).toBe(true);
-    expect(workspace.artifacts.at(-1)?.content).toBe('章节正文');
+    expect(workspace.artifacts.at(-1)?.files[0].content).toBe('章节正文');
   });
 
   it('fails the attempt when current_input_artifact is sealed without a received artifact', async () => {
@@ -635,7 +635,7 @@ describe('TaskRunner attempt outcomes', () => {
         },
       ],
     });
-    // Plain seeded input: the node carries no artifactVersion.
+    // Plain seeded input: the node carries no inputVersion.
     await seedInput(harness, { id: 'ev-input-reviewer', agentId: 'reviewer', sequence: 1, body: '审核' });
 
     const result = await harness.runner.runNext(harness.taskId, harness.controller.signal);

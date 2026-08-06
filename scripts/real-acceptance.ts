@@ -668,7 +668,7 @@ export function buildSanitizedReport(facts: AcceptanceReportFacts): Record<strin
   const artifacts = [...(workspace?.artifacts ?? [])].sort((a, b) => a.version - b.version);
   const artifactVersions = artifacts.map((artifact) => ({
     version: artifact.version,
-    contentHash: sha256Hex(artifact.content),
+    contentHash: sha256Hex(artifact.files[0]?.content ?? ''),
     final: artifact.final,
   }));
   const finalArtifact = artifacts.find((artifact) => artifact.final) ?? null;
@@ -690,7 +690,7 @@ export function buildSanitizedReport(facts: AcceptanceReportFacts): Record<strin
     executedRouteKinds,
     artifactVersions,
     finalArtifactVersion: finalArtifact === null ? null : finalArtifact.version,
-    finalArtifactHash: finalArtifact === null ? null : sha256Hex(finalArtifact.content),
+    finalArtifactHash: finalArtifact === null ? null : sha256Hex(finalArtifact.files[0]?.content ?? ''),
     restartCount: facts.restartCount,
     publicErrorCodes: [...new Set(facts.publicErrorCodes)].sort(),
     secretFindingCount: facts.secretFindingCount,

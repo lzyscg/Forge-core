@@ -173,7 +173,7 @@ export function workspaceWithReturnLoop(): TaskWorkspace {
         body: brief[template.inputFields[0].id],
         status: 'confirmed',
         attemptCount: 1,
-        artifactVersion: null,
+        inputVersion: null,
       },
       {
         id: 'rl-writer-result-1',
@@ -184,7 +184,7 @@ export function workspaceWithReturnLoop(): TaskWorkspace {
         body: v1.content,
         status: 'confirmed',
         attemptCount: 1,
-        artifactVersion: 1,
+        inputVersion: 1,
       },
       {
         id: 'rl-reviewer-input-1',
@@ -195,7 +195,7 @@ export function workspaceWithReturnLoop(): TaskWorkspace {
         body: v1.title,
         status: 'confirmed',
         attemptCount: 1,
-        artifactVersion: null,
+        inputVersion: null,
       },
       {
         id: 'rl-reviewer-result-1',
@@ -206,7 +206,7 @@ export function workspaceWithReturnLoop(): TaskWorkspace {
         body: '第二节节奏过快，退回修改意见：补足人物反应并压低对话密度。',
         status: 'confirmed',
         attemptCount: 1,
-        artifactVersion: null,
+        inputVersion: null,
       },
       {
         id: 'rl-writer-input-2',
@@ -217,7 +217,7 @@ export function workspaceWithReturnLoop(): TaskWorkspace {
         body: '第二节节奏过快，退回修改意见：补足人物反应并压低对话密度。',
         status: 'confirmed',
         attemptCount: 1,
-        artifactVersion: null,
+        inputVersion: null,
       },
       {
         id: 'rl-writer-result-2',
@@ -228,7 +228,7 @@ export function workspaceWithReturnLoop(): TaskWorkspace {
         body: v2.content,
         status: 'confirmed',
         attemptCount: 2,
-        artifactVersion: 2,
+        inputVersion: 2,
       },
       {
         id: 'rl-reviewer-input-2',
@@ -239,7 +239,7 @@ export function workspaceWithReturnLoop(): TaskWorkspace {
         body: v2.title,
         status: 'confirmed',
         attemptCount: 1,
-        artifactVersion: null,
+        inputVersion: null,
       },
       {
         id: 'rl-reviewer-result-2',
@@ -250,7 +250,7 @@ export function workspaceWithReturnLoop(): TaskWorkspace {
         body: v2.content,
         status: 'confirmed',
         attemptCount: 1,
-        artifactVersion: null,
+        inputVersion: null,
       },
     ],
     executedRoutes: [
@@ -284,7 +284,7 @@ export function workspaceWithReturnLoop(): TaskWorkspace {
         id: 'rl-artifact-v1',
         version: 1,
         title: v1.title,
-        content: v1.content,
+        files: [{ name: 'content.md', extract: 'content', content: v1.content }],
         sourceNodeId: 'rl-writer-result-1',
         createdAt: '2026-01-02T00:00:03.000Z',
         final: false,
@@ -293,7 +293,7 @@ export function workspaceWithReturnLoop(): TaskWorkspace {
         id: 'rl-artifact-v2',
         version: 2,
         title: v2.title,
-        content: v2.content,
+        files: [{ name: 'content.md', extract: 'content', content: v2.content }],
         sourceNodeId: 'rl-writer-result-2',
         createdAt: '2026-01-02T00:00:06.000Z',
         final: true,

@@ -244,7 +244,7 @@ export function makeEventNode(overrides: Partial<EventNode> = {}): EventNode {
     body: '输入正文',
     status: 'confirmed',
     attemptCount: 1,
-    artifactVersion: null,
+    inputVersion: null,
     ...overrides,
   };
 }

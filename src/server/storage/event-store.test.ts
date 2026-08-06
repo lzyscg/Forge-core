@@ -158,7 +158,7 @@ describe('EventStore', () => {
       { id, at, type: 'agent_input', node: { ...node, sequence: 0 } },
       { id, at, type: 'agent_input', node: { ...node, attemptCount: 0 } },
       { id, at, type: 'agent_input', node: { ...node, kind: 'banana' } },
-      { id, at, type: 'agent_input', node: { ...node, artifactVersion: 0 } },
+      { id, at, type: 'agent_input', node: { ...node, inputVersion: 0 } },
       { id, at, type: 'agent_input', node: { ...node, title: 42 } },
       { id, at, type: 'agent_input', node: { ...node, extra: 1 } },
       { id, at, type: 'agent_input', node: null },
