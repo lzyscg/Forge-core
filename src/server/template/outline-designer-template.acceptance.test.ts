@@ -35,7 +35,7 @@ describe('outline-designer acceptance template (plan 2026-08-07 Phase 4)', () =>
       format: 'markdown',
       submitters: ['submitter'],
     });
-    expect(template.artifactSchema.files.map((file) => file.name)).toEqual(['content.md']);
+    expect(template.artifactSchema.files.map((file) => file.name)).toEqual(['imitation-blueprint.md']);
     expect(template.budget).toBeNull();
   });
 

@@ -14,10 +14,10 @@ routes:
     kind: artifact
     label: 交付执行大纲
     inject:
-      - { version: input, file: content.md, as: 执行大纲全文 }
+      - { version: input, file: imitation-blueprint.md, as: 执行大纲全文 }
 artifactSchema:
   files:
-    - { name: content.md, required: true, producer: outline-designer, extract: content, phase: create }
+    - { name: imitation-blueprint.md, required: true, producer: outline-designer, extract: content, phase: create }
 finalOutput:
   submitters:
     - submitter

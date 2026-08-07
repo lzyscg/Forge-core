@@ -9,7 +9,7 @@
 5. **轮7 自检**：`read_skill_section(references/07-outline-audit.md)` → `write_workspace(07-outline-audit.json, ...)`（只输出严格 JSON，含 `verdict`）。
 6. `read_workspace(07-outline-audit.json)` 读 `verdict`；若为 `reject`，按 `issues[].earliest_stage` 读 `references/08-outline-repair.md` 定点返修对应轮工作区文件，重跑轮6组装与轮7自检，直到 `verdict: pass`。
 7. **提交前门禁**：`validate_artifact(source=workspace_file, workspaceFile=imitation-blueprint.md, artifactType=imitation_blueprint)` 跑结构门禁；若 `pass: false`，按 `issues` 修正（必要时读 08 返修），重跑轮6+轮7+门禁，直到 `pass`。
-8. **发布**：`finish_production(source=workspace_file, files=[{name: content.md, workspaceFile: imitation-blueprint.md}], format=markdown, artifactType=imitation_blueprint, title=<公开仿写标题>)` → `publish_artifact`。
+8. **发布**：`finish_production(source=workspace_file, files=[{name: imitation-blueprint.md, workspaceFile: imitation-blueprint.md}], format=markdown, artifactType=imitation_blueprint, title=<公开仿写标题>)` → `publish_artifact`。
 
 ## 工作区中间产物（私有）
 
