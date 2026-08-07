@@ -171,6 +171,24 @@ describe('TraceStore final phase (plan 2026-08-04 Task 5, spec §7.4)', () => {
     });
   });
 
+  it('round-trips a forwarded-input phase (v7 forward_input_version dispatch)', async () => {
+    // Plan 2026-08-06: forward_input_version is a legal v7 dispatch action and
+    // its phase must survive the strict read-side whitelist (a missing entry
+    // here would isolate the whole trace to null — TRACE_NOT_FOUND in the UI).
+    const forwarded = {
+      state: 'dispatched' as const,
+      dispatchAction: 'forward_input_version' as const,
+      target: 'agent-beta',
+      message: null,
+    };
+    await store.appendTurnTrace('task-1', 'turn-forward', SAMPLE_ENTRIES, forwarded);
+    expect(await store.readTurnTrace('task-1', 'turn-forward')).toEqual({
+      turnId: 'turn-forward',
+      phase: forwarded,
+      entries: SAMPLE_ENTRIES,
+    });
+  });
+
   it('allows a phase-only write with zero entries for failure paths', async () => {
     const failed = {
       state: 'failed' as const,

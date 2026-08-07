@@ -98,6 +98,7 @@ const PHASE_STATES: readonly string[] = [
 const PHASE_DISPATCH_ACTIONS: readonly string[] = [
   'send_message',
   'publish_artifact',
+  'forward_input_version',
   'submit_final_artifact',
   'request_human_input',
 ];

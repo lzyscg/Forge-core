@@ -268,6 +268,7 @@ export const turnTracePhaseSchema = Type.Object({
   dispatchAction: Type.Union([
     Type.Literal('send_message'),
     Type.Literal('publish_artifact'),
+    Type.Literal('forward_input_version'),
     Type.Literal('submit_final_artifact'),
     Type.Literal('request_human_input'),
     Type.Null(),

@@ -28,6 +28,22 @@ describe('turnTraceSchema phase compatibility (spec §7.5)', () => {
     })).toBe(true);
   });
 
+  it('accepts the v7 forward_input_version dispatch action', () => {
+    // Plan 2026-08-06: forward_input_version is a legal v7 dispatch and must
+    // survive the browser-side wire schema (a missing literal would fail
+    // getDecoded and the UI would show the empty-trace placeholder).
+    expect(Value.Check(turnTraceSchema, {
+      turnId: 'turn-1',
+      phase: {
+        state: 'dispatched',
+        dispatchAction: 'forward_input_version',
+        target: 'controller',
+        message: null,
+      },
+      entries: [{ kind: 'text', text: 'neutral' }],
+    })).toBe(true);
+  });
+
   it('accepts every declared phase state and nullable fields', () => {
     const states = ['production', 'production_complete', 'dispatching', 'dispatched', 'waiting_human', 'failed'];
     for (const state of states) {
