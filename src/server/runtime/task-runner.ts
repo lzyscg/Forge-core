@@ -131,13 +131,42 @@ function resultAttemptNumber(resultEventId: string, inputEventId: string): numbe
 }
 
 /**
+ * Resolves the inputVersion a route sender operated on, for route.inject
+ * execution-time resolution (spec §5.2). Walks the sender's result event
+ * (the route's fromNodeId) to its consumed input node (agent_result.inputNodeId)
+ * and returns that input node's inputVersion. Returns null when the sender has
+ * no result, no consumed input, or the consumed input carried no version.
+ */
+function resolveSenderInputVersion(
+  events: readonly TaskEvent[],
+  senderResultNodeId: string,
+): number | null {
+  for (const event of events) {
+    if (event.type !== 'agent_result' || event.id !== senderResultNodeId) {
+      continue;
+    }
+    const senderInputId = event.inputNodeId ?? null;
+    if (senderInputId === null) {
+      return null;
+    }
+    const senderInput = events.find(
+      (candidate): candidate is Extract<TaskEvent, { type: 'agent_input' }> =>
+        candidate.type === 'agent_input' && candidate.id === senderInputId,
+    );
+    return senderInput === undefined ? null : senderInput.node.inputVersion;
+  }
+  return null;
+}
+
+/**
  * True when one turn's commit plan ran to its terminal event (review F4).
  * Every dispatch shape ends in exactly one platform-owned id: the final
  * submission event, the human request node, the routed message's target
- * input, or the LAST artifact route's target input (the count of declared
- * artifact routes of the publisher is fixed by the frozen snapshot).
+ * input, the LAST artifact route's target input (the count of declared
+ * artifact routes of the publisher is fixed by the frozen snapshot), or the
+ * forward input node (forward is single-edge, id `${turnId}-forward-input-0`).
  */
-function turnPlanCompleted(
+export function turnPlanCompleted(
   events: readonly TaskEvent[],
   turnId: string,
   artifactRouteCount: number,
@@ -148,6 +177,7 @@ function turnPlanCompleted(
       id === `${turnId}-final` ||
       id === `${turnId}-human-requested` ||
       id === `${turnId}-message-input-0` ||
+      id === `${turnId}-forward-input-0` ||
       (artifactRouteCount > 0 && id === `${turnId}-artifact-input-${artifactRouteCount - 1}`)
     ) {
       return true;
@@ -642,10 +672,6 @@ export class TaskRunner {
       let inputText = input.node.body;
       let handOffArtifact: CurrentInputArtifact | null = null;
       if (input.node.inputVersion !== null) {
-        // Artifact hand-off: the route node body carries only the title; the
-        // receiving agent's Turn must carry the full artifact content. The
-        // same read supplies the commit context's received-artifact identity
-        // (frozen decision 3: the platform resolves current_input_artifact).
         const handOff = await this.artifacts.read(taskId, input.node.inputVersion);
         const contentFile =
           handOff.files.find((file) => file.name === 'content.md' || file.name === 'content.txt')
@@ -660,6 +686,45 @@ export class TaskRunner {
           sourceNodeId: handOff.meta.sourceNodeId,
           humanAuthorized: input.node.humanAuthorized ?? false,
         };
+      } else {
+        // Route inject (spec §5.2): the input node carries no inputVersion, so
+        // the delivering route's declared inject files are read from the
+        // SENDER's input version (resolved through the route's fromNodeId ->
+        // agent_result.inputNodeId -> sender agent_input) and appended to the
+        // input text under their declared `as` labels. Inject is execution-time
+        // only: nothing is materialized into events (spec §5.2).
+        const routeEvent = events.find(
+          (e): e is Extract<TaskEvent, { type: 'route_executed' }> =>
+            e.type === 'route_executed' && e.route.toNodeId === inputNodeId,
+        );
+        if (routeEvent !== undefined) {
+          const declaredRoute = frozen.routes.find(
+            (r) => r.kind === routeEvent.route.kind && r.label === routeEvent.route.label,
+          );
+          if (declaredRoute !== undefined && declaredRoute.inject !== undefined) {
+            const injects = declaredRoute.inject;
+            if (injects.length > 0) {
+              const injectVersion = resolveSenderInputVersion(events, routeEvent.route.fromNodeId);
+              if (injectVersion !== null) {
+                try {
+                  const injectEntry = await this.artifacts.read(taskId, injectVersion);
+                  const injectParts: string[] = [];
+                  for (const inj of injects) {
+                    const file = injectEntry.files.find((f) => f.name === inj.file);
+                    if (file !== undefined) {
+                      injectParts.push(`${inj.as}：\n${file.content}`);
+                    }
+                  }
+                  if (injectParts.length > 0) {
+                    inputText = `${inputText}\n\n${injectParts.join('\n\n')}`;
+                  }
+                } catch {
+                  // Inject read failure is non-fatal; the agent still has the base input.
+                }
+              }
+            }
+          }
+        }
       }
       const statePrefix = buildTurnStatePrefix(events, agentId, frozen, inputNodeId);
       if (statePrefix.length > 0) {

@@ -10,6 +10,53 @@
 - **legacy 兼容**：v1 在途任务 gate 为 `incompatible(SCHEMA_V2_REQUIRED)` 只读；event-store 读取期 transform 归一旧事件（artifactVersion→inputVersion、contentHash→files、缺省 humanAuthorized=false、缺省 source=agent_request）使其不 CORRUPTED。
 - **真实验收**：`scripts/real-acceptance.ts` 硬编码 zhihu-single-chapter（Phase 3 删除）。Phase 7 将写 dedicated long-form-hub 验收脚本（3 agent：controller/writer/reviewer 占位符替换）。
 
+## Phase 4 — 运行时（runner + committer）
+
+（已完成；tsc 0 错误，1113/1113 测试绿，含新增 14 条 committer/runner v7 测试）
+
+### 做了什么
+- `task-runner.ts`（继承前序会话 WIP 并补全）：
+  - **route.inject 执行期解析**（spec §5.2）：输入节点无 inputVersion 时，沿交付路由 `route_executed` 找到发送方 result，经 `agent_result.inputNodeId` 回溯发送方输入节点的 inputVersion，读取声明 inject 文件追加到 inputText。抽出 `resolveSenderInputVersion` 纯函数。
+  - **forward 终态 id**（spec §8.2）：`turnPlanCompleted` 补 `${turnId}-forward-input-0`，使 forward 回合的完成检测与 publish/send/submit/human 对齐；修复「forward 回合完成后若残留 stale `commit-failed` 标记会无限重入」的边界 bug。导出 `turnPlanCompleted` 供单测。
+  - 清理 WIP 的重复注释与缩进。
+- `action-committer.ts`：
+  - **annotate 文件归属校验**（spec §5.3）：`assertAnnotateAllowed` 增 `contract.annotate.files` 包含校验，不合法即 `ANNOTATE_FILE_NOT_ALLOWED`（零写）。补齐工具层遗漏的 file 归属门禁。
+  - **annotate 唯一性 + 自排除**（spec §8）：`assertAnnotateAllowed` 改 async，提交前扫已提交 `artifact_annotated`，`(version,file)` 已被**不同 turn** 标注即 `ANNOTATE_DUPLICATE`（零写）；本 turn 的标注（同 turnId）自排除，重放幂等。
+  - 可达性闭包（spec §7.3）、inputVersion 传播（spec §2）、dispatchKind 驱动（spec §8.2）已在 Phase 2 / 前序 WIP 落地，Phase 4 补齐 forward 经 artifact 边到 controller 的可达性测试与五种 dispatchKind 的事件级断言。
+- 测试：
+  - `action-committer.test.ts` +10 例：forward 转发、forward 经 artifact 边可达性闭包、annotate 原子追加、annotate 跨 turn 重复拒绝、annotate 自排除重放、annotate 文件归属拒绝、send_message inputVersion 传播（v1/null）、dispatchKind 五形 `agent_result` 断言、publish 重放不重复。
+  - `task-runner.test.ts` +5 例：long-form-hub 端到端 writer publish -> reviewer forward -> controller submit；forward 完成后 stale 标记不重入；`turnPlanCompleted` forward/publish/send/submit/human 终态 id 单测。
+  - 新增 `hubRunnerHarness` 安装真实 long-form-hub 模板跑 runner 端到端。
+
+### 关键决策
+- **annotate 唯一性移到校验期**：原 store 层在 staging 期拒绝（不同 turn 重复会落到 `COMMIT_INTERRUPTED`，残留 agent_result）。Phase 4 把 `(version,file)` 跨 turn 重复提到 `validateActionSet`（零写，`ANNOTATE_DUPLICATE`）；store 层保留为兜底。
+- **forward 终态 id 是真 bug**：`turnPlanCompleted` 漏 forward 导致「forward 回合完成后若 `afterCommitted` 读取等后置步骤抛错留下 stale `commit-failed` 标记」时无限重入。用 stale-marker 集成测试钉死。
+- **route.inject WIP 保留**（见问题与解决）。
+
+### 问题与解决
+- **route.inject 语义与 spec §5.2 存在偏差（已知局限，保留 WIP）**：前序会话的 task-runner inject WIP 仅在 `inputVersion === null` 分支触发，并回溯**发送方** inputVersion 读取 inject 文件。但 spec §5.2「version: input = 本回合输入节点 inputVersion」与设计 §7「forward 产生的输入是 operate 输入，runner 按 inject 供料、不触发产物全文 hand-off 分支」要求 inject 锚定**输入节点自身**的 inputVersion，并对带版本的 forward/send_message 输入触发（而非全文 hand-off）。当前 committer 的 send_message/forward 会把 inputVersion 传播给接收方，故接收方 inputVersion != null 走 hand-off 分支，inject 实际不触发。按任务指示「PRESERVE this work; do not revert it; commit it as part of Phase 4」，保留 WIP 原样提交；正确的 inject（带版本输入按声明文件供料、publish 走 hand-off）列为后续跟进。当前 forward 快乐路径经 hand-off 交付正文，可达性闭包与提交均正常。
+- **annotate 文件归属门禁补在 committer**：spec §4/§5.3 要求 annotate file 须 `phase:annotate 且 producer==本 agent`，dev-plan Phase 2 列在工具层（pi-tool-factory），但工具层只做 shape 校验未做 file 归属。Phase 4 在 committer `assertAnnotateAllowed` 补 `contract.annotate.files` 校验（spec 允许「工具层/committer」双口），关闭模型绕过工具层直提任意文件标注的缺口。
+
+## Phase 3 — 模板契约
+
+（已完成；tsc 0 错误，1099/1099 测试绿；commit dfc661c）
+
+### 做了什么
+- `template-validator.ts` 重写为 v2 校验器：artifactSchema（files 的 name/required/producer/extract/phase）、route.inject（产物边必声明至少一个 required 文件 inject）、v2 turnContract 形状（production/annotate/dispatch-only 回合推导；production+annotate 混合拒绝；v1 output 嵌套兼容）；纯操作/协调 Agent 交叉校验（annotate.files ⊆ schema(phase:annotate && producer==本 agent)；forward.targets ⊆ 产物边对端；submit ∈ finalOutput.submitters）。
+- `template-schema.ts`：ArtifactSchema/ArtifactSchemaFile/route.inject 类型落 FrozenTemplate。
+- `template-loader.ts`：缓存键/哈希含 artifactSchema，保证 v2 模板哈希稳定。
+- `templates/long-form-hub` 重写为 v2：controller dispatch-only（send_message/submit）、writer production（content.md/revision.md + publish）、reviewer operate（annotate review.md + forward/send_message）；reviewer->controller 改 artifact 边（零复制 forward）；artifactSchema 含 content/revision/review；route.inject（writer->reviewer、reviewer->writer、reviewer->controller）；模板级 budget 16；prompts 更新为 v7 工具（annotate_artifact/forward_input_version/submit_final_artifact/send_message summary）。
+- `templates/zhihu-single-chapter` 升级 v2 契约（production/annotate）+ v7 prompts（**保留未删**，见关键决策）。
+- 模板验收测试更新为 v2 断言（long-form-hub 三 Agent 拓扑、controller dispatch-only、reviewer operate、reviewer->controller artifact 边、artifactSchema 三文件）。
+
+### 关键决策
+- **zhihu-single-chapter 升级而非删除**：spec §9 / dev-plan Phase 3 原列「删 zhihu」，但 `scripts/real-acceptance.ts` 硬编码 zhihu-single-chapter（Phase 0 日志记「Phase 3 删除」）。为不破坏真实验收脚本，Phase 3 选择把 zhihu 升级为 v2 契约（保留可跑），real-acceptance 的 long-form-hub 专用脚本留 Phase 7。zhihu 删除顺延至 Phase 7（与 real-acceptance 脚本重写一并）。
+- **v1 output 嵌套兼容**：v2 把 production.output.formats/sources 扁平化，但 v1 fixture 与历史快照用嵌套 output。validator 兼容两种形态，避免历史快照校验失败。
+- **production.sources 恢复**：finish 的 source ⊆ production.sources（workspace_file/inline）；current_input_artifact 不再是 finish 的 source（它是 submit 的输入解析机制）。
+
+### 问题与解决
+- 模板拓扑重写（reviewer->controller 改 artifact 边）改变了版本传播与 forward 语义，靠 long-form-hub 验收测试钉死三 Agent 拓扑与 artifact 边声明。
+
 ## Phase 2 — 动作与工具
 
 （已完成；tsc 0 错误，35 server test files / 635 tests 绿）
@@ -32,6 +79,8 @@
 ### 问题与解决
 - v7 action shape 影响 server 35 个测试文件；通过集中迁移 fixture builders，再逐一修正 submit-from-inputVersion、workspace_file files[]、humanAuthorized 输入。
 
+
+## Phase 1 - 存储层
 
 （已完成；tsc 0 错误，1093/1093 测试绿，含新增 14 条 artifact-store v7 测试）
 

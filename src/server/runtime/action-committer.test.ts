@@ -28,6 +28,7 @@ import { ArtifactStore } from '../storage/artifact-store';
 import { EventStore } from '../storage/event-store';
 import { TaskStore } from '../storage/task-store';
 import type { TaskWorkspace } from '../../shared/contracts';
+import type { FrozenTemplate, TurnContract } from '../template/template-schema';
 import {
   catalogWithOneTemplate,
   disposeAllTestRoots,
@@ -738,5 +739,425 @@ describe('ActionCommitter mid-plan failure and replay', () => {
     expect(result.phase.dispatchAction).toBe('publish_artifact');
     expect(result.phase.state).toBe('dispatched');
     expect(result.phase.message).toBe('已发布产物「第二章」v1');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 4: forward / annotate / reachability / inputVersion (spec §5.2/§7/§8/§9)
+// ---------------------------------------------------------------------------
+
+/**
+ * A three-agent forward-chain frozen snapshot mirroring the long-form-hub v7
+ * topology: writer publishes -> reviewer annotates + forwards -> controller
+ * submits. The committer trusts the CommitContext fields, so the snapshot is
+ * used only to build contexts against the `valid`-fixture task storage.
+ * Business vocabulary is confined to this test file (iron rule 1).
+ */
+function forwardChainFrozen(): FrozenTemplate {
+  const writerContract: TurnContract = {
+    version: 2,
+    production: {
+      files: ['content.md', 'revision.md'],
+      output: { formats: ['markdown'], sources: ['inline', 'workspace_file'] },
+    },
+    dispatch: {
+      allowedActions: ['publish_artifact'],
+      targets: { publish_artifact: ['reviewer'] },
+    },
+  };
+  const reviewerContract: TurnContract = {
+    version: 2,
+    annotate: { files: ['review.md'] },
+    dispatch: {
+      allowedActions: ['forward_input_version', 'send_message', 'request_human_input'],
+      targets: { forward_input_version: ['controller'], send_message: ['writer'] },
+    },
+  };
+  const controllerContract: TurnContract = {
+    version: 2,
+    dispatch: {
+      allowedActions: ['send_message', 'submit_final_artifact'],
+      targets: { send_message: ['writer', 'reviewer'] },
+    },
+  };
+  return {
+    id: 'forward-chain',
+    name: 'Forward Chain',
+    description: 'Three-agent forward-chain fixture for Phase 4 committer tests.',
+    versionHash: 'a'.repeat(64),
+    inputFields: [],
+    agents: [
+      { id: 'writer', name: '写作 Agent', description: '', systemPrompt: '', model: 'configured/writer-model', skills: [], turnContract: writerContract },
+      { id: 'reviewer', name: '审核 Agent', description: '', systemPrompt: '', model: 'configured/reviewer-model', skills: [], turnContract: reviewerContract },
+      { id: 'controller', name: '总控 Agent', description: '', systemPrompt: '', model: 'configured/controller-model', skills: [], turnContract: controllerContract },
+    ],
+    routes: [
+      { from: 'controller', to: 'writer', kind: 'message', label: '分配写作任务' },
+      { from: 'controller', to: 'reviewer', kind: 'message', label: '派发审读任务' },
+      { from: 'writer', to: 'reviewer', kind: 'artifact', label: '提交章节稿件', inject: [{ version: 'input', file: 'content.md', as: '上一版正文' }] },
+      { from: 'reviewer', to: 'writer', kind: 'message', label: '退回修改意见', inject: [{ version: 'input', file: 'content.md', as: '上一版正文' }, { version: 'input', file: 'review.md', as: '返修意见' }] },
+      { from: 'reviewer', to: 'controller', kind: 'artifact', label: '审读结论（通过转交）', inject: [{ version: 'input', file: 'content.md', as: '通过的章节正文' }] },
+    ],
+    finalOutput: { name: 'story_markdown', format: 'markdown', submitters: ['controller'] },
+    artifactSchema: {
+      files: [
+        { name: 'content.md', required: true, producer: 'writer', extract: 'content', phase: 'create' },
+        { name: 'revision.md', required: false, producer: 'writer', extract: 'revision', phase: 'create' },
+        { name: 'review.md', required: false, producer: 'reviewer', extract: 'review', phase: 'annotate' },
+      ],
+    },
+    budget: null,
+    sourcePath: 'fixture:forward-chain',
+  };
+}
+
+/** Builds a Phase-4 CommitContext for one forward-chain agent against the task. */
+function forwardContext(
+  taskId: string,
+  agentId: string,
+  overrides: Partial<CommitContext> & { turnId?: string } = {},
+): CommitContext {
+  const frozen = forwardChainFrozen();
+  const agent = frozen.agents.find((a) => a.id === agentId);
+  if (agent === undefined) {
+    throw new Error(`forward-chain fixture has no agent '${agentId}'`);
+  }
+  const { turnId, ...rest } = overrides;
+  return {
+    taskId,
+    turnId: turnId ?? `fwd-turn-${agentId}`,
+    currentAgent: agent,
+    agents: frozen.agents.map(({ id, name }) => ({ id, name })),
+    inputNodeId: `fwd-input-${agentId}`,
+    attemptCount: 1,
+    publicText: 'forward chain turn',
+    declaredRoutes: frozen.routes,
+    finalOutput: frozen.finalOutput,
+    turnContract: agent.turnContract,
+    currentInputArtifact: null,
+    ...rest,
+  };
+}
+
+describe('ActionCommitter v7 forward, annotate and reachability (spec §7/§8/§9)', () => {
+  it('forwards the received input version along one declared artifact edge', async () => {
+    // Writer publishes v1 (auto-routes the artifact hand-off to reviewer).
+    const writerCtx = forwardContext(taskId, 'writer', {
+      turnId: 'fwd-w-1',
+      inputNodeId: 'fwd-input-writer',
+    });
+    const published_turn = await committer.validateAndCommit(writerCtx, [
+      finishInline({ files: [{ name: 'content.md', content: '章节正文' }], title: '章节 V1', artifactType: null }),
+      PUBLISH_CURRENT,
+    ]);
+    expect(published_turn.publishedVersions).toEqual([1]);
+    const reviewerInputId = 'fwd-w-1-artifact-input-0';
+    const version1 = await artifacts.read(taskId, 1);
+
+    // Reviewer forwards the received input version to controller (zero-copy).
+    const result = await committer.validateAndCommit(
+      forwardContext(taskId, 'reviewer', {
+        turnId: 'fwd-r-1',
+        inputNodeId: reviewerInputId,
+        currentInputArtifact: receivedFrom(version1),
+      }),
+      [{ type: 'forward_input_version', targetAgentId: 'controller' }],
+    );
+    expect(result.nextAgentIds).toEqual(['controller']);
+    expect(result.publishedVersions).toEqual([]); // forward never bumps
+    expect(result.phase).toEqual({
+      state: 'dispatched',
+      dispatchAction: 'forward_input_version',
+      target: 'controller',
+      message: null,
+    });
+    const workspace = await projector.workspace(taskId);
+    const forwardRoute = workspace.executedRoutes.find((r) => r.toNodeId === 'fwd-r-1-forward-input-0');
+    expect(forwardRoute?.kind).toBe('artifact');
+    const controllerInput = workspace.nodes.find((n) => n.id === 'fwd-r-1-forward-input-0');
+    expect(controllerInput?.agentId).toBe('controller');
+    expect(controllerInput?.inputVersion).toBe(1); // forwarded version
+    // The forward result carries dispatchKind=forward (spec §8.2).
+    const reviewerResult = (await events.read(taskId)).find((e) => e.event.id === 'fwd-r-1-result');
+    expect(reviewerResult?.event.type === 'agent_result' && reviewerResult.event.dispatchKind).toBe('forward');
+  });
+
+  it('accepts a submit reachability closure through a forward edge (spec §7.3)', async () => {
+    // Chain: writer publish -> reviewer forward -> controller submit.
+    const writerCtx = forwardContext(taskId, 'writer', {
+      turnId: 'rc-w-1',
+      inputNodeId: 'rc-input-writer',
+    });
+    await committer.validateAndCommit(writerCtx, [
+      finishInline({ files: [{ name: 'content.md', content: '终稿正文' }], title: '终稿 V1', artifactType: null }),
+      PUBLISH_CURRENT,
+    ]);
+    const reviewerInputId = 'rc-w-1-artifact-input-0';
+    const version1 = await artifacts.read(taskId, 1);
+
+    await committer.validateAndCommit(
+      forwardContext(taskId, 'reviewer', {
+        turnId: 'rc-r-1',
+        inputNodeId: reviewerInputId,
+        currentInputArtifact: receivedFrom(version1),
+      }),
+      [{ type: 'forward_input_version', targetAgentId: 'controller' }],
+    );
+    const controllerInputId = 'rc-r-1-forward-input-0';
+
+    // Controller submits the forwarded version; reachability walks the
+    // committed artifact routes (publish + forward) connected by inputNodeId.
+    const result = await committer.validateAndCommit(
+      forwardContext(taskId, 'controller', {
+        turnId: 'rc-c-1',
+        inputNodeId: controllerInputId,
+        currentInputArtifact: receivedFrom(version1),
+      }),
+      [SUBMIT_CURRENT],
+    );
+    expect(result.taskCompleted).toBe(true);
+    expect((await projector.workspace(taskId)).task.status).toBe('completed');
+  });
+
+  it('annotates one file of the received input version atomically (spec §8)', async () => {
+    const writerCtx = forwardContext(taskId, 'writer', {
+      turnId: 'an-w-1',
+      inputNodeId: 'an-input-writer',
+    });
+    await committer.validateAndCommit(writerCtx, [
+      finishInline({ files: [{ name: 'content.md', content: '章节正文' }], title: '章节 V1', artifactType: null }),
+      PUBLISH_CURRENT,
+    ]);
+    const version1 = await artifacts.read(taskId, 1);
+
+    const result = await committer.validateAndCommit(
+      forwardContext(taskId, 'reviewer', {
+        turnId: 'an-r-1',
+        inputNodeId: 'an-w-1-artifact-input-0',
+        currentInputArtifact: receivedFrom(version1),
+      }),
+      [
+        { type: 'annotate_artifact', file: 'review.md', content: '---\nverdict: pass\n---\n## 意见\n通过' },
+        { type: 'forward_input_version', targetAgentId: 'controller' },
+      ],
+    );
+    expect(result.committedEvents.map((e) => e.type)).toContain('artifact_annotated');
+    const annotated = await artifacts.readFile(taskId, 1, 'review.md');
+    expect(annotated).toContain('verdict: pass');
+    // The annotate event records the content hash, version and owning turn.
+    const annotateEvent = (await events.read(taskId)).find((e) => e.event.id === 'an-r-1-annotate-review.md');
+    expect(annotateEvent?.event.type === 'artifact_annotated' && annotateEvent.event.version).toBe(1);
+  });
+
+  it('rejects a second annotation of the same (version, file) from a different turn before any write', async () => {
+    const writerCtx = forwardContext(taskId, 'writer', {
+      turnId: 'ad-w-1',
+      inputNodeId: 'ad-input-writer',
+    });
+    await committer.validateAndCommit(writerCtx, [
+      finishInline({ files: [{ name: 'content.md', content: '章节正文' }], title: '章节', artifactType: null }),
+      PUBLISH_CURRENT,
+    ]);
+    const version1 = await artifacts.read(taskId, 1);
+
+    // Turn 1 annotates (v1, review.md).
+    await committer.validateAndCommit(
+      forwardContext(taskId, 'reviewer', {
+        turnId: 'ad-r-1',
+        inputNodeId: 'ad-w-1-artifact-input-0',
+        currentInputArtifact: receivedFrom(version1),
+      }),
+      [
+        { type: 'annotate_artifact', file: 'review.md', content: '---\nverdict: pass\n---\n意见一' },
+        { type: 'send_message', targetAgentId: 'writer', summary: '通过' },
+      ],
+    );
+
+    // A different turn tries the same (v1, review.md): rejected at validation.
+    const before = await events.read(taskId);
+    await expect(
+      committer.validateAndCommit(
+        forwardContext(taskId, 'reviewer', {
+          turnId: 'ad-r-2',
+          inputNodeId: 'ad-w-1-artifact-input-0',
+          currentInputArtifact: receivedFrom(version1),
+        }),
+        [
+          { type: 'annotate_artifact', file: 'review.md', content: '---\nverdict: reject\n---\n意见二' },
+          { type: 'send_message', targetAgentId: 'writer', summary: '再批' },
+        ],
+      ),
+    ).rejects.toMatchObject({ code: 'ANNOTATE_DUPLICATE', retryable: false });
+    expect(await events.read(taskId)).toEqual(before); // zero writes
+  });
+
+  it('replays this turn own annotation idempotently (self-exclusion, spec §8)', async () => {
+    const writerCtx = forwardContext(taskId, 'writer', {
+      turnId: 'ai-w-1',
+      inputNodeId: 'ai-input-writer',
+    });
+    await committer.validateAndCommit(writerCtx, [
+      finishInline({ files: [{ name: 'content.md', content: '章节正文' }], title: '章节', artifactType: null }),
+      PUBLISH_CURRENT,
+    ]);
+    const version1 = await artifacts.read(taskId, 1);
+    const reviewerCtx = forwardContext(taskId, 'reviewer', {
+      turnId: 'ai-r-1',
+      inputNodeId: 'ai-w-1-artifact-input-0',
+      currentInputArtifact: receivedFrom(version1),
+    });
+    const actions = [
+      { type: 'annotate_artifact', file: 'review.md', content: '---\nverdict: pass\n---\n意见' },
+      { type: 'send_message', targetAgentId: 'writer', summary: '通过' },
+    ] as const;
+
+    await committer.validateAndCommit(reviewerCtx, [...actions]);
+    // Re-committing the SAME turn replays the annotation instead of rejecting.
+    const replay = await committer.validateAndCommit(reviewerCtx, [...actions]);
+    expect(replay.committedEvents.some((e) => e.type === 'artifact_annotated')).toBe(true);
+    const after = await events.read(taskId);
+    expect(after.filter((e) => e.event.type === 'artifact_annotated')).toHaveLength(1);
+  });
+
+  it('rejects an annotate file the contract does not allow (spec §5.3)', async () => {
+    const writerCtx = forwardContext(taskId, 'writer', {
+      turnId: 'ab-w-1',
+      inputNodeId: 'ab-input-writer',
+    });
+    await committer.validateAndCommit(writerCtx, [
+      finishInline({ files: [{ name: 'content.md', content: '章节正文' }], title: '章节', artifactType: null }),
+      PUBLISH_CURRENT,
+    ]);
+    const version1 = await artifacts.read(taskId, 1);
+    const before = await events.read(taskId);
+    await expect(
+      committer.validateAndCommit(
+        forwardContext(taskId, 'reviewer', {
+          turnId: 'ab-r-1',
+          inputNodeId: 'ab-w-1-artifact-input-0',
+          currentInputArtifact: receivedFrom(version1),
+        }),
+        [
+          { type: 'annotate_artifact', file: 'notes.md', content: '---\nverdict: pass\n---\n意见' },
+          { type: 'send_message', targetAgentId: 'writer', summary: '意见' },
+        ],
+      ),
+    ).rejects.toMatchObject({ code: 'ANNOTATE_FILE_NOT_ALLOWED', retryable: false });
+    expect(await events.read(taskId)).toEqual(before);
+  });
+
+  it('propagates the sender input version to the message recipient (spec §2)', async () => {
+    // Writer publishes v1 -> reviewer receives v1; reviewer messages writer.
+    const writerCtx = forwardContext(taskId, 'writer', {
+      turnId: 'iv-w-1',
+      inputNodeId: 'iv-input-writer',
+    });
+    await committer.validateAndCommit(writerCtx, [
+      finishInline({ files: [{ name: 'content.md', content: '章节正文' }], title: '章节', artifactType: null }),
+      PUBLISH_CURRENT,
+    ]);
+    const version1 = await artifacts.read(taskId, 1);
+
+    const result = await committer.validateAndCommit(
+      forwardContext(taskId, 'reviewer', {
+        turnId: 'iv-r-1',
+        inputNodeId: 'iv-w-1-artifact-input-0',
+        currentInputArtifact: receivedFrom(version1),
+      }),
+      [{ type: 'send_message', targetAgentId: 'writer', summary: '返修意见' }],
+    );
+    expect(result.nextAgentIds).toEqual(['writer']);
+    const workspace = await projector.workspace(taskId);
+    const writerInput = workspace.nodes.find((n) => n.id === 'iv-r-1-message-input-0');
+    expect(writerInput?.agentId).toBe('writer');
+    expect(writerInput?.inputVersion).toBe(1); // inherited from reviewer's input version
+  });
+
+  it('propagates a null input version when the sender carries no artifact', async () => {
+    // Controller (no input version) messages writer -> writer inherits null.
+    const result = await committer.validateAndCommit(
+      forwardContext(taskId, 'controller', {
+        turnId: 'nv-c-1',
+        inputNodeId: 'nv-input-controller',
+        currentInputArtifact: null,
+      }),
+      [{ type: 'send_message', targetAgentId: 'writer', summary: '开始写作' }],
+    );
+    expect(result.nextAgentIds).toEqual(['writer']);
+    const workspace = await projector.workspace(taskId);
+    const writerInput = workspace.nodes.find((n) => n.id === 'nv-c-1-message-input-0');
+    expect(writerInput?.inputVersion).toBeNull();
+  });
+
+  it('records the dispatchKind on agent_result for each dispatch shape (spec §8.2)', async () => {
+    // publish
+    await committer.validateAndCommit(
+      forwardContext(taskId, 'writer', { turnId: 'dk-w-1', inputNodeId: 'dk-input-writer' }),
+      [finishInline({ files: [{ name: 'content.md', content: 'c' }], title: 't', artifactType: null }), PUBLISH_CURRENT],
+    );
+    const wResult = (await events.read(taskId)).find((e) => e.event.id === 'dk-w-1-result');
+    expect(wResult?.event.type === 'agent_result' && wResult.event.dispatchKind).toBe('publish');
+
+    // forward (reviewer forwards the published v1 to controller)
+    const v1 = await artifacts.read(taskId, 1);
+    await committer.validateAndCommit(
+      forwardContext(taskId, 'reviewer', {
+        turnId: 'dk-r-1',
+        inputNodeId: 'dk-w-1-artifact-input-0',
+        currentInputArtifact: receivedFrom(v1),
+      }),
+      [{ type: 'forward_input_version', targetAgentId: 'controller' }],
+    );
+    const rResult = (await events.read(taskId)).find((e) => e.event.id === 'dk-r-1-result');
+    expect(rResult?.event.type === 'agent_result' && rResult.event.dispatchKind).toBe('forward');
+
+    // send (controller messages writer)
+    await committer.validateAndCommit(
+      forwardContext(taskId, 'controller', { turnId: 'dk-c-1', inputNodeId: 'dk-input-controller' }),
+      [{ type: 'send_message', targetAgentId: 'writer', summary: '协调' }],
+    );
+    const cResult = (await events.read(taskId)).find((e) => e.event.id === 'dk-c-1-result');
+    expect(cResult?.event.type === 'agent_result' && cResult.event.dispatchKind).toBe('send');
+
+    // submit (controller submits the forwarded v1)
+    await committer.validateAndCommit(
+      forwardContext(taskId, 'controller', {
+        turnId: 'dk-c-2',
+        inputNodeId: 'dk-r-1-forward-input-0',
+        currentInputArtifact: receivedFrom(v1),
+      }),
+      [SUBMIT_CURRENT],
+    );
+    const sResult = (await events.read(taskId)).find((e) => e.event.id === 'dk-c-2-result');
+    expect(sResult?.event.type === 'agent_result' && sResult.event.dispatchKind).toBe('submit');
+
+    // human (writer requests human input)
+    await committer.validateAndCommit(
+      forwardContext(taskId, 'writer', { turnId: 'dk-w-2', inputNodeId: 'dk-input-writer-2' }),
+      [{ type: 'request_human_input', question: '是否继续？' }],
+    );
+    const hResult = (await events.read(taskId)).find((e) => e.event.id === 'dk-w-2-result');
+    expect(hResult?.event.type === 'agent_result' && hResult.event.dispatchKind).toBe('human');
+  });
+
+  it('replays a committed publish without re-publishing the version (spec §6)', async () => {
+    const ctx = forwardContext(taskId, 'writer', {
+      turnId: 'rp-w-1',
+      inputNodeId: 'rp-input-writer',
+    });
+    const actions = [
+      finishInline({ files: [{ name: 'content.md', content: '正文' }], title: '初稿', artifactType: null }),
+      PUBLISH_CURRENT,
+    ];
+    const first = await committer.validateAndCommit(ctx, actions);
+    expect(first.publishedVersions).toEqual([1]);
+
+    // Re-committing the same Turn replays committed items instead of duplicating.
+    const replay = await committer.validateAndCommit(ctx, actions);
+    expect(replay.publishedVersions).toEqual([1]);
+    const after = await events.read(taskId);
+    expect(after.filter((e) => e.event.type === 'artifact_published')).toHaveLength(1);
+    expect(after.filter((e) => e.event.type === 'agent_result')).toHaveLength(1);
+    expect(await artifacts.list(taskId)).toHaveLength(1);
   });
 });

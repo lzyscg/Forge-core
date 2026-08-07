@@ -373,7 +373,7 @@ export class ActionCommitter {
       }
     }
     for (const annotate of annotates) {
-      this.assertAnnotateAllowed(context, annotate);
+      await this.assertAnnotateAllowed(context, annotate);
     }
 
     // Final declaration + reachability (spec §6.4/§7).
@@ -541,20 +541,49 @@ export class ActionCommitter {
 
   /**
    * annotate targets a file declared phase:annotate with producer==this agent
-   * (spec §5.3), and requires the input to carry an inputVersion.
+   * (spec §5.3), requires the input to carry an inputVersion, and is unique per
+   * (version, file) across turns. File-belonging is enforced here as the
+   * non-bypassable gate (the contract's `annotate.files` is the agent's allowed
+   * set); uniqueness is scanned against committed `artifact_annotated` events,
+   * self-excluding this turn's own planned annotation so a replay re-enters
+   * cleanly instead of being rejected (spec §8).
    */
-  private assertAnnotateAllowed(
+  private async assertAnnotateAllowed(
     context: CommitContext,
     annotate: Extract<ForgeAction, { type: 'annotate_artifact' }>,
-  ): void {
-    if (context.currentInputArtifact === null) {
+  ): Promise<void> {
+    const received = context.currentInputArtifact;
+    if (received === null) {
       throw new CommitFailure(
         COMMIT_ERROR_CODES.ANNOTATE_VERSION_MISSING,
         '标注产物需要当前输入携带产物版本。',
       );
     }
-    // File-belonging is enforced by the template artifactSchema (Phase 3); the
-    // committer only guards the input-version precondition here.
+    const contract = context.turnContract;
+    const allowedFiles = contract?.annotate?.files;
+    if (allowedFiles === undefined || !allowedFiles.includes(annotate.file)) {
+      throw new CommitFailure(
+        COMMIT_ERROR_CODES.ANNOTATE_FILE_NOT_ALLOWED,
+        '标注文件不在本回合契约声明的可标注文件之内。',
+      );
+    }
+    // Uniqueness with self-exclusion (spec §8): a prior annotation of the same
+    // (version, file) by a DIFFERENT turn is rejected before any write; this
+    // turn's own prior annotation (replay) is self-excluded by turnId.
+    const committed = await this.events.read(context.taskId);
+    const foreignDuplicate = committed.some(
+      (entry): boolean =>
+        entry.event.type === 'artifact_annotated' &&
+        entry.event.version === received.version &&
+        entry.event.file === annotate.file &&
+        entry.event.turnId !== context.turnId,
+    );
+    if (foreignDuplicate) {
+      throw new CommitFailure(
+        COMMIT_ERROR_CODES.ANNOTATE_DUPLICATE,
+        '该产物版本的此文件已被标注，不可重复标注。',
+      );
+    }
   }
 
   /** Type/format declaration check (spec §6.4). */

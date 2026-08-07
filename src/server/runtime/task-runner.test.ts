@@ -17,24 +17,29 @@
  * test file; the TaskRunner module itself carries none (iron rule 1).
  */
 import { createHash } from 'node:crypto';
+import { cpSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { TaskWorkspace } from '../../shared/contracts';
 import { CoreService } from '../core-service';
 import type { CorePaths } from '../storage/core-paths';
 import type { EventStore } from '../storage/event-store';
+import type { TaskEvent } from '../storage/task-events';
 import { TraceStore } from '../storage/trace-store';
 import {
   catalogWithOneTemplate,
   disposeAllTestRoots,
   makeEventNode,
   makeTaskEvent,
+  makeTempCorePaths,
   validTaskRequest,
 } from '../test-support';
 import { RuntimeAbortedError, RuntimeFailure } from './agent-runtime';
 import { ActionCommitter } from './action-committer';
 import { FakeAgentRuntime, type FakeScriptStep } from './fake-agent-runtime';
 import { SkillService } from './skill-service';
-import { buildTurnChecklist, TaskRunner, type RunNextResult } from './task-runner';
+import { buildTurnChecklist, TaskRunner, turnPlanCompleted, type RunNextResult } from './task-runner';
 import { WorkspaceStore } from './workspace-store';
 import { RecordingRuntime } from './test-support';
 import type { FrozenAgentConfig } from '../template/template-schema';
@@ -996,5 +1001,242 @@ describe('TaskRunner per-turn checklist (plan 2026-08-06)', () => {
         expect(item.text).not.toContain(CHECKLIST_MARKER);
       }
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 4: forward dispatch + turnPlanCompleted forward terminal id (spec §8.2)
+// ---------------------------------------------------------------------------
+
+/** The committed long-form-hub template root, resolved from this test file. */
+function hubTemplateRoot(): string {
+  return fileURLToPath(new URL('../../../templates/long-form-hub', import.meta.url));
+}
+
+/**
+ * A runner harness over the real long-form-hub v7 template (controller/writer/
+ * reviewer with the reviewer->controller artifact edge). Installs the template
+ * into a fresh temp root so the runner exercises the v7 forward path end-to-end.
+ */
+async function hubRunnerHarness(
+  scripts: Record<string, readonly FakeScriptStep[]>,
+): Promise<RunnerHarness> {
+  const fake = new FakeAgentRuntime({ scripts });
+  const runtime = new RecordingRuntime(fake);
+  const { paths } = makeTempCorePaths('forge-hub-runner-');
+  cpSync(hubTemplateRoot(), join(paths.templateRoot, 'long-form-hub'), { recursive: true });
+  const service = new CoreService(paths, { runtime });
+  await service.initialize();
+  const skills = new SkillService({ paths, tasks: service.tasks, events: service.events });
+  const committer = new ActionCommitter({
+    events: service.events,
+    artifacts: service.artifacts,
+    skills,
+  });
+  const workspaces = new WorkspaceStore(paths);
+  const traces = new TraceStore(paths);
+  const runner = new TaskRunner({
+    tasks: service.tasks,
+    events: service.events,
+    artifacts: service.artifacts,
+    skills,
+    committer,
+    runtime,
+    workspaces,
+    traces,
+  });
+  const created = await service.tasks.create({
+    templateId: 'long-form-hub',
+    name: 'Hub 任务',
+    input: { theme: '一段主题', outline: '一份大纲' },
+  });
+  return {
+    paths,
+    service,
+    events: service.events,
+    runner,
+    runtime,
+    fake,
+    workspaces,
+    traces,
+    taskId: created.id,
+    controller: new AbortController(),
+    workspace: (id: string) => service.getWorkspace(id),
+  };
+}
+
+describe('TaskRunner v7 forward path (spec §7.3, long-form-hub template)', () => {
+  it('runs writer publish -> reviewer forward -> controller submit to completion', async () => {
+    const harness = await hubRunnerHarness({
+      controller: [
+        {
+          kind: 'result',
+          publicText: '分配写作任务',
+          actions: [{ type: 'send_message', targetAgentId: 'writer', summary: '请写第一章。' }],
+        },
+        {
+          kind: 'result',
+          publicText: '审核通过，提交终稿。',
+          actions: [{ type: 'submit_final_artifact' }],
+        },
+      ],
+      writer: [
+        {
+          kind: 'result',
+          publicText: '初稿完成',
+          actions: [
+            {
+              type: 'finish_production',
+              source: 'inline',
+              files: [{ name: 'content.md', content: '章节正文' }],
+              format: 'markdown',
+              artifactType: '章节',
+              title: '第一章 V1',
+            },
+            { type: 'publish_artifact' },
+          ],
+        },
+      ],
+      reviewer: [
+        {
+          kind: 'result',
+          publicText: '审核通过并转交',
+          actions: [
+            {
+              type: 'annotate_artifact',
+              file: 'review.md',
+              content: '---\nverdict: pass\n---\n## 意见\n通过',
+            },
+            { type: 'forward_input_version', targetAgentId: 'controller' },
+          ],
+        },
+      ],
+    });
+    await seedInput(harness, {
+      id: 'ev-input-controller',
+      agentId: 'controller',
+      sequence: 1,
+      body: '开始生产',
+    });
+
+    await harness.runner.runNext(harness.taskId, harness.controller.signal); // controller -> writer
+    await harness.runner.runNext(harness.taskId, harness.controller.signal); // writer publish -> reviewer
+    await harness.runner.runNext(harness.taskId, harness.controller.signal); // reviewer forward -> controller
+    const result = await harness.runner.runNext(harness.taskId, harness.controller.signal); // controller submit
+
+    expect(result.committed).toBe(true);
+    expect(result.taskCompleted).toBe(true);
+    const workspace = await harness.workspace(harness.taskId);
+    expect(workspace.task.status).toBe('completed');
+    expect(workspace.artifacts.at(-1)?.final).toBe(true);
+    // The forward route is an artifact edge ending at the controller.
+    const forwardRoute = workspace.executedRoutes.find(
+      (r) => r.kind === 'artifact' && r.toNodeId.endsWith('-forward-input-0'),
+    );
+    expect(forwardRoute).toBeDefined();
+  });
+
+  it('advances past a completed forward turn (forward terminal id, spec §8.2)', async () => {
+    // A completed forward turn whose plan reached `-forward-input-0` must be
+    // detected as complete even if a stale commit-failed marker lingers, so
+    // the runner advances to the forwarded target instead of re-entering.
+    const harness = await hubRunnerHarness({
+      controller: [
+        {
+          kind: 'result',
+          publicText: '分配',
+          actions: [{ type: 'send_message', targetAgentId: 'writer', summary: '写第一章。' }],
+        },
+        {
+          kind: 'result',
+          publicText: '提交终稿',
+          actions: [{ type: 'submit_final_artifact' }],
+        },
+      ],
+      writer: [
+        {
+          kind: 'result',
+          publicText: '初稿',
+          actions: [
+            {
+              type: 'finish_production',
+              source: 'inline',
+              files: [{ name: 'content.md', content: '章节正文' }],
+              format: 'markdown',
+              artifactType: '章节',
+              title: '第一章 V1',
+            },
+            { type: 'publish_artifact' },
+          ],
+        },
+      ],
+      reviewer: [
+        {
+          kind: 'result',
+          publicText: '转交',
+          actions: [{ type: 'forward_input_version', targetAgentId: 'controller' }],
+        },
+      ],
+    });
+    await seedInput(harness, {
+      id: 'ev-input-controller',
+      agentId: 'controller',
+      sequence: 1,
+      body: '开始生产',
+    });
+
+    await harness.runner.runNext(harness.taskId, harness.controller.signal); // controller -> writer
+    await harness.runner.runNext(harness.taskId, harness.controller.signal); // writer publish -> reviewer
+    await harness.runner.runNext(harness.taskId, harness.controller.signal); // reviewer forward -> controller
+
+    // Inject a stale non-retryable commit-failed marker for the reviewer turn.
+    // The forward plan already reached its terminal `-forward-input-0`, so the
+    // runner must treat the reviewer input as resolved and run the controller.
+    const reviewerInputId = harness.runtime.turnInputs
+      .filter((input) => input.agent.id === 'reviewer')
+      .at(-1)!.inputNodeId;
+    const reviewerTurnId = `${reviewerInputId}-t1`;
+    await harness.events.append(harness.taskId, {
+      id: `${reviewerTurnId}-commit-failed`,
+      at: new Date().toISOString(),
+      type: 'agent_attempt_failed',
+      nodeId: reviewerInputId,
+      message: 'stale marker after completed forward',
+      retryable: false,
+    });
+
+    const result = await harness.runner.runNext(harness.taskId, harness.controller.signal);
+    expect(result.committed).toBe(true);
+    expect(result.taskCompleted).toBe(true);
+    // The last run was the controller submit, not a reviewer re-entry.
+    expect(harness.runtime.turnInputs.at(-1)?.agent.id).toBe('controller');
+    expect(harness.fake.countInvocations('reviewer')).toBe(1);
+  });
+});
+
+describe('turnPlanCompleted forward terminal id (spec §8.2)', () => {
+  /** A minimal event carrying only the id (turnPlanCompleted checks id alone). */
+  function eventWithId(id: string): TaskEvent {
+    return makeTaskEvent({
+      id,
+      type: 'agent_input',
+      node: makeEventNode({ sequence: 1, agentId: 'a', kind: 'input', title: 't', body: 'b' }),
+    });
+  }
+
+  it('recognizes the forward terminal id `${turnId}-forward-input-0`', () => {
+    expect(turnPlanCompleted([eventWithId('t1-forward-input-0')], 't1', 0)).toBe(true);
+    expect(turnPlanCompleted([], 't1', 0)).toBe(false);
+    // A non-forward id does not satisfy the forward terminal.
+    expect(turnPlanCompleted([eventWithId('t1-message-input-0')], 't1', 0)).toBe(true); // send terminal
+    expect(turnPlanCompleted([eventWithId('t1-artifact-input-1')], 't1', 0)).toBe(false); // wrong route count
+  });
+
+  it('recognizes the publish/send/submit/human terminal ids (regression)', () => {
+    expect(turnPlanCompleted([eventWithId('t1-artifact-input-0')], 't1', 1)).toBe(true); // publish, 1 route
+    expect(turnPlanCompleted([eventWithId('t1-artifact-input-1')], 't1', 2)).toBe(true); // publish, 2 routes
+    expect(turnPlanCompleted([eventWithId('t1-message-input-0')], 't1', 0)).toBe(true); // send
+    expect(turnPlanCompleted([eventWithId('t1-final')], 't1', 0)).toBe(true); // submit
+    expect(turnPlanCompleted([eventWithId('t1-human-requested')], 't1', 0)).toBe(true); // human
   });
 });
