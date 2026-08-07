@@ -168,6 +168,7 @@ export function sampleTurnInput(overrides: Partial<AgentTurnInput> = {}): AgentT
         },
       ],
       turnContract: publisherContract('agent-beta'),
+      gate: null,
     },
     inputNodeId: 'node-input-1',
     inputText: 'neutral input text',
@@ -647,6 +648,7 @@ export function frozenSnapshotFixture(): FrozenTemplate {
           },
         ],
         turnContract: publisherContract('agent-beta'),
+        gate: null,
       },
       {
         id: 'agent-beta',
@@ -665,6 +667,7 @@ export function frozenSnapshotFixture(): FrozenTemplate {
           },
         ],
         turnContract: reviewerContract('agent-alpha'),
+        gate: null,
       },
     ],
     routes: [
@@ -699,6 +702,8 @@ export interface CommitFixtureEnvironment {
 export interface CommitContextOverrides extends Partial<Omit<CommitContext, 'taskId' | 'currentAgent'>> {
   /** Pins the turn id instead of letting the environment allocate one. */
   turnId?: string;
+  /** Replaces the frozen current agent (e.g. to attach a gate to a commit). */
+  currentAgent?: CommitContext['currentAgent'];
 }
 
 /**

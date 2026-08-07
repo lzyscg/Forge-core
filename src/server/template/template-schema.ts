@@ -80,6 +80,20 @@ export interface FrozenSkill {
   sections: string[];
 }
 
+/**
+ * A template-declared JS validator gate (plan 2026-08-07 Phase 2, spec §4.1).
+ * The validator file is a CommonJS module whose default export is
+ * `validate(input)`. `self_check` exposes the read-only `validate_artifact`
+ * tool for model self-checks; `commit` makes the platform run the validator as
+ * a non-bypassable gate before any commit that lands a new artifact.
+ */
+export interface FrozenGate {
+  /** JS validator file relative path (CommonJS default export `validate`). */
+  validator: string;
+  artifactType: string;
+  mode: Array<'self_check' | 'commit'>;
+}
+
 export interface FrozenAgentConfig {
   id: string;
   name: string;
@@ -87,6 +101,8 @@ export interface FrozenAgentConfig {
   systemPrompt: string;
   model: string;
   skills: FrozenSkill[];
+  /** Optional JS validator gate; null when the agent declares none. */
+  gate: FrozenGate | null;
   /**
    * The agent's turn contract. Every CURRENT template agent declares one
    * (enforced by the validator); historical frozen task snapshots loaded in

@@ -191,6 +191,27 @@ async function readPromptContent(
   });
 }
 
+/**
+ * Reads one Agent's declared gate validator file, confined to the template
+ * directory (plan 2026-08-07 Phase 2). The validator code is template-owned;
+ * the loader only verifies containment and folds the content into the version
+ * hash so a validator change re-versions the template.
+ */
+async function readGateValidatorContent(
+  templateDir: string,
+  agentFileName: string,
+  validatorPath: string,
+): Promise<string> {
+  return readContainedFile(templateDir, validatorPath, (message) => {
+    throw new TemplateError(
+      TEMPLATE_ERROR_CODES.TEMPLATE_INVALID,
+      `模板 ${agentFileName} 引用的 gate.validator ${validatorPath}：${message}`,
+      validatorPath,
+      RELOAD_ACTION,
+    );
+  });
+}
+
 function normalizeNewlines(value: string): string {
   return value.replace(/\r\n?/g, '\n');
 }
@@ -217,7 +238,14 @@ function canonicalize(value: unknown): unknown {
 interface CanonicalSource {
   template: ValidatedTemplateFile;
   pipeline: ValidatedPipelineFile;
-  agents: Array<ValidatedAgentFile & { skillContents: string[]; skillSections: Array<SkillSectionFile[]> }>;
+  agents: Array<
+    ValidatedAgentFile & {
+      skillContents: string[];
+      skillSections: Array<SkillSectionFile[]>;
+      /** Gate validator file content; null when the agent declares no gate. */
+      gateValidatorContent: string | null;
+    }
+  >;
 }
 
 /**
@@ -280,6 +308,20 @@ function computeVersionHash(source: CanonicalSource): string {
       // (spec §7.3: frozen snapshots are never rewritten or re-versioned).
       ...(agent.turnContract !== null
         ? { turnContract: hashCanonicalContract(agent.turnContract) }
+        : {}),
+      // A declared gate enters the hash (validator content included, so a
+      // validator change re-versions the template); a gate-less agent omits
+      // the key so pre-existing templates' version hashes stay byte-stable
+      // (mirrors the turnContract omission trick above).
+      ...(agent.gate !== null
+        ? {
+            gate: {
+              validator: agent.gate.validator,
+              artifactType: agent.gate.artifactType,
+              mode: agent.gate.mode,
+              validatorContent: agent.gateValidatorContent,
+            },
+          }
         : {}),
     })),
   });
@@ -385,7 +427,11 @@ async function loadValidated(
       skillContents.push(await readSkillContent(sourcePath, skill.contentPath));
       skillSections.push(await collectSkillSections(sourcePath, skill.sectionsPath));
     }
-    agentsWithContents.push({ ...agent, skillContents, skillSections });
+    const gateValidatorContent =
+      agent.gate === null
+        ? null
+        : await readGateValidatorContent(sourcePath, `agents/${agent.id}.yaml`, agent.gate.validator);
+    agentsWithContents.push({ ...agent, skillContents, skillSections, gateValidatorContent });
   }
 
   const versionHash = computeVersionHash({ template, pipeline, agents: agentsWithContents });
@@ -403,6 +449,14 @@ async function loadValidated(
       sectionsPath: skill.sectionsPath,
       sections: agent.skillSections[index].map((section) => section.path),
     })),
+    gate:
+      agent.gate === null
+        ? null
+        : {
+            validator: agent.gate.validator,
+            artifactType: agent.gate.artifactType,
+            mode: [...agent.gate.mode],
+          },
     turnContract: agent.turnContract,
   }));
 

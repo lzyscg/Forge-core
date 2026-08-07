@@ -218,6 +218,7 @@ describe('loadTemplateDirectory', () => {
         sections: [],
       },
     ]);
+    expect(frozen.agents[0]?.gate).toBeNull();
     expect(frozen.routes).toEqual([
       { from: 'writer', to: 'reviewer', kind: 'artifact', label: '提交初稿' },
       { from: 'reviewer', to: 'writer', kind: 'message', label: '退回意见' },
@@ -852,6 +853,109 @@ describe('skill sections (plan 2026-08-07 Phase 1)', () => {
     await expect(loadTemplateDirectory(dest)).rejects.toMatchObject({
       code: 'TEMPLATE_SKILL_MISSING',
       location: 'skills/style-guide/references',
+    });
+  });
+});
+
+describe('agent gate (plan 2026-08-07 Phase 2, spec §4.1)', () => {
+  const GATE_YAML = [
+    'gate:',
+    '  validator: gates/validate.cjs',
+    '  artifactType: chapter_markdown',
+    '  mode: [self_check, commit]',
+    '',
+  ].join('\n');
+
+  /** Appends a gate block to the writer agent and writes the validator file. */
+  function writeWriterGate(dest: string, gateYaml: string, validatorSource: string): void {
+    writeFileSync(
+      join(dest, 'agents/writer.yaml'),
+      `${readFixtureAgent(dest, 'writer')}\n${gateYaml}`,
+      'utf8',
+    );
+    mkdirSync(join(dest, 'gates'), { recursive: true });
+    writeFileSync(join(dest, 'gates/validate.cjs'), validatorSource, 'utf8');
+  }
+
+  it('folds a declared gate into the frozen agent (validator/artifactType/mode)', async () => {
+    const root = makeTempDir('forge-core-t2-gate-parse-');
+    const dest = withContracts(copyFixture('valid', 'gateparse', root));
+    writeWriterGate(dest, GATE_YAML, 'module.exports = { validate() { return { pass: true }; } };');
+    const frozen = await loadTemplateDirectory(dest);
+    const writer = frozen.agents.find((agent) => agent.id === 'writer');
+    expect(writer?.gate).toEqual({
+      validator: 'gates/validate.cjs',
+      artifactType: 'chapter_markdown',
+      mode: ['self_check', 'commit'],
+    });
+    const reviewer = frozen.agents.find((agent) => agent.id === 'reviewer');
+    expect(reviewer?.gate).toBeNull();
+  });
+
+  it('changes the version hash when the gate validator content changes', async () => {
+    const rootA = makeTempDir('forge-core-t2-gatehash-a-');
+    const rootB = makeTempDir('forge-core-t2-gatehash-b-');
+    const destA = withContracts(copyFixture('valid', 'gatehash-a', rootA));
+    const destB = withContracts(copyFixture('valid', 'gatehash-b', rootB));
+    writeWriterGate(destA, GATE_YAML, 'module.exports = { validate() { return { pass: true }; } };');
+    writeWriterGate(destB, GATE_YAML, 'module.exports = { validate() { return { pass: false }; } };');
+    expect((await loadTemplateDirectory(destB)).versionHash).not.toBe(
+      (await loadTemplateDirectory(destA)).versionHash,
+    );
+  });
+
+  it('keeps the pre-change version hash for templates without a gate', async () => {
+    const root = makeTempDir('forge-core-t2-gate-nullhash-');
+    const dest = withContracts(copyFixture('valid', 'gatenullhash', root));
+    const frozen = await loadTemplateDirectory(dest);
+    expect(frozen.agents[0]?.gate).toBeNull();
+    // Byte-stability regression (iron rule 2): the canonical form must omit
+    // the `gate` key when absent, reproducing the pre-change hash exactly.
+    expect(frozen.versionHash).toBe(
+      '5dee5a79b2aa95a0fe9494a3379a6859f5586f35d06fd82d00629a71b38ddd5a',
+    );
+  });
+
+  it('rejects a declared gate whose validator file is missing', async () => {
+    const root = makeTempDir('forge-core-t2-gate-missing-');
+    const dest = withContracts(copyFixture('valid', 'gatemissing', root));
+    writeFileSync(
+      join(dest, 'agents/writer.yaml'),
+      `${readFixtureAgent(dest, 'writer')}\n${GATE_YAML}`,
+      'utf8',
+    );
+    // No gates/ directory is written: the referenced file cannot be read.
+    await expect(loadTemplateDirectory(dest)).rejects.toMatchObject({
+      code: 'TEMPLATE_INVALID',
+      location: 'gates/validate.cjs',
+    });
+  });
+
+  it('rejects a gate validator path escaping the template directory', async () => {
+    const root = makeTempDir('forge-core-t2-gate-escape-');
+    const dest = withContracts(copyFixture('valid', 'gateescape', root));
+    writeFileSync(
+      join(dest, 'agents/writer.yaml'),
+      `${readFixtureAgent(dest, 'writer')}\ngate:\n  validator: ../outside.cjs\n  artifactType: chapter_markdown\n  mode: [commit]\n`,
+      'utf8',
+    );
+    await expect(loadTemplateDirectory(dest)).rejects.toMatchObject({
+      code: 'TEMPLATE_INVALID',
+      location: '../outside.cjs',
+    });
+  });
+
+  it('rejects an invalid gate mode value', async () => {
+    const root = makeTempDir('forge-core-t2-gate-mode-');
+    const dest = withContracts(copyFixture('valid', 'gatemode', root));
+    writeFileSync(
+      join(dest, 'agents/writer.yaml'),
+      `${readFixtureAgent(dest, 'writer')}\ngate:\n  validator: gates/validate.cjs\n  artifactType: chapter_markdown\n  mode: [self_check, preflight]\n`,
+      'utf8',
+    );
+    await expect(loadTemplateDirectory(dest)).rejects.toMatchObject({
+      code: 'TEMPLATE_INVALID',
+      location: 'agents/writer.yaml',
     });
   });
 });

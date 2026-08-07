@@ -41,6 +41,19 @@
  * the Turn id so an interrupted commit replays committed items instead of
  * duplicating them.
  *
+ * Template-declared artifact gate (plan 2026-08-07 Phase 2, spec §4.5): after
+ * the sealed package / submitted version is decided and BEFORE any write, an
+ * agent whose gate.mode includes 'commit' must have the artifact-to-be-committed
+ * pass its JS validator. validateActionSet is the pure validation phase —
+ * events are written only by commitValidated — so a gate rejection
+ * (GATE_REJECTED) or a gate execution failure (GATE_RUNTIME_ERROR, fail-closed)
+ * writes nothing at all, not even an agent result or a failure marker. v2
+ * deviation recorded: the spec assumed submit_final_artifact could carry a
+ * sealedPackage (source !== 'current_input_artifact'); this repo is v2-only,
+ * where submit submits exactly the received input version, so publish
+ * validates the sealed package content and submit validates the received
+ * version content as the fallback.
+ *
  * No business vocabulary lives here (iron rule 1).
  */
 import { createHash } from 'node:crypto';
@@ -61,6 +74,7 @@ import {
   type DispatchKind,
 } from './forge-actions';
 import type { SkillService } from './skill-service';
+import type { GateRunner, GateVerdict } from './gate-runner';
 
 /** Stable committer error codes owned by this module. */
 export const COMMIT_ERROR_CODES = {
@@ -82,6 +96,10 @@ export const COMMIT_ERROR_CODES = {
   ANNOTATE_DUPLICATE: 'ANNOTATE_DUPLICATE',
   /** The annotation body lacks a valid `verdict: pass|reject` frontmatter. */
   ANNOTATE_FRONTMATTER_INVALID: 'ANNOTATE_FRONTMATTER_INVALID',
+  /** The commit artifact failed the template-declared gate validator. */
+  GATE_REJECTED: 'GATE_REJECTED',
+  /** The template declared a gate but it could not be executed (fail-closed). */
+  GATE_RUNTIME_ERROR: 'GATE_RUNTIME_ERROR',
 } as const;
 
 /** Maximum number of buffered actions one Turn may commit. */
@@ -172,6 +190,12 @@ export interface ActionCommitterOptions {
   events: EventStore;
   artifacts: ArtifactStore;
   skills: SkillService;
+  /**
+   * Template-declared artifact gate executor (plan 2026-08-07 Phase 2, spec
+   * §4.5). An agent whose gate.mode includes 'commit' REQUIRES a wired runner;
+   * declaring a gate without one fails the commit closed.
+   */
+  gateRunner?: GateRunner;
   clock?: () => Date;
 }
 
@@ -262,12 +286,15 @@ export class ActionCommitter {
 
   private readonly skills: SkillService;
 
+  private readonly gateRunner: GateRunner | null;
+
   private readonly clock: () => Date;
 
   constructor(options: ActionCommitterOptions) {
     this.events = options.events;
     this.artifacts = options.artifacts;
     this.skills = options.skills;
+    this.gateRunner = options.gateRunner ?? null;
     this.clock = options.clock ?? (() => new Date());
   }
 
@@ -395,7 +422,78 @@ export class ActionCommitter {
       // humanAuthorized accepts without a full route chain (spec §7).
     }
 
+    // Template-declared commit gate (plan 2026-08-07 Phase 2, spec §4.5):
+    // the artifact-to-be-committed must pass the agent's validator BEFORE any
+    // write; a rejection or a gate execution failure writes nothing.
+    await this.assertGateAllowed(context, finish, dispatch);
+
     return { loadSkills, finish, annotates, dispatch };
+  }
+
+  /**
+   * Template-declared artifact gate, executed after the seal is decided and
+   * before any write (validateActionSet is the pure validation phase; events
+   * are written only by commitValidated). v2-only deviation (recorded in the
+   * module header): submit submits exactly the received input version, so
+   * publish validates the sealed package content (`finish.files[0]`) and
+   * submit validates the received version content as the fallback. A
+   * declaration without a wired runner, or any gate execution failure, fails
+   * closed as GATE_RUNTIME_ERROR; a validator rejection is GATE_REJECTED.
+   */
+  private async assertGateAllowed(
+    context: CommitContext,
+    finish: ValidatedActionSet['finish'],
+    dispatch: ValidatedActionSet['dispatch'],
+  ): Promise<void> {
+    const gate = context.currentAgent.gate;
+    if (gate === null || !gate.mode.includes('commit')) {
+      return;
+    }
+    let content: string | null = null;
+    let artifactType: string;
+    if (dispatch.type === 'publish_artifact' && finish !== null) {
+      content = finish.files[0]?.content ?? null;
+      artifactType = finish.artifactType ?? gate.artifactType;
+    } else if (dispatch.type === 'submit_final_artifact') {
+      content = context.currentInputArtifact?.content ?? null;
+      artifactType = gate.artifactType;
+    } else {
+      return; // No new artifact content lands with this dispatch.
+    }
+    if (content === null) {
+      return;
+    }
+    if (this.gateRunner === null) {
+      throw new CommitFailure(
+        COMMIT_ERROR_CODES.GATE_RUNTIME_ERROR,
+        '模板声明了提交门禁，但门禁执行器不可用。',
+      );
+    }
+    let verdict: GateVerdict;
+    try {
+      verdict = await this.gateRunner.run({
+        taskId: context.taskId,
+        agentId: context.currentAgent.id,
+        validatorPath: gate.validator,
+        content,
+        artifactType,
+      });
+    } catch {
+      throw new CommitFailure(
+        COMMIT_ERROR_CODES.GATE_RUNTIME_ERROR,
+        '提交门禁执行失败，提交被拒绝。',
+      );
+    }
+    if (!verdict.pass) {
+      const summary = verdict.issues
+        .map((issue) => issue.evidence ?? issue.stage ?? issue.scope)
+        .filter((part): part is string => part !== undefined)
+        .join('; ');
+      throw new CommitFailure(
+        COMMIT_ERROR_CODES.GATE_REJECTED,
+        `提交产物未通过模板门禁：${summary.length > 0 ? summary : '未通过'}`,
+      );
+    }
   }
 
   /**

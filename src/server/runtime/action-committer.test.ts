@@ -22,6 +22,8 @@
  * ActionCommitter module itself carries none.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { CoreService } from '../core-service';
 import type { CorePaths } from '../storage/core-paths';
 import { ArtifactStore } from '../storage/artifact-store';
@@ -43,6 +45,8 @@ import {
   type CommitResult,
   type CurrentInputArtifact,
 } from './action-committer';
+import { RuntimeFailure } from './agent-runtime';
+import { GateRunner, type GateRunInput } from './gate-runner';
 import { SkillService } from './skill-service';
 import {
   buildCommitContext,
@@ -787,9 +791,9 @@ function forwardChainFrozen(): FrozenTemplate {
     versionHash: 'a'.repeat(64),
     inputFields: [],
     agents: [
-      { id: 'writer', name: '写作 Agent', description: '', systemPrompt: '', model: 'configured/writer-model', skills: [], turnContract: writerContract },
-      { id: 'reviewer', name: '审核 Agent', description: '', systemPrompt: '', model: 'configured/reviewer-model', skills: [], turnContract: reviewerContract },
-      { id: 'controller', name: '总控 Agent', description: '', systemPrompt: '', model: 'configured/controller-model', skills: [], turnContract: controllerContract },
+      { id: 'writer', name: '写作 Agent', description: '', systemPrompt: '', model: 'configured/writer-model', skills: [], gate: null, turnContract: writerContract },
+      { id: 'reviewer', name: '审核 Agent', description: '', systemPrompt: '', model: 'configured/reviewer-model', skills: [], gate: null, turnContract: reviewerContract },
+      { id: 'controller', name: '总控 Agent', description: '', systemPrompt: '', model: 'configured/controller-model', skills: [], gate: null, turnContract: controllerContract },
     ],
     routes: [
       { from: 'controller', to: 'writer', kind: 'message', label: '分配写作任务' },
@@ -1294,5 +1298,224 @@ describe('ActionCommitter v7 forward, annotate and reachability (spec §7/§8/§
     );
     expect(result.taskCompleted).toBe(true);
     expect((await projector.workspace(taskId)).task.status).toBe('completed');
+  });
+});
+
+describe('ActionCommitter artifact gate (plan 2026-08-07 Phase 2, spec §4.5)', () => {
+  /** The frozen writer/reviewer agent with a declared gate. */
+  function gatedAgent(agentId: 'writer' | 'reviewer', mode: Array<'self_check' | 'commit'>) {
+    const agent = env.frozen.agents.find((candidate) => candidate.id === agentId);
+    if (!agent) {
+      throw new Error(`fixture has no agent '${agentId}'`);
+    }
+    return {
+      ...agent,
+      gate: { validator: 'gates/validate.cjs', artifactType: 'chapter_markdown', mode },
+    };
+  }
+
+  /** A stub gate runner that records every call it receives. */
+  function stubGateRunner(
+    verdict: (input: GateRunInput) => { pass: boolean; issues: Array<{ evidence?: string }> } | never,
+    calls: Array<{ content: string | null; artifactType: string }> = [],
+  ): GateRunner {
+    return {
+      run: async (input: GateRunInput) => {
+        calls.push({ content: input.content, artifactType: input.artifactType });
+        return verdict(input);
+      },
+    } as unknown as GateRunner;
+  }
+
+  it('rejects a publish whose artifact fails the commit gate with GATE_REJECTED and zero writes', async () => {
+    const calls: Array<{ content: string | null; artifactType: string }> = [];
+    const gated = new ActionCommitter({
+      events,
+      artifacts,
+      skills: skillService,
+      gateRunner: stubGateRunner(
+        () => ({ pass: false, issues: [{ evidence: '结构不合格' }] }),
+        calls,
+      ),
+    });
+    const before = await events.read(taskId);
+    const context = buildCommitContext(env, 'writer', {
+      currentAgent: gatedAgent('writer', ['commit']),
+    });
+    await expect(
+      gated.validateAndCommit(context, [finishInline(), PUBLISH_CURRENT]),
+    ).rejects.toMatchObject({ code: COMMIT_ERROR_CODES.GATE_REJECTED, retryable: false });
+    // The gate received the sealed content + the sealed artifactType.
+    expect(calls).toEqual([
+      { content: '封存正文', artifactType: '终稿' },
+    ]);
+    // Fail-closed: not even the agent result or a failure marker was written.
+    expect(await events.read(taskId)).toEqual(before);
+    expect(await artifacts.list(taskId)).toEqual([]);
+  });
+
+  it('commits normally when the commit gate passes', async () => {
+    const gated = new ActionCommitter({
+      events,
+      artifacts,
+      skills: skillService,
+      gateRunner: stubGateRunner(() => ({ pass: true, issues: [] })),
+    });
+    const result = await gated.validateAndCommit(
+      buildCommitContext(env, 'writer', { currentAgent: gatedAgent('writer', ['commit']) }),
+      [finishInline(), PUBLISH_CURRENT],
+    );
+    expect(result.publishedVersions).toEqual([1]);
+    expect((await projector.workspace(taskId)).artifacts).toHaveLength(1);
+  });
+
+  it('skips the gate for an agent whose mode lacks commit (self_check only)', async () => {
+    let ran = false;
+    const gated = new ActionCommitter({
+      events,
+      artifacts,
+      skills: skillService,
+      gateRunner: stubGateRunner(() => {
+        ran = true;
+        return { pass: false, issues: [] };
+      }),
+    });
+    const result = await gated.validateAndCommit(
+      buildCommitContext(env, 'writer', { currentAgent: gatedAgent('writer', ['self_check']) }),
+      [finishInline(), PUBLISH_CURRENT],
+    );
+    expect(result.publishedVersions).toEqual([1]);
+    expect(ran).toBe(false);
+  });
+
+  it('does not gate a dispatch that lands no artifact (send_message)', async () => {
+    let ran = false;
+    const gated = new ActionCommitter({
+      events,
+      artifacts,
+      skills: skillService,
+      gateRunner: stubGateRunner(() => {
+        ran = true;
+        return { pass: false, issues: [] };
+      }),
+    });
+    const result = await gated.validateAndCommit(
+      buildCommitContext(env, 'reviewer', { currentAgent: gatedAgent('reviewer', ['commit']) }),
+      [{ type: 'send_message', targetAgentId: 'writer', summary: '返修意见' }],
+    );
+    expect(result.taskCompleted).toBe(false);
+    expect(ran).toBe(false);
+  });
+
+  it('rejects with GATE_RUNTIME_ERROR when the gate runner fails, writing nothing', async () => {
+    const gated = new ActionCommitter({
+      events,
+      artifacts,
+      skills: skillService,
+      gateRunner: stubGateRunner(() => {
+        throw new RuntimeFailure('GATE_TIMEOUT', '门禁超时', false);
+      }),
+    });
+    const before = await events.read(taskId);
+    await expect(
+      gated.validateAndCommit(
+        buildCommitContext(env, 'writer', { currentAgent: gatedAgent('writer', ['commit']) }),
+        [finishInline(), PUBLISH_CURRENT],
+      ),
+    ).rejects.toMatchObject({ code: COMMIT_ERROR_CODES.GATE_RUNTIME_ERROR, retryable: false });
+    expect(await events.read(taskId)).toEqual(before);
+    expect(await artifacts.list(taskId)).toEqual([]);
+  });
+
+  it('fails closed with GATE_RUNTIME_ERROR when a gate is declared but no runner is wired', async () => {
+    // The shared `committer` was constructed without a gateRunner (fail-closed).
+    const before = await events.read(taskId);
+    await expect(
+      committer.validateAndCommit(
+        buildCommitContext(env, 'writer', { currentAgent: gatedAgent('writer', ['commit']) }),
+        [finishInline(), PUBLISH_CURRENT],
+      ),
+    ).rejects.toMatchObject({ code: COMMIT_ERROR_CODES.GATE_RUNTIME_ERROR, retryable: false });
+    expect(await events.read(taskId)).toEqual(before);
+  });
+
+  it('validates the received input version on submit_final_artifact (v2 submit fallback)', async () => {
+    const calls: Array<{ content: string | null; artifactType: string }> = [];
+    const gated = new ActionCommitter({
+      events,
+      artifacts,
+      skills: skillService,
+      gateRunner: stubGateRunner(
+        (input) => ({
+          pass: !(input.content ?? '').includes('BAD'),
+          issues: [],
+        }),
+        calls,
+      ),
+    });
+    const before = await events.read(taskId);
+    const received: CurrentInputArtifact = {
+      artifactId: 'artifact-a',
+      version: 1,
+      title: '终稿',
+      format: 'markdown',
+      content: 'BAD final body',
+      sourceNodeId: 'ev-input-writer',
+      humanAuthorized: true,
+    };
+    const context = buildCommitContext(env, 'reviewer', {
+      currentAgent: gatedAgent('reviewer', ['commit']),
+      currentInputArtifact: received,
+    });
+    await expect(gated.validateAndCommit(context, [SUBMIT_CURRENT])).rejects.toMatchObject({
+      code: COMMIT_ERROR_CODES.GATE_REJECTED,
+    });
+    // The submit gate validates the received input version content with the
+    // gate's declared artifactType.
+    expect(calls).toEqual([{ content: 'BAD final body', artifactType: 'chapter_markdown' }]);
+    expect(await events.read(taskId)).toEqual(before);
+  });
+
+  it('runs the real GateRunner against the frozen snapshot validator on publish', async () => {
+    const snapshotRoot = paths.taskSnapshotRoot(taskId);
+    mkdirSync(join(snapshotRoot, 'gates'), { recursive: true });
+    writeFileSync(
+      join(snapshotRoot, 'gates/validate.cjs'),
+      [
+        'module.exports = {',
+        '  validate(input) {',
+        "    const bad = typeof input.content === 'string' && input.content.includes('BAD');",
+        '    return { pass: !bad, issues: bad ? [{ evidence: "contains BAD" }] : [] };',
+        '  }',
+        '};',
+      ].join('\n'),
+      'utf8',
+    );
+    const gateRunner = new GateRunner({ paths });
+    const gated = new ActionCommitter({ events, artifacts, skills: skillService, gateRunner });
+
+    // Pass path commits normally.
+    const ok = await gated.validateAndCommit(
+      buildCommitContext(env, 'writer', {
+        currentAgent: gatedAgent('writer', ['commit']),
+        turnId: 'gate-real-ok',
+      }),
+      [finishInline({ files: [{ name: 'content.md', content: 'clean body' }] }), PUBLISH_CURRENT],
+    );
+    expect(ok.publishedVersions).toEqual([1]);
+
+    // Reject path fails closed without writing anything.
+    const before = await events.read(taskId);
+    await expect(
+      gated.validateAndCommit(
+        buildCommitContext(env, 'writer', {
+          currentAgent: gatedAgent('writer', ['commit']),
+          turnId: 'gate-real-bad',
+        }),
+        [finishInline({ files: [{ name: 'content.md', content: 'BAD body' }] }), PUBLISH_CURRENT],
+      ),
+    ).rejects.toMatchObject({ code: COMMIT_ERROR_CODES.GATE_REJECTED });
+    expect(await events.read(taskId)).toEqual(before);
+    gateRunner.disposeAll();
   });
 });

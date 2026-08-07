@@ -30,6 +30,9 @@ import {
   validateForgeAction,
   type ForgeActionName,
 } from './forge-actions';
+import type { GateRunner, GateVerdict } from './gate-runner';
+import type { FrozenAgentConfig } from '../template/template-schema';
+import type { WorkspaceStore } from './workspace-store';
 
 /** Short text fields: question / title / summary. */
 const shortText = () => Type.String({ minLength: 1, maxLength: FORGE_ACTION_LIMITS.shortText });
@@ -310,6 +313,122 @@ export function createSkillSectionToolDefinitions(ctx: SkillSectionToolContext):
             return rejected(error.code, 'read_skill_section');
           }
           return rejected(SKILL_SECTION_TOOL_FAILED, 'read_skill_section');
+        }
+      },
+    },
+  ];
+}
+
+/**
+ * The closed read-only artifact-validator tool registry (plan 2026-08-07
+ * Phase 2, spec §4.4). Exactly one tool today, registered only when the agent
+ * declares a gate whose mode includes `self_check`.
+ */
+export const VALIDATE_ARTIFACT_TOOL_NAMES = ['validate_artifact'] as const;
+
+/** Fallback code for a validator run that is not a typed RuntimeFailure. */
+export const VALIDATE_ARTIFACT_TOOL_FAILED = 'VALIDATE_ARTIFACT_TOOL_FAILED';
+
+/**
+ * Read-only context the artifact-validator tool may close over. `gateRunner`
+ * may be null (unwired runner); the factory then registers nothing, so an
+ * unwired runtime never exposes the tool.
+ */
+export interface ValidateArtifactToolContext {
+  gateRunner: GateRunner | null;
+  workspaces: WorkspaceStore;
+  agent: FrozenAgentConfig;
+  taskId: string;
+  agentId: string;
+}
+
+/**
+ * Creates the closed read-only artifact-validator tool set (plan 2026-08-07
+ * Phase 2). Registered ONLY when the agent declares a gate whose mode includes
+ * `self_check` and a runner is wired; otherwise the empty set is returned, so
+ * existing tool-count assertions are untouched. The callback closes over ONLY
+ * the gate runner + the workspace store — no ActionBuffer handle is ever
+ * received, so a validator run can never propose or commit anything (read-only,
+ * never phase-gated). The content is resolved from a workspace file through
+ * the store or taken inline; `artifactType` defaults to the gate declaration.
+ * Typed RuntimeFailures map to short `rejected` acknowledgements with their
+ * stable code; anything else falls back to the tool failure code.
+ */
+export function createValidateArtifactToolDefinitions(
+  ctx: ValidateArtifactToolContext,
+): ToolDefinition[] {
+  if (
+    ctx.gateRunner === null ||
+    ctx.agent.gate === null ||
+    !ctx.agent.gate.mode.includes('self_check')
+  ) {
+    return [];
+  }
+  // Const captures keep the null-narrowing visible inside the execute closure.
+  const gateRunner: GateRunner = ctx.gateRunner;
+  const gate = ctx.agent.gate;
+
+  const VALIDATE_ARTIFACT_PARAMETERS = Type.Object({
+    source: Type.Union([Type.Literal('workspace_file'), Type.Literal('inline')]),
+    workspaceFile: Type.Optional(
+      Type.String({ minLength: 1, maxLength: PUBLISH_WORKSPACE_FILE_MAX_LENGTH }),
+    ),
+    content: Type.Optional(Type.String({ minLength: 1, maxLength: FORGE_ACTION_LIMITS.content })),
+    artifactType: Type.Optional(Type.String({ minLength: 1, maxLength: FORGE_ACTION_LIMITS.id })),
+  });
+
+  return [
+    {
+      name: 'validate_artifact',
+      label: 'validate_artifact',
+      description:
+        'Run the template-declared artifact validator against content, either inline or from one private workspace file. Returns the validator verdict {pass, issues}. Read-only: never proposes or commits anything, and the platform still revalidates at commit time.',
+      promptSnippet:
+        'validate_artifact(source: workspace_file | inline, workspaceFile?, content?, artifactType?) — run the template gate validator on content',
+      parameters: VALIDATE_ARTIFACT_PARAMETERS,
+      executionMode: 'sequential' as const,
+      execute: async (
+        _toolCallId: string,
+        params: Static<TSchema>,
+      ): Promise<ForgeToolResult> => {
+        try {
+          const { source, workspaceFile, content, artifactType } = (params ?? {}) as {
+            source?: string;
+            workspaceFile?: string;
+            content?: string;
+            artifactType?: string;
+          };
+          let resolvedContent: string;
+          if (source === 'workspace_file') {
+            if (workspaceFile === undefined || workspaceFile === '') {
+              return rejected(VALIDATE_ARTIFACT_TOOL_FAILED, 'validate_artifact');
+            }
+            resolvedContent = await ctx.workspaces.readFile(
+              ctx.taskId,
+              ctx.agentId,
+              workspaceFile,
+            );
+          } else {
+            if (content === undefined || content === '') {
+              return rejected(VALIDATE_ARTIFACT_TOOL_FAILED, 'validate_artifact');
+            }
+            resolvedContent = content;
+          }
+          const verdict: GateVerdict = await gateRunner.run({
+            taskId: ctx.taskId,
+            agentId: ctx.agentId,
+            validatorPath: gate.validator,
+            content: resolvedContent,
+            artifactType: artifactType ?? gate.artifactType,
+          });
+          return accepted(
+            `validate_artifact: ${JSON.stringify({ pass: verdict.pass, issues: verdict.issues })}`,
+          );
+        } catch (error) {
+          if (error instanceof RuntimeFailure) {
+            return rejected(error.code, 'validate_artifact');
+          }
+          return rejected(VALIDATE_ARTIFACT_TOOL_FAILED, 'validate_artifact');
         }
       },
     },

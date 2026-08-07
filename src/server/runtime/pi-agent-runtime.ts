@@ -41,9 +41,14 @@ import type {
 import { RuntimeAbortedError, RuntimeFailure } from './agent-runtime';
 import { ActionBuffer } from './action-buffer';
 import type { ForgeAction } from './forge-actions';
+import type { GateRunner } from './gate-runner';
 import { createForgeResourceLoader } from './pi-resource-loader';
 import { RESOURCE_LOADER_ERROR_CODES } from './pi-resource-loader';
-import { createForgeToolDefinitions, createSkillSectionToolDefinitions } from './pi-tool-factory';
+import {
+  createForgeToolDefinitions,
+  createSkillSectionToolDefinitions,
+  createValidateArtifactToolDefinitions,
+} from './pi-tool-factory';
 import type { WorkspaceStore } from './workspace-store';
 import { createWorkspaceToolDefinitions } from './workspace-tools';
 
@@ -503,6 +508,23 @@ export class PiAgentRuntime implements AgentRuntime {
     this.#skillSectionReader = reader;
   }
 
+  /**
+   * Optional artifact-gate runner wired by the CoreService after construction
+   * (structural setter, same discipline as the readers above). When set AND the
+   * agent declares a self_check gate, the read-only validate_artifact tool is
+   * registered; an unwired runner never exposes the tool (the factory returns
+   * the empty set), so tool-count assertions stay stable.
+   */
+  #gateRunner: GateRunner | null = null;
+
+  /**
+   * Wires the artifact-gate runner (structural setter, invoked by CoreService
+   * after the GateRunner is constructed).
+   */
+  setGateRunner(runner: GateRunner): void {
+    this.#gateRunner = runner;
+  }
+
   constructor(options: PiAgentRuntimeOptions) {
     this.#coreCwd = options.coreCwd;
     this.#workspaces = options.workspaces;
@@ -618,6 +640,17 @@ export class PiAgentRuntime implements AgentRuntime {
                     ),
                   )
                 : this.#skillSectionReader(input.taskId, input.agent.id, skillId, sectionPath),
+          }),
+          // Template-declared artifact gate self-check (plan 2026-08-07 Phase
+          // 2): registers validate_artifact only when a runner is wired AND the
+          // agent's gate mode includes self_check; otherwise the factory
+          // returns the empty set, so the closed tool count stays stable.
+          ...createValidateArtifactToolDefinitions({
+            gateRunner: this.#gateRunner,
+            workspaces: this.#workspaces,
+            agent: input.agent,
+            taskId: input.taskId,
+            agentId: input.agent.id,
           }),
         ],
       });

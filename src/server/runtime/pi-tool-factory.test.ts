@@ -16,12 +16,17 @@ import { describe, expect, it } from 'vitest';
 import { RuntimeFailure } from './agent-runtime';
 import { ActionBuffer, ACTION_BUFFER_ERROR_CODES } from './action-buffer';
 import { FORGE_ACTION_NAMES } from './forge-actions';
+import type { FrozenAgentConfig } from '../template/template-schema';
+import type { GateRunner, GateRunInput } from './gate-runner';
 import {
   createForgeToolDefinitions,
   createSkillSectionToolDefinitions,
+  createValidateArtifactToolDefinitions,
   SKILL_SECTION_TOOL_NAMES,
+  VALIDATE_ARTIFACT_TOOL_NAMES,
 } from './pi-tool-factory';
-import { finishProductionProposal, sendMessageProposal } from './test-support';
+import { finishProductionProposal, sampleTurnInput, sendMessageProposal } from './test-support';
+import type { WorkspaceStore } from './workspace-store';
 
 async function execute(
   tools: ReturnType<typeof createForgeToolDefinitions>,
@@ -387,6 +392,169 @@ describe('read_skill_section tool (plan 2026-08-07 Phase 1)', () => {
       skillId: 'style-guide',
       sectionPath: 'a.md',
     });
+    expect(result.accepted).toBe(true);
+    // The factory receives no buffer handle, so nothing can ever be proposed.
+    expect(buffer.snapshot()).toEqual([]);
+  });
+});
+
+describe('validate_artifact tool (plan 2026-08-07 Phase 2, spec §4.4)', () => {
+  const stubWorkspaces = {
+    readFile: async (taskId: string, agentId: string, path: string) => {
+      if (path === 'draft/a.md') {
+        return 'BAD content';
+      }
+      throw new RuntimeFailure('WORKSPACE_FILE_NOT_FOUND', '文件不存在', false);
+    },
+  } as unknown as WorkspaceStore;
+
+  const stubGateRunner = {
+    run: async (input: GateRunInput) => ({
+      pass: !input.content.includes('BAD'),
+      issues: [],
+    }),
+  } as unknown as GateRunner;
+
+  function gatedAgent(mode: Array<'self_check' | 'commit'>): FrozenAgentConfig {
+    return {
+      ...sampleTurnInput().agent,
+      gate: { validator: 'gates/validate.cjs', artifactType: 'chapter_markdown', mode },
+    };
+  }
+
+  function toolsFor(mode: Array<'self_check' | 'commit'>, gateRunner: GateRunner | null = stubGateRunner) {
+    return createValidateArtifactToolDefinitions({
+      gateRunner,
+      workspaces: stubWorkspaces,
+      agent: gatedAgent(mode),
+      taskId: 'task-1',
+      agentId: 'agent-alpha',
+    });
+  }
+
+  it('registers nothing when the agent declares no gate', () => {
+    const tools = createValidateArtifactToolDefinitions({
+      gateRunner: stubGateRunner,
+      workspaces: stubWorkspaces,
+      agent: sampleTurnInput().agent,
+      taskId: 'task-1',
+      agentId: 'agent-alpha',
+    });
+    expect(tools).toEqual([]);
+  });
+
+  it('registers nothing when the gate mode lacks self_check', () => {
+    expect(toolsFor(['commit'])).toEqual([]);
+  });
+
+  it('registers nothing when no gate runner is wired', () => {
+    expect(toolsFor(['self_check'], null)).toEqual([]);
+  });
+
+  it('registers validate_artifact when the gate mode includes self_check', () => {
+    const tools = toolsFor(['self_check', 'commit']);
+    expect(tools.map((tool) => tool.name)).toEqual([...VALIDATE_ARTIFACT_TOOL_NAMES]);
+  });
+
+  it('validates a workspace file read through the store', async () => {
+    const tools = toolsFor(['self_check']);
+    const result = await execute(tools, 'validate_artifact', {
+      source: 'workspace_file',
+      workspaceFile: 'draft/a.md',
+    });
+    expect(result.accepted).toBe(true);
+    expect(result.text).toContain('"pass":false');
+    expect(result.text).toContain('"issues"');
+  });
+
+  it('validates inline content', async () => {
+    const tools = toolsFor(['self_check']);
+    const result = await execute(tools, 'validate_artifact', {
+      source: 'inline',
+      content: 'clean body',
+    });
+    expect(result.accepted).toBe(true);
+    expect(result.text).toContain('"pass":true');
+  });
+
+  it('defaults artifactType to the gate declaration when the tool omits it', async () => {
+    const seen: string[] = [];
+    const recordingRunner = {
+      run: async (input: GateRunInput) => {
+        seen.push(input.artifactType);
+        return { pass: true, issues: [] };
+      },
+    } as unknown as GateRunner;
+    const tools = toolsFor(['self_check'], recordingRunner);
+    await execute(tools, 'validate_artifact', { source: 'inline', content: 'x' });
+    expect(seen).toEqual(['chapter_markdown']);
+  });
+
+  it('rejects with the workspace code when the workspace file is unreadable', async () => {
+    const tools = toolsFor(['self_check']);
+    const result = await execute(tools, 'validate_artifact', {
+      source: 'workspace_file',
+      workspaceFile: 'missing.md',
+    });
+    expect(result.accepted).toBe(false);
+    expect(result.code).toBe('WORKSPACE_FILE_NOT_FOUND');
+  });
+
+  it('rejects with the gate code when the gate runner throws a RuntimeFailure', async () => {
+    const failingRunner = {
+      run: async () => {
+        throw new RuntimeFailure('GATE_TIMEOUT', '超时', false);
+      },
+    } as unknown as GateRunner;
+    const tools = toolsFor(['self_check'], failingRunner);
+    const result = await execute(tools, 'validate_artifact', { source: 'inline', content: 'x' });
+    expect(result.accepted).toBe(false);
+    expect(result.code).toBe('GATE_TIMEOUT');
+  });
+
+  it('falls back to the tool failure code for a non-RuntimeFailure error', async () => {
+    const failingRunner = {
+      run: async () => {
+        throw new Error('boom');
+      },
+    } as unknown as GateRunner;
+    const tools = toolsFor(['self_check'], failingRunner);
+    const result = await execute(tools, 'validate_artifact', { source: 'inline', content: 'x' });
+    expect(result.accepted).toBe(false);
+    expect(result.code).toBe('VALIDATE_ARTIFACT_TOOL_FAILED');
+  });
+
+  it('rejects a call that supplies neither content nor a workspace file', async () => {
+    const tools = toolsFor(['self_check']);
+    const result = await execute(tools, 'validate_artifact', { source: 'inline' });
+    expect(result.accepted).toBe(false);
+    expect(result.code).toBe('VALIDATE_ARTIFACT_TOOL_FAILED');
+  });
+
+  it('declares a top-level object parameter schema with the documented fields', () => {
+    const tools = toolsFor(['self_check']);
+    const tool = tools[0];
+    const schema = tool?.parameters as {
+      type?: string;
+      anyOf?: unknown;
+      properties?: Record<string, unknown>;
+      required?: string[];
+    };
+    expect(schema.type).toBe('object');
+    expect(schema.anyOf).toBeUndefined();
+    expect(Object.keys(schema.properties ?? {}).sort()).toEqual([
+      'artifactType',
+      'content',
+      'source',
+      'workspaceFile',
+    ]);
+    expect([...(schema.required ?? [])].sort()).toEqual(['source']);
+  });
+
+  it('never touches any ActionBuffer: a successful validate leaves a fresh buffer empty', async () => {
+    const buffer = new ActionBuffer('turn-validate');
+    const tools = toolsFor(['self_check']);
+    const result = await execute(tools, 'validate_artifact', { source: 'inline', content: 'clean' });
     expect(result.accepted).toBe(true);
     // The factory receives no buffer handle, so nothing can ever be proposed.
     expect(buffer.snapshot()).toEqual([]);

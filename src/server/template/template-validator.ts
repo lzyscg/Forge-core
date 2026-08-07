@@ -328,6 +328,13 @@ export interface ValidatedAgentSkill {
   sectionsPath: string | null;
 }
 
+/** Structural shape of one validated agent gate (plan 2026-08-07 Phase 2). */
+export interface ValidatedAgentGate {
+  validator: string;
+  artifactType: string;
+  mode: Array<'self_check' | 'commit'>;
+}
+
 /** Structural shape of one validated turn contract (spec §6). */
 export interface ValidatedTurnContract {
   version: 1 | 2;
@@ -411,12 +418,41 @@ export interface ValidatedAgentFile {
   systemPromptFile: string | null;
   model: string;
   skills: ValidatedAgentSkill[];
+  /** Optional JS validator gate; null when the agent declares none. */
+  gate: ValidatedAgentGate | null;
   /**
    * Null only in the relaxed historical-snapshot mode: a missing or
    * unsupported contract marks the snapshot non-runnable, never invalid
    * (spec §7.3). Current templates always carry a version-1 contract.
    */
   turnContract: ValidatedTurnContract | null;
+}
+
+/** Parses the optional `gate` block of one agent file (plan Phase 2). */
+function validateAgentGate(fileName: string, raw: unknown): ValidatedAgentGate {
+  const gate = asRecord(fileName, raw, 'gate');
+  const validator = asString(fileName, gate.validator, 'gate.validator', { required: true });
+  const artifactType = asString(fileName, gate.artifactType, 'gate.artifactType', {
+    required: true,
+  });
+  const mode = asArray(fileName, gate.mode, 'gate.mode');
+  if (mode.length === 0) {
+    invalid(fileName, 'gate.mode 至少需要一个模式。');
+  }
+  const seen = new Set<string>();
+  const modes = mode.map((entry, index) => {
+    const item = asEnum(fileName, entry, `gate.mode[${index}]`, ['self_check', 'commit']);
+    if (seen.has(item)) {
+      invalid(fileName, `gate.mode 中 ${item} 重复。`);
+    }
+    seen.add(item);
+    return item;
+  });
+  return {
+    validator,
+    artifactType,
+    mode: modes as Array<'self_check' | 'commit'>,
+  };
 }
 
 /**
@@ -501,6 +537,14 @@ export function validateAgentFile(
     } satisfies ValidatedAgentSkill;
   });
 
+  // Optional JS validator gate (plan 2026-08-07 Phase 2, spec §4.1): absent
+  // folds to null; a declared block is validated fail-closed. The validator
+  // file content itself is resolved and containment-checked by the loader.
+  const gate =
+    'gate' in root && root.gate !== undefined && root.gate !== null
+      ? validateAgentGate(fileName, root.gate)
+      : null;
+
   return {
     id: asSafeId(fileName, root.id, 'id'),
     name: asString(fileName, root.name, 'name', { required: true }),
@@ -509,6 +553,7 @@ export function validateAgentFile(
     systemPromptFile: fileRef,
     model,
     skills,
+    gate,
     turnContract,
   };
 }

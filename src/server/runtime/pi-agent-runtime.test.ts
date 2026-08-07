@@ -22,6 +22,7 @@ import { DefaultResourceLoader } from '@earendil-works/pi-coding-agent';
 import { ActionBuffer } from './action-buffer';
 import { RuntimeAbortedError, RuntimeFailure } from './agent-runtime';
 import { FORGE_ACTION_NAMES, FORGE_ACTION_NAME_SET } from './forge-actions';
+import type { GateRunner } from './gate-runner';
 import {
   MAX_CORRECTIVE_NUDGES,
   PI_RUNTIME_ERROR_CODES,
@@ -1138,5 +1139,73 @@ describe('corrective nudge loop (plan 2026-08-06)', () => {
     const nudge = harness.session.promptCalls[1].text;
     expect(nudge).toContain('send_message');
     expect(nudge).toContain('submit_final_artifact');
+  });
+});
+
+describe('validate_artifact tool wiring (plan 2026-08-07 Phase 2, spec §4.4)', () => {
+  /** The sample turn agent with a declared self_check gate. */
+  function gatedTurnInput() {
+    return sampleTurnInput({
+      agent: {
+        ...sampleTurnInput().agent,
+        gate: {
+          validator: 'gates/validate.cjs',
+          artifactType: 'chapter_markdown',
+          mode: ['self_check'],
+        },
+      },
+    });
+  }
+
+  const stubGateRunner = {
+    run: async () => ({ pass: true, issues: [] }),
+  } as unknown as GateRunner;
+
+  it('keeps the closed tool set when the agent declares no gate', async () => {
+    const harness = createPiHarness({ coreCwd: tempCwd() });
+    await harness.runtime.run(sampleTurnInput(), freshSignal());
+    const names = harness.sessionOptions.customTools.map((tool) => tool.name);
+    expect(names).not.toContain('validate_artifact');
+    expect(names).toHaveLength(
+      FORGE_ACTION_NAMES.length + WORKSPACE_TOOL_NAMES.length + SKILL_SECTION_TOOL_NAMES.length,
+    );
+  });
+
+  it('registers validate_artifact when the gate includes self_check and a runner is wired', async () => {
+    const harness = createPiHarness({ coreCwd: tempCwd() });
+    harness.runtime.setGateRunner(stubGateRunner);
+    await harness.runtime.run(gatedTurnInput(), freshSignal());
+    const names = harness.sessionOptions.customTools.map((tool) => tool.name);
+    expect(names).toContain('validate_artifact');
+    expect(names).toHaveLength(
+      FORGE_ACTION_NAMES.length + WORKSPACE_TOOL_NAMES.length + SKILL_SECTION_TOOL_NAMES.length + 1,
+    );
+  });
+
+  it('registers no validate_artifact when the gate runner is not wired', async () => {
+    const harness = createPiHarness({ coreCwd: tempCwd() });
+    await harness.runtime.run(gatedTurnInput(), freshSignal());
+    const names = harness.sessionOptions.customTools.map((tool) => tool.name);
+    expect(names).not.toContain('validate_artifact');
+    expect(names).toHaveLength(
+      FORGE_ACTION_NAMES.length + WORKSPACE_TOOL_NAMES.length + SKILL_SECTION_TOOL_NAMES.length,
+    );
+  });
+
+  it('executes validate_artifact through the harness and proposes nothing', async () => {
+    const harness = createPiHarness({
+      coreCwd: tempCwd(),
+      script: [{
+        toolCalls: [{ name: 'validate_artifact', args: { source: 'inline', content: 'clean' } }],
+        text: 'checked',
+      }],
+    });
+    harness.runtime.setGateRunner(stubGateRunner);
+    const result = await harness.runtime.run(gatedTurnInput(), freshSignal());
+    const execution = harness.toolExecutions.find((entry) => entry.name === 'validate_artifact');
+    expect(execution?.accepted).toBe(true);
+    expect(execution?.resultText).toContain('"pass":true');
+    // Read-only: the validator run never proposes anything to the buffer.
+    expect(result.actions).toEqual([]);
   });
 });

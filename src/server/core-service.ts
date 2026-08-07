@@ -44,6 +44,7 @@ import { PiAgentRuntime } from './runtime/pi-agent-runtime';
 import { LiveStore } from './runtime/live-store';
 import { WorkspaceStore } from './runtime/workspace-store';
 import { SkillService } from './runtime/skill-service';
+import { GateRunner } from './runtime/gate-runner';
 import { ActionCommitter } from './runtime/action-committer';
 import { TaskRunner } from './runtime/task-runner';
 import { TaskScheduler, type HumanAnswerRequest } from './runtime/task-scheduler';
@@ -106,6 +107,13 @@ export class CoreService {
   readonly runtime: AgentRuntime;
 
   readonly skills: SkillService;
+
+  /**
+   * Template-declared artifact gate executor (plan 2026-08-07 Phase 2, spec
+   * §4.3): compiles and runs template-owned JS validators in an isolated
+   * sandbox. Read-only — never proposes or commits anything.
+   */
+  readonly gate: GateRunner;
 
   readonly committer: ActionCommitter;
 
@@ -186,10 +194,23 @@ export class CoreService {
         skills.readSection(taskId, agentId, skillId, sectionPath),
       );
     }
+    // Template-declared artifact gate (plan 2026-08-07 Phase 2, spec §4.5):
+    // one shared runner executes template-owned validators in an isolated
+    // sandbox. Wired into the committer as the non-bypassable commit gate and
+    // structurally into runtimes exposing setGateRunner (the read-only
+    // self_check tool); the wiring check stays structural (iron rule 5).
+    this.gate = new GateRunner({ paths });
+    const gateRunnerTarget = this.runtime as Partial<{
+      setGateRunner?: (runner: GateRunner) => void;
+    }>;
+    if (typeof gateRunnerTarget.setGateRunner === 'function') {
+      gateRunnerTarget.setGateRunner(this.gate);
+    }
     this.committer = new ActionCommitter({
       events: this.events,
       artifacts: this.artifacts,
       skills: this.skills,
+      gateRunner: this.gate,
     });
     // Live-preview buffer (plan C): the runner tags every runtime patch with
     // the task id and merges it here. Memory-only — never persisted.
