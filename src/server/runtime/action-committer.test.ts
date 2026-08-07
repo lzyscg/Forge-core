@@ -1160,4 +1160,97 @@ describe('ActionCommitter v7 forward, annotate and reachability (spec §7/§8/§
     expect(after.filter((e) => e.event.type === 'agent_result')).toHaveLength(1);
     expect(await artifacts.list(taskId)).toHaveLength(1);
   });
+
+  it('never writes humanAuthorized on a committed input node (spec §7.1 closedness)', async () => {
+    // Writer publishes v1 -> auto-routes an artifact input to reviewer.
+    await committer.validateAndCommit(
+      forwardContext(taskId, 'writer', { turnId: 'ha-w-1', inputNodeId: 'ha-input-writer' }),
+      [
+        finishInline({ files: [{ name: 'content.md', content: '正文' }], title: 'V1', artifactType: null }),
+        PUBLISH_CURRENT,
+      ],
+    );
+    const version1 = await artifacts.read(taskId, 1);
+    // The received input is humanAuthorized (as if synthesized by the accept
+    // path); a model forward must NOT propagate the field - the committer's
+    // node constructor never sets humanAuthorized.
+    await committer.validateAndCommit(
+      forwardContext(taskId, 'reviewer', {
+        turnId: 'ha-r-1',
+        inputNodeId: 'ha-w-1-artifact-input-0',
+        currentInputArtifact: { ...receivedFrom(version1), humanAuthorized: true },
+      }),
+      [{ type: 'forward_input_version', targetAgentId: 'controller' }],
+    );
+    const allInputs = (await events.read(taskId)).filter((e) => e.event.type === 'agent_input');
+    expect(allInputs.length).toBeGreaterThan(0);
+    for (const entry of allInputs) {
+      if (entry.event.type !== 'agent_input') {
+        continue;
+      }
+      // Every committed input node - publish fan-out and forward alike - lacks
+      // humanAuthorized: only the scheduler accept path writes it.
+      expect(entry.event.node.humanAuthorized).toBeUndefined();
+    }
+  });
+
+  it('reachability bridges a superseded input to its synthesized replacement (spec §11.1 A continue)', async () => {
+    // Writer publishes v1 -> routes the artifact hand-off to reviewer input OLD.
+    await committer.validateAndCommit(
+      forwardContext(taskId, 'writer', { turnId: 'rb-w-1', inputNodeId: 'rb-input-writer' }),
+      [
+        finishInline({ files: [{ name: 'content.md', content: '终稿正文' }], title: '终稿 V1', artifactType: null }),
+        PUBLISH_CURRENT,
+      ],
+    );
+    const oldReviewerInputId = 'rb-w-1-artifact-input-0';
+    const version1 = await artifacts.read(taskId, 1);
+
+    // Human continue voids OLD and synthesizes a replacement input for the
+    // same recipient (reviewer) carrying the same version (deterministic id).
+    await events.append(
+      taskId,
+      makeTaskEvent({ type: 'pending_inputs_superseded', supersededNodeIds: [oldReviewerInputId] }),
+    );
+    await events.append(
+      taskId,
+      makeTaskEvent({
+        id: 'synthesize-continue-0',
+        type: 'agent_input',
+        node: makeEventNode({
+          sequence: 50,
+          agentId: 'reviewer',
+          kind: 'input',
+          title: '合成输入',
+          body: '请转交',
+          inputVersion: 1,
+        }),
+      }),
+    );
+
+    // Reviewer forwards from the synthesized input (not OLD) -> controller.
+    await committer.validateAndCommit(
+      forwardContext(taskId, 'reviewer', {
+        turnId: 'rb-r-1',
+        inputNodeId: 'synthesize-continue-0',
+        currentInputArtifact: receivedFrom(version1),
+      }),
+      [{ type: 'forward_input_version', targetAgentId: 'controller' }],
+    );
+
+    // Controller submits the forwarded version; reachability walks writer ->
+    // route to OLD (voided) -> resolved to the synthesized reviewer input ->
+    // reviewer's forward result -> controller input. Without the bridge the
+    // route dead-ends at the voided OLD (no consumer result).
+    const result = await committer.validateAndCommit(
+      forwardContext(taskId, 'controller', {
+        turnId: 'rb-c-1',
+        inputNodeId: 'rb-r-1-forward-input-0',
+        currentInputArtifact: receivedFrom(version1),
+      }),
+      [SUBMIT_CURRENT],
+    );
+    expect(result.taskCompleted).toBe(true);
+    expect((await projector.workspace(taskId)).task.status).toBe('completed');
+  });
 });

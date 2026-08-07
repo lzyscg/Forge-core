@@ -18,6 +18,7 @@ import { Value } from 'typebox/value';
 import type { TaskSummary, TaskWorkspace } from '../../shared/contracts';
 import { answerBodySchema, createTaskBodySchema } from '../../shared/api-schemas';
 import type { CoreService } from '../core-service';
+import type { HumanAnswerRequest } from '../runtime/task-scheduler';
 import {
   ApiError,
   readJsonObject,
@@ -25,6 +26,27 @@ import {
   type ApiRoute,
   type ApiRouteContext,
 } from './router';
+
+/**
+ * Normalizes a validated answer body into the scheduler's `HumanAnswerRequest`
+ * (spec §11.1/§11.5). A legacy `{ answer: string }` becomes a text answer; a
+ * structured `{ decision, text? }` becomes the matching continue/accept/stop
+ * request, with `text` defaulting to '' (the scheduler rejects empty guidance
+ * for continue/accept as a public INVALID_TRANSITION).
+ */
+function toHumanAnswerRequest(body: {
+  answer?: string;
+  decision?: 'continue' | 'accept' | 'stop';
+  text?: string;
+}): string | HumanAnswerRequest {
+  if (body.decision !== undefined) {
+    if (body.decision === 'stop') {
+      return { kind: 'stop' };
+    }
+    return { kind: body.decision, text: body.text ?? '' };
+  }
+  return body.answer ?? '';
+}
 
 /**
  * Public template versions display the first 12 hash characters everywhere
@@ -73,16 +95,16 @@ async function handleAnswer({ service, req, params, res }: ApiRouteContext): Pro
   if (!Value.Check(answerBodySchema, body)) {
     throw new ApiError(
       'INVALID_INPUT',
-      '人工回答请求必须只包含非空 answer 字段。',
+      '人工回答请求必须是 { answer: string } 或 { decision: continue|accept|stop, text?: string }。',
       null,
-      '按 { answer: string } 形状重新提交。',
+      '按 { answer: string } 或 { decision, text? } 形状重新提交。',
     );
   }
   // Accepted asynchronously: validation errors still reject publicly, the
   // loop continues in the background after the 202 is answered.
   const { accepted, completion } = await service.scheduler.answerDetached(
     params.taskId,
-    (body as { answer: string }).answer,
+    toHumanAnswerRequest(body as Parameters<typeof toHumanAnswerRequest>[0]),
   );
   completion.catch(() => undefined);
   sendJson(res, 202, accepted);

@@ -42,6 +42,7 @@ import {
 import { downgradeTaskSnapshotToLegacy, makeEventNode, makeTaskEvent } from '../test-support';
 import { PROGRESS_GUARD_QUESTION } from './progress-guard';
 import type { ArtifactStore } from '../storage/artifact-store';
+import type { TaskEvent } from '../storage/task-events';
 import { TraceStore } from '../storage/trace-store';
 import { ActionCommitter } from './action-committer';
 import { SkillService } from './skill-service';
@@ -73,6 +74,16 @@ async function schedulerHarness(
     await environment.seedAgentInput(taskId, 'writer', '开始生产');
   }
   return { environment, scheduler: environment.service.scheduler, fake, recording, taskId };
+}
+
+/** Builds a scheduler over the harness service with an injected policy. */
+function guardedScheduler(harness: SchedulerHarness, maxTurnsSinceHumanAnswer: number): TaskScheduler {
+  return new TaskScheduler({
+    service: harness.environment.service,
+    runner: harness.environment.service.runner,
+    runtime: harness.recording,
+    progressPolicy: { maxTurnsSinceHumanAnswer },
+  });
 }
 
 /** One legal writer turn: seal an inline package, then the publish dispatch. */
@@ -804,16 +815,6 @@ describe('TaskScheduler acceptance boundary seam (plan Phase D Task 4)', () => {
 });
 
 describe('TaskScheduler progress guard (plan 2026-08-06)', () => {
-  /** Builds a scheduler over the harness service with an injected policy. */
-  function guardedScheduler(harness: SchedulerHarness, maxTurnsSinceHumanAnswer: number): TaskScheduler {
-    return new TaskScheduler({
-      service: harness.environment.service,
-      runner: harness.environment.service.runner,
-      runtime: harness.recording,
-      progressPolicy: { maxTurnsSinceHumanAnswer },
-    });
-  }
-
   const humanRequestedEvents = async (harness: SchedulerHarness) =>
     (await harness.environment.events.read(harness.taskId)).filter(
       (entry) => entry.event.type === 'human_requested',
@@ -846,8 +847,14 @@ describe('TaskScheduler progress guard (plan 2026-08-06)', () => {
     if (request?.type !== 'human_requested') {
       throw new Error('expected a human_requested event');
     }
-    // The question is asked under the LAST dispatcher (the spinning reviewer).
-    expect(request.node.agentId).toBe('reviewer');
+    // The guard parks under the recipient of the STALEST pending input at
+    // parking time (spec §11.4), not the last dispatcher. After the reviewer's
+    // second rejection (send_message -> writer), the writer owes the next
+    // turn, so the synthesized request is attributed to the writer. The
+    // request carries `source: 'progress_guard'` so the answer flow offers the
+    // structured three-choice (spec §11.5).
+    expect(request.node.agentId).toBe('writer');
+    expect(request.source).toBe('progress_guard');
     expect(request.question).toBe(PROGRESS_GUARD_QUESTION);
 
     const workspace = await harness.environment.service.getWorkspace(harness.taskId);
@@ -1043,6 +1050,219 @@ describe('TaskScheduler progress guard (plan 2026-08-06)', () => {
     if (requests[0]?.event.type === 'human_requested') {
       expect(requests[0].event.question).toBe(PROGRESS_GUARD_QUESTION);
     }
+  });
+});
+
+describe('TaskScheduler progress guard structured decision (spec §11)', () => {
+  /**
+   * Builds the canonical spinning-then-park harness: writer publishes twice,
+   * reviewer rejects once then submits; budget 2 parks after the writer's
+   * second publish (count 3 > 2), leaving the reviewer's v2 hand-off pending.
+   * The guard parks under the reviewer (stalest pending recipient, spec
+   * §11.4) with `source: 'progress_guard'`.
+   */
+  async function parkedHarness(): Promise<{
+    harness: SchedulerHarness;
+    scheduler: TaskScheduler;
+    reviewerInputId: string;
+  }> {
+    const harness = await schedulerHarness({
+      writer: [
+        { kind: 'result', publicText: '初稿 V1', actions: publishTurnActions('初稿 V1') },
+        { kind: 'result', publicText: '初稿 V2', actions: publishTurnActions('初稿 V2') },
+      ],
+      reviewer: [
+        { kind: 'result', publicText: '退回意见一', actions: reviewMessageTurnActions('请修改一') },
+        { kind: 'result', publicText: '终稿提交', actions: submitReceivedArtifactTurnActions },
+      ],
+    });
+    const scheduler = guardedScheduler(harness, 2);
+    const parked = await scheduler.start(harness.taskId);
+    expect(parked.status).toBe('waiting_human');
+    const workspace = await harness.environment.service.getWorkspace(harness.taskId);
+    expect(workspace.pendingHumanSource).toBe('progress_guard');
+    // The pending v2 hand-off is the reviewer's input from the writer's second
+    // publish turn; locate it for supersede assertions.
+    const reviewerPending = workspace.nodes.find(
+      (node) =>
+        node.agentId === 'reviewer' &&
+        node.kind === 'input' &&
+        node.inputVersion === 2 &&
+        node.status === 'confirmed',
+    );
+    if (reviewerPending === undefined) {
+      throw new Error('expected a pending reviewer v2 input after parking');
+    }
+    return { harness, scheduler, reviewerInputId: reviewerPending.id };
+  }
+
+  const findSynthesized = async (
+    harness: SchedulerHarness,
+    suffix: string,
+  ): Promise<Extract<TaskEvent, { type: 'agent_input' }>> => {
+    const entries = await harness.environment.events.read(harness.taskId);
+    const match = entries.find(
+      (entry) => entry.event.type === 'agent_input' && entry.event.id.startsWith(`synthesize-${suffix}-`),
+    );
+    if (match === undefined || match.event.type !== 'agent_input') {
+      throw new Error(`expected a synthesize-${suffix} agent_input event`);
+    }
+    return match.event;
+  };
+
+  it('continue supersedes the pending input and synthesizes guidance for the stalest recipient', async () => {
+    const { harness, scheduler, reviewerInputId } = await parkedHarness();
+
+    const answered = await scheduler.answer(harness.taskId, {
+      kind: 'continue',
+      text: '请直接提交当前版本',
+    });
+    expect(answered.status).toBe('completed');
+
+    const entries = (await harness.environment.events.read(harness.taskId)).map((e) => e.event);
+    // Commit order: human_answered -> pending_inputs_superseded -> synthesize.
+    const answeredIdx = entries.findIndex((e) => e.type === 'human_answered');
+    const supersededIdx = entries.findIndex((e) => e.type === 'pending_inputs_superseded');
+    const synthIdx = entries.findIndex(
+      (e) => e.type === 'agent_input' && e.id.startsWith('synthesize-continue-'),
+    );
+    expect(supersededIdx).toBeGreaterThan(answeredIdx);
+    expect(synthIdx).toBeGreaterThan(supersededIdx);
+    // The supersede voids exactly the stalest pending v2 input.
+    const superseded = entries[supersededIdx];
+    if (superseded.type !== 'pending_inputs_superseded') {
+      throw new Error('expected a pending_inputs_superseded event');
+    }
+    expect(superseded.supersededNodeIds).toEqual([reviewerInputId]);
+    // The synthesized input carries the guidance body and the voided version,
+    // but NOT humanAuthorized (only the accept path sets it, spec §7.1).
+    const synth = await findSynthesized(harness, 'continue');
+    expect(synth.node.agentId).toBe('reviewer');
+    expect(synth.node.inputVersion).toBe(2);
+    expect(synth.node.body).toBe('请直接提交当前版本');
+    expect(synth.node.humanAuthorized).toBeUndefined();
+    // The superseded input was never executed: only one reviewer result before
+    // the synthesized one (the rejection), then the submit consumes the synth.
+    const reviewerResults = entries.filter(
+      (e) => e.type === 'agent_result' && e.node.agentId === 'reviewer',
+    );
+    expect(reviewerResults).toHaveLength(2);
+    const finalWorkspace = await harness.environment.service.getWorkspace(harness.taskId);
+    expect(finalWorkspace.artifacts.at(-1)?.final).toBe(true);
+  });
+
+  it('accept synthesizes a human-authorized submit input for the final submitter', async () => {
+    const { harness, scheduler } = await parkedHarness();
+
+    const answered = await scheduler.answer(harness.taskId, {
+      kind: 'accept',
+      text: '人工授权直接提交',
+    });
+    expect(answered.status).toBe('completed');
+
+    const synth = await findSynthesized(harness, 'accept');
+    // The accept synthesis targets the declared submitter (reviewer) with the
+    // latest published version and humanAuthorized=true (spec §11.1 B).
+    expect(synth.node.agentId).toBe('reviewer');
+    expect(synth.node.inputVersion).toBe(2);
+    expect(synth.node.body).toBe('人工授权直接提交');
+    expect(synth.node.humanAuthorized).toBe(true);
+    const finalWorkspace = await harness.environment.service.getWorkspace(harness.taskId);
+    expect(finalWorkspace.artifacts.at(-1)?.final).toBe(true);
+  });
+
+  it('stop clears the guard request and stops the task without synthesizing', async () => {
+    const { harness, scheduler } = await parkedHarness();
+    const before = (await harness.environment.events.read(harness.taskId)).map((e) => e.event);
+
+    const stopped = await scheduler.answer(harness.taskId, { kind: 'stop' });
+    expect(stopped.status).toBe('stopped');
+
+    const after = (await harness.environment.events.read(harness.taskId)).map((e) => e.event);
+    // stop appends human_answered then task_stopped, and nothing else.
+    const newEvents = after.slice(before.length);
+    expect(newEvents.map((e) => e.type)).toEqual(['human_answered', 'task_stopped']);
+    expect(newEvents.some((e) => e.type === 'pending_inputs_superseded')).toBe(false);
+    expect(newEvents.some((e) => e.type === 'agent_input')).toBe(false);
+  });
+
+  it('rejects accept when no artifact version was ever published (spec §11.5)', async () => {
+    // Server-side re-validation: even with a progress_guard request parked, a
+    // task with zero published versions cannot be accepted.
+    const harness = await schedulerHarness({}, { seedWriterInput: false });
+    const taskId = await harness.environment.createTask();
+    await harness.environment.events.append(taskId, makeTaskEvent({ type: 'task_started' }));
+    await harness.environment.seedAgentInput(taskId, 'writer', '开始生产');
+    await harness.environment.events.append(
+      taskId,
+      makeTaskEvent({
+        type: 'agent_result',
+        node: makeEventNode({
+          sequence: 2,
+          agentId: 'writer',
+          kind: 'result',
+          title: '结果',
+          body: '需要确认',
+        }),
+      }),
+    );
+    await harness.environment.events.append(
+      taskId,
+      makeTaskEvent({
+        type: 'human_requested',
+        node: makeEventNode({
+          sequence: 3,
+          agentId: 'writer',
+          kind: 'human_request',
+          title: '人工请求',
+          body: PROGRESS_GUARD_QUESTION,
+        }),
+        question: PROGRESS_GUARD_QUESTION,
+        source: 'progress_guard',
+      }),
+    );
+    const workspace = await harness.environment.service.getWorkspace(taskId);
+    expect(workspace.task.status).toBe('waiting_human');
+    expect(workspace.pendingHumanSource).toBe('progress_guard');
+
+    await expect(
+      harness.scheduler.answer(taskId, { kind: 'accept', text: '授权' }),
+    ).rejects.toMatchObject({ code: 'INVALID_TRANSITION' });
+    // Nothing was committed by the rejected accept.
+    expect((await harness.environment.events.read(taskId)).length).toBe(4);
+  });
+
+  it('an agent_request question accepts only a text answer (no accept/continue)', async () => {
+    // A model-requested human question (source defaults to agent_request) does
+    // not offer the structured three-choice (spec §11.5).
+    const harness = await schedulerHarness({}, { seedWriterInput: false });
+    const taskId = await harness.environment.createTask();
+    await harness.environment.events.append(taskId, makeTaskEvent({ type: 'task_started' }));
+    await harness.environment.seedAgentInput(taskId, 'writer', '开始生产');
+    await harness.environment.events.append(
+      taskId,
+      makeTaskEvent({
+        type: 'human_requested',
+        node: makeEventNode({
+          sequence: 2,
+          agentId: 'writer',
+          kind: 'human_request',
+          title: '人工请求',
+          body: '是否继续？',
+        }),
+        question: '是否继续？',
+      }),
+    );
+    const workspace = await harness.environment.service.getWorkspace(taskId);
+    expect(workspace.task.status).toBe('waiting_human');
+    expect(workspace.pendingHumanSource).toBe('agent_request');
+
+    await expect(
+      harness.scheduler.answer(taskId, { kind: 'accept', text: '授权' }),
+    ).rejects.toMatchObject({ code: 'INVALID_TRANSITION' });
+    await expect(
+      harness.scheduler.answer(taskId, { kind: 'continue', text: '继续' }),
+    ).rejects.toMatchObject({ code: 'INVALID_TRANSITION' });
   });
 });
 

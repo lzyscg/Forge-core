@@ -10,6 +10,41 @@
 - **legacy 兼容**：v1 在途任务 gate 为 `incompatible(SCHEMA_V2_REQUIRED)` 只读；event-store 读取期 transform 归一旧事件（artifactVersion→inputVersion、contentHash→files、缺省 humanAuthorized=false、缺省 source=agent_request）使其不 CORRUPTED。
 - **真实验收**：`scripts/real-acceptance.ts` 硬编码 zhihu-single-chapter（Phase 3 删除）。Phase 7 将写 dedicated long-form-hub 验收脚本（3 agent：controller/writer/reviewer 占位符替换）。
 
+## Phase 5 — 调度器人工介入（supersede + synthesize，结构化三选一）
+
+（已完成；tsc 0 错误，1123/1123 测试绿；commit 于 Phase 5 尾）
+
+### 做了什么
+- `task-scheduler.ts`：
+  - **progress-guard 停车对象改接收者**（spec §11.4）：`appendProgressGuardRequest` 挂**停车时刻最老 pending 输入的接收者**（`stalestPendingInput`，按序列序取第一个无 committed result 的未作废输入），不再挂最后 dispatch 者；无 pending 时退回最后 dispatch 者兜底。请求事件带 `source: 'progress_guard'`（spec §11.5）。
+  - **结构化三选一**（spec §11.1）：`HumanAnswerRequest`（answer/continue/accept/stop）+ `answer(taskId, string | HumanAnswerRequest)` 入口；`applyHumanAnswer` 按 pending 请求来源分发——`progress_guard` 走 continue/accept/stop 三分支（普通字符串映射为 continue，文本即引导），`agent_request` 只接受文字回答（结构化决策拒绝）。
+  - **continue**：提交序 `human_answered → pending_inputs_superseded（作废全部当前 pending）→ synthesize`（spec §11.6）；合成节点给**最老被作废 pending 的接收者**（spec §11.3），body=引导文本，inputVersion=该 pending 的 inputVersion；无 pending（理论不可达）退化为 guard 请求节点 agent + inputVersion=null（spec §11.6 兜底）。
+  - **accept**：**服务端复校验**至少一个已发布版本（`latestPublishedVersion === null` 即拒绝 INVALID_TRANSITION，spec §11.5）；合成节点给 finalOutput.submitters[0]，inputVersion=最新已发布版本，**humanAuthorized=true**（spec §7.1 唯一写入主体）；不重标注 review.md。
+  - **stop**：`human_answered + task_stopped` 后 **abort run controller**，`execute` 循环立即退出（与既有 stop 生命周期一致），不跑 stop 后残留的 pending 输入（此前会误跑并 completed——测试钉死）。
+  - **合成节点确定性 id**：`synthesize-<suffix>-<round>`（round=已提交 supersede 事件数），多轮干预不撞 id、崩溃重放可幂等（spec §11.6）；序列号固定 `nextSequence(events)+1`（human_answered 已占前一位，含无 pending 兜底分支）。
+  - guard 停车对象与 continue 合成目标一致（同取 stalestPendingInput），人工引导直达被卡接收者。
+- `action-committer.ts`：
+  - **可达性闭包 supersede 桥**（spec §7.3/§11.1）：`assertReachable` 走路由时把 `route_executed.toNodeId` 经 `buildSupersedeResolution`（superseded 输入 id → 同接收者合成输入 id，按提交序累积映射）解析后再比对/跳转——continue 合成的输入能沿「producer → 路由(指向被作废旧输入) → 合成输入 → 消费结果 → …」走到提交者，否则在作废节点死路（**修掉 Phase 5 WIP 的 FINAL_NOT_REACHABLE 回归**，测试 2/3 由红转绿）。
+  - **humanAuthorized 封闭性收口**（spec §7.1）：`node()` 构造器**移除 humanAuthorized 参数**（永不置位），forward 路径不再传播 `received.humanAuthorized`；仅 scheduler accept 合成路径经 events.append 直接写该字段。
+- `task-runner.ts`（WIP 继承）：`findNextUnprocessedInput` / `collectPendingAgents` 跳过 `pending_inputs_superseded` 作废的输入（spec §11.2）。
+- 投影（spec §11.2 作废态）：`task-projector.ts` + `mock-projector.ts` 折叠 `pending_inputs_superseded`，节点渲染 `superseded: true`（显示层，不作废态悬空）；mock-schema 增事件类型与可选字段。
+- API 面（spec §11.5）：`api-schemas.ts` 的 `answerBodySchema` 改为**联合**（`{answer}` 旧形状 | `{decision: continue|accept|stop, text?}`）；`task-routes.ts` 归一化到 `HumanAnswerRequest`；`core-service.answerHuman` 放宽入参；workspace 契约 + wire schema + 双投影暴露 **`pendingHumanSource`**（progress_guard | agent_request | null），UI 据此区分是否提供 accept。
+
+### 关键决策
+- **普通字符串 answer 对 progress_guard 映射为 continue**：旧 answer 流（`answer(taskId, text)`）对 guard 停车继续可用，文本即合成引导 body；结构化 continue/accept/stop 是新通道，两者同路。
+- **stop 用 abort 而非事件驱动停环**：`execute` 循环只认 `signal.aborted` 与 runNext 结果，task_stopped 事件本身不拦环；answer-stop 在 `prepare` 内 append 事件后 abort controller，与既有 `stop` 生命周期（abort + task_stopped）一致，`accepted`/`completion` 均回 stopped。
+- **可达性桥只解析 route.toNodeId**：producer/中间结果（result 节点）永不作废，只有输入节点会被 supersede；解析映射按「合成输入同接收者 + 提交序先 supersede 后 synthesize」构建，多轮干预下先映射的优先、不覆盖。
+- **`pendingHumanSource` 为必填契约字段**（与 pendingHumanQuestion 对齐），3 处测试 fixture + 双投影同步补 `null`；mock 的 human_requested 无 source 字段，恒为 agent_request（mock 不模拟 guard 停车）。
+
+### 问题与解决
+- **Phase 5 WIP 三个红测试**（`npm test` 基线）：
+  1. 停车对象测试期望 reviewer（最后 dispatch 者）实得 writer——**spec §11.4 明确改接收者**，更新测试期望为 writer 并补 `source: 'progress_guard'` 断言。
+  2/3. `answer('复审并提交')` 后任务 `retryable_failure` 而非 completed——continue 作废 pending 输入后合成新输入，但 producer 的 `route_executed` 仍指向**被作废旧输入**，`assertReachable` 找不到消费结果死路。**根因在可达性闭包缺 supersede 桥**，committer 层修复（见上），测试无需改语义即转绿。
+- **stop 分支误跑残留 pending**：applyStop 只 append 事件，`execute` 循环无视 task_stopped 继续跑 reviewer 的 pending 输入至 completed（首版 stop 测试失败）。abort controller 修复。
+- **合成节点序列号碰撞**：WIP 用 `offset = pending 数 >0 ? 1 : 0`，无 pending 兜底分支下合成节点与 human_answered 同序列号；改为固定 `+1`（human_answered 恒占前一位）。
+- **humanAuthorized 封闭性缺口**：committer `node()` 支持置位且 forward 传播 received.humanAuthorized——违反「唯一写入主体」；收口后以「forward 收到 humanAuthorized 输入不落字段」测试钉死。
+- **已知局限（后续跟进）**：崩溃半态自愈（resume 检测「human_answered+superseded 已提交、合成缺失」补合成，spec §11.6）未实现——提交序已把半态压向安全方向，极端窗口下任务 park 可见、人工可 stop/clone；多 pending 拓扑的 continue 合成目标为最老接收者（spec §16 明示边界）。
+
 ## Phase 4 — 运行时（runner + committer）
 
 （已完成；tsc 0 错误，1113/1113 测试绿，含新增 14 条 committer/runner v7 测试）

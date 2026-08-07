@@ -78,6 +78,7 @@ function baseWorkspace(activeTurn?: unknown): Record<string, unknown> {
     executedRoutes: [],
     artifacts: [],
     pendingHumanQuestion: null,
+    pendingHumanSource: null,
     ...(activeTurn !== undefined ? { activeTurn } : {}),
   };
 }

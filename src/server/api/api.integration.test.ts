@@ -337,6 +337,44 @@ describe('typed JSON API', () => {
     await client.close();
   });
 
+  it('accepts the structured decision body on the answer route (spec §11.5)', async () => {
+    const client = await startApiTestClient();
+    const task = await createValidTask(client);
+
+    // Unknown decision value rejected at the schema gate.
+    const badDecision = await client.request('POST', `/api/tasks/${task.id}/answer`, {
+      json: { decision: 'nope' },
+    });
+    expect(badDecision.status).toBe(400);
+    expectPublicErrorEnvelope(badDecision, 'INVALID_INPUT');
+
+    // Unknown field on a structured body rejected (additionalProperties: false).
+    const extraField = await client.request('POST', `/api/tasks/${task.id}/answer`, {
+      json: { decision: 'continue', text: '引导', extra: 1 },
+    });
+    expect(extraField.status).toBe(400);
+    expectPublicErrorEnvelope(extraField, 'INVALID_INPUT');
+
+    // All three structured decisions pass schema validation; a ready task has
+    // no pending human request, so the scheduler rejects with INVALID_TRANSITION
+    // (proving the body reached the scheduler, not the schema gate).
+    for (const body of [
+      { decision: 'continue', text: '请继续' },
+      { decision: 'accept', text: '授权提交' },
+      { decision: 'stop' },
+    ]) {
+      const res = await client.request('POST', `/api/tasks/${task.id}/answer`, { json: body });
+      expect(res.status).toBe(409);
+      expectPublicErrorEnvelope(res, 'INVALID_TRANSITION');
+    }
+
+    // The workspace exposes the pending human source (null when none pending).
+    const workspace = await client.request('GET', `/api/tasks/${task.id}/workspace`);
+    expect(workspace.status).toBe(200);
+    expect((workspace.body as { pendingHumanSource: string | null }).pendingHumanSource).toBeNull();
+    await client.close();
+  });
+
   it('surfaces damaged tasks as TASK_CORRUPTED without breaking listings', async () => {
     const client = await startApiTestClient();
     const task = await createValidTask(client);

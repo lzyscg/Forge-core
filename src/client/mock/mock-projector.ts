@@ -19,9 +19,15 @@ interface ProjectionState {
   lastAgentId: string | null;
   nodes: Map<string, WorkspaceNode>;
   nodeOrder: string[];
+  /**
+   * Input node ids voided by `pending_inputs_superseded` events (spec §11.2).
+   * Voided nodes render as superseded and are never pending.
+   */
+  supersededNodeIds: Set<string>;
   routes: WorkspaceRoute[];
   artifacts: ArtifactVersion[];
   pendingHumanQuestion: string | null;
+  pendingHumanSource: 'progress_guard' | 'agent_request' | null;
   finalArtifactId: string | null;
   maxSequence: number;
 }
@@ -32,9 +38,11 @@ function createState(): ProjectionState {
     lastAgentId: null,
     nodes: new Map(),
     nodeOrder: [],
+    supersededNodeIds: new Set(),
     routes: [],
     artifacts: [],
     pendingHumanQuestion: null,
+    pendingHumanSource: null,
     finalArtifactId: null,
     maxSequence: 0,
   };
@@ -51,6 +59,11 @@ function upsertNode(state: ProjectionState, node: WorkspaceNode): void {
     incoming.attemptCount = Math.max(existing.attemptCount, incoming.attemptCount);
   } else {
     state.nodeOrder.push(node.id);
+  }
+  if (state.supersededNodeIds.has(node.id)) {
+    // Display-only voided mark (spec §11.2): superseded inputs render as
+    // superseded on the canvas and are never pending.
+    incoming.superseded = true;
   }
   state.nodes.set(node.id, incoming);
   state.maxSequence = Math.max(state.maxSequence, incoming.sequence);
@@ -128,12 +141,28 @@ function applyEvent(state: ProjectionState, event: MockTaskEvent): void {
       state.lastAgentId = event.node.agentId;
       state.status = 'waiting_human';
       state.pendingHumanQuestion = event.question;
+      // The mock simulates ordinary model-asked questions only (no
+      // progress_guard), so the source is always agent_request (spec §11.5).
+      state.pendingHumanSource = 'agent_request';
       break;
     case 'human_answered':
       upsertNode(state, event.node);
       state.lastAgentId = event.node.agentId;
       state.status = 'running';
       state.pendingHumanQuestion = null;
+      state.pendingHumanSource = null;
+      break;
+    case 'pending_inputs_superseded':
+      // Display-only voiding (spec §11.2): the referenced input nodes render
+      // as superseded; already-projected nodes are marked in place, and any
+      // input committed later under a voided id keeps the mark.
+      for (const nodeId of event.supersededNodeIds) {
+        state.supersededNodeIds.add(nodeId);
+        const node = state.nodes.get(nodeId);
+        if (node !== undefined) {
+          node.superseded = true;
+        }
+      }
       break;
     case 'final_accepted':
       state.status = 'completed';
@@ -211,5 +240,6 @@ export function projectMockWorkspace(record: MockTaskRecord): TaskWorkspace {
     executedRoutes,
     artifacts,
     pendingHumanQuestion: state.pendingHumanQuestion,
+    pendingHumanSource: state.pendingHumanSource,
   };
 }

@@ -44,6 +44,7 @@ export type MockTaskEvent =
   | { type: 'artifact_published'; at: string; artifact: ArtifactVersion }
   | { type: 'human_requested'; at: string; node: WorkspaceNode; question: string }
   | { type: 'human_answered'; at: string; node: WorkspaceNode; answer: string }
+  | { type: 'pending_inputs_superseded'; at: string; supersededNodeIds: string[] }
   | { type: 'final_accepted'; at: string; artifactId: string }
   | { type: 'task_interrupted'; at: string };
 
@@ -159,6 +160,8 @@ export const workspaceNodeSchema = Type.Object({
   inputVersion: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()]),
   // Optional: records persisted before Phase E never carried the field.
   turnId: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  // True when `pending_inputs_superseded` voided this input (spec §11.2).
+  superseded: Type.Optional(Type.Boolean()),
 });
 
 export const workspaceRouteSchema = Type.Object({
@@ -225,6 +228,11 @@ export const mockTaskEventSchema = Type.Union([
     at: Type.String(),
     node: workspaceNodeSchema,
     answer: Type.String(),
+  }),
+  Type.Object({
+    type: Type.Literal('pending_inputs_superseded'),
+    at: Type.String(),
+    supersededNodeIds: Type.Array(Type.String()),
   }),
   Type.Object({ type: Type.Literal('final_accepted'), at: Type.String(), artifactId: Type.String() }),
   Type.Object({ type: Type.Literal('task_interrupted'), at: Type.String() }),

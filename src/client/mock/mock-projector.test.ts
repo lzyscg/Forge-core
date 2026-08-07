@@ -263,6 +263,38 @@ describe('projectMockWorkspace', () => {
     expect(workspace.nodes.map((node) => node.id)).toContain('n-ha');
   });
 
+  it('renders superseded inputs as voided display nodes (spec §11.2)', () => {
+    const record = makeRecord([
+      { type: 'task_started', at: '2026-01-01T00:00:01.000Z' },
+      {
+        type: 'agent_input',
+        at: '2026-01-01T00:00:02.000Z',
+        node: makeNode('pending-input-1', 1, WRITER_AGENT_ID, { status: 'confirmed' }),
+      },
+      {
+        type: 'pending_inputs_superseded',
+        at: '2026-01-01T00:00:03.000Z',
+        supersededNodeIds: ['pending-input-1'],
+      },
+    ]);
+
+    const workspace = projectMockWorkspace(record);
+    expect(workspace.nodes.find((node) => node.id === 'pending-input-1')?.superseded).toBe(true);
+
+    // The synthesized replacement input is a fresh node: not voided.
+    record.events.push({
+      type: 'agent_input',
+      at: '2026-01-01T00:00:04.000Z',
+      node: makeNode('synthesize-continue-0', 2, WRITER_AGENT_ID, {
+        status: 'confirmed',
+        inputVersion: 1,
+      }),
+    });
+    const after = projectMockWorkspace(record);
+    expect(after.nodes.find((node) => node.id === 'pending-input-1')?.superseded).toBe(true);
+    expect(after.nodes.find((node) => node.id === 'synthesize-continue-0')?.superseded).toBeUndefined();
+  });
+
   it('derives stopped, interrupted and resumed states from lifecycle events', () => {
     const base: MockTaskEvent[] = [{ type: 'task_started', at: '2026-01-01T00:00:01.000Z' }];
     expect(projectTaskStatus(makeRecord([...base]))).toBe('running');

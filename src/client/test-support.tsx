@@ -300,6 +300,7 @@ export function workspaceWithReturnLoop(): TaskWorkspace {
       },
     ],
     pendingHumanQuestion: null,
+    pendingHumanSource: null,
   };
 }
 

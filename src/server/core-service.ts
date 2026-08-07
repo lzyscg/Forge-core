@@ -46,7 +46,7 @@ import { WorkspaceStore } from './runtime/workspace-store';
 import { SkillService } from './runtime/skill-service';
 import { ActionCommitter } from './runtime/action-committer';
 import { TaskRunner } from './runtime/task-runner';
-import { TaskScheduler } from './runtime/task-scheduler';
+import { TaskScheduler, type HumanAnswerRequest } from './runtime/task-scheduler';
 
 export interface CoreServiceOptions {
   /** Injected runtime (tests use the deterministic fake); defaults to Pi. */
@@ -305,7 +305,7 @@ export class CoreService {
     return this.scheduler.retry(taskId);
   }
 
-  answerHuman(taskId: string, answer: string): Promise<TaskSummary> {
+  answerHuman(taskId: string, answer: string | HumanAnswerRequest): Promise<TaskSummary> {
     return this.scheduler.answer(taskId, answer);
   }
 

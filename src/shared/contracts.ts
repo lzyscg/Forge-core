@@ -106,6 +106,12 @@ export interface WorkspaceNode {
    */
   humanAuthorized?: boolean;
   /**
+   * Display-only (spec §11.2): true when `pending_inputs_superseded` voided
+   * this input node. Superseded inputs are never pending, are skipped by the
+   * runner, and render as voided on the canvas; absent → false.
+   */
+  superseded?: boolean;
+  /**
    * The Turn that produced this node's observable content (result/skill
    * nodes carry a value; everything else stays null). Lets the canvas fetch
    * the node's execution trace without ever touching the authoritative
@@ -244,6 +250,13 @@ export interface TaskWorkspace {
   executedRoutes: WorkspaceRoute[];
   artifacts: ArtifactVersion[];
   pendingHumanQuestion: string | null;
+  /**
+   * The source of the pending human request (spec §11.5): `progress_guard`
+   * offers the structured three-choice (continue/accept/stop); `agent_request`
+   * is an ordinary model-asked question that accepts only a text answer. Null
+   * when no human request is pending.
+   */
+  pendingHumanSource: 'progress_guard' | 'agent_request' | null;
   /**
    * The live streaming preview of the task's running Turn, when one is in
    * flight; null/absent otherwise (plan C realtime streaming).

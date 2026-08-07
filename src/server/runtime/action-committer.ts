@@ -603,7 +603,10 @@ export class ActionCommitter {
    * The producer of a previously published artifact must be reachable to the
    * submitter through committed artifact routes (publish or forward), with
    * `agent_result.inputNodeId` connecting each input to the result that
-   * consumed it (spec §7).
+   * consumed it (spec §7). A continue-synthesized input (spec §11.1 A) replaces
+   * the superseded input for the same recipient, but the producer's committed
+   * route still points at the voided node; the walk resolves such a route to
+   * its synthesized replacement before comparing or hopping.
    */
   private async assertReachable(context: CommitContext, sourceNodeId: string): Promise<void> {
     const committed = await this.events.read(context.taskId);
@@ -620,6 +623,8 @@ export class ActionCommitter {
     if (producer === context.currentAgent.id) {
       return; // The submitter produced the version itself.
     }
+    const supersedeResolution = this.buildSupersedeResolution(committed);
+    const resolve = (nodeId: string): string => supersedeResolution.get(nodeId) ?? nodeId;
     // Walk committed artifact routes from the producer's result, hopping
     // through intermediate results (connected by inputNodeId), until the
     // submitter's current input is reached.
@@ -644,7 +649,7 @@ export class ActionCommitter {
           if (entry.event.route.fromNodeId !== fromNodeId) {
             continue;
           }
-          const toNodeId = entry.event.route.toNodeId;
+          const toNodeId = resolve(entry.event.route.toNodeId);
           if (toNodeId === target) {
             return;
           }
@@ -665,6 +670,54 @@ export class ActionCommitter {
       COMMIT_ERROR_CODES.FINAL_NOT_REACHABLE,
       '最终产物未经过已确认的产物交接抵达提交者。',
     );
+  }
+
+  /**
+   * Maps a superseded `agent_input` id to the synthesized `agent_input` id
+   * that replaced it for the same recipient (spec §11.1 A continue / §11.1 B
+   * accept). The synthesized node is committed immediately after
+   * `pending_inputs_superseded` (spec §11.6 commit order) and targets the same
+   * agentId as the voided input. Accept-synthesized inputs skip reachability
+   * (spec §7), so the map is only consulted by the continue path, but it is
+   * built uniformly from the committed supersede/synthesize pairs.
+   */
+  private buildSupersedeResolution(committed: readonly CommittedEvent[]): Map<string, string> {
+    const inputAgent = new Map<string, string>();
+    for (const entry of committed) {
+      if (entry.event.type === 'agent_input') {
+        inputAgent.set(entry.event.id, entry.event.node.agentId);
+      }
+    }
+    const supersededByAgent = new Map<string, string[]>();
+    const map = new Map<string, string>();
+    for (const entry of committed) {
+      const event = entry.event;
+      if (event.type === 'pending_inputs_superseded') {
+        for (const id of event.supersededNodeIds) {
+          const agent = inputAgent.get(id);
+          if (agent === undefined) {
+            continue;
+          }
+          const list = supersededByAgent.get(agent);
+          if (list === undefined) {
+            supersededByAgent.set(agent, [id]);
+          } else if (!list.includes(id)) {
+            list.push(id);
+          }
+        }
+      } else if (event.type === 'agent_input' && event.id.startsWith('synthesize-')) {
+        const agent = event.node.agentId;
+        const list = supersededByAgent.get(agent);
+        if (list !== undefined) {
+          for (const id of list) {
+            if (!map.has(id)) {
+              map.set(id, event.id);
+            }
+          }
+        }
+      }
+    }
+    return map;
   }
 
   // ------------------------------------------------------------------
@@ -825,12 +878,15 @@ export class ActionCommitter {
           inputEventId: `${turnId}-forward-input-0`,
           route,
           fromNodeId: resultEventId,
+          // The forwarded input carries the version (zero-copy hand-off) but
+          // NOT humanAuthorized: the accept exception is bound to the
+          // synthesized submit input itself, never propagated by a model
+          // forward action (spec §7.1 closedness).
           node: this.node(route.to, 'input', this.agentName(context, route.to), {
             sequence: 0,
             body: received.title,
             attemptCount: 1,
             inputVersion: received.version,
-            humanAuthorized: received.humanAuthorized,
           }),
           nextSequence,
           at,
@@ -1094,7 +1150,13 @@ export class ActionCommitter {
     }
   }
 
-  /** Builds a schema-shaped confirmed node owned by the committer. */
+  /**
+   * Builds a schema-shaped confirmed node owned by the committer. The
+   * committer NEVER sets `humanAuthorized` (spec §7.1 closedness): the field is
+   * written only by the scheduler's accept synthesis path (directly via the
+   * event store, not through this constructor), and read here from the input
+   * node via `currentInputArtifact`.
+   */
   private node(
     agentId: string,
     kind: EventNode['kind'],
@@ -1104,10 +1166,9 @@ export class ActionCommitter {
       body: string;
       attemptCount: number;
       inputVersion?: number | null;
-      humanAuthorized?: boolean;
     },
   ): EventNode {
-    const node: EventNode = {
+    return {
       sequence: parts.sequence,
       agentId,
       kind,
@@ -1117,10 +1178,6 @@ export class ActionCommitter {
       attemptCount: parts.attemptCount,
       inputVersion: parts.inputVersion ?? null,
     };
-    if (parts.humanAuthorized !== undefined) {
-      node.humanAuthorized = parts.humanAuthorized;
-    }
-    return node;
   }
 
   private agentName(context: CommitContext, agentId: string): string {

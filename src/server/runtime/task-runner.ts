@@ -247,18 +247,40 @@ function isInputResolved(
 }
 
 /**
+ * The set of agent_input node ids voided by `pending_inputs_superseded`
+ * events (spec §11.2). Superseded inputs are never pending: the runner skips
+ * them, the projection renders them void, and version counts are unaffected.
+ */
+function supersededNodeIds(events: readonly TaskEvent[]): Set<string> {
+  const ids = new Set<string>();
+  for (const event of events) {
+    if (event.type === 'pending_inputs_superseded') {
+      for (const nodeId of event.supersededNodeIds) {
+        ids.add(nodeId);
+      }
+    }
+  }
+  return ids;
+}
+
+/**
  * Agents with unprocessed confirmed input nodes, ordered by the earliest
  * unprocessed input (event sequence). An input node is processed once a
  * matching committed `agent_result` exists AND the result's turn never left
- * an interrupted commit owing completion (see module docs).
+ * an interrupted commit owing completion (see module docs). Superseded inputs
+ * (spec §11.2) are skipped - they are never pending.
  */
 function collectPendingAgents(
   events: readonly TaskEvent[],
   artifactRouteCountFor: (agentId: string) => number,
 ): string[] {
+  const voided = supersededNodeIds(events);
   const pending: string[] = [];
   for (const input of events) {
     if (input.type !== 'agent_input') {
+      continue;
+    }
+    if (voided.has(input.id)) {
       continue;
     }
     if (isInputResolved(events, input, artifactRouteCountFor)) {
@@ -274,14 +296,19 @@ function collectPendingAgents(
 /**
  * The first confirmed input node (by sequence) that still owes execution:
  * one without a committed result, or one whose latest committed result left
- * an interrupted commit incomplete (review F4 re-entry).
+ * an interrupted commit incomplete (review F4 re-entry). Superseded inputs
+ * (spec §11.2) are skipped.
  */
 function findNextUnprocessedInput(
   events: readonly TaskEvent[],
   artifactRouteCountFor: (agentId: string) => number,
 ): { input: Extract<TaskEvent, { type: 'agent_input' }>; partialAttempt: number | null } | null {
+  const voided = supersededNodeIds(events);
   for (const event of events) {
     if (event.type !== 'agent_input') {
+      continue;
+    }
+    if (voided.has(event.id)) {
       continue;
     }
     const hasResult = events.some(

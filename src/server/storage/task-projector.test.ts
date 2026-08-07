@@ -163,6 +163,44 @@ describe('task-projector', () => {
     expect(answered.nodes.map((node) => node.kind)).toEqual(['human_request', 'human_answer']);
   });
 
+  it('renders superseded inputs as voided display nodes (spec §11.2)', async () => {
+    const created = await service.createTask(validTaskRequest());
+    await service.appendTestEvent(created.id, makeTaskEvent({ type: 'task_started' }));
+    const pendingInput = makeTaskEvent({
+      id: 'pending-input-1',
+      type: 'agent_input',
+      node: makeEventNode({ sequence: 1, agentId: 'writer', kind: 'input', title: '输入', body: '待执行' }),
+    });
+    await service.appendTestEvent(created.id, pendingInput);
+    await service.appendTestEvent(
+      created.id,
+      makeTaskEvent({ type: 'pending_inputs_superseded', supersededNodeIds: ['pending-input-1'] }),
+    );
+
+    const workspace = await service.getWorkspace(created.id);
+    expect(workspace.nodes.find((node) => node.id === 'pending-input-1')?.superseded).toBe(true);
+
+    // The synthesized replacement input is a fresh node: not voided.
+    await service.appendTestEvent(
+      created.id,
+      makeTaskEvent({
+        id: 'synthesize-continue-0',
+        type: 'agent_input',
+        node: makeEventNode({
+          sequence: 2,
+          agentId: 'writer',
+          kind: 'input',
+          title: '合成输入',
+          body: '引导',
+          inputVersion: 1,
+        }),
+      }),
+    );
+    const after = await service.getWorkspace(created.id);
+    expect(after.nodes.find((node) => node.id === 'pending-input-1')?.superseded).toBe(true);
+    expect(after.nodes.find((node) => node.id === 'synthesize-continue-0')?.superseded).toBeUndefined();
+  });
+
   it('folds a resume over an unanswered question back to waiting_human', async () => {
     // Plan 2026-08-06: the run loop never executes a Turn while a question
     // is pending, and `answer` is only reachable from waiting_human — so a

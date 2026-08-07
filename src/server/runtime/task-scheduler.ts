@@ -193,6 +193,30 @@ export interface AcceptedLifecycle {
   completion: Promise<TaskSummary>;
 }
 
+/**
+ * A human answer payload (spec §11.1/§11.5). An ordinary `answer` continues
+ * the requesting agent (the only option for `agent_request` source). A
+ * structured `decision` is offered only for `progress_guard` source:
+ * `continue` supersedes pending inputs and synthesizes a guidance input for
+ * the stalest voided recipient; `accept` synthesizes a human-authorized input
+ * for the final submitter (requires at least one published version); `stop`
+ * reuses the stop lifecycle. `continue`/`accept` carry the guidance text that
+ * becomes the synthesized input body.
+ */
+export type HumanAnswerRequest =
+  | { kind: 'answer'; text: string }
+  | { kind: 'continue'; text: string }
+  | { kind: 'accept'; text: string }
+  | { kind: 'stop' };
+
+/** Normalizes a raw answer payload (string or typed) into a HumanAnswerRequest. */
+function normalizeAnswerRequest(payload: string | HumanAnswerRequest): HumanAnswerRequest {
+  if (typeof payload === 'string') {
+    return { kind: 'answer', text: payload };
+  }
+  return payload;
+}
+
 interface ActiveRun {
   taskId: string;
   /** Bumped on stop/shutdown; stale late results are dropped. */
@@ -260,6 +284,107 @@ function defaultRetrySleep(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+/** The next sequence number after the highest committed node/route sequence. */
+function nextSequence(events: readonly TaskEvent[]): number {
+  let sequence = 0;
+  for (const event of events) {
+    if ('node' in event) {
+      sequence = Math.max(sequence, event.node.sequence);
+    }
+    if ('route' in event) {
+      sequence = Math.max(sequence, event.route.sequence);
+    }
+  }
+  return sequence + 1;
+}
+
+/** True when a committed result exists for the input node id (runner id rule). */
+function hasResultForInput(events: readonly TaskEvent[], inputId: string): boolean {
+  return events.some(
+    (event) => event.type === 'agent_result' && event.id.startsWith(`${inputId}-t`) && event.id.endsWith('-result'),
+  );
+}
+
+/** The set of agent_input node ids voided by `pending_inputs_superseded`. */
+function voidedInputIds(events: readonly TaskEvent[]): Set<string> {
+  const ids = new Set<string>();
+  for (const event of events) {
+    if (event.type === 'pending_inputs_superseded') {
+      for (const nodeId of event.supersededNodeIds) {
+        ids.add(nodeId);
+      }
+    }
+  }
+  return ids;
+}
+
+/**
+ * The stalest unprocessed agent_input (oldest by sequence, not superseded, no
+ * committed result) - the guard's parking target (spec §11.4) and continue's
+ * synthesis target (spec §11.3). Null when no pending input exists.
+ */
+function stalestPendingInput(
+  events: readonly TaskEvent[],
+): Extract<TaskEvent, { type: 'agent_input' }> | null {
+  const voided = voidedInputIds(events);
+  for (const event of events) {
+    if (event.type !== 'agent_input' || voided.has(event.id)) {
+      continue;
+    }
+    if (!hasResultForInput(events, event.id)) {
+      return event;
+    }
+  }
+  return null;
+}
+
+/**
+ * All unprocessed agent_input ids at the current frontier (not superseded, no
+ * committed result) - the set the supersede event voids on continue/accept.
+ */
+function currentPendingInputIds(events: readonly TaskEvent[]): string[] {
+  const voided = voidedInputIds(events);
+  const ids: string[] = [];
+  for (const event of events) {
+    if (event.type !== 'agent_input' || voided.has(event.id)) {
+      continue;
+    }
+    if (!hasResultForInput(events, event.id)) {
+      ids.push(event.id);
+    }
+  }
+  return ids;
+}
+
+/** The latest published artifact version, or null when none was published. */
+function latestPublishedVersion(events: readonly TaskEvent[]): number | null {
+  let latest: number | null = null;
+  for (const event of events) {
+    if (event.type === 'artifact_published') {
+      latest = Math.max(latest ?? 0, event.artifact.version);
+    }
+  }
+  return latest;
+}
+
+/**
+ * The most recent `human_requested` with no later `human_answered` - the
+ * pending question the answer flow must resolve. Null when none is pending.
+ */
+function findPendingHumanRequest(
+  events: readonly TaskEvent[],
+): Extract<TaskEvent, { type: 'human_requested' }> | null {
+  let pending: Extract<TaskEvent, { type: 'human_requested' }> | null = null;
+  for (const event of events) {
+    if (event.type === 'human_requested') {
+      pending = event;
+    } else if (event.type === 'human_answered') {
+      pending = null;
+    }
+  }
+  return pending;
+}
+
 export class TaskScheduler {
   /** The runtime this scheduler drives (tests observe concurrency on it). */
   readonly runtime: AgentRuntime;
@@ -316,8 +441,8 @@ export class TaskScheduler {
   }
 
   /** Answers the pending human request and continues the requesting agent. */
-  async answer(taskId: string, answer: string): Promise<TaskSummary> {
-    const { completion } = await this.answerDetached(taskId, answer);
+  async answer(taskId: string, payload: string | HumanAnswerRequest): Promise<TaskSummary> {
+    const { completion } = await this.answerDetached(taskId, payload);
     return completion;
   }
 
@@ -341,11 +466,16 @@ export class TaskScheduler {
   }
 
   /** Detached human answer (`waiting_human` only). */
-  async answerDetached(taskId: string, answer: string): Promise<AcceptedLifecycle> {
-    if (typeof answer !== 'string' || answer.trim().length === 0) {
+  async answerDetached(
+    taskId: string,
+    payload: string | HumanAnswerRequest,
+  ): Promise<AcceptedLifecycle> {
+    const request = normalizeAnswerRequest(payload);
+    const needsText = request.kind === 'answer' || request.kind === 'continue' || request.kind === 'accept';
+    if (needsText && request.text.trim().length === 0) {
       throw invalidTransition('人工回答不能为空。');
     }
-    return this.acceptDetached(taskId, 'answer', answer);
+    return this.acceptDetached(taskId, 'answer', request);
   }
 
   /**
@@ -505,7 +635,7 @@ export class TaskScheduler {
   private async acceptDetached(
     taskId: string,
     kind: 'start' | 'resume' | 'retry' | 'answer',
-    answer?: string,
+    answer?: HumanAnswerRequest,
   ): Promise<AcceptedLifecycle> {
     const run = this.claim(taskId);
     let resolveAccepted!: (summary: TaskSummary) => void;
@@ -546,7 +676,7 @@ export class TaskScheduler {
     run: ActiveRun,
     taskId: string,
     kind: 'start' | 'resume' | 'retry' | 'answer',
-    answer?: string,
+    answer?: HumanAnswerRequest,
   ): Promise<void> {
     try {
       const workspace = await this.#service.getWorkspace(taskId);
@@ -589,7 +719,7 @@ export class TaskScheduler {
         if (status !== 'waiting_human') {
           throw invalidTransition('只有等待人工回答的任务可以提交回答。');
         }
-        await this.appendHumanAnswer(taskId, answer ?? '');
+        await this.applyHumanAnswer(taskId, run, answer ?? { kind: 'answer', text: '' });
       }
     } catch (error) {
       this.release(run);
@@ -731,22 +861,25 @@ export class TaskScheduler {
    * the existing answer flow resumes the task with a fresh progress window —
    * no new event type or status (contracts stay frozen).
    */
+  /**
+   * Commits the guard's one synthetic human request (spec §11.4): the node is
+   * attributed to the recipient of the STALEST pending input at parking time
+   * (not the last dispatcher), so the continue synthesis target aligns with
+   * the parking target. Falls back to the last dispatcher when no pending
+   * input exists (theoretical - the guard only fires after a successful turn).
+   * The request carries `source: 'progress_guard'` so the answer flow offers
+   * the structured three-choice (spec §11.5).
+   */
   private async appendProgressGuardRequest(
     taskId: string,
     events: readonly TaskEvent[],
-    agentId: string,
+    fallbackAgentId: string,
   ): Promise<void> {
+    const stalest = stalestPendingInput(events);
+    const agentId = stalest?.node.agentId ?? fallbackAgentId;
     const frozen = await this.#service.tasks.readFrozenTemplate(taskId);
     const agentName = frozen.agents.find((agent) => agent.id === agentId)?.name ?? agentId;
-    let sequence = 0;
-    for (const event of events) {
-      if ('node' in event) {
-        sequence = Math.max(sequence, event.node.sequence);
-      }
-      if ('route' in event) {
-        sequence = Math.max(sequence, event.route.sequence);
-      }
-    }
+    const sequence = nextSequence(events);
     await this.#service.events.append(taskId, {
       id: randomUUID(),
       at: new Date().toISOString(),
@@ -762,6 +895,7 @@ export class TaskScheduler {
         inputVersion: null,
       },
       question: PROGRESS_GUARD_QUESTION,
+      source: 'progress_guard',
     });
   }
 
@@ -878,40 +1012,233 @@ export class TaskScheduler {
     });
   }
 
-  /** Appends the human answer plus a fresh input for the requesting agent. */
-  private async appendHumanAnswer(taskId: string, answer: string): Promise<void> {
+  /**
+   * Dispatches a human answer to the pending request (spec §11.1/§11.5). A
+   * `progress_guard` request offers the structured three-choice (an ordinary
+   * text answer maps to `continue` with the text as guidance); an
+   * `agent_request` request accepts only an ordinary text answer.
+   */
+  private async applyHumanAnswer(
+    taskId: string,
+    run: ActiveRun,
+    request: HumanAnswerRequest,
+  ): Promise<void> {
     const committed = await this.#service.events.read(taskId);
     const events = committed.map((entry) => entry.event);
-    let pendingRequest: Extract<TaskEvent, { type: 'human_requested' }> | null = null;
-    for (const event of events) {
-      if (event.type === 'human_requested') {
-        pendingRequest = event;
-      } else if (event.type === 'human_answered') {
-        pendingRequest = null;
-      }
-    }
+    const pendingRequest = findPendingHumanRequest(events);
     if (pendingRequest === null) {
       throw invalidTransition('没有等待回答的人工输入请求。');
     }
+    const source = pendingRequest.source ?? 'agent_request';
+    if (source === 'progress_guard') {
+      if (request.kind === 'accept') {
+        await this.applyAccept(taskId, events, pendingRequest, request.text);
+      } else if (request.kind === 'stop') {
+        await this.applyStop(taskId, run, events, pendingRequest);
+      } else {
+        // `answer` or `continue` -> continue with the guidance text.
+        await this.applyContinue(taskId, events, pendingRequest, request.text);
+      }
+      return;
+    }
+    // agent_request: only an ordinary text answer is accepted.
+    if (request.kind !== 'answer') {
+      throw invalidTransition('该人工提问只接受文字回答，不支持结构化决策。');
+    }
+    await this.appendHumanAnswer(taskId, events, pendingRequest, request.text);
+  }
+
+  /**
+   * Continue (spec §11.1 A): human_answered clears the guard request;
+   * pending_inputs_superseded voids every current pending input; a fresh
+   * synthesized input goes to the stalest voided pending's recipient, carrying
+   * the guidance text as body and the voided input's inputVersion (spec §11.3).
+   * Falls back to the guard request's agent with inputVersion=null when no
+   * pending input exists (spec §11.6).
+   */
+  private async applyContinue(
+    taskId: string,
+    events: readonly TaskEvent[],
+    pendingRequest: Extract<TaskEvent, { type: 'human_requested' }>,
+    text: string,
+  ): Promise<void> {
+    const pendingIds = currentPendingInputIds(events);
+    const stalest = stalestPendingInput(events);
+    const targetAgentId = stalest?.node.agentId ?? pendingRequest.node.agentId;
+    const inputVersion = stalest?.node.inputVersion ?? null;
+    await this.appendHumanAnswered(taskId, events, pendingRequest, text);
+    if (pendingIds.length > 0) {
+      await this.appendSupersede(taskId, pendingIds);
+    }
+    await this.appendSynthesizedInput(taskId, events, {
+      agentId: targetAgentId,
+      body: text,
+      inputVersion,
+      humanAuthorized: false,
+      suffix: 'continue',
+    });
+  }
+
+  /**
+   * Accept (spec §11.1 B): server re-validates at least one published version
+   * (spec §11.5); human_answered clears the guard; pending_inputs_superseded
+   * voids every current pending input; a synthesized input goes to the final
+   * submitter (controller) with the latest published version and
+   * `humanAuthorized: true`. The reject record stays; the human accept is the
+   * explicit exception (spec §11.1 B 5).
+   */
+  private async applyAccept(
+    taskId: string,
+    events: readonly TaskEvent[],
+    pendingRequest: Extract<TaskEvent, { type: 'human_requested' }>,
+    text: string,
+  ): Promise<void> {
+    const latest = latestPublishedVersion(events);
+    if (latest === null) {
+      throw invalidTransition('当前任务尚无已发布产物版本，无法采用人工接受。');
+    }
+    const frozen = await this.#service.tasks.readFrozenTemplate(taskId);
+    const submitter = frozen.finalOutput.submitters[0];
+    if (submitter === undefined) {
+      throw invalidTransition('模板未声明最终提交者，无法采用人工接受。');
+    }
+    const pendingIds = currentPendingInputIds(events);
+    await this.appendHumanAnswered(taskId, events, pendingRequest, text);
+    if (pendingIds.length > 0) {
+      await this.appendSupersede(taskId, pendingIds);
+    }
+    await this.appendSynthesizedInput(taskId, events, {
+      agentId: submitter,
+      body: text,
+      inputVersion: latest,
+      humanAuthorized: true,
+      suffix: 'accept',
+    });
+  }
+
+  /**
+   * Stop (spec §11.1 C): human_answered clears the guard request, then the
+   * task is stopped. Reuses the stop lifecycle event; the synthesized
+   * continue/accept input is not created. The run controller is aborted so the
+   * `execute` loop never runs a pending input that the stop just voided by
+   * clearing the guard - matching the existing `stop` lifecycle (abort + task
+   * _stopped).
+   */
+  private async applyStop(
+    taskId: string,
+    run: ActiveRun,
+    events: readonly TaskEvent[],
+    pendingRequest: Extract<TaskEvent, { type: 'human_requested' }>,
+  ): Promise<void> {
+    await this.appendHumanAnswered(taskId, events, pendingRequest, '已选择停止任务。');
+    await this.appendLifecycle(taskId, 'task_stopped');
+    run.controller.abort();
+  }
+
+  /** Appends `human_answered` clearing the pending request (no fresh input). */
+  private async appendHumanAnswered(
+    taskId: string,
+    events: readonly TaskEvent[],
+    pendingRequest: Extract<TaskEvent, { type: 'human_requested' }>,
+    text: string,
+  ): Promise<void> {
     const agentId = pendingRequest.node.agentId;
     const frozen = await this.#service.tasks.readFrozenTemplate(taskId);
     const agentName = frozen.agents.find((agent) => agent.id === agentId)?.name ?? agentId;
-    let sequence = 0;
-    for (const event of events) {
-      if ('node' in event) {
-        sequence = Math.max(sequence, event.node.sequence);
-      }
-      if ('route' in event) {
-        sequence = Math.max(sequence, event.route.sequence);
-      }
-    }
+    const sequence = nextSequence(events);
+    await this.#service.events.append(taskId, {
+      id: randomUUID(),
+      at: new Date().toISOString(),
+      type: 'human_answered',
+      node: {
+        sequence,
+        agentId,
+        kind: 'human_answer',
+        title: agentName,
+        body: text,
+        status: 'confirmed',
+        attemptCount: 1,
+        inputVersion: null,
+      },
+      answer: text,
+    });
+  }
+
+  /** Appends `pending_inputs_superseded` voiding the given input node ids. */
+  private async appendSupersede(
+    taskId: string,
+    inputIds: readonly string[],
+  ): Promise<void> {
+    await this.#service.events.append(taskId, {
+      id: randomUUID(),
+      at: new Date().toISOString(),
+      type: 'pending_inputs_superseded',
+      supersededNodeIds: [...inputIds],
+    });
+  }
+
+  /**
+   * Appends the synthesized agent_input for continue/accept. The id is
+   * deterministic - `synthesize-<suffix>-<round>` where `<round>` is the count
+   * of `pending_inputs_superseded` events already committed - so a crash
+   * between supersede and synthesize is recoverable (re-appending the same id
+   * is idempotent, spec §11.6) and multiple intervention rounds never collide.
+   * The sequence skips one slot ahead of the baseline: the `human_answered`
+   * node (and, when pending inputs exist, the supersede event) already
+   * committed consume the intervening sequences.
+   */
+  private async appendSynthesizedInput(
+    taskId: string,
+    events: readonly TaskEvent[],
+    parts: {
+      agentId: string;
+      body: string;
+      inputVersion: number | null;
+      humanAuthorized: boolean;
+      suffix: string;
+    },
+  ): Promise<void> {
+    const frozen = await this.#service.tasks.readFrozenTemplate(taskId);
+    const agentName = frozen.agents.find((agent) => agent.id === parts.agentId)?.name ?? parts.agentId;
+    const round = events.filter((event) => event.type === 'pending_inputs_superseded').length;
+    const sequence = nextSequence(events) + 1;
+    const node: TaskEvent = {
+      id: `synthesize-${parts.suffix}-${round}`,
+      at: new Date().toISOString(),
+      type: 'agent_input',
+      node: {
+        sequence,
+        agentId: parts.agentId,
+        kind: 'input',
+        title: agentName,
+        body: parts.body,
+        status: 'confirmed',
+        attemptCount: 1,
+        inputVersion: parts.inputVersion,
+        ...(parts.humanAuthorized ? { humanAuthorized: true } : {}),
+      },
+    };
+    await this.#service.events.append(taskId, node);
+  }
+
+  /** Appends the human answer plus a fresh input for the requesting agent. */
+  private async appendHumanAnswer(
+    taskId: string,
+    events: readonly TaskEvent[],
+    pendingRequest: Extract<TaskEvent, { type: 'human_requested' }>,
+    answer: string,
+  ): Promise<void> {
+    const agentId = pendingRequest.node.agentId;
+    const frozen = await this.#service.tasks.readFrozenTemplate(taskId);
+    const agentName = frozen.agents.find((agent) => agent.id === agentId)?.name ?? agentId;
+    const sequence = nextSequence(events);
     const at = new Date().toISOString();
     await this.#service.events.append(taskId, {
       id: randomUUID(),
       at,
       type: 'human_answered',
       node: {
-        sequence: sequence + 1,
+        sequence,
         agentId,
         kind: 'human_answer',
         title: agentName,
@@ -927,7 +1254,7 @@ export class TaskScheduler {
       at,
       type: 'agent_input',
       node: {
-        sequence: sequence + 2,
+        sequence: sequence + 1,
         agentId,
         kind: 'input',
         title: agentName,

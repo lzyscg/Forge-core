@@ -88,6 +88,7 @@ function stubWorkspace(id: string, status: TaskStatus, updatedAt: string): TaskW
     executedRoutes: [],
     artifacts: [],
     pendingHumanQuestion: null,
+    pendingHumanSource: null,
   };
 }
 

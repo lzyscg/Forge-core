@@ -20,11 +20,26 @@ export const createTaskBodySchema = Type.Object(
   { additionalProperties: false },
 );
 
-export const answerBodySchema = Type.Object(
-  {
-    answer: Type.String({ minLength: 1 }),
-  },
-  { additionalProperties: false },
+export const answerBodySchema = Type.Union(
+  [
+    // Legacy plain answer (agent_request source) or a text-only reply.
+    Type.Object({ answer: Type.String({ minLength: 1 }) }, { additionalProperties: false }),
+    // Structured decision for a progress_guard request (spec §11.5):
+    // `continue`/`accept` carry guidance text; `stop` needs none.
+    Type.Object(
+      {
+        decision: Type.Union([
+          Type.Literal('continue'),
+          Type.Literal('accept'),
+          Type.Literal('stop'),
+        ]),
+        text: Type.Optional(Type.String()),
+      },
+      { additionalProperties: false },
+    ),
+  ],
+  // `text` defaults to '' when omitted; the scheduler rejects empty guidance
+  // for continue/accept as a public INVALID_TRANSITION.
 );
 
 /* ------------------------------ error envelope ------------------------------ */
@@ -150,6 +165,8 @@ const workspaceNodeSchema = Type.Object({
   inputVersion: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()]),
   // Optional: projections from before Phase E never carried the field.
   turnId: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  // True when `pending_inputs_superseded` voided this input (spec §11.2).
+  superseded: Type.Optional(Type.Boolean()),
 });
 
 const workspaceRouteSchema = Type.Object({
@@ -207,6 +224,11 @@ export const taskWorkspaceSchema = Type.Object({
   executedRoutes: Type.Array(workspaceRouteSchema),
   artifacts: Type.Array(artifactVersionSchema),
   pendingHumanQuestion: Type.Union([Type.String(), Type.Null()]),
+  pendingHumanSource: Type.Union([
+    Type.Literal('progress_guard'),
+    Type.Literal('agent_request'),
+    Type.Null(),
+  ]),
   activeTurn: Type.Optional(Type.Union([liveTurnSchema, Type.Null()])),
 });
 

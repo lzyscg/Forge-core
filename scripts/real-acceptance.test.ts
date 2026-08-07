@@ -703,6 +703,7 @@ describe('sanitized report shape', () => {
         },
       ],
       pendingHumanQuestion: null,
+      pendingHumanSource: null,
     };
     return {
       outcome: 'completed',
