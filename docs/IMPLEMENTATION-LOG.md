@@ -10,6 +10,40 @@
 - **legacy 兼容**：v1 在途任务 gate 为 `incompatible(SCHEMA_V2_REQUIRED)` 只读；event-store 读取期 transform 归一旧事件（artifactVersion→inputVersion、contentHash→files、缺省 humanAuthorized=false、缺省 source=agent_request）使其不 CORRUPTED。
 - **真实验收**：`scripts/real-acceptance.ts` 硬编码 zhihu-single-chapter（Phase 3 删除）。Phase 7 将写 dedicated long-form-hub 验收脚本（3 agent：controller/writer/reviewer 占位符替换）。
 
+## Phase 7 — 迁移 + 集成验证（v2-only 门禁、运行时 fixture 迁移、e2e 重写、全量门禁）
+
+（已完成；tsc 0 错误，1136/1136 单测绿，44/44 e2e 绿（10 条桌面专属截图证据跳过），build/verify:backend/verify:runtime/verify:ui 全过；commit 于 Phase 7 尾）
+
+### 做了什么
+- **v2-only 不兼容门禁**（spec §9）：`isTurnContractSupported` 收紧为**仅接受 version 2** 契约；调度器 `markIncompatibleOnce` 按快照形态选 reason——**v1 契约快照 → `SCHEMA_V2_REQUIRED`**（`incompatibleReasonFor`：快照含任一契约即判 v1 迁移，无契约判 `TURN_CONTRACT_REQUIRED`）；projector 已有 SCHEMA_V2_REQUIRED 诊断文案。新增测试：手工构造 v1 契约快照（重写 snapshot agent yaml + 重新哈希 task.json.templateVersion），recovery 后 `task_incompatible.reason === 'SCHEMA_V2_REQUIRED'`、诊断含「旧版产物契约」。
+- **运行时 fixture 全量迁移 v1→v2**（执行中任务必为 v2 契约）：
+  - `src/server/test-support.ts`：`FIXTURE_WRITER/REVIEWER_CONTRACT_YAML`（valid fixture 的 executable 副本注入）改 v2——writer 生产（content.md/workspace_file→publish），reviewer 操作（annotate review.md→send_message/submit）；提交的 `__fixtures__/valid` 目录保持无契约（门禁的历史快照源）。
+  - `src/server/runtime/test-support.ts`：`publisherContract`/`reviewerContract` 与注入 YAML 改 v2（生产/操作分离，去掉 completionAction/cardinality/productionPackageRef/current_input_artifact）。
+  - `e2e/runtime-harness.ts`：两 Agent fixture 改 v2 契约 + artifactSchema（content.md/review.md）+ reviewer→alpha message 边 route.inject（上一版正文）；`finish_production` 改 `files[]` 形状（inline 带 content、workspace_file 带 workspaceFile）；脚本重写为 v2 语义——alpha 生产（publish），beta 操作（annotate+send_message / annotate+submit），submit 不再走封存包而是提交输入版本（零复制）；submitters 收敛为 [agent-beta]；`readTaskFileProjection` 改读事件 `files[].hash`（meta 无哈希）。
+- **e2e 重写与断言更新**：
+  - runtime-loop 全 10 条（desktop+mobile）随 v2 脚本转绿：全链路 V1/V2、瞬时重试、手动重试、人工输入、非法路由隔离。
+  - process-recovery：v2 下恢复回合为「annotate + submit 输入版本」→ 版本链收敛为 [1]（不再发布 V2），事件/最终提交断言同步。
+  - process-trace：`workspace.artifacts[].files[0].content` 取代已删的 `.content`；工作区草稿→publish→beta submit 流程。
+  - http-persistence：`seedConfirmedWorkspaceWithTwoArtifacts` 的 `publishTestArtifact` 改 `files[]` 形状、节点 `artifactVersion`→`inputVersion`。
+- **全量门禁**：`npm run check`（tsc 0 错误）+ `npm test`（1136/1136）+ `npm run e2e`（44/44）+ `npm run build` + `verify:runtime`（runtime-modules 398 + e2e-runtime-loop 10 + e2e-process-recovery 2 + pi-boundary，13/13 能力）+ `verify:backend`（gateway-contracts 170 + server-modules 659 + typecheck + build + e2e-http-persistence 4，9/9 能力）+ `verify:ui`（process-trace 8）。
+
+### 关键决策
+- **门禁 reason 按「是否有契约」判别**：v1 契约（有 version 字段但非 2）→ SCHEMA_V2_REQUIRED；完全无契约（预契约时代快照）→ TURN_CONTRACT_REQUIRED。`downgradeTaskSnapshotToLegacy` 测试（去契约）继续命中 TURN_CONTRACT_REQUIRED，语义不漂移。
+- **e2e fixture 的 v2 形状对齐**：alpha=生产回合（publish 扇出 artifact 边），beta=操作回合（annotate + dispatch）；submit 经输入节点 inputVersion 直解（spec §15「submit 从 inputVersion 直解产物」），零复制交付。
+- **process-recovery 收敛为单版本**：v2 下 beta 恢复回合只 annotate+submit 接收的 V1，不再二次发布——事件流断言从「2 次 artifact_published」改为 1 次，更贴近 v7「操作不 bump」语义。
+- **zhihu-single-chapter 保留（Phase 3 日志既定偏差延续）**：dev-plan Phase 7 清单未列删 zhihu；client mock 演示与 real-acceptance 脚本硬编码 zhihu（升级为 v2 后仍可跑）。删除留作后续独立任务（连带 mock fixture 迁移与 real-acceptance 重写为 long-form-hub）。
+
+### 问题与解决
+- **v2-only 门禁连锁红**：valid fixture executable 副本的 v1 契约被门禁拒绝，api.integration（422 而非 202/409）与调度器测试全红——根源是 fixture 注入块未迁移，改 v2 后恢复。
+- **e2e 全红根因**：v7 动作 schema 拒绝 `finish_production` 的 `content` 键（v1 形状）与 `productionPackageRef`；逐个脚本迁移为 `files[]` + 操作回合语义后转绿。
+- **`frozen` 变量作用域**：recoverInterruptedTasks 内 try 块声明的 `frozen` 在门外引用——提升为 `frozenSnapshot` 变量。
+- **v1 快照测试的哈希一致性**：手改 snapshot agent yaml 后须重算模板哈希写回 task.json，否则 TaskStore 判「快照版本与记录不一致」CORRUPTED（沿用 `downgradeTaskSnapshotToLegacy` 的 re-hash 模式）。
+
+### 已知局限与后续跟进
+- **崩溃半态自愈**（spec §11.6）未实现：resume 检测「human_answered+superseded 已提交、合成缺失」补合成留作后续（提交序已把半态压向安全方向）。
+- **zhihu-single-chapter 删除**：未做（见关键决策），后续需连带 mock fixture 迁移 + real-acceptance 重写为 long-form-hub（3 Agent 占位符替换）。
+- **route.inject 带版本输入触发**：Phase 4 日志记录的已知偏差（inject 只在 inputVersion===null 分支触发）仍在——forward/send 带版本走 hand-off 交付，正确 inject 供料列后续。
+
 ## Phase 6 — 投影与 UI（产物链 extract 槽位、verdict 展示、superseded 渲染、accept 决策 UI）
 
 （已完成；tsc 0 错误，1135/1135 测试绿；commit 于 Phase 6 尾）

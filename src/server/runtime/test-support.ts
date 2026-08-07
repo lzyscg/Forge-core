@@ -116,36 +116,29 @@ export function fakeUsage(inputTokens = 12, outputTokens = 34): {
   return { inputTokens, outputTokens };
 }
 
-/** Neutral version-1 turn contract for the fixture's publishing agent. */
+/** Neutral version-2 turn contract for the fixture's publishing agent. */
 export function publisherContract(targetAgentId: string): TurnContract {
   return {
-    version: 1,
+    version: 2,
     production: {
-      completionAction: 'finish_production',
+      files: ['content.md'],
       output: { formats: ['markdown'], sources: ['inline', 'workspace_file'] },
     },
     dispatch: {
-      cardinality: 'single',
       allowedActions: ['publish_artifact'],
       targets: { publish_artifact: [targetAgentId] },
-      productionPackageRef: 'current',
     },
   };
 }
 
-/** Neutral version-1 turn contract for the fixture's reviewing submitter. */
+/** Neutral version-2 turn contract for the fixture's reviewing submitter. */
 export function reviewerContract(targetAgentId: string): TurnContract {
   return {
-    version: 1,
-    production: {
-      completionAction: 'finish_production',
-      output: { formats: ['markdown', 'text'], sources: ['inline', 'current_input_artifact'] },
-    },
+    version: 2,
+    annotate: { files: ['review.md'] },
     dispatch: {
-      cardinality: 'single',
       allowedActions: ['send_message', 'submit_final_artifact'],
       targets: { send_message: [targetAgentId] },
-      productionPackageRef: 'current',
     },
   };
 }
@@ -768,38 +761,30 @@ export function disposeRuntimeTestRoots(): void {
 /** Template id used when the storage-level `valid` fixture is installed. */
 export const RUNTIME_FIXTURE_TEMPLATE_ID = 'test-template';
 
-/** Version-1 turn contract blocks injected into the legacy runtime fixture. */
+/** Version-2 turn contract blocks injected into the runtime fixture. */
 const RUNTIME_WRITER_CONTRACT_YAML = [
   'turnContract:',
-  '  version: 1',
+  '  version: 2',
   '  production:',
-  '    completionAction: finish_production',
-  '    output:',
-  '      formats: [markdown]',
-  '      sources: [inline, workspace_file]',
+  '    files: [content.md]',
+  '    sources: [inline, workspace_file]',
+  '    formats: [markdown]',
   '  dispatch:',
-  '    cardinality: single',
   '    allowedActions: [publish_artifact]',
   '    targets:',
   '      publish_artifact: reviewer',
-  '    productionPackageRef: current',
   '',
 ].join('\n');
 
 const RUNTIME_REVIEWER_CONTRACT_YAML = [
   'turnContract:',
-  '  version: 1',
-  '  production:',
-  '    completionAction: finish_production',
-  '    output:',
-  '      formats: [markdown, text]',
-  '      sources: [inline, current_input_artifact]',
+  '  version: 2',
+  '  annotate:',
+  '    files: [review.md]',
   '  dispatch:',
-  '    cardinality: single',
   '    allowedActions: [send_message, submit_final_artifact]',
   '    targets:',
   '      send_message: writer',
-  '    productionPackageRef: current',
   '',
 ].join('\n');
 

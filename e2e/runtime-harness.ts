@@ -96,9 +96,24 @@ routes:
     to: agent-alpha
     kind: message
     label: 返修意见
+    inject:
+      - version: input
+        file: content.md
+        as: 上一版正文
+artifactSchema:
+  files:
+    - name: content.md
+      required: true
+      producer: agent-alpha
+      extract: content
+      phase: create
+    - name: review.md
+      required: false
+      producer: agent-beta
+      extract: review
+      phase: annotate
 finalOutput:
   submitters:
-    - agent-alpha
     - agent-beta
 `;
 
@@ -114,18 +129,15 @@ skills:
     description: 用于验证 load_skill 的中性技能。
     contentPath: skills/alpha-skill/SKILL.md
 turnContract:
-  version: 1
+  version: 2
   production:
-    completionAction: finish_production
-    output:
-      formats: [markdown]
-      sources: [inline, workspace_file]
+    files: [content.md]
+    sources: [inline, workspace_file]
+    formats: [markdown]
   dispatch:
-    cardinality: single
-    allowedActions: [publish_artifact, submit_final_artifact]
+    allowedActions: [publish_artifact]
     targets:
       publish_artifact: agent-beta
-    productionPackageRef: current
 `;
 
 const FIXTURE_AGENT_BETA_YAML = `id: agent-beta
@@ -140,18 +152,13 @@ skills:
     description: Agent Beta 的中性技能。
     contentPath: skills/beta-skill/SKILL.md
 turnContract:
-  version: 1
-  production:
-    completionAction: finish_production
-    output:
-      formats: [markdown, text]
-      sources: [inline, current_input_artifact]
+  version: 2
+  annotate:
+    files: [review.md]
   dispatch:
-    cardinality: single
     allowedActions: [send_message, submit_final_artifact]
     targets:
       send_message: agent-alpha
-    productionPackageRef: current
 `;
 
 export const FIXTURE_SKILL_ALPHA = `# Alpha 技能
@@ -212,21 +219,31 @@ function finishInlineAction(title: string, content: string): ForgeAction {
   return {
     type: 'finish_production',
     source: 'inline',
-    content,
+    files: [{ name: 'content.md', content }],
     format: 'markdown',
     artifactType: FINAL_ARTIFACT_TYPE,
     title,
   };
 }
 
+/** One legal review.md annotation (frontmatter verdict + opinion body). */
+function annotateReviewAction(verdict: 'pass' | 'reject', opinion: string): ForgeAction {
+  return {
+    type: 'annotate_artifact',
+    file: 'review.md',
+    content: `---\nverdict: ${verdict}\n---\n## 意见\n${opinion}`,
+  };
+}
+
+const annotateRejectAction = (opinion: string): ForgeAction => annotateReviewAction('reject', opinion);
+const annotatePassAction = (opinion: string): ForgeAction => annotateReviewAction('pass', opinion);
+
 const PUBLISH_CURRENT: ForgeAction = {
   type: 'publish_artifact',
-  productionPackageRef: 'current',
 };
 
 const SUBMIT_CURRENT: ForgeAction = {
   type: 'submit_final_artifact',
-  productionPackageRef: 'current',
 };
 
 /**
@@ -259,25 +276,18 @@ export function fullLoopScripts(): JsonScriptMap {
         kind: 'result',
         publicText: '需要返修。',
         actions: [
-          {
-            type: 'finish_production',
-            source: 'inline',
-            content: '请处理第一版。',
-            format: 'text',
-            artifactType: null,
-            title: null,
-          },
+          annotateRejectAction('请处理第一版。'),
           {
             type: 'send_message',
             targetAgentId: 'agent-alpha',
-            productionPackageRef: 'current',
+            summary: '请处理第一版。',
           },
         ],
       },
       {
         kind: 'result',
         publicText: '提交最终产物。',
-        actions: [{ type: 'finish_production', source: 'current_input_artifact' }, SUBMIT_CURRENT],
+        actions: [annotatePassAction('审核通过。'), SUBMIT_CURRENT],
       },
     ],
   };
@@ -291,7 +301,14 @@ export function transientRetryScripts(): JsonScriptMap {
       {
         kind: 'result',
         publicText: '重试后完成。',
-        actions: [finishInlineAction('重试后版本', '# 重试后版本\n\n正文。'), SUBMIT_CURRENT],
+        actions: [finishInlineAction('重试后版本', '# 重试后版本\n\n正文。'), PUBLISH_CURRENT],
+      },
+    ],
+    'agent-beta': [
+      {
+        kind: 'result',
+        publicText: '提交最终产物。',
+        actions: [annotatePassAction('审核通过。'), SUBMIT_CURRENT],
       },
     ],
   };
@@ -307,7 +324,14 @@ export function manualRetryScripts(): JsonScriptMap {
       {
         kind: 'result',
         publicText: '手动重试后完成。',
-        actions: [finishInlineAction('手动重试版本', '# 手动重试版本\n\n正文。'), SUBMIT_CURRENT],
+        actions: [finishInlineAction('手动重试版本', '# 手动重试版本\n\n正文。'), PUBLISH_CURRENT],
+      },
+    ],
+    'agent-beta': [
+      {
+        kind: 'result',
+        publicText: '提交最终产物。',
+        actions: [annotatePassAction('审核通过。'), SUBMIT_CURRENT],
       },
     ],
   };
@@ -325,7 +349,14 @@ export function humanInputScripts(): JsonScriptMap {
       {
         kind: 'result',
         publicText: '人工确认后完成。',
-        actions: [finishInlineAction('确认后版本', '# 确认后版本\n\n正文。'), SUBMIT_CURRENT],
+        actions: [finishInlineAction('确认后版本', '# 确认后版本\n\n正文。'), PUBLISH_CURRENT],
+      },
+    ],
+    'agent-beta': [
+      {
+        kind: 'result',
+        publicText: '提交最终产物。',
+        actions: [annotatePassAction('审核通过。'), SUBMIT_CURRENT],
       },
     ],
   };
@@ -343,7 +374,7 @@ export function malformedActionScripts(): JsonScriptMap {
           {
             type: 'send_message',
             targetAgentId: 'agent-gamma',
-            productionPackageRef: 'current',
+            summary: '非法路由消息。',
           },
         ],
       },
@@ -358,7 +389,14 @@ export function singleCompletionScripts(): JsonScriptMap {
       {
         kind: 'result',
         publicText: '隔离验证任务完成。',
-        actions: [finishInlineAction('隔离验证版本', '# 隔离验证版本\n\n正文。'), SUBMIT_CURRENT],
+        actions: [finishInlineAction('隔离验证版本', '# 隔离验证版本\n\n正文。'), PUBLISH_CURRENT],
+      },
+    ],
+    'agent-beta': [
+      {
+        kind: 'result',
+        publicText: '提交最终产物。',
+        actions: [annotatePassAction('审核通过。'), SUBMIT_CURRENT],
       },
     ],
   };
@@ -381,16 +419,15 @@ export const WORKSPACE_TRACE_THINKING = '先起草，再从工作区发布。';
  * One alpha Turn exercising the whole Phase E surface (plan Task E6): load
  * the declared Skill, draft into the agent workspace, seal the draft through
  * `finish_production(source: workspace_file)` (the runner resolves the file
- * to controlled content pre-commit) and submit the sealed package as the
- * final output. Agent beta intentionally carries no script: the final
- * submission completes the task before beta could ever run.
+ * to controlled content pre-commit) and publish the version; beta then
+ * annotates and submits the received version as the system final output.
  */
 export function workspaceTraceScripts(): JsonScriptMap {
   return {
     'agent-alpha': [
       {
         kind: 'result',
-        publicText: '初稿已写入工作区并提交。',
+        publicText: '初稿已写入工作区并发布。',
         thinking: WORKSPACE_TRACE_THINKING,
         workspaceWrites: [{ path: WORKSPACE_DRAFT_PATH, content: WORKSPACE_DRAFT_CONTENT }],
         actions: [
@@ -398,13 +435,20 @@ export function workspaceTraceScripts(): JsonScriptMap {
           {
             type: 'finish_production',
             source: 'workspace_file',
-            workspaceFile: WORKSPACE_DRAFT_PATH,
+            files: [{ name: 'content.md', workspaceFile: WORKSPACE_DRAFT_PATH }],
             format: 'markdown',
             artifactType: FINAL_ARTIFACT_TYPE,
             title: '工作区初稿',
           },
-          SUBMIT_CURRENT,
+          PUBLISH_CURRENT,
         ],
+      },
+    ],
+    'agent-beta': [
+      {
+        kind: 'result',
+        publicText: '提交最终产物。',
+        actions: [annotatePassAction('审核通过。'), SUBMIT_CURRENT],
       },
     ],
   };
@@ -424,14 +468,14 @@ export function recoveryPhaseAScripts(): JsonScriptMap {
   };
 }
 
-/** Recovery phase 2 (after restart): beta seals a fresh V2 package and submits it. */
+/** Recovery phase 2 (after restart): beta annotates the received V1 and submits it. */
 export function recoveryPhaseBScripts(): JsonScriptMap {
   return {
     'agent-beta': [
       {
         kind: 'result',
         publicText: '恢复后提交最终产物。',
-        actions: [finishInlineAction('第二版', '# 第二版\n\n恢复后的正文。'), SUBMIT_CURRENT],
+        actions: [annotatePassAction('审核通过。'), SUBMIT_CURRENT],
       },
     ],
   };
@@ -505,7 +549,6 @@ export interface FileArtifactEntry {
   contentHash: string;
   content: string;
 }
-
 export interface TaskFileProjection {
   events: FileEventEntry[];
   artifacts: FileArtifactEntry[];
@@ -549,11 +592,10 @@ export function readTaskFileProjection(paths: CorePaths, taskId: string): TaskFi
         version: number;
         title: string;
         format: 'markdown' | 'text';
-        contentHash: string;
       };
       const contentFile = meta.format === 'markdown' ? 'content.md' : 'content.txt';
       const content = readFileSync(join(artifactsRoot, name, contentFile), 'utf8');
-      return { ...meta, content };
+      return { ...meta, contentHash: sha256Hex(content), content };
     })
     .sort((a, b) => a.version - b.version);
 
@@ -643,7 +685,9 @@ export async function reconcileFileProjectionWithWorkspace(
   for (const entry of projection.events) {
     if (entry.event.type !== 'artifact_published') continue;
     const artifact = (entry.event as unknown as { artifact: Record<string, unknown> }).artifact;
-    publishedByEvent.set(Number(artifact.version), String(artifact.contentHash));
+    const files = (artifact.files as Array<{ name: string; hash: string }> | undefined) ?? [];
+    const contentFile = files.find((file) => file.name === 'content.md' || file.name === 'content.txt');
+    publishedByEvent.set(Number(artifact.version), String(contentFile?.hash ?? ''));
   }
   if (projection.artifacts.length !== workspace.artifacts.length) {
     mismatch.push(

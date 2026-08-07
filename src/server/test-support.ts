@@ -67,42 +67,35 @@ function validFixtureDir(): string {
 }
 
 /**
- * Version-1 turn contract blocks injected into copies of the legacy `valid`
- * fixture (plan 2026-08-04 Task 3). The committed fixture directories stay
- * legacy (no `turnContract`) so the incompatibility gate has historical
- * snapshots; every EXECUTABLE test template receives these contracts.
+ * Version-2 turn contract blocks injected into copies of the legacy `valid`
+ * fixture (plan 2026-08-04 Task 3; upgraded to v2 in Phase 7). The committed
+ * fixture directories stay legacy (no `turnContract`) so the incompatibility
+ * gate has historical snapshots; every EXECUTABLE test template receives
+ * these contracts.
  */
 const FIXTURE_WRITER_CONTRACT_YAML = [
   'turnContract:',
-  '  version: 1',
+  '  version: 2',
   '  production:',
-  '    completionAction: finish_production',
-  '    output:',
-  '      formats: [markdown]',
-  '      sources: [inline, workspace_file]',
+  '    files: [content.md]',
+  '    sources: [inline, workspace_file]',
+  '    formats: [markdown]',
   '  dispatch:',
-  '    cardinality: single',
   '    allowedActions: [publish_artifact]',
   '    targets:',
   '      publish_artifact: reviewer',
-  '    productionPackageRef: current',
   '',
 ].join('\n');
 
 const FIXTURE_REVIEWER_CONTRACT_YAML = [
   'turnContract:',
-  '  version: 1',
-  '  production:',
-  '    completionAction: finish_production',
-  '    output:',
-  '      formats: [markdown, text]',
-  '      sources: [inline, current_input_artifact]',
+  '  version: 2',
+  '  annotate:',
+  '    files: [review.md]',
   '  dispatch:',
-  '    cardinality: single',
   '    allowedActions: [send_message, submit_final_artifact]',
   '    targets:',
   '      send_message: writer',
-  '    productionPackageRef: current',
   '',
 ].join('\n');
 

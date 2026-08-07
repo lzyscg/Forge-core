@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "outcome": "passed",
-  "observedAt": "2026-08-06T07:44:28.497Z",
-  "commit": "522942a4e9650ce3cf9130cf377be891a82c8945",
+  "observedAt": "2026-08-07T05:40:04.221Z",
+  "commit": "48156242bd6925198e28cc54edd06770773a3fef",
   "command": "npm run verify:ui",
   "passedCapabilities": [
     "templates",

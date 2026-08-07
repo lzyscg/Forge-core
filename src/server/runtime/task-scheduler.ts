@@ -60,7 +60,7 @@ import {
 } from '../../shared/errors';
 import type { CoreService } from '../core-service';
 import type { TaskEvent } from '../storage/task-events';
-import { isTurnContractSupported } from '../template/template-schema';
+import { isTurnContractSupported, type FrozenTemplate } from '../template/template-schema';
 import { RuntimeAbortedError } from './agent-runtime';
 import type { AgentRuntime } from './agent-runtime';
 import type { AcceptanceStopHook } from '../acceptance-boundary';
@@ -125,6 +125,17 @@ function contractIncompatible(): SchedulerError {
     TASK_CONTRACT_INCOMPATIBLE_MESSAGE,
     TASK_CONTRACT_INCOMPATIBLE_ACTION,
   );
+}
+
+/**
+ * The `task_incompatible` reason for an unsupported frozen snapshot (spec
+ * §3.3/§9): a snapshot carrying version-1 contracts requires the v2 schema
+ * (`SCHEMA_V2_REQUIRED`); a snapshot without any turn contract is structurally
+ * legacy (`TURN_CONTRACT_REQUIRED`).
+ */
+function incompatibleReasonFor(frozen: FrozenTemplate): 'TURN_CONTRACT_REQUIRED' | 'SCHEMA_V2_REQUIRED' {
+  const hasAnyContract = frozen.agents.some((agent) => agent.turnContract !== null);
+  return hasAnyContract ? 'SCHEMA_V2_REQUIRED' : 'TURN_CONTRACT_REQUIRED';
 }
 
 /** Statuses from which `stop` is meaningful even without the live slot. */
@@ -552,14 +563,18 @@ export class TaskScheduler {
       // Corrupt tasks stay isolated: identity/snapshot reads that throw leave
       // them exactly where the projection already placed them.
       let snapshotSupported: boolean;
+      let frozenSnapshot: FrozenTemplate | null = null;
       try {
-        const frozen = await this.#service.tasks.readFrozenTemplate(summary.id);
-        snapshotSupported = isTurnContractSupported(frozen);
+        frozenSnapshot = await this.#service.tasks.readFrozenTemplate(summary.id);
+        snapshotSupported = isTurnContractSupported(frozenSnapshot);
       } catch {
         continue;
       }
       if (!snapshotSupported) {
-        await this.markIncompatibleOnce(summary.id);
+        await this.markIncompatibleOnce(
+          summary.id,
+          incompatibleReasonFor(frozenSnapshot as FrozenTemplate),
+        );
         continue;
       }
       if (!ACTIVE_STATUSES.has(summary.status)) {
@@ -585,7 +600,10 @@ export class TaskScheduler {
    * unfinished legacy task; idempotent across repeated recoveries (the first
    * committed event wins, append-only history is never rewritten).
    */
-  private async markIncompatibleOnce(taskId: string): Promise<void> {
+  private async markIncompatibleOnce(
+    taskId: string,
+    reason: 'TURN_CONTRACT_REQUIRED' | 'SCHEMA_V2_REQUIRED',
+  ): Promise<void> {
     const committed = await this.#service.events.read(taskId);
     if (committed.some((entry) => entry.event.type === 'task_incompatible')) {
       return;
@@ -594,7 +612,7 @@ export class TaskScheduler {
       id: randomUUID(),
       at: new Date().toISOString(),
       type: 'task_incompatible',
-      reason: 'TURN_CONTRACT_REQUIRED',
+      reason,
     });
   }
 

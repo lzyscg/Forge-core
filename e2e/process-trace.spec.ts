@@ -175,7 +175,7 @@ test('process trace: workspace draft, trace file and V1 content agree on disk', 
     // V1 was resolved from the workspace draft: identical content.
     expect(workspace.artifacts).toHaveLength(1);
     expect(workspace.artifacts[0].version).toBe(1);
-    expect(workspace.artifacts[0].content).toBe(WORKSPACE_DRAFT_CONTENT);
+    expect(workspace.artifacts[0].files[0].content).toBe(WORKSPACE_DRAFT_CONTENT);
     expect(workspace.artifacts[0].final).toBe(true);
 
     // File/projection parity still holds for the workspace-publish shape.

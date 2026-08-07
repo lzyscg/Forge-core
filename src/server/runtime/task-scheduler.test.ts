@@ -22,7 +22,7 @@
  * Neutral identities only (iron rule 1); fixture agent ids appear exclusively
  * in test data.
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { RuntimeFailure } from './agent-runtime';
@@ -1430,6 +1430,61 @@ describe('TaskScheduler incompatibility gate (plan 2026-08-04 Task 3, spec §7.3
     await expect(harness.scheduler.resume(legacyInterrupted)).rejects.toMatchObject({
       code: 'TASK_CONTRACT_INCOMPATIBLE',
     });
+  });
+
+  it('gates a version-1 snapshot with SCHEMA_V2_REQUIRED (spec §9)', async () => {
+    // An in-flight task frozen against a v1 (removed) contract must be gated
+    // with the schema-migration reason, distinct from the contract-less
+    // TURN_CONTRACT_REQUIRED gate.
+    const harness = await legacyHarness();
+    const v1Task = await harness.environment.createTask();
+    const snapshotRoot = harness.environment.paths.taskSnapshotRoot(v1Task);
+    const agentsRoot = join(snapshotRoot, 'agents');
+    for (const name of readdirSync(agentsRoot)) {
+      if (!name.endsWith('.yaml')) {
+        continue;
+      }
+      const file = join(agentsRoot, name);
+      const yaml = readFileSync(file, 'utf8').replace(/\r\n?/g, '\n');
+      writeFileSync(
+        file,
+        `${yaml.replace(/\nturnContract:[\s\S]*$/, '')}
+turnContract:
+  version: 1
+  production:
+    completionAction: finish_production
+    output:
+      formats: [markdown]
+      sources: [inline, workspace_file]
+  dispatch:
+    cardinality: single
+    allowedActions: [publish_artifact]
+    targets:
+      publish_artifact: reviewer
+    productionPackageRef: current
+`,
+        'utf8',
+      );
+    }
+    await harness.environment.events.append(v1Task, makeTaskEvent({ type: 'task_started' }));
+    await harness.environment.seedAgentInput(v1Task, 'writer', '中断前输入');
+    // Re-hash the modified snapshot so the task record stays consistent.
+    const { loadTemplateDirectory } = await import('../template/template-loader');
+    const historical = await loadTemplateDirectory(snapshotRoot, { historicalSnapshot: true });
+    const taskFile = harness.environment.paths.taskFile(v1Task);
+    const record = JSON.parse(readFileSync(taskFile, 'utf8')) as Record<string, unknown>;
+    record.templateVersion = historical.versionHash;
+    writeFileSync(taskFile, `${JSON.stringify(record, null, 2)}\n`, 'utf8');
+
+    await harness.scheduler.recoverInterruptedTasks();
+    const workspace = await harness.environment.service.getWorkspace(v1Task);
+    expect(workspace.task.status).toBe('incompatible');
+    const events = await harness.environment.events.read(v1Task);
+    const incompatible = events.find((entry) => entry.event.type === 'task_incompatible');
+    expect(incompatible?.event.type === 'task_incompatible' && incompatible.event.reason).toBe(
+      'SCHEMA_V2_REQUIRED',
+    );
+    expect(workspace.task.diagnostic).toContain('旧版产物契约');
   });
 
   it('leaves never-started and interrupted current-contract tasks as they are (review F3)', async () => {

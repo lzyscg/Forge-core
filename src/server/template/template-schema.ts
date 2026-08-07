@@ -113,13 +113,15 @@ export interface FrozenTemplate {
 }
 
 /**
- * True when every frozen agent carries a supported (version 1) turn contract.
- * Historical task snapshots without one stay readable but can never be
- * executed — the scheduler gates them into `incompatible` (spec §7.3).
+ * True when every frozen agent carries a supported (version 2) turn contract.
+ * Historical task snapshots without one (or carrying the removed version-1
+ * shape) stay readable but can never be executed — the scheduler gates them
+ * into `incompatible` (spec §7.3/§9): contract-less snapshots get
+ * `TURN_CONTRACT_REQUIRED`, version-1 snapshots get `SCHEMA_V2_REQUIRED`.
  */
 export function isTurnContractSupported(frozen: FrozenTemplate): boolean {
   return frozen.agents.every(
-    (agent) => agent.turnContract !== null && (agent.turnContract.version === 1 || agent.turnContract.version === 2),
+    (agent) => agent.turnContract !== null && agent.turnContract.version === 2,
   );
 }
 

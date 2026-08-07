@@ -179,13 +179,13 @@ export async function startPersistentCoreServer(): Promise<PersistentCoreHarness
             kind: 'result',
             title: '初稿结果',
             body: '第一版正文草稿。',
-            artifactVersion: 1,
+            inputVersion: 1,
           }),
         }),
       );
       await current.publishTestArtifact(taskId, {
         title: '初稿',
-        content: '# 初稿（V1）\n\n第一版正文内容。',
+        files: [{ name: 'content.md', content: '# 初稿（V1）\n\n第一版正文内容。' }],
         sourceNodeId: writerResult.event.id,
         format: 'markdown',
       });
@@ -224,13 +224,13 @@ export async function startPersistentCoreServer(): Promise<PersistentCoreHarness
             kind: 'result',
             title: '审核结果',
             body: '采纳意见后的修订版本。',
-            artifactVersion: 2,
+            inputVersion: 2,
           }),
         }),
       );
       await current.publishTestArtifact(taskId, {
         title: '修订稿',
-        content: '# 修订稿（V2）\n\n根据审核意见修订后的正文。',
+        files: [{ name: 'content.md', content: '# 修订稿（V2）\n\n根据审核意见修订后的正文。' }],
         sourceNodeId: reviewerResult.event.id,
         format: 'markdown',
       });

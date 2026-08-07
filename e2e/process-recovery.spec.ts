@@ -167,12 +167,14 @@ test('process recovery: SIGKILL mid-Turn restarts as interrupted and resumes wit
     );
 
     const finalWorkspace = await fetchWorkspace(child.url, taskId);
-    expect(finalWorkspace.artifacts.map((artifact) => artifact.version)).toEqual([1, 2]);
-    expect(finalWorkspace.artifacts.find((artifact) => artifact.version === 2)?.final).toBe(true);
+    // v2: beta is operate-only — the recovered turn annotates + submits the
+    // received V1 (zero-copy), so the version chain stays at one version.
+    expect(finalWorkspace.artifacts.map((artifact) => artifact.version)).toEqual([1]);
+    expect(finalWorkspace.artifacts.find((artifact) => artifact.version === 1)?.final).toBe(true);
 
     // No duplicate versions: exactly one directory per published version.
     const afterResume = readChildFileProjection(roots, taskId);
-    expect(afterResume.artifacts.map((artifact) => artifact.version)).toEqual([1, 2]);
+    expect(afterResume.artifacts.map((artifact) => artifact.version)).toEqual([1]);
 
     // Event stream integrity across the crash: contiguous sequences, unique
     // ids, exactly one more result than before the kill (nothing replayed or
@@ -194,7 +196,7 @@ test('process recovery: SIGKILL mid-Turn restarts as interrupted and resumes wit
     ).toHaveLength(1);
     expect(
       afterResume.events.filter((entry) => entry.event.type === 'artifact_published'),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
     expect(
       afterResume.events.some((entry) => entry.event.type === 'task_interrupted'),
     ).toBe(true);
