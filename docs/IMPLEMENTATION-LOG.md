@@ -10,6 +10,30 @@
 - **legacy 兼容**：v1 在途任务 gate 为 `incompatible(SCHEMA_V2_REQUIRED)` 只读；event-store 读取期 transform 归一旧事件（artifactVersion→inputVersion、contentHash→files、缺省 humanAuthorized=false、缺省 source=agent_request）使其不 CORRUPTED。
 - **真实验收**：`scripts/real-acceptance.ts` 硬编码 zhihu-single-chapter（Phase 3 删除）。Phase 7 将写 dedicated long-form-hub 验收脚本（3 agent：controller/writer/reviewer 占位符替换）。
 
+## Phase 6 — 投影与 UI（产物链 extract 槽位、verdict 展示、superseded 渲染、accept 决策 UI）
+
+（已完成；tsc 0 错误，1135/1135 测试绿；commit 于 Phase 6 尾）
+
+### 做了什么
+- **投影（Phase 5 已铺垫，本 Phase 收口）**：`pending_inputs_superseded` 在真实/模拟投影中折叠为节点 `superseded: true`（spec §11.2 作废态，不悬空）；`pendingHumanSource` 契约 + wire schema + 双投影暴露（Phase 5）。
+- **产物链 extract 槽位**（spec §5.1/§10）：`artifact-drawer.tsx` 重写为**每版本多槽渲染**——按 `files[].extract` 分槽（content→正文 / revision→修订说明 / review→审核意见），槽标题含文件名；旧任务单 content 文件自然降级为一个正文槽。
+- **verdict 展示**（spec §3.2/§10，展示层行为）：抽屉内解析 review.md frontmatter（`---\nverdict: pass|reject`）渲染「审核结论：通过/打回」徽标；**平台不据此门禁**（verdict 语义只由 controller 模型消费，注释明示）。
+- **accept 决策 UI**（spec §11.1/§11.5）：`TaskControls` 在 `waiting_human + pendingHumanSource=progress_guard` 时渲染**结构化三选一**（继续推进 / 人工接受 / 停止任务）+ 指引文本域；`agent_request` 保持普通回答表单。**accept 按 `task.latestVersion >= 1` 前置禁用**（零版本不呈交，spec §11.5；服务端复校验为兜底）。
+- **Gateway 结构化决策通道**：`ForgeCoreGateway.submitHumanDecision(taskId, HumanDecision)` 新方法；http-gateway 归一为 `{decision, text?}` 调 answer 端点；mock-gateway 仅接受 continue（模拟只产生 agent_request 停车，accept/stop 拒绝——显式平台语义）；共享契约套件对 mock/http 双实现断言三形状拒绝 + 未知任务 TASK_NOT_FOUND。
+- **superseded 画布渲染**：`workspace-canvas` NodeButton 加 `fc-node--superseded` 类（虚线、淡化、删除线）；turn-card 对分组输入显示「已作废」徽标。
+- CSS：新增 `fc-artifact-slot`/`fc-verdict`/`fc-answer-form__decisions`/`fc-node--superseded`/`fc-turn__superseded` 样式。
+
+### 关键决策
+- **verdict 解析放展示层组件内**（artifact-drawer 局部纯函数 `parseReviewVerdict`）：不侵入服务端投影，不违反铁律 1（平台不解析业务语义；frontmatter 结构校验在工具层/committer，展示层只读渲染）。
+- **`HumanDecision` 契约放 shared/contracts**：客户端四实现（http/mock/stub/contract 套件）共用同一形状，与 scheduler 的 `HumanAnswerRequest` 一一对应（answer/continue/accept/stop）。
+- **mock 只接受 continue**：模拟器不产生 progress_guard 停车（source 恒 agent_request），accept/stop 在 mock 层以 INVALID_TRANSITION 显式拒绝，防 UI 演示中「点了没反应」；真实后端三形状全支持。
+- **superseded 输入在画布上几乎总在 turn-card 内**（pending 输入无 result 成 trailing 组）——测试按 turn shell 徽标断言，standalone button 的 `fc-node--superseded` 类保留为防御路径。
+
+### 问题与解决
+- **artifact-drawer 测试同用例双 render 残留 DOM**：首个渲染的旧抽屉节点仍查询得到，导致 `queryByText` 断言误判；拆为两个独立用例。
+- **指引文本域无 label**：结构化表单初版用 `<p>` 作标签，`getByLabelText` 找不到；改 `<label htmlFor>`。
+- **superseded 输入在画布的落点**：初版测试期望 reviewer 输入作 standalone button，实际被分组成 turn；改为断言 turn shell 徽标 + 追加 trailing 输入用例。
+
 ## Phase 5 — 调度器人工介入（supersede + synthesize，结构化三选一）
 
 （已完成；tsc 0 错误，1123/1123 测试绿；commit 于 Phase 5 尾）

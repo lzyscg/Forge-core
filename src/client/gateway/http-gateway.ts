@@ -21,6 +21,7 @@
 import type { TSchema } from 'typebox';
 import { Value } from 'typebox/value';
 import type {
+  HumanDecision,
   SkillContent,
   TaskSummary,
   TaskWorkspace,
@@ -236,6 +237,15 @@ export function createHttpGateway(options: HttpGatewayOptions = {}): ForgeCoreGa
 
     async answerHuman(taskId: string, answer: string): Promise<void> {
       await postVoid(`/api/tasks/${encodeURIComponent(taskId)}/answer`, { answer });
+      knownTaskIds.add(taskId);
+    },
+
+    async submitHumanDecision(taskId: string, decision: HumanDecision): Promise<void> {
+      const body =
+        decision.decision === 'stop'
+          ? { decision: 'stop' }
+          : { decision: decision.decision, text: decision.text };
+      await postVoid(`/api/tasks/${encodeURIComponent(taskId)}/answer`, body);
       knownTaskIds.add(taskId);
     },
 

@@ -24,6 +24,19 @@ export type TaskStatus =
 
 export type NodeKind = 'input' | 'result' | 'human_request' | 'human_answer' | 'skill';
 export type RouteKind = 'message' | 'artifact';
+
+/**
+ * A human answer submitted through the answer flow (spec §11.1/§11.5).
+ * `answer` is an ordinary text reply (the only shape an `agent_request`
+ * question accepts); `continue`/`accept` are the structured decisions a
+ * `progress_guard` question offers, carrying the guidance text; `stop` stops
+ * the task. The platform vocabulary stays neutral: no business semantics.
+ */
+export type HumanDecision =
+  | { decision: 'answer'; text: string }
+  | { decision: 'continue'; text: string }
+  | { decision: 'accept'; text: string }
+  | { decision: 'stop' };
 export type MockScenarioId =
   | 'happy_path'
   | 'review_return_v2'

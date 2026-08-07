@@ -1,5 +1,6 @@
 import type {
   CapabilityEvidence,
+  HumanDecision,
   MockScenarioId,
   SkillContent,
   TaskStatus,
@@ -407,6 +408,25 @@ export function createMockGateway(
         );
       }
       simulator.answer(taskId, answer);
+    },
+
+    async submitHumanDecision(taskId: string, decision: HumanDecision): Promise<void> {
+      const location = 'MockGateway.submitHumanDecision';
+      const record = requireRecord(taskId, location);
+      requireStatus(record, ['waiting_human'], location);
+      // The mock simulates ordinary model-asked questions (agent_request)
+      // only: the structured accept/stop decisions belong to the platform's
+      // progress-guard flow, which the simulator never parks. `continue`
+      // degrades to the plain answer with the guidance text.
+      if (decision.decision !== 'continue') {
+        throw new CoreError(
+          CORE_ERROR_CODES.INVALID_TRANSITION,
+          '该模拟任务不提供结构化决策，仅接受文字回答。',
+          location,
+          '填写回答内容后重新提交。',
+        );
+      }
+      simulator.answer(taskId, decision.text);
     },
 
     watchTask(taskId: string, listener: () => void): () => void {

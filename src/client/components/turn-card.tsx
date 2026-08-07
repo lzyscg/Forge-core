@@ -119,6 +119,9 @@ export function TurnCard({
         {inputVersion !== null ? (
           <span className="fc-turn__version">产物 V{inputVersion}</span>
         ) : null}
+        {group.input?.superseded ? (
+          <span className="fc-turn__superseded">已作废</span>
+        ) : null}
         {group.skills.length > 0 ? (
           <span className="fc-turn__skills">
             {group.skills.map((skill) => (

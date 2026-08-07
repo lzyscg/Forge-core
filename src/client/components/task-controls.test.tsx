@@ -28,10 +28,15 @@ function renderControls(
   task: TaskSummary,
   gateway: ForgeCoreGateway & DevelopmentGateway = stubGateway(),
   pendingHumanQuestion: string | null = null,
+  pendingHumanSource: 'progress_guard' | 'agent_request' | null = null,
 ) {
   return render(
     <GatewayProvider core={gateway} development={gateway}>
-      <TaskControls task={task} pendingHumanQuestion={pendingHumanQuestion} />
+      <TaskControls
+        task={task}
+        pendingHumanQuestion={pendingHumanQuestion}
+        pendingHumanSource={pendingHumanSource}
+      />
     </GatewayProvider>,
   );
 }
@@ -110,5 +115,83 @@ describe('TaskControls', () => {
     expect(alert.textContent).toContain('已有任务 task-other 正在运行。');
     // The control stays available for another attempt.
     expect(screen.getByRole('button', { name: '开始生产' })).toBeVisible();
+  });
+
+  it('renders the structured three-choice only for a progress_guard question', async () => {
+    const gateway = stubGateway();
+    renderControls(makeTask('waiting_human'), gateway, '进度已超限，请指示下一步。', 'progress_guard');
+
+    expect(screen.getByRole('button', { name: '继续推进' })).toBeVisible();
+    expect(screen.getByRole('button', { name: '人工接受' })).toBeVisible();
+    expect(screen.getByRole('button', { name: '停止任务' })).toBeVisible();
+    // The plain answer form is replaced by the structured guidance textarea.
+    expect(screen.queryByRole('button', { name: '提交回答' })).toBeNull();
+  });
+
+  it('keeps the plain answer form for an agent_request question', async () => {
+    const gateway = stubGateway();
+    renderControls(makeTask('waiting_human'), gateway, '问题？', 'agent_request');
+
+    expect(screen.getByRole('button', { name: '提交回答' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: '继续推进' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '人工接受' })).toBeNull();
+  });
+
+  it('submits continue with the guidance text via the structured gateway method', async () => {
+    const submitHumanDecision = vi.fn(async () => {});
+    const gateway = stubGateway({ submitHumanDecision });
+    renderControls(makeTask('waiting_human'), gateway, '进度已超限，请指示下一步。', 'progress_guard');
+
+    await userEvent.type(screen.getByLabelText('人工干预处理指引（作为继续推进或人工接受的依据）'), '请直接提交当前版本');
+    await userEvent.click(screen.getByRole('button', { name: '继续推进' }));
+    expect(submitHumanDecision).toHaveBeenCalledWith('task-controls-1', {
+      decision: 'continue',
+      text: '请直接提交当前版本',
+    });
+  });
+
+  it('submits accept only when at least one version exists and disables it otherwise', async () => {
+    const submitHumanDecision = vi.fn(async () => {});
+    const gateway = stubGateway({ submitHumanDecision });
+
+    // Zero versions: accept is disabled before it ever reaches the gateway.
+    renderControls(
+      makeTask('waiting_human', { latestVersion: null }),
+      gateway,
+      '进度已超限，请指示下一步。',
+      'progress_guard',
+    );
+    expect(screen.getByRole('button', { name: '人工接受' })).toBeDisabled();
+    // The stop decision still works without guidance text.
+    await userEvent.click(screen.getByRole('button', { name: '停止任务' }));
+    expect(submitHumanDecision).toHaveBeenCalledWith('task-controls-1', { decision: 'stop' });
+  });
+
+  it('submits accept with guidance text when versions exist', async () => {
+    const submitHumanDecision = vi.fn(async () => {});
+    const gateway = stubGateway({ submitHumanDecision });
+    renderControls(
+      makeTask('waiting_human', { latestVersion: 2 }),
+      gateway,
+      '进度已超限，请指示下一步。',
+      'progress_guard',
+    );
+
+    await userEvent.type(screen.getByLabelText('人工干预处理指引（作为继续推进或人工接受的依据）'), '授权直接提交终稿');
+    await userEvent.click(screen.getByRole('button', { name: '人工接受' }));
+    expect(submitHumanDecision).toHaveBeenCalledWith('task-controls-1', {
+      decision: 'accept',
+      text: '授权直接提交终稿',
+    });
+  });
+
+  it('blocks a guidance-less continue before it reaches the gateway', async () => {
+    const submitHumanDecision = vi.fn(async () => {});
+    const gateway = stubGateway({ submitHumanDecision });
+    renderControls(makeTask('waiting_human'), gateway, '进度已超限，请指示下一步。', 'progress_guard');
+
+    await userEvent.click(screen.getByRole('button', { name: '继续推进' }));
+    expect(await screen.findByRole('alert')).toBeVisible();
+    expect(submitHumanDecision).not.toHaveBeenCalled();
   });
 });

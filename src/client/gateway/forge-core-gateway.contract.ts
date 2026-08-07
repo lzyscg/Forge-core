@@ -348,6 +348,29 @@ export function runForgeCoreGatewayContract(
       });
     });
 
+    it('guards structured human decisions like the plain answer path', async () => {
+      await withGateway(async (gateway) => {
+        const detail = await loadFirstTemplate(gateway);
+        const created = await gateway.createTask({
+          templateId: detail.id,
+          name: '契约套件任务',
+          input: inputWithRequiredFields(detail.inputFields),
+        });
+        // A ready task has no pending human request: every decision shape
+        // rejects with a stable public error, never silently succeeding.
+        await expectPublicRejection(
+          gateway.submitHumanDecision(created.id, { decision: 'continue', text: '继续推进' }),
+        );
+        await expectPublicRejection(
+          gateway.submitHumanDecision(created.id, { decision: 'accept', text: '授权提交' }),
+        );
+        await expectPublicRejection(gateway.submitHumanDecision(created.id, { decision: 'stop' }));
+        await expect(gateway.submitHumanDecision('task-missing', { decision: 'stop' })).rejects.toMatchObject({
+          code: 'TASK_NOT_FOUND',
+        });
+      });
+    });
+
     it('starts with an empty artifact chain and no pending question', async () => {
       await withGateway(async (gateway) => {
         const detail = await loadFirstTemplate(gateway);

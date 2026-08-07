@@ -734,6 +734,20 @@
   border-left-color: var(--fc-danger);
 }
 
+/* Voided input (spec §11.2): muted, dashed, never interactive-looking. */
+.fc-node--superseded {
+  border-left-color: var(--fc-border);
+  border-style: dashed;
+  opacity: 0.55;
+  text-decoration: line-through;
+  cursor: default;
+}
+
+.fc-node__superseded {
+  color: var(--fc-muted);
+  font-weight: 600;
+}
+
 /* Skill nodes stay accent-tinted regardless of confirmed/active status. */
 .fc-node--kind-skill {
   border-left-color: var(--fc-accent);
@@ -888,6 +902,13 @@
 .fc-turn__version {
   font-size: 0.75rem;
   color: var(--fc-muted);
+}
+
+.fc-turn__superseded {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--fc-muted);
+  text-decoration: line-through;
 }
 
 .fc-turn__skills {
@@ -1315,6 +1336,46 @@
   margin-bottom: 0;
 }
 
+/* One extract slot of a version directory (spec §5.1/§10): the drawer stacks
+   the content/revision/review files under their declared extract labels. */
+.fc-artifact-slot {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.fc-artifact-slot__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.fc-artifact-slot__filename {
+  font-weight: 400;
+  color: var(--fc-muted);
+  font-size: 0.75rem;
+}
+
+/* Display-only verdict badge parsed from review.md frontmatter (never a gate). */
+.fc-verdict {
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.1rem 0.45rem;
+  border-radius: var(--fc-radius-sm);
+}
+
+.fc-verdict--pass {
+  color: var(--fc-success);
+  background-color: color-mix(in srgb, var(--fc-success) 12%, transparent);
+}
+
+.fc-verdict--reject {
+  color: var(--fc-danger);
+  background-color: color-mix(in srgb, var(--fc-danger) 12%, transparent);
+}
+
 /* ------------------------------------------------------- Task controls */
 
 .fc-task-controls {
@@ -1362,6 +1423,13 @@
 
 .fc-answer-form .fc-button {
   align-self: flex-start;
+}
+
+/* Structured three-choice for progress_guard questions (spec §11.1). */
+.fc-answer-form__decisions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
 }
 
 /* ---------------------------------------------------- Node detail dialog */

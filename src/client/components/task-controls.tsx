@@ -8,6 +8,12 @@ import { PublicErrorNotice } from '../pages/public-error-notice';
 export interface TaskControlsProps {
   task: TaskSummary;
   pendingHumanQuestion: string | null;
+  /**
+   * Source of the pending human request (spec §11.5): `progress_guard`
+   * renders the structured three-choice (continue/accept/stop); `agent_request`
+   * keeps the plain answer form. Null when no question is pending.
+   */
+  pendingHumanSource: 'progress_guard' | 'agent_request' | null;
 }
 
 type LifecycleAction = 'startTask' | 'stopTask' | 'resumeTask' | 'retryTask';
@@ -48,7 +54,7 @@ const CONTROLS_BY_STATUS: Partial<Record<TaskStatus, LifecycleControl[]>> = {
  * path: each simulator event notifies watchers and the page reloads its
  * workspace.
  */
-export function TaskControls({ task, pendingHumanQuestion }: TaskControlsProps) {
+export function TaskControls({ task, pendingHumanQuestion, pendingHumanSource }: TaskControlsProps) {
   const gateway = useForgeCoreGateway();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<PublicCoreError | null>(null);
@@ -57,6 +63,10 @@ export function TaskControls({ task, pendingHumanQuestion }: TaskControlsProps) 
 
   const controls = CONTROLS_BY_STATUS[task.status] ?? [];
   const showAnswerForm = task.status === 'waiting_human';
+  const showStructuredDecision = showAnswerForm && pendingHumanSource === 'progress_guard';
+  // Accept requires at least one published version (spec §11.5); the server
+  // re-validates, this disables the option before the request.
+  const acceptDisabled = (task.latestVersion ?? 0) < 1;
 
   const runAction = async (action: LifecycleAction): Promise<void> => {
     setPending(true);
@@ -89,6 +99,29 @@ export function TaskControls({ task, pendingHumanQuestion }: TaskControlsProps) 
     }
   };
 
+  const submitDecision = async (decision: 'continue' | 'accept' | 'stop'): Promise<void> => {
+    if (decision !== 'stop' && answer.trim().length === 0) {
+      setAnswerProblem('请填写对本次人工干预的处理指引后再提交。');
+      return;
+    }
+    setAnswerProblem(null);
+    setPending(true);
+    setError(null);
+    try {
+      await gateway.submitHumanDecision(
+        task.id,
+        decision === 'stop'
+          ? { decision: 'stop' }
+          : { decision, text: answer },
+      );
+      setAnswer('');
+    } catch (cause) {
+      setError(toPublicCoreError(cause));
+    } finally {
+      setPending(false);
+    }
+  };
+
   return (
     <div className="fc-task-controls">
       {controls.map((control, index) => (
@@ -103,29 +136,78 @@ export function TaskControls({ task, pendingHumanQuestion }: TaskControlsProps) 
         </button>
       ))}
       {showAnswerForm ? (
-        <form className="fc-answer-form" onSubmit={(event) => void submitAnswer(event)}>
+        <div className="fc-answer-form">
           {pendingHumanQuestion !== null ? (
             <p className="fc-answer-form__question">{pendingHumanQuestion}</p>
           ) : null}
-          <label className="fc-answer-form__label" htmlFor="fc-answer-input">
-            回答
-          </label>
-          <textarea
-            id="fc-answer-input"
-            className="fc-answer-form__input"
-            value={answer}
-            disabled={pending}
-            onChange={(event) => setAnswer(event.target.value)}
-          />
-          {answerProblem !== null ? (
-            <p className="fc-answer-form__problem" role="alert">
-              {answerProblem}
-            </p>
-          ) : null}
-          <button type="submit" className="fc-button" disabled={pending}>
-            提交回答
-          </button>
-        </form>
+          {showStructuredDecision ? (
+            <>
+              <label className="fc-answer-form__label" htmlFor="fc-answer-input">
+                人工干预处理指引（作为继续推进或人工接受的依据）
+              </label>
+              <textarea
+                id="fc-answer-input"
+                className="fc-answer-form__input"
+                value={answer}
+                disabled={pending}
+                onChange={(event) => setAnswer(event.target.value)}
+              />
+              {answerProblem !== null ? (
+                <p className="fc-answer-form__problem" role="alert">
+                  {answerProblem}
+                </p>
+              ) : null}
+              <div className="fc-answer-form__decisions">
+                <button
+                  type="button"
+                  className="fc-button"
+                  disabled={pending}
+                  onClick={() => void submitDecision('continue')}
+                >
+                  继续推进
+                </button>
+                <button
+                  type="button"
+                  className="fc-button fc-button--secondary"
+                  disabled={pending || acceptDisabled}
+                  onClick={() => void submitDecision('accept')}
+                  title={acceptDisabled ? '尚无已发布产物版本，无法人工接受。' : undefined}
+                >
+                  人工接受
+                </button>
+                <button
+                  type="button"
+                  className="fc-button fc-button--secondary"
+                  disabled={pending}
+                  onClick={() => void submitDecision('stop')}
+                >
+                  停止任务
+                </button>
+              </div>
+            </>
+          ) : (
+            <form onSubmit={(event) => void submitAnswer(event)}>
+              <label className="fc-answer-form__label" htmlFor="fc-answer-input">
+                回答
+              </label>
+              <textarea
+                id="fc-answer-input"
+                className="fc-answer-form__input"
+                value={answer}
+                disabled={pending}
+                onChange={(event) => setAnswer(event.target.value)}
+              />
+              {answerProblem !== null ? (
+                <p className="fc-answer-form__problem" role="alert">
+                  {answerProblem}
+                </p>
+              ) : null}
+              <button type="submit" className="fc-button" disabled={pending}>
+                提交回答
+              </button>
+            </form>
+          )}
+        </div>
       ) : null}
       {error !== null ? <PublicErrorNotice title="任务操作失败" error={error} /> : null}
     </div>

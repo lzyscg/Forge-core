@@ -40,6 +40,7 @@ function NodeButton({ node, row, selected, highlighted, onSelect }: NodeButtonPr
     'fc-node',
     `fc-node--kind-${node.kind}`,
     `fc-node--${node.status}`,
+    node.superseded ? 'fc-node--superseded' : '',
     selected ? 'fc-node--selected' : '',
     highlighted ? 'fc-node--highlighted' : '',
   ]
@@ -53,6 +54,7 @@ function NodeButton({ node, row, selected, highlighted, onSelect }: NodeButtonPr
       className={classes}
       style={{ gridRow: String(row) }}
       aria-haspopup="dialog"
+      aria-label={node.superseded ? `已作废：${node.title}` : undefined}
       onClick={() => onSelect(node.id)}
     >
       <span className="fc-node__meta">
@@ -70,6 +72,7 @@ function NodeButton({ node, row, selected, highlighted, onSelect }: NodeButtonPr
         {node.inputVersion !== null ? (
           <span className="fc-node__version">产物 V{node.inputVersion}</span>
         ) : null}
+        {node.superseded ? <span className="fc-node__superseded">已作废</span> : null}
       </span>
     </button>
   );

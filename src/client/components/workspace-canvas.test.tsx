@@ -163,6 +163,38 @@ describe('WorkspaceCanvas', () => {
     expect(humanButton.closest('[data-testid="workspace-turn"]')).toBeNull();
   });
 
+  it('renders a superseded input as voided on its turn card (spec §11.2)', () => {
+    const ws = workspaceWithReturnLoop();
+    // Mark a grouped input and a trailing input (no result yet) as voided.
+    const voided: TaskWorkspace = {
+      ...ws,
+      nodes: [
+        ...ws.nodes.map((node) =>
+          node.id === 'rl-writer-input-2' ? { ...node, superseded: true } : node,
+        ),
+        {
+          id: 'rl-trailing-voided',
+          sequence: 9,
+          agentId: WRITER_AGENT_ID,
+          kind: 'input',
+          title: '已作废输入',
+          body: 'body',
+          status: 'confirmed',
+          attemptCount: 1,
+          inputVersion: null,
+          superseded: true,
+        },
+      ],
+    };
+    renderCanvas(voided);
+    // The grouped input's turn shell carries the 已作废 badge.
+    const grouped = shellOf('rl-writer-input-2');
+    expect(within(grouped).getByText('已作废')).toBeVisible();
+    // The trailing (never executed) superseded input also renders voided.
+    const trailing = shellOf('rl-trailing-voided');
+    expect(within(trailing).getByText('已作废')).toBeVisible();
+  });
+
   it('routes [运行过程] to the result and [输入] to the input of a turn', async () => {
     const onSelectNode = vi.fn();
     renderCanvas(workspaceWithReturnLoop(), { onSelectNode });

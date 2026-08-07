@@ -207,7 +207,11 @@ function ProductionWorkspace({ workspace }: { workspace: TaskWorkspace }) {
           onSelectNode={handleSelectNode}
           drawerRevision={drawerRevision}
         />
-        <TaskControls task={workspace.task} pendingHumanQuestion={workspace.pendingHumanQuestion} />
+        <TaskControls
+          task={workspace.task}
+          pendingHumanQuestion={workspace.pendingHumanQuestion}
+          pendingHumanSource={workspace.pendingHumanSource}
+        />
       </div>
 
       {artifactsOpen ? (

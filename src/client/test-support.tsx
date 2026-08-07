@@ -71,6 +71,7 @@ export function stubGateway(
     resumeTask: unused,
     retryTask: unused,
     answerHuman: unused,
+    submitHumanDecision: unused,
     watchTask: () => () => {},
     getTurnTrace: unused,
     getSkillContent: unused,

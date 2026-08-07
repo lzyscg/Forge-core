@@ -45,6 +45,82 @@ describe('ArtifactDrawer', () => {
     expect(preview.textContent).not.toContain('第一章 旧信疑云（V2）');
   });
 
+  it('renders extract slots for content/review and the verdict badge', () => {
+    const ws = workspaceWithReturnLoop();
+    const reviewMd = '---\nverdict: reject\n---\n## 意见\n1. 【位置】第二节 【问题】节奏过快\n';
+    renderDrawer({
+      selectedVersion: 2,
+      workspace: {
+        ...ws,
+        artifacts: [
+          {
+            ...ws.artifacts[0]!,
+            files: [
+              { name: 'content.md', extract: 'content', content: '第一节正文' },
+              { name: 'revision.md', extract: 'revision', content: '修订说明：重写了第二节。' },
+            ],
+          },
+          {
+            ...ws.artifacts[1]!,
+            files: [
+              { name: 'content.md', extract: 'content', content: '第二节正文' },
+              { name: 'review.md', extract: 'review', content: reviewMd },
+            ],
+          },
+        ],
+      },
+    });
+
+    // The selected V2 renders content + review slots; the review verdict badge
+    // is parsed from the review.md frontmatter (display layer only).
+    expect(screen.getByText('正文')).toBeVisible();
+    expect(screen.getByText('审核意见')).toBeVisible();
+    expect(screen.getByText('第二节正文')).toBeVisible();
+    expect(screen.getByText('审核结论：打回')).toBeVisible();
+  });
+
+  it('renders the revision slot without a verdict badge for a creator version', () => {
+    const ws = workspaceWithReturnLoop();
+    renderDrawer({
+      selectedVersion: 1,
+      workspace: {
+        ...ws,
+        artifacts: [
+          {
+            ...ws.artifacts[0]!,
+            files: [
+              { name: 'content.md', extract: 'content', content: '第一节正文' },
+              { name: 'revision.md', extract: 'revision', content: '修订说明：重写了第二节。' },
+            ],
+          },
+        ],
+      },
+    });
+    expect(screen.getByText('正文')).toBeVisible();
+    expect(screen.getByText('修订说明')).toBeVisible();
+    expect(screen.queryByText('审核意见')).toBeNull();
+    expect(screen.queryByText(/审核结论/)).toBeNull();
+  });
+
+  it('degrades a legacy single content file to one content slot', () => {
+    const ws = workspaceWithReturnLoop();
+    renderDrawer({
+      selectedVersion: 1,
+      workspace: {
+        ...ws,
+        artifacts: [
+          {
+            ...ws.artifacts[0]!,
+            files: [{ name: 'content.md', extract: 'content', content: '旧版单文件正文' }],
+          },
+        ],
+      },
+    });
+    expect(screen.getByText('正文')).toBeVisible();
+    expect(screen.getByText('旧版单文件正文')).toBeVisible();
+    expect(screen.getAllByTestId('artifact-preview')).toHaveLength(1);
+  });
+
   it('falls back to the latest version when nothing is selected', () => {
     renderDrawer({ selectedVersion: null });
     const preview = screen.getByTestId('artifact-preview');

@@ -1,4 +1,5 @@
 import type {
+  HumanDecision,
   SkillContent,
   TaskSummary,
   TaskWorkspace,
@@ -38,6 +39,12 @@ export interface ForgeCoreGateway {
   resumeTask(taskId: string): Promise<void>;
   retryTask(taskId: string): Promise<void>;
   answerHuman(taskId: string, answer: string): Promise<void>;
+  /**
+   * Submits a structured human decision (spec §11.1): `continue`/`accept`/`stop`
+   * for a `progress_guard` question. The plain `answerHuman` text path remains
+   * the channel for `agent_request` questions.
+   */
+  submitHumanDecision(taskId: string, decision: HumanDecision): Promise<void>;
   watchTask(taskId: string, listener: () => void): () => void;
   getTurnTrace(taskId: string, turnId: string): Promise<TurnTrace>;
   getSkillContent(taskId: string, skillId: string): Promise<SkillContent>;
