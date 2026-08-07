@@ -178,54 +178,43 @@ describe('zhihu single-chapter acceptance template', () => {
     expect((example.source_material as string).trim().length).toBeGreaterThan(0);
   });
 
-  it('declares version 1 turn contracts for both agents (plan 2026-08-04 Task 2)', async () => {
+  it('declares version 2 turn contracts for both agents (plan 2026-08-07 Phase 3)', async () => {
     const template = await loadTemplateDirectory(zhihuTemplateRoot());
     const writer = template.agents.find((agent) => agent.id === 'writer');
     const reviewer = template.agents.find((agent) => agent.id === 'reviewer');
-    // Writer: seal a Markdown chapter from its workspace file, publish to reviewer.
-    expect(writer?.turnContract).toEqual({
-      version: 1,
+    // Writer: production turn - seal a workspace_file chapter and publish.
+    expect(writer?.turnContract).toMatchObject({
+      version: 2,
       production: {
-        completionAction: 'finish_production',
+        files: ['content.md'],
         output: { formats: ['markdown'], sources: ['workspace_file'] },
       },
       dispatch: {
-        cardinality: 'single',
         allowedActions: ['publish_artifact'],
         targets: { publish_artifact: ['reviewer'] },
-        productionPackageRef: 'current',
       },
     });
-    // Reviewer: seal an inline review and message it back, or seal the received
-    // chapter artifact and submit it as the final output — one intent per turn.
-    expect(reviewer?.turnContract).toEqual({
-      version: 1,
-      production: {
-        completionAction: 'finish_production',
-        output: { formats: ['markdown', 'text'], sources: ['inline', 'current_input_artifact'] },
-      },
+    // Reviewer: operate turn - annotate review.md, then send_message or submit.
+    expect(reviewer?.turnContract).toMatchObject({
+      version: 2,
+      annotate: { files: ['review.md'] },
       dispatch: {
-        cardinality: 'single',
         allowedActions: ['send_message', 'submit_final_artifact'],
         targets: { send_message: ['writer'] },
-        productionPackageRef: 'current',
       },
     });
+    expect(reviewer?.turnContract?.production).toBeUndefined();
   });
 
-  it('system prompts teach the two-step finish_production → dispatch contract', async () => {
+  it('system prompts teach the v7 turn contract (finish_production for writers, annotate/submit for reviewers)', async () => {
     const template = await loadTemplateDirectory(zhihuTemplateRoot());
-    for (const agent of template.agents) {
-      expect(
-        agent.systemPrompt,
-        `${agent.id} must be told to seal production with finish_production`,
-      ).toContain('finish_production');
-      expect(
-        agent.systemPrompt,
-        `${agent.id} must reference the sealed package with productionPackageRef`,
-      ).toContain('productionPackageRef');
-    }
-    const reviewer = template.agents.find((agent) => agent.id === 'reviewer');
-    expect(reviewer?.systemPrompt).toContain('current_input_artifact');
+    const writer = template.agents.find((agent) => agent.id === 'writer')!;
+    const reviewer = template.agents.find((agent) => agent.id === 'reviewer')!;
+    expect(writer.systemPrompt).toContain('finish_production');
+    expect(writer.systemPrompt).toContain('publish_artifact');
+    expect(reviewer.systemPrompt).toContain('annotate_artifact');
+    expect(reviewer.systemPrompt).toContain('submit_final_artifact');
+    // v7 removes the sealed-package productionPackageRef/current_input_artifact.
+    expect(reviewer.systemPrompt).not.toContain('current_input_artifact');
   });
 });

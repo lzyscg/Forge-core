@@ -185,6 +185,7 @@ function computeVersionHash(source: CanonicalSource): string {
     pipeline: {
       agents: source.pipeline.agents,
       routes: source.pipeline.routes,
+      artifactSchema: source.pipeline.artifactSchema,
       finalOutput: { submitters: source.pipeline.submitters },
       // A declared budget is part of the frozen contract; a budget-less
       // template omits the key so legacy hashes stay reproducible (mirrors
@@ -343,7 +344,9 @@ async function loadValidated(
       to: route.to,
       kind: route.kind,
       label: route.label,
+      ...(route.inject.length > 0 ? { inject: route.inject } : {}),
     })),
+    artifactSchema: pipeline.artifactSchema,
     finalOutput: {
       name: template.finalArtifact.name,
       format: template.finalArtifact.format,

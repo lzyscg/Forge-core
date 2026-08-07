@@ -1,4 +1,4 @@
-# 有序 Agent、合法连线与最终出口（知乎单章生产）
+# 有序 Agent、合法连线与最终出口（知乎单章生产 · v7）
 agents:
   - writer
   - reviewer
@@ -7,10 +7,19 @@ routes:
     to: reviewer
     kind: artifact
     label: 提交章节稿件
+    inject:
+      - { version: input, file: content.md, as: 上一版正文 }
   - from: reviewer
     to: writer
     kind: message
     label: 返修意见
+    inject:
+      - { version: input, file: content.md, as: 上一版正文 }
+      - { version: input, file: review.md, as: 返修意见 }
+artifactSchema:
+  files:
+    - { name: content.md, required: true,  producer: writer,   extract: content, phase: create }
+    - { name: review.md,  required: false, producer: reviewer, extract: review,   phase: annotate }
 finalOutput:
   submitters:
     - reviewer

@@ -1,6 +1,6 @@
 id: reviewer
 name: 章节审核 Agent
-description: 审读章节正文：首次审读给出可操作返修意见，复审确认问题已修复后申请系统最终交付。
+description: 审读章节正文：不通过时直连退回写作 Agent 并给出可操作意见；通过时标注 review.md 并申请系统最终交付。
 # 占位模型：真实验收时由脚本复制到工作副本并仅替换该标量（单一 configured 命名空间）。
 model: configured/reviewer-model
 systemPromptFile: prompts/reviewer-system.md
@@ -10,21 +10,12 @@ skills:
     description: 第一人称一致性、因果连续、冲突升级、冗余解释、正文完整性与返修消息格式。
     contentPath: skills/chapter-review/SKILL.md
 turnContract:
-  version: 1
-  production:
-    completionAction: finish_production
-    output:
-      formats:
-        - markdown
-        - text
-      sources:
-        - inline
-        - current_input_artifact
+  version: 2
+  annotate:
+    files: [review.md]
   dispatch:
-    cardinality: single
     allowedActions:
       - send_message
       - submit_final_artifact
     targets:
       send_message: writer
-    productionPackageRef: current

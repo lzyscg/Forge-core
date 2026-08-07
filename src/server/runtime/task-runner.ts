@@ -945,11 +945,11 @@ ${checklist}`;
           return null;
         }
       }
-      // Platform-resolved shape consumed by the committer: inline files with
-      // content (never model-supplied for workspace_file sources).
+      // Platform-resolved shape consumed by the committer: keep the declared
+      // source (so the contract's sources list still validates), and attach the
+      // resolved file content the committer publishes.
       resolved.push({
         ...action,
-        source: 'inline',
         files: resolvedFiles,
       } as ForgeAction);
     }

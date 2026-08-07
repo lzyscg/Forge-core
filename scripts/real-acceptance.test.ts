@@ -268,7 +268,7 @@ function finishChapter(title: string): ForgeAction {
   return {
     type: 'finish_production',
     source: 'workspace_file',
-    workspaceFile: CHAPTER_DRAFT_PATH,
+    files: [{ name: 'content.md', workspaceFile: CHAPTER_DRAFT_PATH }],
     format: 'markdown',
     artifactType: 'chapter_markdown',
     title,
@@ -286,7 +286,7 @@ function fullLoopScripts(): Record<string, Array<{ kind: 'result'; publicText: s
         actions: [
           { type: 'load_skill', skillId: 'chapter-drafting' },
           finishChapter('初稿'),
-          { type: 'publish_artifact', productionPackageRef: 'current' },
+          { type: 'publish_artifact' },
         ],
       },
       {
@@ -297,7 +297,7 @@ function fullLoopScripts(): Record<string, Array<{ kind: 'result'; publicText: s
         ],
         actions: [
           finishChapter('修订稿'),
-          { type: 'publish_artifact', productionPackageRef: 'current' },
+          { type: 'publish_artifact' },
         ],
       },
     ],
@@ -308,17 +308,14 @@ function fullLoopScripts(): Record<string, Array<{ kind: 'result'; publicText: s
         actions: [
           { type: 'load_skill', skillId: 'chapter-review' },
           {
-            type: 'finish_production',
-            source: 'inline',
-            content: '请修复两个问题后重新发布完整稿件。',
-            format: 'text',
-            artifactType: null,
-            title: null,
+            type: 'annotate_artifact',
+            file: 'review.md',
+            content: '---\nverdict: reject\n---\n请修复两个问题后重新发布完整稿件。',
           },
           {
             type: 'send_message',
             targetAgentId: 'writer',
-            productionPackageRef: 'current',
+            summary: '初稿需要返修。',
           },
         ],
       },
@@ -326,8 +323,12 @@ function fullLoopScripts(): Record<string, Array<{ kind: 'result'; publicText: s
         kind: 'result',
         publicText: '复审通过，申请系统最终交付。',
         actions: [
-          { type: 'finish_production', source: 'current_input_artifact' },
-          { type: 'submit_final_artifact', productionPackageRef: 'current' },
+          {
+            type: 'annotate_artifact',
+            file: 'review.md',
+            content: '---\nverdict: pass\n---\n复审通过。',
+          },
+          { type: 'submit_final_artifact' },
         ],
       },
     ],

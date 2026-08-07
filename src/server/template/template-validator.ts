@@ -185,23 +185,83 @@ export function validateTemplateFile(fileName: string, raw: unknown): ValidatedT
   };
 }
 
+export interface ValidatedInject {
+  version: 'input';
+  file: string;
+  as: string;
+}
+
 export interface ValidatedRoute {
   from: string;
   to: string;
   kind: 'message' | 'artifact';
   label: string;
+  inject: ValidatedInject[];
+}
+
+export interface ValidatedArtifactFile {
+  name: string;
+  required: boolean;
+  producer: string;
+  extract: string;
+  phase: 'create' | 'annotate';
+}
+
+export interface ValidatedArtifactSchema {
+  files: ValidatedArtifactFile[];
 }
 
 export interface ValidatedPipelineFile {
   agents: string[];
   routes: ValidatedRoute[];
   submitters: string[];
+  artifactSchema: ValidatedArtifactSchema;
   /**
    * Optional per-template progress budget (plan 2026-08-06): overrides the
    * scheduler-injected progress policy for every task frozen from this
    * template. Null when the pipeline declares none.
    */
   budget: ProgressPolicy | null;
+}
+
+function validateArtifactSchema(
+  fileName: string,
+  raw: unknown,
+  agents: ReadonlySet<string>,
+): ValidatedArtifactSchema {
+  const root = asRecord(fileName, raw, 'artifactSchema');
+  const entries = asArray(fileName, root.files, 'artifactSchema.files');
+  if (entries.length === 0) invalid(fileName, 'artifactSchema.files 至少需要一个文件。');
+  const seen = new Set<string>();
+  const files = entries.map((entry, index) => {
+    const item = asRecord(fileName, entry, `artifactSchema.files[${index}]`);
+    const name = asSafeId(fileName, item.name, `artifactSchema.files[${index}].name`);
+    if (seen.has(name)) invalid(fileName, `artifactSchema.files 中 ${name} 重复。`);
+    seen.add(name);
+    const producer = asSafeId(fileName, item.producer, `artifactSchema.files[${index}].producer`);
+    if (!agents.has(producer)) invalid(fileName, `artifactSchema.files[${index}].producer 未声明。`);
+    const phase = asEnum(fileName, item.phase, `artifactSchema.files[${index}].phase`, ['create', 'annotate']);
+    return {
+      name,
+      required: asBoolean(fileName, item.required, `artifactSchema.files[${index}].required`),
+      producer,
+      extract: asSafeId(fileName, item.extract, `artifactSchema.files[${index}].extract`),
+      phase,
+    } satisfies ValidatedArtifactFile;
+  });
+  if (!files.some((file) => file.required && file.phase === 'create')) {
+    invalid(fileName, 'artifactSchema 至少需要一个 required create 文件。');
+  }
+  return { files };
+}
+
+function validateInject(fileName: string, raw: unknown, index: number): ValidatedInject {
+  const item = asRecord(fileName, raw, `routes.inject[${index}]`);
+  return {
+    version: asEnum(fileName, item.version, `routes.inject[${index}].version`, ['input']),
+    file: asSafeId(fileName, item.file, `routes.inject[${index}].file`),
+    as: asString(fileName, item.as, `routes.inject[${index}].as`, { required: true }),
+  };
 }
 
 /** Validates pipeline.yaml: deterministic Agent order, routes and final submitters. */
@@ -211,24 +271,27 @@ export function validatePipelineFile(fileName: string, raw: unknown): ValidatedP
   const agents = asArray(fileName, root.agents, 'agents').map((entry, index) =>
     asSafeId(fileName, entry, `agents[${index}]`),
   );
-  if (agents.length === 0) {
-    invalid(fileName, 'agents 至少需要一个 Agent。');
-  }
+  if (agents.length === 0) invalid(fileName, 'agents 至少需要一个 Agent。');
   const seenAgents = new Set<string>();
   for (const agentId of agents) {
-    if (seenAgents.has(agentId)) {
-      invalid(fileName, `Agent ${agentId} 在 agents 列表中重复，顺序必须确定。`);
-    }
+    if (seenAgents.has(agentId)) invalid(fileName, `Agent ${agentId} 在 agents 列表中重复，顺序必须确定。`);
     seenAgents.add(agentId);
   }
 
+  const artifactSchema = root.artifactSchema === undefined || root.artifactSchema === null
+    ? { files: [{ name: 'content.md', required: true, producer: agents[0]!, extract: 'content', phase: 'create' as const }] }
+    : validateArtifactSchema(fileName, root.artifactSchema, seenAgents);
   const routes = asArray(fileName, root.routes, 'routes').map((entry, index) => {
     const route = asRecord(fileName, entry, `routes[${index}]`);
+    const inject = route.inject === undefined || route.inject === null
+      ? []
+      : asArray(fileName, route.inject, `routes[${index}].inject`).map((item, injectIndex) => validateInject(fileName, item, injectIndex));
     return {
       from: asSafeId(fileName, route.from, `routes[${index}].from`),
       to: asSafeId(fileName, route.to, `routes[${index}].to`),
       kind: asEnum(fileName, route.kind, `routes[${index}].kind`, ['message', 'artifact']),
       label: asString(fileName, route.label, `routes[${index}].label`, { required: false }),
+      inject,
     } satisfies ValidatedRoute;
   });
 
@@ -236,43 +299,26 @@ export function validatePipelineFile(fileName: string, raw: unknown): ValidatedP
   const submitters = asArray(fileName, finalOutput.submitters, 'finalOutput.submitters').map(
     (entry, index) => asSafeId(fileName, entry, `finalOutput.submitters[${index}]`),
   );
-  if (submitters.length === 0) {
-    invalid(fileName, 'finalOutput.submitters 至少需要一个 Agent。');
-  }
+  if (submitters.length === 0) invalid(fileName, 'finalOutput.submitters 至少需要一个 Agent。');
   const seenSubmitters = new Set<string>();
   for (const submitter of submitters) {
-    if (seenSubmitters.has(submitter)) {
-      invalid(fileName, `finalOutput.submitters 中 ${submitter} 重复。`);
-    }
+    if (seenSubmitters.has(submitter)) invalid(fileName, `finalOutput.submitters 中 ${submitter} 重复。`);
     seenSubmitters.add(submitter);
   }
 
-  // Optional progress budget: an integer turn count within the platform
-  // ceiling, with exactly the one declared key (plan 2026-08-06).
   let budget: ProgressPolicy | null = null;
   if ('budget' in root && root.budget !== undefined && root.budget !== null) {
     const budgetRecord = asRecord(fileName, root.budget, 'budget');
     for (const key of Object.keys(budgetRecord)) {
-      if (key !== 'maxTurnsSinceHumanAnswer') {
-        invalid(fileName, `budget 只能声明 maxTurnsSinceHumanAnswer，未知键 ${key}。`);
-      }
+      if (key !== 'maxTurnsSinceHumanAnswer') invalid(fileName, `budget 只能声明 maxTurnsSinceHumanAnswer，未知键 ${key}。`);
     }
     const turns = budgetRecord.maxTurnsSinceHumanAnswer;
-    if (typeof turns !== 'number' || !Number.isInteger(turns)) {
-      invalid(fileName, 'budget.maxTurnsSinceHumanAnswer 必须是整数。');
-    }
-    if (turns < 1 || turns > PROGRESS_POLICY_CEILING) {
-      invalid(
-        fileName,
-        `budget.maxTurnsSinceHumanAnswer 必须在 1 到 ${PROGRESS_POLICY_CEILING} 之间。`,
-      );
-    }
+    if (typeof turns !== 'number' || !Number.isInteger(turns)) invalid(fileName, 'budget.maxTurnsSinceHumanAnswer 必须是整数。');
+    if (turns < 1 || turns > PROGRESS_POLICY_CEILING) invalid(fileName, `budget.maxTurnsSinceHumanAnswer 必须在 1 到 ${PROGRESS_POLICY_CEILING} 之间。`);
     budget = Object.freeze({ maxTurnsSinceHumanAnswer: turns });
   }
-
-  return { agents, routes, submitters, budget };
+  return { agents, routes, submitters, artifactSchema, budget };
 }
-
 export interface ValidatedAgentSkill {
   id: string;
   name: string;
@@ -282,143 +328,75 @@ export interface ValidatedAgentSkill {
 
 /** Structural shape of one validated turn contract (spec §6). */
 export interface ValidatedTurnContract {
-  version: 1;
-  production: {
+  version: 1 | 2;
+  production?: {
+    files?: string[];
     completionAction: 'finish_production';
     output: {
       formats: Array<'markdown' | 'text'>;
       sources: Array<'inline' | 'workspace_file' | 'current_input_artifact'>;
     };
   };
+  annotate?: { files: string[] };
   dispatch: {
     cardinality: 'single';
-    allowedActions: Array<'send_message' | 'publish_artifact' | 'submit_final_artifact'>;
-    /**
-     * Candidate target sets per dispatch intent (plan 2026-08-06): one
-     * dispatch action per turn still, but its target may be any agent in the
-     * declared set. Scalar YAML declarations normalize to one-element sets.
-     */
-    targets: Partial<
-      Record<'send_message' | 'publish_artifact' | 'submit_final_artifact', string[]>
-    >;
-    productionPackageRef: 'current';
+    allowedActions: Array<'send_message' | 'publish_artifact' | 'submit_final_artifact' | 'forward_input_version' | 'submit_final_artifact' | 'request_human_input'>;
+    targets: Partial<Record<'send_message' | 'publish_artifact' | 'submit_final_artifact' | 'forward_input_version', string[]>>;
+    productionPackageRef?: 'current';
   };
 }
 
 const PRODUCTION_SOURCES = ['inline', 'workspace_file', 'current_input_artifact'] as const;
-
-const DISPATCH_INTENTS = ['send_message', 'publish_artifact', 'submit_final_artifact'] as const;
+const DISPATCH_INTENTS = ['send_message', 'publish_artifact', 'submit_final_artifact', 'forward_input_version', 'request_human_input'] as const;
 
 /** Validates the required `turnContract` block of one agent file (spec §6). */
 function validateTurnContract(fileName: string, raw: unknown): ValidatedTurnContract {
   const contract = asRecord(fileName, raw, 'turnContract');
+  const version = contract.version;
+  if (version !== 1 && version !== 2) invalid(fileName, 'turnContract.version 仅支持 1 或 2。');
 
-  if (contract.version !== 1) {
-    invalid(fileName, 'turnContract.version 目前仅支持 1。');
-  }
-
-  const production = asRecord(fileName, contract.production, 'turnContract.production');
-  const completionAction = asString(
-    fileName,
-    production.completionAction,
-    'turnContract.production.completionAction',
-    { required: true },
-  );
-  if (completionAction !== 'finish_production') {
-    invalid(fileName, 'turnContract.production.completionAction 仅支持 finish_production。');
-  }
-  const output = asRecord(fileName, production.output, 'turnContract.production.output');
-  const formats = asArray(fileName, output.formats, 'turnContract.production.output.formats').map(
-    (entry, index) =>
-      asEnum(fileName, entry, `turnContract.production.output.formats[${index}]`, [
-        'markdown',
-        'text',
-      ]),
-  );
-  if (formats.length === 0) {
-    invalid(fileName, 'turnContract.production.output.formats 至少需要一个格式。');
-  }
-  const sources = asArray(fileName, output.sources, 'turnContract.production.output.sources').map(
-    (entry, index) =>
-      asEnum(fileName, entry, `turnContract.production.output.sources[${index}]`, PRODUCTION_SOURCES),
-  );
-  if (sources.length === 0) {
-    invalid(fileName, 'turnContract.production.output.sources 至少需要一个来源。');
+  let production: ValidatedTurnContract['production'];
+  if (contract.production !== undefined && contract.production !== null) {
+    const p = asRecord(fileName, contract.production, 'turnContract.production');
+    // v2 carries files/sources/formats directly under production; v1 wrapped
+    // them under `output`. Accept both: prefer v2 top-level fields, fall back
+    // to v1 `output` for legacy snapshots.
+    const outputSrc = (p.output !== undefined && p.output !== null) ? asRecord(fileName, p.output, 'turnContract.production.output') : p;
+    const formats = asArray(fileName, outputSrc.formats, 'turnContract.production.formats').map((e,i) => asEnum(fileName,e,`turnContract.production.formats[${i}]`,['markdown','text']));
+    if (formats.length === 0) invalid(fileName, 'turnContract.production.formats 至少需要一个格式。');
+    const sources = asArray(fileName, outputSrc.sources, 'turnContract.production.sources').map((e,i) => asEnum(fileName,e,`turnContract.production.sources[${i}]`,PRODUCTION_SOURCES));
+    if (sources.length === 0) invalid(fileName, 'turnContract.production.sources 至少需要一个来源。');
+    const files = p.files === undefined ? undefined : asArray(fileName,p.files,'turnContract.production.files').map((e,i)=>asSafeId(fileName,e,`turnContract.production.files[${i}]`));
+    production = { completionAction: 'finish_production', output: { formats: formats as Array<'markdown'|'text'>, sources: sources as Array<'inline'|'workspace_file'|'current_input_artifact'> }, ...(files ? { files } : {}) };
   }
 
+  let annotate: ValidatedTurnContract['annotate'];
+  if (contract.annotate !== undefined && contract.annotate !== null) {
+    const a = asRecord(fileName, contract.annotate, 'turnContract.annotate');
+    annotate = { files: asArray(fileName,a.files,'turnContract.annotate.files').map((e,i)=>asSafeId(fileName,e,`turnContract.annotate.files[${i}]`)) };
+  }
+  if (production !== undefined && annotate !== undefined) invalid(fileName, 'turnContract 不能同时声明 production 与 annotate。');
   const dispatch = asRecord(fileName, contract.dispatch, 'turnContract.dispatch');
-  const cardinality = asString(fileName, dispatch.cardinality, 'turnContract.dispatch.cardinality', {
-    required: true,
+  const cardinality = dispatch.cardinality === undefined ? 'single' : asEnum(fileName,dispatch.cardinality,'turnContract.dispatch.cardinality',['single']);
+  const seen = new Set<string>();
+  const allowedActions = asArray(fileName,dispatch.allowedActions,'turnContract.dispatch.allowedActions').map((e,i)=>{
+    const intent=asEnum(fileName,e,`turnContract.dispatch.allowedActions[${i}]`,DISPATCH_INTENTS);
+    if(seen.has(intent)) invalid(fileName,`turnContract.dispatch.allowedActions 中 ${intent} 重复。`); seen.add(intent); return intent;
   });
-  if (cardinality !== 'single') {
-    invalid(fileName, 'turnContract.dispatch.cardinality 仅支持 single。');
-  }
-  const seenActions = new Set<string>();
-  const allowedActions = asArray(
-    fileName,
-    dispatch.allowedActions,
-    'turnContract.dispatch.allowedActions',
-  ).map((entry, index) => {
-    const intent = asEnum(
-      fileName,
-      entry,
-      `turnContract.dispatch.allowedActions[${index}]`,
-      DISPATCH_INTENTS,
-    );
-    if (seenActions.has(intent)) {
-      invalid(fileName, `turnContract.dispatch.allowedActions 中 ${intent} 重复。`);
-    }
-    seenActions.add(intent);
-    return intent;
-  });
-  if (allowedActions.length === 0) {
-    invalid(fileName, 'turnContract.dispatch.allowedActions 至少需要一个发送意图。');
-  }
-
+  if (allowedActions.length===0) invalid(fileName,'turnContract.dispatch.allowedActions 至少需要一个发送意图。');
   const targets: ValidatedTurnContract['dispatch']['targets'] = {};
-  if ('targets' in dispatch && dispatch.targets !== undefined && dispatch.targets !== null) {
-    const targetMap = asRecord(fileName, dispatch.targets, 'turnContract.dispatch.targets');
-    for (const [intent, target] of Object.entries(targetMap)) {
-      if (!(DISPATCH_INTENTS as readonly string[]).includes(intent)) {
-        invalid(fileName, `turnContract.dispatch.targets 包含未知发送意图 ${intent}。`);
-      }
-      if (!seenActions.has(intent)) {
-        invalid(fileName, `turnContract.dispatch.targets.${intent} 未在 allowedActions 中声明。`);
-      }
-      targets[intent as keyof typeof targets] = asSafeIdList(
-        fileName,
-        target,
-        `turnContract.dispatch.targets.${intent}`,
-      );
+  if (dispatch.targets !== undefined && dispatch.targets !== null) {
+    const map=asRecord(fileName,dispatch.targets,'turnContract.dispatch.targets');
+    for (const [intent,target] of Object.entries(map)) {
+      if (!(DISPATCH_INTENTS as readonly string[]).includes(intent)) invalid(fileName,`turnContract.dispatch.targets 包含未知发送意图 ${intent}。`);
+      if (!seen.has(intent)) invalid(fileName,`turnContract.dispatch.targets.${intent} 未在 allowedActions 中声明。`);
+      if (intent !== 'request_human_input') targets[intent as keyof typeof targets]=asSafeIdList(fileName,target,`turnContract.dispatch.targets.${intent}`);
     }
   }
-
-  const productionPackageRef = asString(
-    fileName,
-    dispatch.productionPackageRef,
-    'turnContract.dispatch.productionPackageRef',
-    { required: true },
-  );
-  if (productionPackageRef !== 'current') {
-    invalid(fileName, "turnContract.dispatch.productionPackageRef 仅支持 'current'。");
-  }
-
-  return {
-    version: 1,
-    production: {
-      completionAction: 'finish_production',
-      output: {
-        formats: formats as Array<'markdown' | 'text'>,
-        sources: sources as Array<'inline' | 'workspace_file' | 'current_input_artifact'>,
-      },
-    },
-    dispatch: {
-      cardinality: 'single',
-      allowedActions,
-      targets,
-      productionPackageRef: 'current',
-    },
-  };
+  const productionPackageRef = dispatch.productionPackageRef === undefined ? undefined : asEnum(fileName,dispatch.productionPackageRef,'turnContract.dispatch.productionPackageRef',['current']);
+  if (version === 2 && productionPackageRef !== undefined) invalid(fileName,'v2 turnContract 不得声明 productionPackageRef。');
+  if (version === 2 && production === undefined && annotate === undefined && !allowedActions.some((a)=>a !== 'request_human_input')) invalid(fileName,'协调回合必须声明至少一个 dispatch。');
+  return { version: version as 1|2, ...(production ? {production} : {}), ...(annotate ? {annotate} : {}), dispatch: { cardinality, allowedActions, targets, ...(productionPackageRef ? {productionPackageRef} : {}) } };
 }
 
 export interface ValidatedAgentFile {

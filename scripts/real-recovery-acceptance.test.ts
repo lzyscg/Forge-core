@@ -137,10 +137,19 @@ routes:
     to: agent-beta
     kind: artifact
     label: 交付产物
+    inject:
+      - { version: input, file: content.md, as: 上一版正文 }
   - from: agent-beta
     to: agent-alpha
     kind: message
     label: 返修意见
+    inject:
+      - { version: input, file: content.md, as: 上一版正文 }
+      - { version: input, file: review.md, as: 返修意见 }
+artifactSchema:
+  files:
+    - { name: content.md, required: true,  producer: agent-alpha, extract: content, phase: create }
+    - { name: review.md,  required: false, producer: agent-beta,  extract: review,   phase: annotate }
 finalOutput:
   submitters:
     - agent-alpha
@@ -159,18 +168,15 @@ skills:
     description: 中性技能。
     contentPath: skills/alpha-skill/SKILL.md
 turnContract:
-  version: 1
+  version: 2
   production:
-    completionAction: finish_production
-    output:
-      formats: [markdown]
-      sources: [inline, workspace_file]
+    files: [content.md]
+    sources: [inline, workspace_file]
+    formats: [markdown]
   dispatch:
-    cardinality: single
     allowedActions: [publish_artifact]
     targets:
       publish_artifact: agent-beta
-    productionPackageRef: current
 `;
 
 const FIXTURE_AGENT_BETA_YAML = `id: agent-beta
@@ -185,18 +191,13 @@ skills:
     description: 中性技能。
     contentPath: skills/beta-skill/SKILL.md
 turnContract:
-  version: 1
-  production:
-    completionAction: finish_production
-    output:
-      formats: [markdown, text]
-      sources: [inline, current_input_artifact]
+  version: 2
+  annotate:
+    files: [review.md]
   dispatch:
-    cardinality: single
     allowedActions: [send_message, submit_final_artifact]
     targets:
       send_message: agent-alpha
-    productionPackageRef: current
 `;
 
 function installFixtureTemplate(templateRoot: string): void {
@@ -218,12 +219,12 @@ function publishFixtureArtifactTurn(title: string, content: string): Array<Recor
     {
       type: 'finish_production',
       source: 'inline',
-      content,
+      files: [{ name: 'content.md', content }],
       format: 'markdown',
       artifactType: FIXTURE_FINAL_NAME,
       title,
     },
-    { type: 'publish_artifact', productionPackageRef: 'current' },
+    { type: 'publish_artifact' },
   ];
 }
 
@@ -249,17 +250,14 @@ function phaseBScripts(): Record<string, unknown> {
         publicText: '请返修。',
         actions: [
           {
-            type: 'finish_production',
-            source: 'inline',
-            content: '请修订第一版。',
-            format: 'text',
-            artifactType: null,
-            title: null,
+            type: 'annotate_artifact',
+            file: 'review.md',
+            content: '---\nverdict: reject\n---\n请修订第一版。',
           },
           {
             type: 'send_message',
             targetAgentId: 'agent-alpha',
-            productionPackageRef: 'current',
+            summary: '请返修。',
           },
         ],
       },
@@ -267,8 +265,12 @@ function phaseBScripts(): Record<string, unknown> {
         kind: 'result',
         publicText: '提交最终产物。',
         actions: [
-          { type: 'finish_production', source: 'current_input_artifact' },
-          { type: 'submit_final_artifact', productionPackageRef: 'current' },
+          {
+            type: 'annotate_artifact',
+            file: 'review.md',
+            content: '---\nverdict: pass\n---\n通过。',
+          },
+          { type: 'submit_final_artifact' },
         ],
       },
     ],
@@ -483,8 +485,8 @@ describe('fake recovery orchestration (plan Phase D Task 4 Step 1 verbatim)', ()
           kind: 'result',
           publicText: '直接提交。',
           actions: [
-            { type: 'finish_production', source: 'current_input_artifact' },
-            { type: 'submit_final_artifact', productionPackageRef: 'current' },
+            { type: 'annotate_artifact', file: 'review.md', content: '---\nverdict: pass\n---\n通过。' },
+            { type: 'submit_final_artifact' },
           ],
         },
       ],
@@ -685,12 +687,12 @@ function recoveryCliPhaseAScripts(): Record<string, unknown> {
           {
             type: 'finish_production',
             source: 'workspace_file',
-            workspaceFile: 'draft/chapter.md',
+            files: [{ name: 'content.md', workspaceFile: 'draft/chapter.md' }],
             format: 'markdown',
             artifactType: 'chapter_markdown',
             title: '初稿',
           },
-          { type: 'publish_artifact', productionPackageRef: 'current' },
+          { type: 'publish_artifact' },
         ],
       },
     ],
@@ -705,17 +707,14 @@ function recoveryCliPhaseBScripts(): Record<string, unknown> {
         publicText: '初稿需要返修。',
         actions: [
           {
-            type: 'finish_production',
-            source: 'inline',
-            content: '请修复问题后重新发布完整稿件。',
-            format: 'text',
-            artifactType: null,
-            title: null,
+            type: 'annotate_artifact',
+            file: 'review.md',
+            content: '---\nverdict: reject\n---\n请修复问题后重新发布完整稿件。',
           },
           {
             type: 'send_message',
             targetAgentId: 'writer',
-            productionPackageRef: 'current',
+            summary: '初稿需要返修。',
           },
         ],
       },
@@ -723,8 +722,8 @@ function recoveryCliPhaseBScripts(): Record<string, unknown> {
         kind: 'result',
         publicText: '复审通过，申请系统最终交付。',
         actions: [
-          { type: 'finish_production', source: 'current_input_artifact' },
-          { type: 'submit_final_artifact', productionPackageRef: 'current' },
+          { type: 'annotate_artifact', file: 'review.md', content: '---\nverdict: pass\n---\n复审通过。' },
+          { type: 'submit_final_artifact' },
         ],
       },
     ],
@@ -739,12 +738,12 @@ function recoveryCliPhaseBScripts(): Record<string, unknown> {
           {
             type: 'finish_production',
             source: 'workspace_file',
-            workspaceFile: 'draft/chapter.md',
+            files: [{ name: 'content.md', workspaceFile: 'draft/chapter.md' }],
             format: 'markdown',
             artifactType: 'chapter_markdown',
             title: '修订稿',
           },
-          { type: 'publish_artifact', productionPackageRef: 'current' },
+          { type: 'publish_artifact' },
         ],
       },
     ],

@@ -1,21 +1,17 @@
 id: writer
 name: 写作 Agent
 description: 依据任务指令起草完整章节正文，并按退回意见修订后重新发布完整稿件。
-# 占位模型：真实验收时由脚本复制到工作副本并仅替换该标量（单一 configured 命名空间）。
 model: configured/writer-model
 systemPromptFile: prompts/writer-system.md
 turnContract:
-  version: 1
+  version: 2
   production:
-    completionAction: finish_production
-    output:
-      formats:
-        - markdown
-      sources:
-        - inline
-        - workspace_file
+    files: [content.md, revision.md]
+    sources: [inline, workspace_file]
+    formats: [markdown]
   dispatch:
-    cardinality: single
     allowedActions:
       - publish_artifact
-    productionPackageRef: current
+    targets:
+      publish_artifact:
+        - reviewer

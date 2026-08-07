@@ -673,6 +673,11 @@ export function frozenSnapshotFixture(): FrozenTemplate {
       { from: 'agent-beta', to: 'agent-alpha', kind: 'message', label: 'message reply' },
     ],
     finalOutput: { name: 'final-output', format: 'markdown', submitters: ['agent-beta'] },
+    artifactSchema: {
+      files: [
+        { name: 'content.md', required: true, producer: 'agent-alpha', extract: 'content', phase: 'create' },
+      ],
+    },
     sourcePath: 'fixture:neutral',
   };
 }

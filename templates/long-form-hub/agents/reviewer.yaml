@@ -1,26 +1,19 @@
 id: reviewer
 name: 审核 Agent
-description: 审读章节正文：不通过时直连退回写作 Agent 并给出可操作意见；通过时封存收到章节转交总控。
-# 占位模型：真实验收时由脚本复制到工作副本并仅替换该标量（单一 configured 命名空间）。
+description: 审读章节正文：不通过时直连退回写作 Agent 并给出可操作意见；通过时标注 review 并把输入版本转发给总控。
 model: configured/reviewer-model
 systemPromptFile: prompts/reviewer-system.md
 turnContract:
-  version: 1
-  production:
-    completionAction: finish_production
-    output:
-      formats:
-        - markdown
-        - text
-      sources:
-        - inline
-        - current_input_artifact
+  version: 2
+  annotate:
+    files: [review.md]
   dispatch:
-    cardinality: single
     allowedActions:
+      - forward_input_version
       - send_message
+      - request_human_input
     targets:
+      forward_input_version:
+        - controller
       send_message:
         - writer
-        - controller
-    productionPackageRef: current

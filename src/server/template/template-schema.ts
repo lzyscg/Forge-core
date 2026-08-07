@@ -81,6 +81,18 @@ export interface FrozenAgentConfig {
   turnContract: TurnContract | null;
 }
 
+export interface ArtifactSchemaFile {
+  name: string;
+  required: boolean;
+  producer: string;
+  extract: string;
+  phase: 'create' | 'annotate';
+}
+
+export interface ArtifactSchema {
+  files: ArtifactSchemaFile[];
+}
+
 export interface FrozenTemplate {
   id: string;
   name: string;
@@ -88,7 +100,8 @@ export interface FrozenTemplate {
   versionHash: string;
   inputFields: InputField[];
   agents: FrozenAgentConfig[];
-  routes: Array<{ from: string; to: string; kind: 'message' | 'artifact'; label: string }>;
+  routes: Array<{ from: string; to: string; kind: 'message' | 'artifact'; label: string; inject?: Array<{ version: 'input'; file: string; as: string }> }>;
+  artifactSchema: ArtifactSchema;
   finalOutput: { name: string; format: 'markdown' | 'text'; submitters: string[] };
   /**
    * Optional per-template progress budget (plan 2026-08-06): overrides the

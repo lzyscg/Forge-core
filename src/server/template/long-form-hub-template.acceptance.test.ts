@@ -1,13 +1,13 @@
 // @vitest-environment node
 /**
- * Long-form hub acceptance template (plan 2026-08-06).
+ * Long-form hub acceptance template (plan 2026-08-07 Phase 3, v7).
  *
  * Loads the committed `templates/long-form-hub` template through the generic
- * template contract and pins the shape the hybrid hub topology depends on:
- * three Agents (controller/writer/reviewer), the controller owning a
- * multi-target `send_message` candidate set plus the sole `submit_final_artifact`,
- * the reviewer choosing between a direct return to writer and a report to the
- * controller, and a template-declared progress budget.
+ * template contract and pins the v7 hybrid hub topology: three Agents
+ * (controller/writer/reviewer) with production/operate/coordinate turn
+ * contracts, the reviewer->controller artifact edge (zero-copy forward), the
+ * controller as the sole final submitter, and a template-declared progress
+ * budget.
  *
  * The committed fixture must validate with no Provider call: Agents carry
  * non-live `configured/<model>` placeholders in a single provider namespace.
@@ -33,65 +33,64 @@ describe('long-form hub acceptance template', () => {
         expect.objectContaining({ from: 'controller', to: 'reviewer', kind: 'message' }),
         expect.objectContaining({ from: 'writer', to: 'reviewer', kind: 'artifact' }),
         expect.objectContaining({ from: 'reviewer', to: 'writer', kind: 'message' }),
-        expect.objectContaining({ from: 'reviewer', to: 'controller', kind: 'message' }),
+        // v7: reviewer->controller is an artifact edge (zero-copy forward).
+        expect.objectContaining({ from: 'reviewer', to: 'controller', kind: 'artifact' }),
       ]),
     );
     expect(template.finalOutput.submitters).toEqual(['controller']);
-    // The template declares a progress budget within the platform ceiling.
     expect(template.budget).toEqual({ maxTurnsSinceHumanAnswer: 16 });
+    expect(template.artifactSchema.files.map((file) => file.name).sort()).toEqual([
+      'content.md',
+      'review.md',
+      'revision.md',
+    ]);
   });
 
-  it('gives the controller multi-target dispatch and the sole final submission', async () => {
+  it('gives the controller a coordinate (dispatch-only) contract with sole final submission', async () => {
     const template = await loadTemplateDirectory(hubTemplateRoot());
     const controller = template.agents.find((agent) => agent.id === 'controller');
-    expect(controller?.turnContract).toEqual({
-      version: 1,
-      production: {
-        completionAction: 'finish_production',
-        output: { formats: ['markdown', 'text'], sources: ['inline', 'current_input_artifact'] },
-      },
+    expect(controller?.turnContract).toMatchObject({
+      version: 2,
       dispatch: {
-        cardinality: 'single',
         allowedActions: ['send_message', 'submit_final_artifact'],
         targets: { send_message: ['writer', 'reviewer'] },
-        productionPackageRef: 'current',
       },
     });
+    expect(controller?.turnContract?.production).toBeUndefined();
+    expect(controller?.turnContract?.annotate).toBeUndefined();
   });
 
-  it('gives the reviewer a direct-return candidate and a forward-to-controller candidate', async () => {
+  it('gives the reviewer an operate contract (annotate + forward/send)', async () => {
     const template = await loadTemplateDirectory(hubTemplateRoot());
     const reviewer = template.agents.find((agent) => agent.id === 'reviewer');
-    expect(reviewer?.turnContract).toEqual({
-      version: 1,
-      production: {
-        completionAction: 'finish_production',
-        output: { formats: ['markdown', 'text'], sources: ['inline', 'current_input_artifact'] },
-      },
+    expect(reviewer?.turnContract).toMatchObject({
+      version: 2,
+      annotate: { files: ['review.md'] },
       dispatch: {
-        cardinality: 'single',
-        allowedActions: ['send_message'],
-        targets: { send_message: ['writer', 'controller'] },
-        productionPackageRef: 'current',
+        allowedActions: ['forward_input_version', 'send_message', 'request_human_input'],
+        targets: {
+          forward_input_version: ['controller'],
+          send_message: ['writer'],
+        },
       },
     });
+    expect(reviewer?.turnContract?.production).toBeUndefined();
   });
 
-  it('lets the writer publish chapter artifacts without a dispatch target choice', async () => {
+  it('gives the writer a production contract with publish_artifact', async () => {
     const template = await loadTemplateDirectory(hubTemplateRoot());
     const writer = template.agents.find((agent) => agent.id === 'writer');
-    expect(writer?.turnContract).toEqual({
-      version: 1,
+    expect(writer?.turnContract).toMatchObject({
+      version: 2,
       production: {
-        completionAction: 'finish_production',
-        output: { formats: ['markdown'], sources: ['inline', 'workspace_file'] },
+        files: ['content.md', 'revision.md'],
+        output: { sources: ['inline', 'workspace_file'], formats: ['markdown'] },
       },
       dispatch: {
-        cardinality: 'single',
         allowedActions: ['publish_artifact'],
-        targets: {},
-        productionPackageRef: 'current',
+        targets: { publish_artifact: ['reviewer'] },
       },
     });
+    expect(writer?.turnContract?.annotate).toBeUndefined();
   });
 });

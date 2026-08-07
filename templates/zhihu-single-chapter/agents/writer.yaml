@@ -10,18 +10,15 @@ skills:
     description: 起草顺序、连续性检查、返修清单与终稿自检。
     contentPath: skills/chapter-drafting/SKILL.md
 turnContract:
-  version: 1
+  version: 2
   production:
-    completionAction: finish_production
-    output:
-      formats:
-        - markdown
-      sources:
-        - workspace_file
+    files: [content.md]
+    sources:
+      - workspace_file
+    formats:
+      - markdown
   dispatch:
-    cardinality: single
     allowedActions:
       - publish_artifact
     targets:
       publish_artifact: reviewer
-    productionPackageRef: current
