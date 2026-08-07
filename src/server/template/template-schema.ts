@@ -65,13 +65,28 @@ export interface TurnContract {
   };
 }
 
+/** One frozen Skill: identity + content file plus optional section files. */
+export interface FrozenSkill {
+  id: string;
+  name: string;
+  description: string;
+  contentPath: string;
+  /** Optional: section-file directory (template-relative); null = no sections. */
+  sectionsPath: string | null;
+  /**
+   * `.md` relative paths collected from `sectionsPath` at load time (relative
+   * to the template directory, forward slashes, sorted); runtime read-only.
+   */
+  sections: string[];
+}
+
 export interface FrozenAgentConfig {
   id: string;
   name: string;
   description: string;
   systemPrompt: string;
   model: string;
-  skills: Array<{ id: string; name: string; description: string; contentPath: string }>;
+  skills: FrozenSkill[];
   /**
    * The agent's turn contract. Every CURRENT template agent declares one
    * (enforced by the validator); historical frozen task snapshots loaded in

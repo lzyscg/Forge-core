@@ -12,7 +12,7 @@
  */
 import { createHash } from 'node:crypto';
 import { readFile, readdir, realpath, stat } from 'node:fs/promises';
-import { basename, isAbsolute, join, resolve, sep } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
   TEMPLATE_ERROR_CODES,
   TemplateError,
@@ -112,6 +112,65 @@ async function readSkillContent(templateDir: string, contentPath: string): Promi
   return readContainedFile(templateDir, contentPath, (message) => skillMissing(contentPath, message));
 }
 
+/** One collected Skill section: template-relative path + normalized content. */
+interface SkillSectionFile {
+  path: string;
+  content: string;
+}
+
+/** Depth ceiling for the recursive section walk (generous; templates are flat). */
+const MAX_SECTION_DEPTH = 8;
+
+/**
+ * Collects every `.md` section file under one Skill's optional `sectionsPath`
+ * (template-relative, forward slashes, deterministic sorted order). `null`
+ * returns `[]` for backwards compatibility. Hidden files, symlinks and
+ * non-`.md` files are skipped; each file is still read through
+ * `readContainedFile` so its realpath stays confined to the template
+ * directory. A declared but missing/unreadable directory fails the template
+ * as a missing Skill.
+ */
+async function collectSkillSections(
+  templateDir: string,
+  sectionsPath: string | null,
+): Promise<SkillSectionFile[]> {
+  if (sectionsPath === null) {
+    return [];
+  }
+  const sections: SkillSectionFile[] = [];
+  const walk = async (dir: string, depth: number): Promise<void> => {
+    if (depth > MAX_SECTION_DEPTH) {
+      return;
+    }
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      skillMissing(sectionsPath, '缺失或不可读。');
+    }
+    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const entry of entries) {
+      if (entry.name.startsWith('.') || entry.isSymbolicLink()) {
+        continue;
+      }
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(full, depth + 1);
+        continue;
+      }
+      if (entry.isFile() && entry.name.endsWith('.md')) {
+        const relPath = relative(templateDir, full).split(sep).join('/');
+        const content = await readContainedFile(templateDir, relPath, (message) =>
+          skillMissing(relPath, message),
+        );
+        sections.push({ path: relPath, content });
+      }
+    }
+  };
+  await walk(join(templateDir, sectionsPath), 1);
+  return sections;
+}
+
 /**
  * Reads one Agent's `systemPromptFile`, confined to the template directory
  * (plan Phase D Task 1 deviation). The resolved content becomes the frozen
@@ -158,7 +217,7 @@ function canonicalize(value: unknown): unknown {
 interface CanonicalSource {
   template: ValidatedTemplateFile;
   pipeline: ValidatedPipelineFile;
-  agents: Array<ValidatedAgentFile & { skillContents: string[] }>;
+  agents: Array<ValidatedAgentFile & { skillContents: string[]; skillSections: Array<SkillSectionFile[]> }>;
 }
 
 /**
@@ -204,6 +263,17 @@ function computeVersionHash(source: CanonicalSource): string {
         description: skill.description,
         contentPath: skill.contentPath,
         content: source.agents.length > 0 ? (agent.skillContents[index] ?? '') : '',
+        // Skill sections are hashed only when present; an absent sections key
+        // (not an empty array) keeps every pre-existing template's version
+        // hash byte-stable (iron rule 2, mirroring the turnContract trick).
+        ...(agent.skillSections[index].length > 0
+          ? {
+              sections: agent.skillSections[index].map((section) => ({
+                path: section.path,
+                content: section.content,
+              })),
+            }
+          : {}),
       })),
       // Historical snapshots predate the contract; omitting the key (instead
       // of serializing null) keeps their original version hash reproducible
@@ -310,24 +380,28 @@ async function loadValidated(
   const agentsWithContents = [] as CanonicalSource['agents'];
   for (const agent of agents) {
     const skillContents: string[] = [];
+    const skillSections: Array<SkillSectionFile[]> = [];
     for (const skill of agent.skills) {
       skillContents.push(await readSkillContent(sourcePath, skill.contentPath));
+      skillSections.push(await collectSkillSections(sourcePath, skill.sectionsPath));
     }
-    agentsWithContents.push({ ...agent, skillContents });
+    agentsWithContents.push({ ...agent, skillContents, skillSections });
   }
 
   const versionHash = computeVersionHash({ template, pipeline, agents: agentsWithContents });
-  const frozenAgents: FrozenAgentConfig[] = agents.map((agent) => ({
+  const frozenAgents: FrozenAgentConfig[] = agentsWithContents.map((agent) => ({
     id: agent.id,
     name: agent.name,
     description: agent.description,
     systemPrompt: agent.systemPrompt,
     model: agent.model,
-    skills: agent.skills.map((skill) => ({
+    skills: agent.skills.map((skill, index) => ({
       id: skill.id,
       name: skill.name,
       description: skill.description,
       contentPath: skill.contentPath,
+      sectionsPath: skill.sectionsPath,
+      sections: agent.skillSections[index].map((section) => section.path),
     })),
     turnContract: agent.turnContract,
   }));

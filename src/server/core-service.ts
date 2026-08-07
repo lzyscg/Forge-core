@@ -166,6 +166,26 @@ export class CoreService {
         skills.readSkillForDisplay(taskId, skillId),
       );
     }
+    // Structural skill-section-reader wiring (plan 2026-08-07 Phase 1): the
+    // same structural-setter discipline as the content reader above. Runtimes
+    // exposing `setSkillSectionReader` receive a reader backed by the
+    // SkillService authorization + snapshot-containment read.
+    const sectionReaderTarget = this.runtime as Partial<{
+      setSkillSectionReader?: (
+        reader: (
+          taskId: string,
+          agentId: string,
+          skillId: string,
+          sectionPath: string,
+        ) => Promise<{ content: string; versionHash: string }>,
+      ) => void;
+    }>;
+    if (typeof sectionReaderTarget.setSkillSectionReader === 'function') {
+      const skills = this.skills;
+      sectionReaderTarget.setSkillSectionReader((taskId, agentId, skillId, sectionPath) =>
+        skills.readSection(taskId, agentId, skillId, sectionPath),
+      );
+    }
     this.committer = new ActionCommitter({
       events: this.events,
       artifacts: this.artifacts,

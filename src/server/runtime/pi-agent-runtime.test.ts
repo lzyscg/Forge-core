@@ -31,6 +31,7 @@ import {
 } from './pi-agent-runtime';
 import { assertNoDiscoveredResources, createForgeResourceLoader } from './pi-resource-loader';
 import { createForgeToolDefinitions } from './pi-tool-factory';
+import { SKILL_SECTION_TOOL_NAMES } from './pi-tool-factory';
 import { WORKSPACE_TOOL_NAMES, WORKSPACE_TOOL_NAME_SET } from './workspace-tools';
 import {
   createDeferred,
@@ -61,29 +62,37 @@ function freshSignal(): AbortSignal {
   return new AbortController().signal;
 }
 
-describe('adapter configuration (plan Phase E Task 2: five production + three workspace tools)', () => {
-  it('creates an in-memory Pi session with exactly eight custom tools', async () => {
+describe('adapter configuration (plan Phase E Task 2: five production + three workspace + one section tool)', () => {
+  it('creates an in-memory Pi session with exactly nine custom tools', async () => {
     const harness = createPiHarness({ coreCwd: tempCwd() });
     await harness.runtime.run(sampleTurnInput(), freshSignal());
     expect(harness.sessionOptions.sessionManager.isPersisted()).toBe(false);
     expect(harness.sessionOptions.noTools).toBe('builtin');
     const names = harness.sessionOptions.customTools.map((tool) => tool.name);
-    expect(names).toHaveLength(FORGE_ACTION_NAMES.length + WORKSPACE_TOOL_NAMES.length);
-    expect(names.sort()).toEqual([...FORGE_ACTION_NAMES, ...WORKSPACE_TOOL_NAMES].sort());
+    expect(names).toHaveLength(
+      FORGE_ACTION_NAMES.length + WORKSPACE_TOOL_NAMES.length + SKILL_SECTION_TOOL_NAMES.length,
+    );
+    expect(names.sort()).toEqual(
+      [...FORGE_ACTION_NAMES, ...WORKSPACE_TOOL_NAMES, ...SKILL_SECTION_TOOL_NAMES].sort(),
+    );
     expect(harness.settings.getCompactionEnabled()).toBe(false);
     expect(harness.settings.getRetryEnabled()).toBe(false);
   });
 
-  it('splits the custom tools into the five production and three workspace sets', async () => {
+  it('splits the custom tools into the production, workspace and section sets', async () => {
     const harness = createPiHarness({ coreCwd: tempCwd() });
     await harness.runtime.run(sampleTurnInput(), freshSignal());
     const names = harness.sessionOptions.customTools.map((tool) => tool.name);
     const production = names.filter((name) => FORGE_ACTION_NAME_SET.has(name as never));
     const workspace = names.filter((name) => WORKSPACE_TOOL_NAME_SET.has(name as never));
+    const sections = names.filter((name) =>
+      (SKILL_SECTION_TOOL_NAMES as readonly string[]).includes(name),
+    );
     expect(production.sort()).toEqual(Array.from(FORGE_ACTION_NAMES).sort());
     expect(workspace.sort()).toEqual([...WORKSPACE_TOOL_NAMES].sort());
-    // The two sets are disjoint and cover every custom tool.
-    expect(production.length + workspace.length).toBe(names.length);
+    expect(sections.sort()).toEqual([...SKILL_SECTION_TOOL_NAMES].sort());
+    // The three sets are disjoint and cover every custom tool.
+    expect(production.length + workspace.length + sections.length).toBe(names.length);
   });
 
   it('injects a temp-root WorkspaceStore into the runtime via the harness', async () => {
@@ -840,6 +849,68 @@ describe('load_skill tool result carries the full skill body in-turn', () => {
     );
     expect(loadResult).toBeDefined();
     expect((loadResult as { text: string }).text).toContain('SKILL_FULL_BODY');
+  });
+});
+
+describe('read_skill_section tool wiring (plan 2026-08-07 Phase 1)', () => {
+  it('rejects the section read with SKILL_SECTION_NOT_AUTHORIZED when no reader is wired', async () => {
+    const harness = createPiHarness({
+      coreCwd: tempCwd(),
+      script: [{
+        toolCalls: [
+          { name: 'read_skill_section', args: { skillId: 'skill-alpha', sectionPath: 'a.md' } },
+        ],
+        text: 'acted on nothing',
+      }],
+    });
+    await harness.runtime.run(sampleTurnInput(), freshSignal());
+    const execution = harness.toolExecutions.find((entry) => entry.name === 'read_skill_section');
+    expect(execution?.accepted).toBe(false);
+    expect(execution?.resultText).toContain('SKILL_SECTION_NOT_AUTHORIZED');
+  });
+
+  it('returns the wired section body in the tool result and trace', async () => {
+    const harness = createPiHarness({
+      coreCwd: tempCwd(),
+      script: [{
+        toolCalls: [
+          { name: 'read_skill_section', args: { skillId: 'skill-alpha', sectionPath: 'a.md' } },
+        ],
+        text: 'acted on the section',
+      }],
+    });
+    harness.runtime.setSkillSectionReader(async (_taskId, _agentId, _skillId, _sectionPath) => ({
+      content: 'SECTION_BODY',
+      versionHash: 'v1',
+    }));
+    const result = await harness.runtime.run(sampleTurnInput(), freshSignal());
+    const execution = harness.toolExecutions.find((entry) => entry.name === 'read_skill_section');
+    expect(execution?.accepted).toBe(true);
+    expect(execution?.resultText).toContain('SECTION_BODY');
+    const traceEntry = result.trace.find(
+      (entry) => entry.kind === 'tool_result' && entry.toolName === 'read_skill_section',
+    );
+    expect(traceEntry).toBeDefined();
+    expect((traceEntry as { text: string }).text).toContain('SECTION_BODY');
+  });
+
+  it('passes a typed RuntimeFailure through to the rejected acknowledgement', async () => {
+    const harness = createPiHarness({
+      coreCwd: tempCwd(),
+      script: [{
+        toolCalls: [
+          { name: 'read_skill_section', args: { skillId: 'skill-alpha', sectionPath: 'a.md' } },
+        ],
+        text: 'no section',
+      }],
+    });
+    harness.runtime.setSkillSectionReader(async () => {
+      throw new RuntimeFailure('SKILL_SECTION_MISSING', 'section missing', false);
+    });
+    await harness.runtime.run(sampleTurnInput(), freshSignal());
+    const execution = harness.toolExecutions.find((entry) => entry.name === 'read_skill_section');
+    expect(execution?.accepted).toBe(false);
+    expect(execution?.resultText).toContain('SKILL_SECTION_MISSING');
   });
 });
 

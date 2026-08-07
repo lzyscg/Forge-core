@@ -45,6 +45,12 @@ export const SKILL_ERROR_CODES = {
   SKILL_PATH_UNSAFE: 'SKILL_PATH_UNSAFE',
   /** The Skill content changed after it was first loaded for this Agent. */
   SKILL_CONTENT_CHANGED: 'SKILL_CONTENT_CHANGED',
+  /** The requested section is not inside the Skill's frozen readable set. */
+  SKILL_SECTION_NOT_AUTHORIZED: 'SKILL_SECTION_NOT_AUTHORIZED',
+  /** An authorized section file is absent or unreadable in the snapshot. */
+  SKILL_SECTION_MISSING: 'SKILL_SECTION_MISSING',
+  /** An authorized section resolves outside the frozen snapshot directory. */
+  SKILL_SECTION_PATH_UNSAFE: 'SKILL_SECTION_PATH_UNSAFE',
 } as const;
 
 /** One loaded Skill ready for injection into an Agent Turn. */
@@ -246,30 +252,24 @@ export class SkillService {
   }
 
   /**
-   * Reads one authorized Skill file confined to the frozen snapshot. The
-   * containment check runs on the resolved path and again after `realpath`,
-   * so symlinks escaping the snapshot are rejected (plan Task 3 Step 3).
+   * Reads one path confined to the frozen snapshot. The containment check runs
+   * on the resolved path and again after `realpath`, so symlinks escaping the
+   * snapshot are rejected. Shared by Skill content files and Skill sections;
+   * the caller supplies the typed failure codes so each read keeps its own
+   * public error identity.
    */
-  private async readSnapshotSkill(
+  private async readSnapshotPath(
     taskId: string,
-    skill: FrozenSkill,
+    relPath: string,
+    codes: { missing: string; unsafe: string },
   ): Promise<{ content: string; versionHash: string }> {
     const snapshotRoot = this.paths.taskSnapshotRoot(taskId);
-    const contentPath = skill.contentPath;
-    if (isAbsolute(contentPath) || contentPath.includes('\0')) {
-      throw new RuntimeFailure(
-        SKILL_ERROR_CODES.SKILL_PATH_UNSAFE,
-        '技能文件必须位于任务快照之内。',
-        false,
-      );
+    if (isAbsolute(relPath) || relPath.includes('\0')) {
+      throw new RuntimeFailure(codes.unsafe, '技能文件必须位于任务快照之内。', false);
     }
-    const resolved = resolve(snapshotRoot, contentPath);
+    const resolved = resolve(snapshotRoot, relPath);
     if (resolved !== snapshotRoot && !resolved.startsWith(snapshotRoot + sep)) {
-      throw new RuntimeFailure(
-        SKILL_ERROR_CODES.SKILL_PATH_UNSAFE,
-        '技能文件必须位于任务快照之内。',
-        false,
-      );
+      throw new RuntimeFailure(codes.unsafe, '技能文件必须位于任务快照之内。', false);
     }
     let real: string;
     let realRoot: string;
@@ -277,46 +277,68 @@ export class SkillService {
       real = await realpath(resolved);
       realRoot = await realpath(snapshotRoot);
     } catch {
-      throw new RuntimeFailure(
-        SKILL_ERROR_CODES.SKILL_MISSING,
-        '技能文件缺失或不可读，当前节点无法继续。',
-        false,
-      );
+      throw new RuntimeFailure(codes.missing, '技能文件缺失或不可读，当前节点无法继续。', false);
     }
     if (real !== realRoot && !real.startsWith(realRoot + sep)) {
-      throw new RuntimeFailure(
-        SKILL_ERROR_CODES.SKILL_PATH_UNSAFE,
-        '技能文件必须位于任务快照之内。',
-        false,
-      );
+      throw new RuntimeFailure(codes.unsafe, '技能文件必须位于任务快照之内。', false);
     }
     let fileStat: Awaited<ReturnType<typeof stat>>;
     try {
       fileStat = await stat(real);
     } catch {
-      throw new RuntimeFailure(
-        SKILL_ERROR_CODES.SKILL_MISSING,
-        '技能文件缺失或不可读，当前节点无法继续。',
-        false,
-      );
+      throw new RuntimeFailure(codes.missing, '技能文件缺失或不可读，当前节点无法继续。', false);
     }
     if (!fileStat.isFile()) {
-      throw new RuntimeFailure(
-        SKILL_ERROR_CODES.SKILL_MISSING,
-        '技能文件缺失或不可读，当前节点无法继续。',
-        false,
-      );
+      throw new RuntimeFailure(codes.missing, '技能文件缺失或不可读，当前节点无法继续。', false);
     }
     let content: string;
     try {
       content = await readFile(real, 'utf8');
     } catch {
+      throw new RuntimeFailure(codes.missing, '技能文件缺失或不可读，当前节点无法继续。', false);
+    }
+    return { content, versionHash: sha256(content) };
+  }
+
+  /**
+   * Reads one authorized Skill file confined to the frozen snapshot, keeping
+   * the Skill-specific public error codes (plan Task 3 Step 3).
+   */
+  private async readSnapshotSkill(
+    taskId: string,
+    skill: FrozenSkill,
+  ): Promise<{ content: string; versionHash: string }> {
+    return this.readSnapshotPath(taskId, skill.contentPath, {
+      missing: SKILL_ERROR_CODES.SKILL_MISSING,
+      unsafe: SKILL_ERROR_CODES.SKILL_PATH_UNSAFE,
+    });
+  }
+
+  /**
+   * Reads one authorized Skill section file from the frozen snapshot (plan
+   * 2026-08-07 Phase 1). Only paths inside the Skill's frozen `sections` set
+   * are readable; the snapshot-containment read is shared with Skill content
+   * reads. Read-only, exactly like `readSkillForDisplay`: no event is ever
+   * appended, so the read can never mutate the task's committed event stream.
+   */
+  async readSection(
+    taskId: string,
+    agentId: string,
+    skillId: string,
+    sectionPath: string,
+  ): Promise<{ content: string; versionHash: string }> {
+    const frozen = await this.frozenFor(taskId);
+    const skill = this.authorizedSkill(frozen, agentId, skillId);
+    if (!skill.sections.includes(sectionPath)) {
       throw new RuntimeFailure(
-        SKILL_ERROR_CODES.SKILL_MISSING,
-        '技能文件缺失或不可读，当前节点无法继续。',
+        SKILL_ERROR_CODES.SKILL_SECTION_NOT_AUTHORIZED,
+        '该 section 不在本技能的可读范围之内。',
         false,
       );
     }
-    return { content, versionHash: sha256(content) };
+    return this.readSnapshotPath(taskId, sectionPath, {
+      missing: SKILL_ERROR_CODES.SKILL_SECTION_MISSING,
+      unsafe: SKILL_ERROR_CODES.SKILL_SECTION_PATH_UNSAFE,
+    });
   }
 }

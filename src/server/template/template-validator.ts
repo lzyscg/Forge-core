@@ -324,6 +324,8 @@ export interface ValidatedAgentSkill {
   name: string;
   description: string;
   contentPath: string;
+  /** Optional section-file directory (template-relative); null when absent. */
+  sectionsPath: string | null;
 }
 
 /** Structural shape of one validated turn contract (spec §6). */
@@ -492,6 +494,10 @@ export function validateAgentFile(
       contentPath: asString(fileName, skill.contentPath, `skills[${index}].contentPath`, {
         required: true,
       }),
+      sectionsPath:
+        typeof skill.sectionsPath === 'string' && skill.sectionsPath.trim() !== ''
+          ? skill.sectionsPath
+          : null,
     } satisfies ValidatedAgentSkill;
   });
 

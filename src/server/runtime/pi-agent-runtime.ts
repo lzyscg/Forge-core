@@ -43,7 +43,7 @@ import { ActionBuffer } from './action-buffer';
 import type { ForgeAction } from './forge-actions';
 import { createForgeResourceLoader } from './pi-resource-loader';
 import { RESOURCE_LOADER_ERROR_CODES } from './pi-resource-loader';
-import { createForgeToolDefinitions } from './pi-tool-factory';
+import { createForgeToolDefinitions, createSkillSectionToolDefinitions } from './pi-tool-factory';
 import type { WorkspaceStore } from './workspace-store';
 import { createWorkspaceToolDefinitions } from './workspace-tools';
 
@@ -473,6 +473,36 @@ export class PiAgentRuntime implements AgentRuntime {
     this.#skillReader = reader;
   }
 
+  /**
+   * Optional skill section reader wired by the CoreService after construction
+   * (structural setter, structurally identical to the content reader above).
+   * When set, read_skill_section returns the authorized section file content
+   * in its tool result; the per-Turn closure captures task/agent so the
+   * factory stays free of any CoreService handle.
+   */
+  #skillSectionReader: ((
+    taskId: string,
+    agentId: string,
+    skillId: string,
+    sectionPath: string,
+  ) => Promise<{ content: string; versionHash: string }>) | null = null;
+
+  /**
+   * Wires the skill section reader (structural setter, invoked by CoreService
+   * after the SkillService is constructed). An unwired reader rejects every
+   * section read with SKILL_SECTION_NOT_AUTHORIZED inside the tool callback.
+   */
+  setSkillSectionReader(
+    reader: (
+      taskId: string,
+      agentId: string,
+      skillId: string,
+      sectionPath: string,
+    ) => Promise<{ content: string; versionHash: string }>,
+  ): void {
+    this.#skillSectionReader = reader;
+  }
+
   constructor(options: PiAgentRuntimeOptions) {
     this.#coreCwd = options.coreCwd;
     this.#workspaces = options.workspaces;
@@ -576,6 +606,18 @@ export class PiAgentRuntime implements AgentRuntime {
             // the package is sealed or dispatched the sealed content (e.g. a
             // sealed workspace_file) must stay immutable.
             isProductionPhase: () => buffer.phase === 'production',
+          }),
+          ...createSkillSectionToolDefinitions({
+            readSection: (skillId, sectionPath) =>
+              this.#skillSectionReader === null
+                ? Promise.reject(
+                    new RuntimeFailure(
+                      'SKILL_SECTION_NOT_AUTHORIZED',
+                      '该技能无子文件授权。',
+                      false,
+                    ),
+                  )
+                : this.#skillSectionReader(input.taskId, input.agent.id, skillId, sectionPath),
           }),
         ],
       });

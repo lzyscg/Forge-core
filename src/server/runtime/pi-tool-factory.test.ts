@@ -13,9 +13,14 @@
  * agent ids appear exclusively in test data.
  */
 import { describe, expect, it } from 'vitest';
+import { RuntimeFailure } from './agent-runtime';
 import { ActionBuffer, ACTION_BUFFER_ERROR_CODES } from './action-buffer';
 import { FORGE_ACTION_NAMES } from './forge-actions';
-import { createForgeToolDefinitions } from './pi-tool-factory';
+import {
+  createForgeToolDefinitions,
+  createSkillSectionToolDefinitions,
+  SKILL_SECTION_TOOL_NAMES,
+} from './pi-tool-factory';
 import { finishProductionProposal, sendMessageProposal } from './test-support';
 
 async function execute(
@@ -312,5 +317,78 @@ describe('pi-tool-factory phase gate rejections are correctable (spec §5.3)', (
       { type: 'publish_artifact' },
     ]);
     void sendMessageProposal(); // Shared proposal builders stay import-safe.
+  });
+});
+
+describe('read_skill_section tool (plan 2026-08-07 Phase 1)', () => {
+  function sectionTools(
+    readSection: (skillId: string, sectionPath: string) => Promise<{ content: string; versionHash: string }>,
+  ): ReturnType<typeof createSkillSectionToolDefinitions> {
+    return createSkillSectionToolDefinitions({ readSection });
+  }
+
+  it('exposes read_skill_section with a top-level object parameter schema', () => {
+    const tools = sectionTools(async () => ({ content: '', versionHash: 'x' }));
+    expect(tools.map((tool) => tool.name)).toEqual([...SKILL_SECTION_TOOL_NAMES]);
+    const tool = tools[0];
+    const schema = tool?.parameters as {
+      type?: string;
+      anyOf?: unknown;
+      properties?: Record<string, unknown>;
+      required?: string[];
+    };
+    // DeepSeek requires a single top-level object, never an anyOf union.
+    expect(schema.type).toBe('object');
+    expect(schema.anyOf).toBeUndefined();
+    expect(Object.keys(schema.properties ?? {}).sort()).toEqual(['sectionPath', 'skillId']);
+    expect([...(schema.required ?? [])].sort()).toEqual(['sectionPath', 'skillId']);
+  });
+
+  it('returns the section content with accepted details on a successful read', async () => {
+    const tools = sectionTools(async () => ({ content: '## 参考正文', versionHash: 'abc' }));
+    const result = await execute(tools, 'read_skill_section', {
+      skillId: 'style-guide',
+      sectionPath: 'skills/style-guide/references/01.md',
+    });
+    expect(result.accepted).toBe(true);
+    expect(result.text).toContain('## 参考正文');
+    expect(result.text).toContain('skills/style-guide/references/01.md');
+  });
+
+  it('rejects with the stable code when the reader throws a RuntimeFailure', async () => {
+    const tools = sectionTools(async () => {
+      throw new RuntimeFailure('SKILL_SECTION_MISSING', 'section missing', false);
+    });
+    const result = await execute(tools, 'read_skill_section', {
+      skillId: 'style-guide',
+      sectionPath: 'skills/style-guide/references/01.md',
+    });
+    expect(result.accepted).toBe(false);
+    expect(result.code).toBe('SKILL_SECTION_MISSING');
+    expect(result.text).toBe('read_skill_section rejected: SKILL_SECTION_MISSING');
+  });
+
+  it('falls back to the tool failure code for a non-RuntimeFailure error', async () => {
+    const tools = sectionTools(async () => {
+      throw new Error('boom');
+    });
+    const result = await execute(tools, 'read_skill_section', {
+      skillId: 'style-guide',
+      sectionPath: 'a.md',
+    });
+    expect(result.accepted).toBe(false);
+    expect(result.code).toBe('SKILL_SECTION_TOOL_FAILED');
+  });
+
+  it('never touches any ActionBuffer: a successful read leaves a fresh buffer empty', async () => {
+    const buffer = new ActionBuffer('turn-section');
+    const tools = sectionTools(async () => ({ content: 'body', versionHash: 'abc' }));
+    const result = await execute(tools, 'read_skill_section', {
+      skillId: 'style-guide',
+      sectionPath: 'a.md',
+    });
+    expect(result.accepted).toBe(true);
+    // The factory receives no buffer handle, so nothing can ever be proposed.
+    expect(buffer.snapshot()).toEqual([]);
   });
 });

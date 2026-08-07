@@ -8,7 +8,7 @@
  * Phase B Task 3 adds template/task fixture helpers so storage tests build on
  * the exact Task 2 `valid` fixture instead of duplicating template content.
  */
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { readdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -197,6 +197,56 @@ export function validTaskRequest(templateId: string = ONE_TEMPLATE_ID): CreateTa
       'style-note': '保持简洁。',
     },
   };
+}
+
+/**
+ * The section directory declared on the fixture writer's style-guide skill
+ * (plan 2026-08-07 Phase 1). Business vocabulary is confined to fixture data.
+ */
+export const SECTIONS_TEMPLATE_SECTION_DIR = 'skills/style-guide/references';
+
+/** Section `.md` files written under the fixture section directory. */
+export const SECTIONS_TEMPLATE_SECTION_FILES = [
+  'skills/style-guide/references/01.md',
+  'skills/style-guide/references/sub/02.md',
+] as const;
+
+/**
+ * Installs the `valid` fixture (contract-upgraded), declares
+ * `sectionsPath: skills/style-guide/references` on the writer's style-guide
+ * skill and writes two section `.md` files (one nested) under that directory.
+ * Returns everything storage tests need to freeze a task whose snapshot
+ * carries authorized skill sections.
+ */
+export async function catalogWithSectionsTemplate(): Promise<{
+  paths: CorePaths;
+  catalog: TemplateCatalog;
+  templateId: string;
+}> {
+  const { paths, templateRoot } = makeTempCorePaths();
+  installValidFixtureTemplate(templateRoot);
+  const templateDir = join(templateRoot, ONE_TEMPLATE_ID);
+  const writerFile = join(templateDir, 'agents', 'writer.yaml');
+  const writerYaml = readFileSync(writerFile, 'utf8').replace(/\r\n?/g, '\n');
+  writeFileSync(
+    writerFile,
+    writerYaml.replace(
+      '    contentPath: skills/style-guide/SKILL.md\n',
+      `    contentPath: skills/style-guide/SKILL.md\n    sectionsPath: ${SECTIONS_TEMPLATE_SECTION_DIR}\n`,
+    ),
+    'utf8',
+  );
+  for (const sectionFile of SECTIONS_TEMPLATE_SECTION_FILES) {
+    mkdirSync(join(templateDir, sectionFile, '..'), { recursive: true });
+    writeFileSync(join(templateDir, sectionFile), `# ${sectionFile}\n`, 'utf8');
+  }
+  const catalog = new TemplateCatalog(paths);
+  await catalog.initialize();
+  const detail = catalog.get(ONE_TEMPLATE_ID);
+  if (!detail || detail.status !== 'valid') {
+    throw new Error('test-support: the sections template did not initialize as valid');
+  }
+  return { paths, catalog, templateId: ONE_TEMPLATE_ID };
 }
 
 /** Removes every temporary root created by the helpers above in this process. */

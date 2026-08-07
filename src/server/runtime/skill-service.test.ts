@@ -24,6 +24,7 @@ import { EventStore } from '../storage/event-store';
 import { TaskStore } from '../storage/task-store';
 import {
   catalogWithOneTemplate,
+  catalogWithSectionsTemplate,
   disposeAllTestRoots,
   makeEventNode,
   makeTaskEvent,
@@ -191,5 +192,112 @@ describe('SkillService display read (plan Task E3 Step 1)', () => {
     await skills.readSkillForDisplay(taskId, 'style-guide');
     rmSync(join(snapshotRoot, 'skills/style-guide/SKILL.md'));
     await expect(skills.readSkillForDisplay(taskId, 'style-guide')).resolves.toBeNull();
+  });
+});
+
+describe('SkillService section reads (plan 2026-08-07 Phase 1)', () => {
+  let sectionsPaths: CorePaths;
+  let sectionsEvents: EventStore;
+  let sectionsSkills: SkillService;
+  let sectionsTaskId: string;
+  let sectionsSnapshotRoot: string;
+  let sectionsDataRoot: string;
+
+  beforeEach(async () => {
+    const fixture = await catalogWithSectionsTemplate();
+    sectionsPaths = fixture.paths;
+    sectionsDataRoot = fixture.paths.dataRoot;
+    const tasks = new TaskStore(fixture.paths, fixture.catalog);
+    sectionsEvents = new EventStore(fixture.paths);
+    sectionsSkills = new SkillService({ paths: fixture.paths, tasks, events: sectionsEvents });
+    const created = await tasks.create(validTaskRequest());
+    sectionsTaskId = created.id;
+    sectionsSnapshotRoot = fixture.paths.taskSnapshotRoot(sectionsTaskId);
+  });
+
+  it('reads one authorized section from the frozen snapshot without appending events', async () => {
+    const before = await sectionsEvents.read(sectionsTaskId);
+    const section = await sectionsSkills.readSection(
+      sectionsTaskId,
+      'writer',
+      'style-guide',
+      'skills/style-guide/references/01.md',
+    );
+    const onDisk = readFileSync(
+      join(sectionsSnapshotRoot, 'skills/style-guide/references/01.md'),
+      'utf8',
+    );
+    expect(section).toEqual({ content: onDisk, versionHash: sha256(onDisk) });
+    // Read-only invariant: a section read never appends any event.
+    expect(await sectionsEvents.read(sectionsTaskId)).toEqual(before);
+  });
+
+  it('rejects a section path outside the frozen readable set', async () => {
+    await expect(
+      sectionsSkills.readSection(
+        sectionsTaskId,
+        'writer',
+        'style-guide',
+        'skills/style-guide/references/zz.md',
+      ),
+    ).rejects.toMatchObject({ code: 'SKILL_SECTION_NOT_AUTHORIZED' });
+    await expect(
+      sectionsSkills.readSection(sectionsTaskId, 'writer', 'style-guide', '../outside.md'),
+    ).rejects.toMatchObject({ code: 'SKILL_SECTION_NOT_AUTHORIZED' });
+  });
+
+  it('rejects an unknown skill with the authorization code', async () => {
+    await expect(
+      sectionsSkills.readSection(
+        sectionsTaskId,
+        'writer',
+        'ghost-skill',
+        'skills/style-guide/references/01.md',
+      ),
+    ).rejects.toMatchObject({ code: 'SKILL_NOT_AUTHORIZED' });
+  });
+
+  it('rejects a section symlink escaping the frozen snapshot as path-unsafe', async () => {
+    // A first successful read caches the frozen manifest, so the later file
+    // surgery surfaces as the section read failure, not a snapshot corruption.
+    await sectionsSkills.readSection(
+      sectionsTaskId,
+      'writer',
+      'style-guide',
+      'skills/style-guide/references/01.md',
+    );
+    const sectionFile = join(sectionsSnapshotRoot, 'skills/style-guide/references/01.md');
+    const outsideFile = join(sectionsDataRoot, 'outside-section.md');
+    writeFileSync(outsideFile, 'content outside the frozen snapshot');
+    rmSync(sectionFile);
+    symlinkSync(outsideFile, sectionFile);
+    await expect(
+      sectionsSkills.readSection(
+        sectionsTaskId,
+        'writer',
+        'style-guide',
+        'skills/style-guide/references/01.md',
+      ),
+    ).rejects.toMatchObject({ code: 'SKILL_SECTION_PATH_UNSAFE' });
+  });
+
+  it('fails with the missing code when an authorized section file is absent', async () => {
+    // A first successful read caches the frozen manifest, so the removed file
+    // surfaces as the section missing failure, not a snapshot corruption.
+    await sectionsSkills.readSection(
+      sectionsTaskId,
+      'writer',
+      'style-guide',
+      'skills/style-guide/references/01.md',
+    );
+    rmSync(join(sectionsSnapshotRoot, 'skills/style-guide/references/01.md'));
+    await expect(
+      sectionsSkills.readSection(
+        sectionsTaskId,
+        'writer',
+        'style-guide',
+        'skills/style-guide/references/01.md',
+      ),
+    ).rejects.toMatchObject({ code: 'SKILL_SECTION_MISSING' });
   });
 });

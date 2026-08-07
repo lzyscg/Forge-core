@@ -14,7 +14,7 @@
  * through `withContracts`-upgraded copies. Fixture files may carry business
  * copy (they are data); the modules under test carry none (iron rule 1).
  */
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync, unlinkSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -214,6 +214,8 @@ describe('loadTemplateDirectory', () => {
         name: '文风指南',
         description: '语气与节奏参考。',
         contentPath: 'skills/style-guide/SKILL.md',
+        sectionsPath: null,
+        sections: [],
       },
     ]);
     expect(frozen.routes).toEqual([
@@ -772,5 +774,84 @@ describe('template progress budget (plan 2026-08-06)', () => {
     expect((await loadTemplateDirectory(destB)).versionHash).not.toBe(
       (await loadTemplateDirectory(destA)).versionHash,
     );
+  });
+});
+
+describe('skill sections (plan 2026-08-07 Phase 1)', () => {
+  /** Rewrites the writer agent with a `sectionsPath` on the style-guide skill. */
+  function writeWriterWithSectionsPath(dest: string, sectionsPath: string): void {
+    writeFileSync(
+      join(dest, 'agents/writer.yaml'),
+      `id: writer\nname: 初稿 Agent\ndescription: 生成初稿。\nmodel: deepseek/deepseek-chat\nsystemPrompt: |\n  生成初稿。\nskills:\n  - id: style-guide\n    name: 文风指南\n    description: 参考。\n    contentPath: skills/style-guide/SKILL.md\n    sectionsPath: ${sectionsPath}\n${CONTRACT_YAML}`,
+      'utf8',
+    );
+  }
+
+  it('collects only declared .md section files, sorted, with forward slashes', async () => {
+    const root = makeTempDir('forge-core-t2-sections-');
+    const dest = withContracts(copyFixture('valid', 'sections', root));
+    writeWriterWithSectionsPath(dest, 'skills/style-guide/references');
+    const refs = join(dest, 'skills/style-guide/references');
+    mkdirSync(join(refs, 'sub'), { recursive: true });
+    writeFileSync(join(refs, '01-a.md'), '# 第一节\n', 'utf8');
+    writeFileSync(join(refs, 'sub/02-b.md'), '# 第二节\n', 'utf8');
+    writeFileSync(join(refs, 'notes.txt'), 'not markdown\n', 'utf8');
+    writeFileSync(join(refs, '.hidden.md'), '# hidden\n', 'utf8');
+    const frozen = await loadTemplateDirectory(dest);
+    const writer = frozen.agents.find((agent) => agent.id === 'writer');
+    const reviewer = frozen.agents.find((agent) => agent.id === 'reviewer');
+    expect(writer?.skills[0]?.sections).toEqual([
+      'skills/style-guide/references/01-a.md',
+      'skills/style-guide/references/sub/02-b.md',
+    ]);
+    expect(writer?.skills[0]?.sectionsPath).toBe('skills/style-guide/references');
+    expect(reviewer?.skills[0]?.sections).toEqual([]);
+    expect(reviewer?.skills[0]?.sectionsPath).toBeNull();
+  });
+
+  it('keeps the version hash stable when an undeclared file changes', async () => {
+    const root = makeTempDir('forge-core-t2-sections-unrelated-');
+    const dest = withContracts(copyFixture('valid', 'unrelated', root));
+    const before = await loadTemplateDirectory(dest);
+    // A stray non-declared file inside the skill directory never enters the hash.
+    writeFileSync(join(dest, 'skills/style-guide/notes.txt'), 'stray\n', 'utf8');
+    const after = await loadTemplateDirectory(dest);
+    expect(after.versionHash).toBe(before.versionHash);
+  });
+
+  it('changes the version hash when a section file content changes', async () => {
+    const root = makeTempDir('forge-core-t2-sections-hash-');
+    const dest = withContracts(copyFixture('valid', 'sectionhash', root));
+    writeWriterWithSectionsPath(dest, 'skills/style-guide/references');
+    const refs = join(dest, 'skills/style-guide/references');
+    mkdirSync(refs, { recursive: true });
+    writeFileSync(join(refs, '01.md'), '# v1\n', 'utf8');
+    const before = await loadTemplateDirectory(dest);
+    writeFileSync(join(refs, '01.md'), '# v2\n', 'utf8');
+    const after = await loadTemplateDirectory(dest);
+    expect(after.versionHash).not.toBe(before.versionHash);
+  });
+
+  it('keeps the pre-change version hash for templates without sectionsPath', async () => {
+    const root = makeTempDir('forge-core-t2-sections-nullhash-');
+    const dest = withContracts(copyFixture('valid', 'nullhash', root));
+    const frozen = await loadTemplateDirectory(dest);
+    expect(frozen.agents[0]?.skills[0]?.sections).toEqual([]);
+    expect(frozen.agents[0]?.skills[0]?.sectionsPath).toBeNull();
+    // Byte-stability regression (iron rule 2): the canonical form must omit
+    // the `sections` key when empty, reproducing the pre-change hash exactly.
+    expect(frozen.versionHash).toBe(
+      '5dee5a79b2aa95a0fe9494a3379a6859f5586f35d06fd82d00629a71b38ddd5a',
+    );
+  });
+
+  it('rejects a missing sectionsPath directory', async () => {
+    const root = makeTempDir('forge-core-t2-sections-missing-');
+    const dest = withContracts(copyFixture('valid', 'missingsec', root));
+    writeWriterWithSectionsPath(dest, 'skills/style-guide/references');
+    await expect(loadTemplateDirectory(dest)).rejects.toMatchObject({
+      code: 'TEMPLATE_SKILL_MISSING',
+      location: 'skills/style-guide/references',
+    });
   });
 });

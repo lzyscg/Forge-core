@@ -19,6 +19,7 @@
  */
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { Type, type Static, type TSchema } from 'typebox';
+import { RuntimeFailure } from './agent-runtime';
 import { ActionBufferError, type ActionBuffer } from './action-buffer';
 import { parseAnnotateVerdict, ANNOTATE_FRONTMATTER_INVALID } from './annotate-verdict';
 import {
@@ -184,7 +185,7 @@ function accepted(acknowledgement: string): ForgeToolResult {
   return { content: [{ type: 'text', text: acknowledgement }], details: { accepted: true } };
 }
 
-function rejected(code: string, name: ForgeActionName): ForgeToolResult {
+function rejected(code: string, name: string): ForgeToolResult {
   return {
     content: [{ type: 'text', text: `${name} rejected: ${code}` }],
     details: { accepted: false, code },
@@ -257,4 +258,60 @@ export function createForgeToolDefinitions(
       }
     },
   }));
+}
+
+/**
+ * The closed read-only skill-section tool registry (plan 2026-08-07 Phase 1).
+ * Exactly one tool today; kept as a named registry for the same closed-set
+ * discipline as the forge/workspace registries.
+ */
+export const SKILL_SECTION_TOOL_NAMES = ['read_skill_section'] as const;
+
+/** Fallback code for a section read that is not a typed RuntimeFailure. */
+export const SKILL_SECTION_TOOL_FAILED = 'SKILL_SECTION_TOOL_FAILED';
+
+/** Read-only context the skill-section tools may close over. */
+export interface SkillSectionToolContext {
+  readSection: (skillId: string, sectionPath: string) => Promise<{ content: string; versionHash: string }>;
+}
+
+/**
+ * Creates the closed read-only skill-section tool set (plan 2026-08-07 Phase
+ * 1). The callback closes over ONLY the read hook — no ActionBuffer handle is
+ * ever received, so a section read can never propose or commit anything, and
+ * it is never gated by a phase probe (read-only, always available). Every
+ * typed RuntimeFailure maps to a short `rejected` acknowledgement with its
+ * stable code; anything else falls back to the tool failure code.
+ */
+export function createSkillSectionToolDefinitions(ctx: SkillSectionToolContext): ToolDefinition[] {
+  const READ_SKILL_SECTION_PARAMETERS = Type.Object({
+    skillId: idField(),
+    sectionPath: Type.String({ minLength: 1, maxLength: 512 }),
+  });
+  return [
+    {
+      name: 'read_skill_section',
+      label: 'read_skill_section',
+      description:
+        'Read one section file of an authorized skill by id + section path. Read-only: never proposes or commits anything.',
+      promptSnippet: 'read_skill_section(skillId, sectionPath) — read one section of an authorized skill',
+      parameters: READ_SKILL_SECTION_PARAMETERS,
+      executionMode: 'sequential' as const,
+      execute: async (
+        _toolCallId: string,
+        params: Static<TSchema>,
+      ): Promise<ForgeToolResult> => {
+        try {
+          const { skillId, sectionPath } = (params ?? {}) as { skillId?: string; sectionPath?: string };
+          const loaded = await ctx.readSection(skillId ?? '', sectionPath ?? '');
+          return accepted(`read_skill_section (${sectionPath}):\n${loaded.content}`);
+        } catch (error) {
+          if (error instanceof RuntimeFailure) {
+            return rejected(error.code, 'read_skill_section');
+          }
+          return rejected(SKILL_SECTION_TOOL_FAILED, 'read_skill_section');
+        }
+      },
+    },
+  ];
 }
