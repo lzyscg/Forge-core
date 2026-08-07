@@ -109,7 +109,6 @@ describe('CoreService getTurnTrace (plan Task E3 Step 1)', () => {
     const service = await phaseEService();
     const created = await service.createTask(validTaskRequest());
     const entries = [
-      { kind: 'thinking', text: '先思考。' },
       { kind: 'text', text: '正文。' },
     ] as const;
     await service.traces.appendTurnTrace(created.id, 'turn-1', [...entries]);

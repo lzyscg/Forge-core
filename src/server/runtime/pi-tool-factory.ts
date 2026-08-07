@@ -20,6 +20,7 @@
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { Type, type Static, type TSchema } from 'typebox';
 import { ActionBufferError, type ActionBuffer } from './action-buffer';
+import { parseAnnotateVerdict, ANNOTATE_FRONTMATTER_INVALID } from './annotate-verdict';
 import {
   ACTION_VALIDATION_CODES,
   FORGE_ACTION_LIMITS,
@@ -234,6 +235,14 @@ export function createForgeToolDefinitions(
             return rejected('FINAL_ARTIFACT_NOT_FOUND', spec.name);
           }
           return accepted(`read_artifact_version (${action.file}):\n${content}`);
+        }
+        if (action.type === 'annotate_artifact') {
+          // Model-facing format contract (semantic audit P1, plan 2026-08-07):
+          // reject malformed review frontmatter here so the model can correct
+          // in the same Turn; the committer re-checks it non-bypassably.
+          if (parseAnnotateVerdict(action.content) === null) {
+            return rejected(ANNOTATE_FRONTMATTER_INVALID, spec.name);
+          }
         }
         buffer.propose(action);
         return accepted(`${spec.name} proposal accepted`);

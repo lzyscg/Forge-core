@@ -46,7 +46,6 @@ const skillNode: WorkspaceNode = {
 const trace: TurnTrace = {
   turnId: 'turn-1',
   entries: [
-    { kind: 'thinking', text: '先确定视角，再落细节。' },
     {
       kind: 'tool_call',
       toolName: 'write_workspace',
@@ -108,7 +107,7 @@ function renderDialog(
 }
 
 describe('ProcessTraceDialog', () => {
-  it('renders thinking, tool call, tool result and text entries in order', async () => {
+  it('renders tool call, tool result and text entries in order, never provider thinking', async () => {
     const getTurnTrace = vi.fn().mockResolvedValue(trace);
     renderDialog(resultNode, stubGateway({ getTurnTrace }));
 
@@ -122,7 +121,6 @@ describe('ProcessTraceDialog', () => {
       (section) => section.querySelector('.fc-trace__section-title')?.textContent ?? null,
     );
     expect(sectionTitles).toEqual([
-      '思维',
       '工具调用：write_workspace',
       '工具返回：write_workspace',
       '正文',
@@ -132,10 +130,11 @@ describe('ProcessTraceDialog', () => {
     expect(pres).toHaveLength(2);
     expect(pres[0].textContent).toContain('"path": "draft/v1.md"');
     expect(pres[1].textContent).toContain('draft/v1.md (6 bytes)');
-    expect(dialog.textContent).toContain('先确定视角，再落细节。');
     expect(dialog.textContent).toContain('第一段正文。');
-    // The thinking section carries its dedicated style hook.
-    expect(dialog.querySelector('.fc-trace__section--thinking')).not.toBeNull();
+    // Provider thinking is never durable or displayed (semantic audit P0,
+    // plan 2026-08-07): no 思维 section, no thinking style hook.
+    expect(dialog.querySelector('.fc-trace__section--thinking')).toBeNull();
+    expect(dialog.textContent).not.toContain('思维');
   });
 
   it('shows the skill version prefix and full content for skill nodes', async () => {
@@ -256,9 +255,9 @@ describe('ProcessTraceDialog', () => {
 
     // Exactly one row, directly above the trace entry sections.
     expect(phaseRows[0].nextElementSibling).toBe(dialog.querySelector('.fc-trace__sections'));
-    // Entries stay unchanged beneath the phase row.
+    // Entries stay unchanged beneath the phase row (no thinking section).
     expect(dialog.querySelectorAll('.fc-trace__section')).toHaveLength(trace.entries.length);
-    expect(dialog.textContent).toContain('先确定视角，再落细节。');
+    expect(dialog.textContent).toContain('第一段正文。');
   });
 
   it('shows the submit intent for a dispatched final submission without target', async () => {

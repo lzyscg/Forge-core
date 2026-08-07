@@ -263,21 +263,21 @@ describe('FakeAgentRuntime thinking and workspace writes (plan Phase E Task 2)',
       { path: 'draft/v1.md', content: '初稿' },
       { path: 'notes.md', content: '备忘' },
     ]);
-    // Trace order: thinking, one call/result pair per write, then the text.
+    // Trace order: one call/result pair per write, then the text. Provider
+    // thinking is never durable (semantic audit P0, plan 2026-08-07).
     expect(result.trace.map((entry) => entry.kind)).toEqual([
-      'thinking', 'tool_call', 'tool_result', 'tool_call', 'tool_result', 'text',
+      'tool_call', 'tool_result', 'tool_call', 'tool_result', 'text',
     ]);
-    expect(result.trace[0]).toEqual({ kind: 'thinking', text: 'drafting in my head' });
-    expect(result.trace[1]).toEqual({
+    expect(result.trace[0]).toEqual({
       kind: 'tool_call',
       toolName: 'write_workspace',
       params: { path: 'draft/v1.md', content: '初稿' },
     });
-    expect(result.trace[2]).toMatchObject({ kind: 'tool_result', toolName: 'write_workspace' });
-    expect(result.trace[5]).toEqual({ kind: 'text', text: 'published' });
+    expect(result.trace[1]).toMatchObject({ kind: 'tool_result', toolName: 'write_workspace' });
+    expect(result.trace[4]).toEqual({ kind: 'text', text: 'published' });
   });
 
-  it('skips workspace writes without a sink and keeps only thinking and text', async () => {
+  it('skips workspace writes without a sink and keeps only public text', async () => {
     const runtime = new FakeAgentRuntime({
       scripts: {
         'agent-alpha': [{
@@ -291,7 +291,8 @@ describe('FakeAgentRuntime thinking and workspace writes (plan Phase E Task 2)',
     // No setWorkspaceSink call: writes are skipped, never thrown.
     const result = await runtime.run(sampleTurnInput(), signal());
     expect(result.publicText).toBe('published');
-    expect(result.trace.map((entry) => entry.kind)).toEqual(['thinking', 'text']);
+    // The scripted thinking block never reaches the trace.
+    expect(result.trace.map((entry) => entry.kind)).toEqual(['text']);
   });
 
   it('returns an empty trace for a neutral unscripted agent', async () => {

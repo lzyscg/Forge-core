@@ -73,8 +73,18 @@ interface ProjectionState {
   incompatibleDiagnostic: string | null;
 }
 
-/** Derives a display extract slot from a committed file name (Phase 1 transitional). */
-function extractForFile(name: string): string {
+/**
+ * Derives the display extract slot for one committed artifact file (semantic
+ * audit P1, plan 2026-08-07). The frozen template's `artifactSchema` is the
+ * source of truth for the extract name — never a filename heuristic. A file
+ * without a schema entry (legacy artifact, or a legacy snapshot whose pipeline
+ * declared no artifactSchema) falls back to the Phase-1 filename mapping.
+ */
+function extractForFile(frozen: FrozenTemplate, name: string): string {
+  const declared = frozen.artifactSchema?.files?.find((file) => file.name === name);
+  if (declared !== undefined) {
+    return declared.extract;
+  }
   if (name === 'review.md') return 'review';
   if (name === 'revision.md') return 'revision';
   return 'content';
@@ -382,12 +392,12 @@ export function projectTask(
       id: entry.meta.id,
       version: entry.meta.version,
       title: entry.meta.title,
-      // Map every committed file to a display slot. The extract name derives
-      // from the file name here (Phase 1 transitional); Phase 6 formalizes it
-      // through the template's artifactSchema.
+      // Map every committed file to a display slot: the extract name derives
+      // from the frozen template's artifactSchema (semantic audit P1), with a
+      // legacy filename fallback for schemas that do not declare the file.
       files: entry.files.map((file) => ({
         name: file.name,
-        extract: extractForFile(file.name),
+        extract: extractForFile(task.frozenTemplate, file.name),
         content: file.content,
       })),
       sourceNodeId: entry.meta.sourceNodeId,

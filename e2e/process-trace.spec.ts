@@ -91,7 +91,7 @@ test('process trace: the skill chip opens a dialog with the full Skill text', as
   }
 });
 
-test('process trace: the turn card [运行过程] opens the trace with thinking and tool steps', async ({
+test('process trace: the turn card [运行过程] opens the trace with tool and text steps', async ({
   page,
 }) => {
   const harness = await startRuntimeCoreServer({ scripts: workspaceTraceScripts() });
@@ -106,10 +106,11 @@ test('process trace: the turn card [运行过程] opens the trace with thinking 
     const dialog = page.getByRole('dialog', { name: '执行 Agent Alpha' });
     await expect(dialog).toBeVisible();
 
-    // Thinking section with the scripted sentence.
-    const thinking = dialog.locator('.fc-trace__section--thinking');
-    await expect(thinking.getByText('思维', { exact: true })).toBeVisible();
-    await expect(thinking.getByText(WORKSPACE_TRACE_THINKING)).toBeVisible();
+    // Provider thinking is never durable or displayed (semantic audit P0,
+    // plan 2026-08-07): the scripted thinking sentence must not surface.
+    await expect(dialog.locator('.fc-trace__section--thinking')).toHaveCount(0);
+    await expect(dialog.getByText('思维', { exact: true })).toHaveCount(0);
+    await expect(dialog.getByText(WORKSPACE_TRACE_THINKING)).toHaveCount(0);
 
     // Tool call: write_workspace with the draft path in its parameters.
     await expect(
@@ -153,7 +154,7 @@ test('process trace: workspace draft, trace file and V1 content agree on disk', 
     expect(readFileSync(draftFile, 'utf8')).toBe(WORKSPACE_DRAFT_CONTENT);
 
     // The served result node carries the Turn id; the trace file exists and
-    // holds the thinking/tool/text entries in order.
+    // holds the tool/text entries in order (never the scripted thinking).
     const resultNode = workspace.nodes.find((node) => node.kind === 'result');
     expect(resultNode).toBeDefined();
     const turnId = resultNode?.turnId ?? null;
@@ -166,7 +167,6 @@ test('process trace: workspace draft, trace file and V1 content agree on disk', 
     };
     expect(trace.turnId).toBe(turnId);
     expect(trace.entries.map((entry) => entry.kind)).toEqual([
-      'thinking',
       'tool_call',
       'tool_result',
       'text',

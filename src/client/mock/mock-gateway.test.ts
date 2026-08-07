@@ -233,7 +233,7 @@ describe('createMockGateway', () => {
 runForgeCoreGatewayContract(() => createMockGateway(new MemoryStorage(), fixedClock));
 
 describe('createMockGateway phase E reads (plan Task E4 Step 1)', () => {
-  it('serves the recorded turn trace with thinking, public text and final phase', async () => {
+  it('serves the recorded turn trace with public text and final phase, never thinking', async () => {
     const harness = createSimulatorHarness('happy_path');
     const task = await harness.createAndRun();
     await harness.clock.runAll();
@@ -249,8 +249,9 @@ describe('createMockGateway phase E reads (plan Task E4 Step 1)', () => {
         target: '章节审核',
         message: null,
       },
+      // Provider thinking is never durable (semantic audit P0): only the
+      // public text survives, even though the script declared thinking.
       entries: [
-        { kind: 'thinking', text: templateFixture.sampleThinking },
         { kind: 'text', text: templateFixture.sampleArtifacts.v1.content },
       ],
     });

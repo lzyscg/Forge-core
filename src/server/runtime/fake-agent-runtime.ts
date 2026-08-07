@@ -172,8 +172,9 @@ export class FakeAgentRuntime implements AgentRuntime {
 
   /**
    * Applies scripted workspace writes through the sink (exactly once), then
-   * builds the display-only trace: thinking, one call/result pair per applied
-   * write, then the public text. Without a sink the writes are skipped.
+   * builds the display-only trace: one call/result pair per applied write,
+   * then the public text. Without a sink the writes are skipped. Provider
+   * thinking is never durable (semantic audit P0, plan 2026-08-07).
    */
   async #buildTrace(
     taskId: string,
@@ -182,9 +183,6 @@ export class FakeAgentRuntime implements AgentRuntime {
     publicText: string,
   ): Promise<TraceEntry[]> {
     const trace: TraceEntry[] = [];
-    if (typeof step.thinking === 'string' && step.thinking.length > 0) {
-      trace.push({ kind: 'thinking', text: step.thinking });
-    }
     const writes = step.workspaceWrites ?? [];
     if (writes.length > 0 && this.#workspaceSink !== null) {
       await this.#workspaceSink(taskId, agentId, writes);

@@ -27,10 +27,6 @@
     "task_recovery",
     "workspace",
     "artifacts",
-    "lifecycle",
-    "retry",
-    "skills",
-    "final_output",
     "process_trace",
     "agent_workspace",
     "task_clone"

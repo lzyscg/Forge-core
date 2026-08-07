@@ -756,6 +756,10 @@ export class TaskScheduler {
   private async execute(run: ActiveRun): Promise<TaskSummary> {
     let autoRetries = 0;
     try {
+      // Crash half-state repair (spec §11.6, semantic audit P2): a process
+      // death between supersede and synthesize leaves no executable pending
+      // input; heal it deterministically before the loop runs.
+      await this.repairInterventionHalfState(run.taskId);
       for (;;) {
         if (run.controller.signal.aborted) {
           break;
@@ -1084,7 +1088,7 @@ export class TaskScheduler {
     const stalest = stalestPendingInput(events);
     const targetAgentId = stalest?.node.agentId ?? pendingRequest.node.agentId;
     const inputVersion = stalest?.node.inputVersion ?? null;
-    await this.appendHumanAnswered(taskId, events, pendingRequest, text);
+    await this.appendHumanAnswered(taskId, events, pendingRequest, text, 'continue');
     if (pendingIds.length > 0) {
       await this.appendSupersede(taskId, pendingIds);
     }
@@ -1121,7 +1125,7 @@ export class TaskScheduler {
       throw invalidTransition('模板未声明最终提交者，无法采用人工接受。');
     }
     const pendingIds = currentPendingInputIds(events);
-    await this.appendHumanAnswered(taskId, events, pendingRequest, text);
+    await this.appendHumanAnswered(taskId, events, pendingRequest, text, 'accept');
     if (pendingIds.length > 0) {
       await this.appendSupersede(taskId, pendingIds);
     }
@@ -1159,6 +1163,7 @@ export class TaskScheduler {
     events: readonly TaskEvent[],
     pendingRequest: Extract<TaskEvent, { type: 'human_requested' }>,
     text: string,
+    decision?: 'continue' | 'accept',
   ): Promise<void> {
     const agentId = pendingRequest.node.agentId;
     const frozen = await this.#service.tasks.readFrozenTemplate(taskId);
@@ -1179,6 +1184,9 @@ export class TaskScheduler {
         inputVersion: null,
       },
       answer: text,
+      // The structured progress-guard decision is persisted so a crash between
+      // supersede and synthesize is deterministically recoverable (spec §11.6).
+      ...(decision === undefined ? {} : { decision }),
     });
   }
 
@@ -1215,10 +1223,15 @@ export class TaskScheduler {
       humanAuthorized: boolean;
       suffix: string;
     },
+    roundOverride?: number,
   ): Promise<void> {
     const frozen = await this.#service.tasks.readFrozenTemplate(taskId);
     const agentName = frozen.agents.find((agent) => agent.id === parts.agentId)?.name ?? parts.agentId;
-    const round = events.filter((event) => event.type === 'pending_inputs_superseded').length;
+    // The intervention round: the supersede count the SYNTH time sees. Callers
+    // that synthesize during applyContinue/applyAccept pass the pre-answer
+    // events (the count before this intervention's own supersede); the crash
+    // repair passes the same derived round so the re-appended id matches.
+    const round = roundOverride ?? events.filter((event) => event.type === 'pending_inputs_superseded').length;
     const sequence = nextSequence(events) + 1;
     const node: TaskEvent = {
       id: `synthesize-${parts.suffix}-${round}`,
@@ -1237,6 +1250,123 @@ export class TaskScheduler {
       },
     };
     await this.#service.events.append(taskId, node);
+  }
+
+  /**
+   * Crash half-state repair (spec §11.6, semantic audit P2 plan 2026-08-07):
+   * a process death between `human_answered + pending_inputs_superseded` and
+   * the synthesized continue/accept input leaves a task with no executable
+   * pending input. On re-entry this finds the most recent human_answered that
+   * carries a persisted decision, and — when its deterministic
+   * `synthesize-<decision>-<round>` input is missing — re-applies the missing
+   * steps: supersede any still-pending inputs, then synthesize the decision
+   * input. Deterministic and idempotent: never a duplicate supersede for an
+   * already-voided round, never two synthesized inputs, and `humanAuthorized`
+   * is only ever produced by the accept decision (never from a model action).
+   */
+  private async repairInterventionHalfState(taskId: string): Promise<void> {
+    const committed = await this.#service.events.read(taskId);
+    const events = committed.map((entry) => entry.event);
+    let decision: 'continue' | 'accept' | null = null;
+    let answeredText = '';
+    let answeredIndex = -1;
+    for (let index = 0; index < events.length; index += 1) {
+      const event = events[index];
+      if (
+        event.type === 'human_answered' &&
+        (event.decision === 'continue' || event.decision === 'accept')
+      ) {
+        decision = event.decision;
+        answeredText = event.answer;
+        answeredIndex = index;
+      }
+    }
+    if (decision === null || answeredIndex < 0) {
+      return; // No structured intervention was ever answered.
+    }
+    // The intervention round mirrors applyContinue/applyAccept: the supersede
+    // count the synth would have seen at its commit time (the count before the
+    // answered event's own supersede, i.e. before answeredIndex).
+    let round = 0;
+    for (let index = 0; index < answeredIndex; index += 1) {
+      if (events[index].type === 'pending_inputs_superseded') {
+        round += 1;
+      }
+    }
+    const expectedId = `synthesize-${decision}-${round}`;
+    const synthesized = events.some(
+      (event) => event.type === 'agent_input' && event.id === expectedId,
+    );
+    if (synthesized) {
+      return; // The flow completed; nothing to repair.
+    }
+    // Re-apply the missing steps: supersede any inputs not yet voided, then
+    // synthesize the decision's input under the SAME round (deterministic id).
+    const pendingIds = currentPendingInputIds(events);
+    if (pendingIds.length > 0) {
+      await this.appendSupersede(taskId, pendingIds);
+    }
+    const fresh = await this.#service.events.read(taskId);
+    const freshEvents = fresh.map((entry) => entry.event);
+    if (decision === 'continue') {
+      // The continue recipient is the stalest VOIDED pending input when the
+      // supersede already committed (the crash point), else the stalest
+      // still-pending input (crash before supersede).
+      const supersededIds = events
+        .filter((event) => event.type === 'pending_inputs_superseded')
+        .flatMap((event) =>
+          event.type === 'pending_inputs_superseded' ? event.supersededNodeIds : [],
+        );
+      const supersededInputs = supersededIds
+        .map((id) =>
+          events.find(
+            (candidate): candidate is Extract<TaskEvent, { type: 'agent_input' }> =>
+              candidate.type === 'agent_input' && candidate.id === id,
+          ),
+        )
+        .filter((candidate): candidate is Extract<TaskEvent, { type: 'agent_input' }> =>
+          candidate !== undefined,
+        )
+        .sort((a, b) => a.node.sequence - b.node.sequence);
+      const stalest = supersededInputs[0] ?? stalestPendingInput(freshEvents);
+      if (stalest === null || stalest === undefined) {
+        return; // No recipient derivable; leave the task as-is.
+      }
+      await this.appendSynthesizedInput(
+        taskId,
+        freshEvents,
+        {
+          agentId: stalest.node.agentId,
+          body: answeredText,
+          inputVersion: stalest.node.inputVersion,
+          humanAuthorized: false,
+          suffix: 'continue',
+        },
+        round,
+      );
+    } else {
+      const latest = latestPublishedVersion(freshEvents);
+      if (latest === null) {
+        return;
+      }
+      const frozen = await this.#service.tasks.readFrozenTemplate(taskId);
+      const submitter = frozen.finalOutput.submitters[0];
+      if (submitter === undefined) {
+        return;
+      }
+      await this.appendSynthesizedInput(
+        taskId,
+        freshEvents,
+        {
+          agentId: submitter,
+          body: answeredText,
+          inputVersion: latest,
+          humanAuthorized: true,
+          suffix: 'accept',
+        },
+        round,
+      );
+    }
   }
 
   /** Appends the human answer plus a fresh input for the requesting agent. */

@@ -51,8 +51,8 @@ export interface AgentTurnResult {
 export interface LivePatch {
   agentId: string;
   turnId: string;
+  /** Cumulative public text streamed so far. */
   text?: string;
-  thinking?: string;
   /** A tool call started executing (by tool name). */
   toolStarted?: string;
   /** A tool call finished executing (by tool name). */

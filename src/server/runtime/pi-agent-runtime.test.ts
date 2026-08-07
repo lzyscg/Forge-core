@@ -458,12 +458,10 @@ describe('hidden thinking and secret exclusion (plan Phase E Task 2 rewrite)', (
   const SENTINEL = 'SECRET_SENTINEL';
   const THINKING_MARKER = 'reasoning_content';
 
-  it('keeps thinking out of publicText/actions/usage but surfaces it as one trace thinking entry', async () => {
+  it('keeps thinking out of every durable surface including the trace', async () => {
     const harness = createPiHarness({
       coreCwd: tempCwd(),
       script: [{
-        // The dispatch completes the phase so no corrective nudge runs and
-        // the trace stays exactly one thinking entry plus the tool steps.
         toolCalls: [
           {
             name: 'finish_production',
@@ -490,14 +488,17 @@ describe('hidden thinking and secret exclusion (plan Phase E Task 2 rewrite)', (
     });
     expect(publicOnly).not.toContain(SENTINEL);
     expect(publicOnly).not.toContain('thinkingSignature');
-    // The trace carries exactly one thinking entry with the sentinel text,
-    // and never the thinkingSignature metadata field.
-    const thinkingEntries = result.trace.filter((entry) => entry.kind === 'thinking');
-    expect(thinkingEntries).toHaveLength(1);
-    expect(thinkingEntries[0]).toEqual({
-      kind: 'thinking',
-      text: `${SENTINEL} hidden chain with ${THINKING_MARKER}`,
-    });
+    // The durable trace never carries raw provider thinking (semantic audit
+    // P0, plan 2026-08-07): only public text and tool steps survive.
+    expect(JSON.stringify(result.trace)).not.toContain(SENTINEL);
+    expect(JSON.stringify(result.trace)).not.toContain(THINKING_MARKER);
+    expect(result.trace.map((entry) => entry.kind)).toEqual([
+      'tool_call',
+      'tool_result',
+      'tool_call',
+      'tool_result',
+      'text',
+    ]);
     expect(JSON.stringify(result.trace)).not.toContain('thinkingSignature');
   });
 
@@ -548,7 +549,7 @@ describe('hidden thinking and secret exclusion (plan Phase E Task 2 rewrite)', (
 });
 
 describe('turn trace capture (plan Phase E Task 2)', () => {
-  it('orders a single turn trace as thinking -> tool_call -> tool_result -> text', async () => {
+  it('orders a single turn trace as tool_call -> tool_result -> text', async () => {
     const harness = createPiHarness({
       coreCwd: tempCwd(),
       // The workspace-only reply leaves the phase incomplete, so the two
@@ -564,11 +565,11 @@ describe('turn trace capture (plan Phase E Task 2)', () => {
       ],
     });
     const result = await harness.runtime.run(sampleTurnInput(), freshSignal());
-    // Chronological: tools execute before the final message (whose thinking
-    // block therefore lands between the tool steps and the public text); the
-    // nudge replies follow as plain text entries.
+    // Chronological: tools execute before the final message; the provider
+    // thinking block is never durable, so only tool/text entries survive
+    // (semantic audit P0, plan 2026-08-07).
     expect(result.trace.map((entry) => entry.kind))
-      .toEqual(['tool_call', 'tool_result', 'thinking', 'text', 'text', 'text']);
+      .toEqual(['tool_call', 'tool_result', 'text', 'text', 'text']);
     expect(result.trace[0]).toEqual({
       kind: 'tool_call',
       toolName: 'write_workspace',
@@ -576,11 +577,10 @@ describe('turn trace capture (plan Phase E Task 2)', () => {
     });
     expect(result.trace[1]).toMatchObject({ kind: 'tool_result', toolName: 'write_workspace' });
     expect((result.trace[1] as { text: string }).text).toContain('draft/v1.md');
-    expect(result.trace[2]).toEqual({ kind: 'thinking', text: 'planning the draft' });
-    expect(result.trace[3]).toEqual({ kind: 'text', text: 'public final answer' });
+    expect(result.trace[2]).toEqual({ kind: 'text', text: 'public final answer' });
   });
 
-  it('accumulates thinking from every assistant message, including inter-tool-call turns', async () => {
+  it('keeps provider thinking out of the trace while keeping public text', async () => {
     const harness = createPiHarness({
       coreCwd: tempCwd(),
       script: [
@@ -589,16 +589,20 @@ describe('turn trace capture (plan Phase E Task 2)', () => {
           toolCalls: [{ name: 'write_workspace', args: { path: 'a.md', content: 'one' } }],
           text: 'final answer',
         },
-        // Corrective-nudge replies: text-only, no thinking blocks.
+        // Corrective-nudge replies: text-only.
         { text: 'correcting' },
         { text: 'correcting' },
       ],
     });
     const result = await harness.runtime.run(sampleTurnInput(), freshSignal());
-    const thinking = result.trace.filter((entry) => entry.kind === 'thinking');
-    expect(thinking.map((entry) => (entry as { text: string }).text)).toEqual([
-      'planning before tool one',
-      'reasoning between tools',
+    // The intermediate thinking blocks never reach the durable trace (the
+    // trace carries only text + tool kinds; the sentinel markers stay absent).
+    expect(result.trace.map((entry) => entry.kind)).toEqual([
+      'tool_call',
+      'tool_result',
+      'text',
+      'text',
+      'text',
     ]);
     const texts = result.trace
       .filter((entry) => entry.kind === 'text')
@@ -624,9 +628,9 @@ describe('turn trace capture (plan Phase E Task 2)', () => {
     const first = await harness.runtime.run(sampleTurnInput({ turnId: 'turn-1' }), freshSignal());
     const second = await harness.runtime.run(sampleTurnInput({ turnId: 'turn-2' }), freshSignal());
     expect(first.trace.map((entry) => entry.kind))
-      .toEqual(['tool_call', 'tool_result', 'thinking', 'text', 'text', 'text']);
+      .toEqual(['tool_call', 'tool_result', 'text', 'text', 'text']);
     expect(second.trace.map((entry) => entry.kind))
-      .toEqual(['tool_call', 'tool_result', 'thinking', 'text', 'text', 'text']);
+      .toEqual(['tool_call', 'tool_result', 'text', 'text', 'text']);
     // The two traces are distinct array instances, not a shared reference.
     expect(first.trace).not.toBe(second.trace);
   });
@@ -881,13 +885,14 @@ describe('runtime type surface', () => {
 });
 
 describe('live streaming patches (plan C realtime streaming)', () => {
-  it('streams cumulative thinking/text patches around tool calls and ends with finished', async () => {
+  it('streams cumulative public text patches around tool calls and ends with finished', async () => {
     const harness = createPiHarness({
       coreCwd: tempCwd(),
       script: [{
         streaming: { thinkingChunks: ['hmm'], textChunks: ['he', 'llo'] },
         // Finish + dispatch complete the phase, so no corrective nudge runs
-        // and the patch stream stays exactly the scripted shape.
+        // and the patch stream stays exactly the scripted shape. Provider
+        // thinking is never streamed to the live buffer (semantic audit P0).
         toolCalls: [
           {
             name: 'finish_production',
@@ -904,9 +909,9 @@ describe('live streaming patches (plan C realtime streaming)', () => {
     });
     expect(result.publicText).toBe('hello');
     expect(patches).toEqual([
-      { agentId: 'agent-alpha', turnId: 'turn-1', thinking: 'hmm', text: '' },
-      { agentId: 'agent-alpha', turnId: 'turn-1', thinking: 'hmm', text: 'he' },
-      { agentId: 'agent-alpha', turnId: 'turn-1', thinking: 'hmm', text: 'hello' },
+      { agentId: 'agent-alpha', turnId: 'turn-1', text: '' },
+      { agentId: 'agent-alpha', turnId: 'turn-1', text: 'he' },
+      { agentId: 'agent-alpha', turnId: 'turn-1', text: 'hello' },
       { agentId: 'agent-alpha', turnId: 'turn-1', toolStarted: 'finish_production' },
       { agentId: 'agent-alpha', turnId: 'turn-1', toolFinished: 'finish_production' },
       { agentId: 'agent-alpha', turnId: 'turn-1', toolStarted: 'publish_artifact' },

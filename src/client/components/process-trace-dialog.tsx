@@ -192,17 +192,6 @@ export function ProcessTraceDialog({ taskId, node, onClose }: ProcessTraceDialog
             ) : null}
             <div className="fc-trace__sections">
               {state.trace.entries.map((entry, index) => {
-                if (entry.kind === 'thinking') {
-                  return (
-                    <section
-                      key={`${entry.kind}-${index}`}
-                      className="fc-trace__section fc-trace__section--thinking"
-                    >
-                      <h3 className="fc-trace__section-title">思维</h3>
-                      <p className="fc-trace__text">{entry.text}</p>
-                    </section>
-                  );
-                }
                 if (entry.kind === 'tool_call') {
                   return (
                     <section key={`${entry.kind}-${index}`} className="fc-trace__section">

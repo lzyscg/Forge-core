@@ -114,6 +114,19 @@ describe('pi-tool-factory action shapes (plan 2026-08-07 Phase 2)', () => {
     ]);
   });
 
+  it('rejects annotate_artifact content whose frontmatter lacks a valid verdict', async () => {
+    const { buffer, tools } = toolsFor();
+    // Missing frontmatter, and a frontmatter with an unknown verdict: both are
+    // rejected with a stable, model-correctable code (semantic audit P1, plan
+    // 2026-08-07) — nothing is buffered.
+    for (const content of ['今天感觉还行，建议改一下。', '---\nverdict: maybe\n---\n意见']) {
+      const result = await execute(tools, 'annotate_artifact', { file: 'review.md', content });
+      expect(result.accepted).toBe(false);
+      expect(result.code).toBe('ANNOTATE_FRONTMATTER_INVALID');
+    }
+    expect(buffer.snapshot()).toEqual([]);
+  });
+
   it('rejects dispatch tools that still carry productionPackageRef', async () => {
     const { tools } = toolsFor();
     for (const name of ['publish_artifact', 'submit_final_artifact']) {
@@ -247,7 +260,7 @@ describe('pi-tool-factory phase gate rejections are correctable (spec §5.3)', (
     await sealInline(tools);
     const rejected = await execute(tools, 'annotate_artifact', {
       file: 'review.md',
-      content: '意见',
+      content: '---\nverdict: reject\n---\n意见',
     });
     expect(rejected.accepted).toBe(false);
     expect(rejected.code).toBe(ACTION_BUFFER_ERROR_CODES.PHASE_ANNOTATE_AFTER_SEAL_INVALID);

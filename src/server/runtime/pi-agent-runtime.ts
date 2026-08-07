@@ -327,76 +327,60 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Extracts the display-only thinking/text steps from a final assistant
- * message (plan Phase E Task 2). Thinking blocks contribute `block.thinking`
- * (falling back to `block.text`); text blocks contribute `block.text`. Empty
- * blocks are skipped and provider metadata (e.g. thinkingSignature) is never
- * carried into the trace. Defensive: never throws.
+ * Extracts the public text steps from a final assistant message (plan Phase E
+ * Task 2; raw provider thinking is NEVER durable — semantic audit P0, plan
+ * 2026-08-07). Text blocks contribute `block.text`; empty blocks are skipped
+ * and provider metadata (e.g. thinkingSignature) never leaves the adapter.
+ * Defensive: never throws.
  */
 function collectAssistantTrace(message: NonNullable<PiSessionEventLike['message']>): {
-  thinking: TraceEntry[];
   text: TraceEntry[];
 } {
-  const thinking: TraceEntry[] = [];
   const text: TraceEntry[] = [];
   const content = message.content;
   if (!Array.isArray(content)) {
-    return { thinking, text };
+    return { text };
   }
   for (const block of content) {
     if (block === null || typeof block !== 'object') {
       continue;
     }
     const type = (block as { type?: unknown }).type;
-    if (type === 'thinking') {
-      const raw = (block as { thinking?: unknown }).thinking ?? (block as { text?: unknown }).text;
-      if (typeof raw === 'string' && raw.length > 0) {
-        thinking.push({ kind: 'thinking', text: raw });
-      }
-    } else if (type === 'text') {
+    if (type === 'text') {
       const raw = (block as { text?: unknown }).text;
       if (typeof raw === 'string' && raw.length > 0) {
         text.push({ kind: 'text', text: raw });
       }
     }
   }
-  return { thinking, text };
+  return { text };
 }
 
 /**
- * Cumulative public text + thinking of an assistant message snapshot, for
- * the live-preview patches (plan C). `message_update` events carry the
- * message accumulated so far, so each patch can replace the previous value.
- * Defensive: never throws; provider metadata never leaves the adapter.
+ * Cumulative public text of an assistant message snapshot, for the live-preview
+ * patches (plan C). `message_update` events carry the message accumulated so
+ * far, so each patch can replace the previous value. Provider thinking is never
+ * streamed (semantic audit P0). Defensive: never throws.
  */
-function extractLiveContent(message: NonNullable<PiSessionEventLike['message']>): {
-  text: string;
-  thinking: string;
-} {
+function extractLiveContent(message: NonNullable<PiSessionEventLike['message']>): string {
   const texts: string[] = [];
-  const thinkings: string[] = [];
   const content = message.content;
   if (!Array.isArray(content)) {
-    return { text: '', thinking: '' };
+    return '';
   }
   for (const block of content) {
     if (block === null || typeof block !== 'object') {
       continue;
     }
     const type = (block as { type?: unknown }).type;
-    if (type === 'thinking') {
-      const raw = (block as { thinking?: unknown }).thinking ?? (block as { text?: unknown }).text;
-      if (typeof raw === 'string') {
-        thinkings.push(raw);
-      }
-    } else if (type === 'text') {
+    if (type === 'text') {
       const raw = (block as { text?: unknown }).text;
       if (typeof raw === 'string') {
         texts.push(raw);
       }
     }
   }
-  return { text: texts.join('\n'), thinking: thinkings.join('\n') };
+  return texts.join('\n');
 }
 
 /** Builds a tool_call trace entry from a tool_execution_start event. */
@@ -610,18 +594,17 @@ export class PiAgentRuntime implements AgentRuntime {
       };
       unsubscribe = session.subscribe((event) => {
         // Trace collection is defensive: it must never fail the Turn.
-        // Entries are appended in event order so the dialog shows thinking
-        // exactly where it happened (including between tool calls).
+        // Entries are appended in event order so the dialog shows the public
+        // steps where they happened; provider thinking never enters the trace
+        // (semantic audit P0, plan 2026-08-07).
         try {
           if (event?.type === 'message_end' && event.message?.role === 'assistant') {
             collected.message = event.message;
-            const { thinking, text } = collectAssistantTrace(event.message);
-            collected.ordered.push(...thinking, ...text);
+            collected.ordered.push(...collectAssistantTrace(event.message).text);
           } else if (event?.type === 'message_update' && event.message?.role === 'assistant') {
             // Live streaming preview (plan C): cumulative snapshot of the
-            // in-flight assistant message; memory-only, never persisted.
-            const live = extractLiveContent(event.message);
-            emitLive({ text: live.text, thinking: live.thinking });
+            // in-flight assistant message; public text only, never persisted.
+            emitLive({ text: extractLiveContent(event.message) });
           } else if (event?.type === 'tool_execution_start') {
             collected.ordered.push(toolCallEntry(event));
             emitLive({

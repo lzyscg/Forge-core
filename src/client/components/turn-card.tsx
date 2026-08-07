@@ -74,7 +74,7 @@ export function TurnCard({
       ? activeTurn
       : null;
   const liveIsEmpty =
-    live !== null && live.text === '' && live.thinking === '' && live.tools.length === 0;
+    live !== null && live.text === '' && live.tools.length === 0;
 
   const skillName = (skill: WorkspaceNode): string =>
     agent?.skills.find((item) => item.id === skill.title)?.name ?? skill.title;
@@ -178,12 +178,6 @@ export function TurnCard({
             <p className="fc-turn__stream-empty">运行中…</p>
           ) : (
             <>
-              {live.thinking !== '' ? (
-                <details className="fc-turn__stream-thinking">
-                  <summary>思考过程</summary>
-                  <p className="fc-turn__stream-thinking-text">{live.thinking}</p>
-                </details>
-              ) : null}
               {live.text !== '' ? (
                 <p className="fc-turn__stream-text">{live.text}</p>
               ) : null}

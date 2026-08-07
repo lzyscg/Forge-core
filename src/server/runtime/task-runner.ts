@@ -131,31 +131,29 @@ function resultAttemptNumber(resultEventId: string, inputEventId: string): numbe
 }
 
 /**
- * Resolves the inputVersion a route sender operated on, for route.inject
- * execution-time resolution (spec §5.2). Walks the sender's result event
- * (the route's fromNodeId) to its consumed input node (agent_result.inputNodeId)
- * and returns that input node's inputVersion. Returns null when the sender has
- * no result, no consumed input, or the consumed input carried no version.
+ * The declared route that delivered an input node, or null when the input has
+ * no delivering route (initial seeded input, scheduler-synthesized human
+ * continue/accept nodes). Matched by route kind + label against the frozen
+ * snapshot (semantic audit P0, plan 2026-08-07): prompt assembly is decided by
+ * WHICH edge produced the input, not by whether inputVersion is set.
  */
-function resolveSenderInputVersion(
+function resolveIncomingDelivery(
   events: readonly TaskEvent[],
-  senderResultNodeId: string,
-): number | null {
-  for (const event of events) {
-    if (event.type !== 'agent_result' || event.id !== senderResultNodeId) {
-      continue;
-    }
-    const senderInputId = event.inputNodeId ?? null;
-    if (senderInputId === null) {
-      return null;
-    }
-    const senderInput = events.find(
-      (candidate): candidate is Extract<TaskEvent, { type: 'agent_input' }> =>
-        candidate.type === 'agent_input' && candidate.id === senderInputId,
-    );
-    return senderInput === undefined ? null : senderInput.node.inputVersion;
+  frozen: FrozenTemplate,
+  inputNodeId: string,
+): FrozenTemplate['routes'][number] | null {
+  const routeEvent = events.find(
+    (e): e is Extract<TaskEvent, { type: 'route_executed' }> =>
+      e.type === 'route_executed' && e.route.toNodeId === inputNodeId,
+  );
+  if (routeEvent === undefined) {
+    return null;
   }
-  return null;
+  return (
+    frozen.routes.find(
+      (route) => route.kind === routeEvent.route.kind && route.label === routeEvent.route.label,
+    ) ?? null
+  );
 }
 
 /**
@@ -696,14 +694,17 @@ export class TaskRunner {
     // Rebuild loaded Skills; failures are confined to the current node.
     try {
       const loadedSkills = await this.skills.loadedSkillsFor(taskId, agentId);
-      let inputText = input.node.body;
+      const inputVersion = input.node.inputVersion;
+      // Hand-off identity for the commit context (publish/forward/submit/
+      // send-with-version all consume the received artifact): derived from the
+      // input node's OWN version reference — independent of prompt assembly
+      // (semantic audit P0, plan 2026-08-07).
       let handOffArtifact: CurrentInputArtifact | null = null;
-      if (input.node.inputVersion !== null) {
-        const handOff = await this.artifacts.read(taskId, input.node.inputVersion);
+      if (inputVersion !== null) {
+        const handOff = await this.artifacts.read(taskId, inputVersion);
         const contentFile =
           handOff.files.find((file) => file.name === 'content.md' || file.name === 'content.txt')
             ?.content ?? '';
-        inputText = artifactHandOffInputText(handOff.meta.title, contentFile);
         handOffArtifact = {
           artifactId: handOff.meta.id,
           version: handOff.meta.version,
@@ -713,44 +714,38 @@ export class TaskRunner {
           sourceNodeId: handOff.meta.sourceNodeId,
           humanAuthorized: input.node.humanAuthorized ?? false,
         };
-      } else {
-        // Route inject (spec §5.2): the input node carries no inputVersion, so
-        // the delivering route's declared inject files are read from the
-        // SENDER's input version (resolved through the route's fromNodeId ->
-        // agent_result.inputNodeId -> sender agent_input) and appended to the
-        // input text under their declared `as` labels. Inject is execution-time
-        // only: nothing is materialized into events (spec §5.2).
-        const routeEvent = events.find(
-          (e): e is Extract<TaskEvent, { type: 'route_executed' }> =>
-            e.type === 'route_executed' && e.route.toNodeId === inputNodeId,
-        );
-        if (routeEvent !== undefined) {
-          const declaredRoute = frozen.routes.find(
-            (r) => r.kind === routeEvent.route.kind && r.label === routeEvent.route.label,
-          );
-          if (declaredRoute !== undefined && declaredRoute.inject !== undefined) {
-            const injects = declaredRoute.inject;
-            if (injects.length > 0) {
-              const injectVersion = resolveSenderInputVersion(events, routeEvent.route.fromNodeId);
-              if (injectVersion !== null) {
-                try {
-                  const injectEntry = await this.artifacts.read(taskId, injectVersion);
-                  const injectParts: string[] = [];
-                  for (const inj of injects) {
-                    const file = injectEntry.files.find((f) => f.name === inj.file);
-                    if (file !== undefined) {
-                      injectParts.push(`${inj.as}：\n${file.content}`);
-                    }
-                  }
-                  if (injectParts.length > 0) {
-                    inputText = `${inputText}\n\n${injectParts.join('\n\n')}`;
-                  }
-                } catch {
-                  // Inject read failure is non-fatal; the agent still has the base input.
-                }
-              }
+      }
+      // Prompt assembly is decided by the INCOMING DELIVERY (which edge produced
+      // this input), NOT by whether inputVersion is set: inputVersion is a
+      // reference, not an input type. Message edges keep their summary body;
+      // artifact edges and message edges both apply the declared route.inject
+      // (anchored on the receiver's OWN inputVersion, spec §5.2).
+      const delivery = resolveIncomingDelivery(events, frozen, inputNodeId);
+      let inputText = input.node.body; // initial / synthesized guidance / message summary
+      if (delivery !== null && inputVersion !== null) {
+        try {
+          const entry = await this.artifacts.read(taskId, inputVersion);
+          const injectParts: string[] = [];
+          for (const inj of delivery.inject ?? []) {
+            const file = entry.files.find((f) => f.name === inj.file);
+            if (file !== undefined) {
+              injectParts.push(`${inj.as}：\n${file.content}`);
             }
           }
+          if (injectParts.length > 0) {
+            inputText = `${inputText}\n\n${injectParts.join('\n\n')}`;
+          } else if (delivery.kind === 'artifact') {
+            // No declared inject (or none matched this version): legacy fallback
+            // reads the primary content file so artifact hand-off inputs stay
+            // informative. Explicitly a fallback, never an override of inject.
+            const contentFile =
+              entry.files.find(
+                (file) => file.name === 'content.md' || file.name === 'content.txt',
+              )?.content ?? '';
+            inputText = artifactHandOffInputText(entry.meta.title, contentFile);
+          }
+        } catch {
+          // Inject read failure is non-fatal; the agent still has the base input.
         }
       }
       const statePrefix = buildTurnStatePrefix(events, agentId, frozen, inputNodeId);

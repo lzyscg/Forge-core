@@ -32,13 +32,12 @@ describe('LiveStore', () => {
   it('merges the first patch into a running live turn', () => {
     const time = clockAt('2026-08-05T00:00:00.000Z');
     const store = new LiveStore({ clock: time.clock });
-    store.merge('task-1', patch({ text: 'hello', thinking: 'hmm' }));
+    store.merge('task-1', patch({ text: 'hello' }));
     expect(store.get('task-1')).toEqual({
       agentId: 'agent-alpha',
       turnId: 'turn-1',
       status: 'running',
       text: 'hello',
-      thinking: 'hmm',
       tools: [],
       updatedAt: '2026-08-05T00:00:00.000Z',
     });
@@ -47,12 +46,11 @@ describe('LiveStore', () => {
   it('keeps earlier fields when later patches omit them and bumps updatedAt', () => {
     const time = clockAt('2026-08-05T00:00:00.000Z');
     const store = new LiveStore({ clock: time.clock });
-    store.merge('task-1', patch({ text: 'hello', thinking: 'hmm' }));
+    store.merge('task-1', patch({ text: 'hello' }));
     time.advance(250);
     store.merge('task-1', patch({ text: 'hello world' }));
     const live = store.get('task-1');
     expect(live?.text).toBe('hello world');
-    expect(live?.thinking).toBe('hmm');
     expect(live?.updatedAt).toBe('2026-08-05T00:00:00.250Z');
   });
 

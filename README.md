@@ -37,7 +37,7 @@ src/server/            文件后端 + 调度
                        / task-store / task-projector
   template/            模板加载/校验/最后有效缓存
   api/                 REST 路由（/api/templates、/api/tasks、DELETE 等）
-templates/             业务模板（知乎单章：Agent/Skill/管道 YAML + 提示词）
+templates/             业务模板（long-form-hub 长篇总控中枢；zhihu-single-chapter 保留为 v2 升级版）
 e2e/                   Playwright 门禁
 scripts/               verify-*/probe:pi/acceptance-* 门禁脚本
 ```
@@ -45,12 +45,13 @@ scripts/               verify-*/probe:pi/acceptance-* 门禁脚本
 ## 不变量 / 铁律（改代码前必读）
 
 1. **平台零业务词**：业务语义只存在于 `templates/` 与 mock fixture；平台代码不出现「章节/写作/审核/知乎」等词。
-2. **模型不碰工程数据**：ID/版本/时间戳/路由由系统补；模型只调五类生产动作 + 三个工作区动作。
+2. **模型不碰工程数据**：ID/版本/时间戳/路由由系统补；模型只调九类生产动作 + 三个工作区动作。
 3. **事件只追加不覆盖**：`events/<6位序列>-<uuid>.json`；产物版本只增不改；损坏隔离不猜测。
 4. **交付由系统门禁决定**：`submit_final_artifact` 经独立校验才完成；自然语言不算数。
 5. **单一执行槽**：全进程一次只跑一个 Agent Turn；stop/abort 有界等待、stale 结果不提交。
-6. **凭据/隐藏思维链不上屏、不持久化**：live 缓冲纯内存；`probe:pi` 报告脱敏。
-7. **Pi 约束**：内置工具/自动 Skill/压缩/自动重试全关；只暴露五个生产工具 + 三个工作区工具。
+6. **凭据/隐藏思维链不上屏、不持久化**：live 缓冲纯内存；durable trace 只保留公开文本/工具步骤，raw provider thinking 永不落盘；`probe:pi` 报告脱敏。
+7. **Pi 约束**：内置工具/自动 Skill/压缩/自动重试全关；只暴露九个生产动作工具 + 三个工作区工具。
+8. **v2-only runnable**：当前唯一可执行回合契约是 version 2；历史 v1 快照只读、gate 为 `incompatible`，可 clone 到当前模板。
 
 ## 数据模型（每任务一个目录）
 
@@ -59,15 +60,18 @@ data/tasks/<taskId>/
   task.json            冻结记录（templateId/templateVersion/frozenInput）
   snapshot/            冻结模板快照（校验后拷贝，versionHash 复核）
   events/              追加式事件（agent_input/result/attempt_failed/route_executed/
-                       artifact_published/skill_loaded/human_*/final_submission_accepted…）
-  artifacts/vNNN/      meta.json + content.md|txt（版本只增）
+                       artifact_published/artifact_annotated/skill_loaded/human_*/
+                       pending_inputs_superseded/final_submission_accepted…）
+  artifacts/vNNN/      版本目录：content.md|txt（正文）+ revision.md（修订）
+                       + review.md（审核意见）+ meta.json（版本只增）
+  traces/<turnId>.json 展示用回合过程（公开文本/工具步骤，无 raw thinking）
 ```
 
 ## 关键契约
 
-- `contracts.ts`：`TaskWorkspace`/`WorkspaceNode`(kind: input|result|human_request|human_answer|skill)/`ArtifactVersion`/`LiveTurn`(流式)。冻结，改它要全链路同步。
-- `ForgeCoreGateway`：listTemplates/getTemplate/reloadTemplate/createTask/listTasks/getWorkspace/start/stop/resume/retry/answerHuman/**deleteTask**/watchTask/getTurnTrace/getSkillContent/cloneTask。
-- 生产动作五类：`load_skill/send_message/publish_artifact/submit_final_artifact/request_human_input`；工作区三类：`write/read/list_workspace`。
+- `contracts.ts`：`TaskWorkspace`/`WorkspaceNode`/`ArtifactVersion.files[].extract`/`LiveTurn`。冻结，改它要全链路同步。
+- `ForgeCoreGateway`：listTemplates/getTemplate/reloadTemplate/createTask/listTasks/getWorkspace/start/stop/resume/retry/answerHuman/submitHumanDecision/**deleteTask**/watchTask/getTurnTrace/getSkillContent/cloneTask。
+- 动作注册表九类：`load_skill/finish_production(多文件)/annotate_artifact/read_artifact_version/publish_artifact/forward_input_version/submit_final_artifact/send_message/request_human_input`；工作区三类：`write/read/list_workspace`。
 
 ## 运行
 
@@ -102,3 +106,12 @@ A 产品形态(Mock) · B 文件/HTTP 后端 · C Pi Runtime/调度/恢复 · D 
 ## 先读这些
 
 `src/shared/contracts.ts` → `src/server/core-service.ts` → `src/server/runtime/task-scheduler.ts` → `src/server/storage/task-projector.ts` → `src/client/components/turn-card.tsx`。
+
+### docs 索引
+
+- `docs/ARCHITECTURE.md` —— 当前稳定架构与核心不变量（v2-only、9 动作、事件溯源、人工介入）。
+- `docs/PROJECT-MAP.md` —— 模块地图、关键类、调用链、数据目录、测试门禁。
+- `docs/IMPLEMENTATION-LOG.md` —— 实施历史（v7 各 Phase 做了什么/关键决策/已知局限）。
+- `docs/2026-08-07-*.md` —— v7 产物版本目录制 的 spec / dev-plan / 语义审计修复计划。
+- 更早的 `docs/2026-08-0*.md` —— 历史设计与实现记录（保留作历史，不反映当前行为）。
+

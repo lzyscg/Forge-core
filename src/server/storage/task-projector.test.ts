@@ -74,6 +74,44 @@ describe('task-projector', () => {
     expect(workspace.pendingHumanQuestion).toBeNull();
   });
 
+  it('derives artifact file extract from the frozen artifactSchema, legacy fallback intact', async () => {
+    const created = await service.createTask(validTaskRequest());
+    await service.publishTestArtifact(created.id, {
+      title: '评估 V1',
+      sourceNodeId: 'ev-result-writer',
+      files: [
+        { name: 'content.md', content: '正文' },
+        { name: 'evaluation.md', content: '评估' },
+      ],
+      format: 'markdown',
+    });
+    const record = await service.tasks.readTaskRecord(created.id);
+    const frozen = await service.tasks.readFrozenTemplate(created.id);
+    // A template-declared non-standard extract slot must survive projection
+    // (semantic audit P1, plan 2026-08-07): the frozen artifactSchema is the
+    // source of truth, not the file name.
+    const customized = {
+      ...frozen,
+      artifactSchema: {
+        files: [
+          { name: 'content.md', required: true, producer: 'writer', extract: 'content', phase: 'create' as const },
+          { name: 'evaluation.md', required: false, producer: 'reviewer', extract: 'evaluation', phase: 'annotate' as const },
+        ],
+      },
+    };
+    const artifacts = await service.artifacts.list(created.id);
+    const workspace = projectTask({ record, frozenTemplate: customized }, [], artifacts);
+    const v1 = workspace.artifacts.find((a) => a.version === 1);
+    expect(v1?.files.find((f) => f.name === 'evaluation.md')?.extract).toBe('evaluation');
+    expect(v1?.files.find((f) => f.name === 'content.md')?.extract).toBe('content');
+
+    // A file absent from the schema (legacy) still degrades via the filename
+    // heuristic rather than inventing a template slot.
+    const legacy = projectTask({ record, frozenTemplate: frozen }, [], artifacts);
+    const legacyV1 = legacy.artifacts.find((a) => a.version === 1);
+    expect(legacyV1?.files.find((f) => f.name === 'content.md')?.extract).toBe('content');
+  });
+
   it('folds nodes, executed routes and attempt counts from committed events', async () => {
     const created = await service.createTask(validTaskRequest());
     await service.appendTestEvent(created.id, makeTaskEvent({ type: 'task_started' }));

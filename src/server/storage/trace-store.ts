@@ -43,8 +43,6 @@ function truncateText(text: string): string {
 /** Bounds one entry in place: text fields truncated, oversized params dropped. */
 function limitEntry(entry: TraceEntry): TraceEntry {
   switch (entry.kind) {
-    case 'thinking':
-      return { kind: 'thinking', text: truncateText(entry.text) };
     case 'text':
       return { kind: 'text', text: truncateText(entry.text) };
     case 'tool_result':
@@ -69,8 +67,6 @@ function parseTraceEntry(raw: unknown): TraceEntry | null {
     return null;
   }
   switch (raw.kind) {
-    case 'thinking':
-      return typeof raw.text === 'string' ? { kind: 'thinking', text: raw.text } : null;
     case 'text':
       return typeof raw.text === 'string' ? { kind: 'text', text: raw.text } : null;
     case 'tool_call':
@@ -82,6 +78,8 @@ function parseTraceEntry(raw: unknown): TraceEntry | null {
         ? { kind: 'tool_result', toolName: raw.toolName, text: raw.text }
         : null;
     default:
+      // Including a legacy `thinking` kind: isolated to null (semantic audit
+      // P0 — raw provider thinking is never durable).
       return null;
   }
 }

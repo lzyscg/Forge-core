@@ -134,12 +134,12 @@ export interface WorkspaceNode {
 }
 
 /**
- * One observable step of a model Turn. Traces are display-only, stored
+ * One observable public step of a model Turn. Traces are display-only, stored
  * outside the canonical event union, and never feed delivery gates
- * (plan Phase E, Global Constraint 5).
+ * (plan Phase E, Global Constraint 5). Provider raw thinking is NEVER durable:
+ * only public text and tool steps survive (semantic audit P0, plan 2026-08-07).
  */
 export type TraceEntry =
-  | { kind: 'thinking'; text: string }
   | { kind: 'tool_call'; toolName: string; params: Record<string, unknown> }
   | { kind: 'tool_result'; toolName: string; text: string }
   | { kind: 'text'; text: string };
@@ -239,7 +239,8 @@ export interface LiveToolCall {
  * Memory-only live preview of the one running Turn of a task (plan C
  * realtime streaming). Served from the server's in-memory buffer (real
  * runtime) or derived from the scenario clock (mock) — never written to
- * files or events, so thinking fragments never persist.
+ * files or events. Provider raw thinking is never streamed here either
+ * (semantic audit P0, plan 2026-08-07): only public text and tool calls.
  */
 export interface LiveTurn {
   agentId: string;
@@ -247,8 +248,6 @@ export interface LiveTurn {
   status: 'running';
   /** Cumulative public assistant text streamed so far. */
   text: string;
-  /** Cumulative thinking text streamed so far (display only). */
-  thinking: string;
   tools: LiveToolCall[];
   updatedAt: string;
 }

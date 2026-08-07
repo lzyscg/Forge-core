@@ -15,6 +15,7 @@
  * Business vocabulary lives only inside the template directory and this test;
  * the platform template modules under test carry none (iron rule 1).
  */
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { loadTemplateDirectory } from './template-loader';
@@ -92,5 +93,17 @@ describe('long-form hub acceptance template', () => {
       },
     });
     expect(writer?.turnContract?.annotate).toBeUndefined();
+  });
+
+  it('does not hardcode a narrative voice in the writer system prompt', () => {
+    // Semantic audit P2 (plan 2026-08-07): the theme input declares the
+    // narrative voice (first/third person); the generic writer prompt must not
+    // hardcode one, or it conflicts with the business input.
+    const promptPath = fileURLToPath(
+      new URL('../../../templates/long-form-hub/prompts/writer-system.md', import.meta.url),
+    );
+    const prompt = readFileSync(promptPath, 'utf8');
+    expect(prompt).not.toMatch(/第一人称/);
+    expect(prompt).not.toMatch(/第三人称/);
   });
 });

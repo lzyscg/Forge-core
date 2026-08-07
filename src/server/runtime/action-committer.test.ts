@@ -882,6 +882,48 @@ describe('ActionCommitter v7 forward, annotate and reachability (spec §7/§8/§
     expect(reviewerResult?.event.type === 'agent_result' && reviewerResult.event.dispatchKind).toBe('forward');
   });
 
+  it('rejects annotate_artifact with malformed frontmatter and writes nothing', async () => {
+    // Writer publishes v1 so the reviewer has a received artifact to annotate.
+    const writerCtx = forwardContext(taskId, 'writer', {
+      turnId: 'ann-w-1',
+      inputNodeId: 'ann-input-writer',
+    });
+    await committer.validateAndCommit(writerCtx, [
+      finishInline({ files: [{ name: 'content.md', content: '章节正文' }], title: '章节 V1', artifactType: null }),
+      PUBLISH_CURRENT,
+    ]);
+    const reviewerInputId = 'ann-w-1-artifact-input-0';
+    const version1 = await artifacts.read(taskId, 1);
+    const before = await events.read(taskId);
+
+    // Missing frontmatter and an unknown verdict both fail closed at the
+    // committer boundary (semantic audit P1) — a FakeRuntime or direct-commit
+    // path must never bypass the tool-layer check. The turn is a legal operate
+    // shape (annotate + forward) so the annotate gate is what rejects it.
+    for (const content of ['今天感觉还行。', '---\nverdict: maybe\n---\n意见']) {
+      await expect(
+        committer.validateAndCommit(
+          forwardContext(taskId, 'reviewer', {
+            turnId: 'ann-r-1',
+            inputNodeId: reviewerInputId,
+            currentInputArtifact: receivedFrom(version1),
+          }),
+          [
+            { type: 'annotate_artifact', file: 'review.md', content },
+            { type: 'forward_input_version', targetAgentId: 'controller' },
+          ],
+        ),
+      ).rejects.toMatchObject({ code: 'ANNOTATE_FRONTMATTER_INVALID' });
+    }
+
+    // Zero writes: no artifact_annotated event, no review file in the version.
+    const after = await events.read(taskId);
+    expect(after.map((entry) => entry.event.type)).not.toContain('artifact_annotated');
+    expect(after).toEqual(before);
+    const versionAfter = await artifacts.read(taskId, 1);
+    expect(versionAfter.files.some((file) => file.name === 'review.md')).toBe(false);
+  });
+
   it('accepts a submit reachability closure through a forward edge (spec §7.3)', async () => {
     // Chain: writer publish -> reviewer forward -> controller submit.
     const writerCtx = forwardContext(taskId, 'writer', {

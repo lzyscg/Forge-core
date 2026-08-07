@@ -188,7 +188,18 @@ export type TaskEvent =
       /** Origin of the request (spec §11.5); optional, legacy → agent_request. */
       source?: HumanRequestSource;
     })
-  | (EventBase & { type: 'human_answered'; node: EventNode; answer: string })
+  | (EventBase & {
+      type: 'human_answered';
+      node: EventNode;
+      answer: string;
+      /**
+       * The structured progress-guard decision this answer carried (spec
+       * §11.1): persisted so a crash between supersede and synthesize is
+       * deterministically recoverable (spec §11.6). Absent on ordinary
+       * agent_request answers.
+       */
+      decision?: 'continue' | 'accept';
+    })
   | (EventBase & { type: 'final_submission_accepted'; artifactId: string; version: number })
   | (EventBase & { type: 'skill_loaded'; skillId: string });
 
@@ -377,7 +388,7 @@ const MEMBER_KEYS: Record<string, ReadonlySet<string>> = {
   artifact_annotated: baseAnd('version', 'file', 'contentHash', 'turnId', 'nodeId'),
   pending_inputs_superseded: baseAnd('supersededNodeIds'),
   human_requested: baseAnd('node', 'question', 'source'),
-  human_answered: baseAnd('node', 'answer'),
+  human_answered: baseAnd('node', 'answer', 'decision'),
   final_submission_accepted: baseAnd('artifactId', 'version'),
   skill_loaded: baseAnd('skillId'),
 };
@@ -536,14 +547,23 @@ export function validateTaskEvent(candidate: unknown): TaskEvent {
       }
       return { id, at, type, node, question, ...(source === undefined ? {} : { source }) };
     }
-    case 'human_answered':
+    case 'human_answered': {
+      const decision = candidate.decision;
       return {
         id,
         at,
         type,
         node: validateEventNode(candidate.node, '事件 node'),
         answer: assertNonEmptyString(candidate.answer, '事件 answer'),
+        ...(decision === undefined
+          ? {}
+          : {
+              decision: assertOneOf(decision, ['continue', 'accept'], '事件 decision') as
+                | 'continue'
+                | 'accept',
+            }),
       };
+    }
     case 'final_submission_accepted':
       return {
         id,

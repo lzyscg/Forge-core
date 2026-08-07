@@ -510,7 +510,6 @@ describe('Phase E Task 3: trace, skill content and clone routes (plan Task E3 St
     const client = await startApiTestClient();
     const task = await createValidTask(client);
     await client.service.traces.appendTurnTrace(task.id, 'turn-1', [
-      { kind: 'thinking', text: '先思考。' },
       { kind: 'text', text: '正文。' },
     ]);
 
@@ -518,10 +517,7 @@ describe('Phase E Task 3: trace, skill content and clone routes (plan Task E3 St
     expect(found.status).toBe(200);
     expect(found.body).toEqual({
       turnId: 'turn-1',
-      entries: [
-        { kind: 'thinking', text: '先思考。' },
-        { kind: 'text', text: '正文。' },
-      ],
+      entries: [{ kind: 'text', text: '正文。' }],
     });
 
     const missing = await client.get(`/api/tasks/${task.id}/trace/turn-missing`);

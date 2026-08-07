@@ -253,7 +253,6 @@ describe('TurnCard live stream preview (plan C realtime streaming)', () => {
     turnId: 'turn-live',
     status: 'running',
     text: '正在逐字输出的正文',
-    thinking: '正在思考的内容',
     tools: [
       { name: 'load_skill', state: 'done' },
       { name: 'finish_production', state: 'running' },
@@ -277,14 +276,11 @@ describe('TurnCard live stream preview (plan C realtime streaming)', () => {
     const stream = document.querySelector('.fc-turn__stream');
     expect(stream).not.toBeNull();
     const scope = within(stream as HTMLElement);
-    // Public text streams pre-wrap; thinking stays collapsible (collapsed by
-    // default) small text.
+    // Public text streams pre-wrap; provider thinking is never streamed to the
+    // live buffer (semantic audit P0, plan 2026-08-07).
     expect(scope.getByText('正在逐字输出的正文')).toBeVisible();
-    const thinking = scope.getByText('正在思考的内容');
-    expect(thinking).toBeInTheDocument();
-    const details = stream!.querySelector('details.fc-turn__stream-thinking');
-    expect(details).not.toBeNull();
-    expect((details as HTMLDetailsElement).open).toBe(false);
+    expect(stream!.querySelector('.fc-turn__stream-thinking')).toBeNull();
+    expect(stream!.textContent).not.toContain('思考过程');
     // Tool calls list running/done state by name.
     const runningTool = stream!.querySelector('.fc-turn__stream-tool--running');
     const doneTool = stream!.querySelector('.fc-turn__stream-tool--done');
@@ -295,7 +291,7 @@ describe('TurnCard live stream preview (plan C realtime streaming)', () => {
   it('shows a running placeholder while the buffer is still empty', () => {
     renderCard({
       group: activeGroup(),
-      activeTurn: { ...LIVE_TURN, text: '', thinking: '', tools: [] },
+      activeTurn: { ...LIVE_TURN, text: '', tools: [] },
     });
     const stream = document.querySelector('.fc-turn__stream');
     expect(stream).not.toBeNull();

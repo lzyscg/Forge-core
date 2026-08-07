@@ -21,7 +21,6 @@ let paths: CorePaths;
 let store: TraceStore;
 
 const SAMPLE_ENTRIES: TraceEntry[] = [
-  { kind: 'thinking', text: '先确认输入。' },
   { kind: 'tool_call', toolName: 'read_workspace', params: { path: 'notes/a.md' } },
   { kind: 'tool_result', toolName: 'read_workspace', text: '笔记正文' },
   { kind: 'text', text: '已完成。' },
@@ -83,11 +82,9 @@ describe('TraceStore', () => {
 
   it('truncates an oversized text field and marks the truncation', async () => {
     const oversized = '思'.repeat(TRACE_LIMITS.maxEntryChars + 100);
-    await store.appendTurnTrace('task-1', 'turn-big', [
-      { kind: 'thinking', text: oversized },
-    ]);
+    await store.appendTurnTrace('task-1', 'turn-big', [{ kind: 'text', text: oversized }]);
     const trace = await store.readTurnTrace('task-1', 'turn-big');
-    const text = trace?.entries[0]?.kind === 'thinking' ? trace.entries[0].text : '';
+    const text = trace?.entries[0]?.kind === 'text' ? trace.entries[0].text : '';
     expect(text).toHaveLength(TRACE_LIMITS.maxEntryChars);
     expect(text.endsWith('…[truncated]')).toBe(true);
     expect(oversized.startsWith(text.slice(0, 64))).toBe(true);

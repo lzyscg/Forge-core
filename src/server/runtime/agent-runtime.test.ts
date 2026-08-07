@@ -84,7 +84,6 @@ describe('Forge runtime contract (plan Phase C Task 1 Step 1)', () => {
 describe('TurnTrace phase contract (spec §7.4, plan 2026-08-04 Task 1)', () => {
   it('accepts a trace carrying the optional phase summary', () => {
     const entries: TraceEntry[] = [
-      { kind: 'thinking', text: 'neutral thinking' },
       { kind: 'tool_call', toolName: 'finish_production', params: { source: 'inline' } },
       { kind: 'tool_result', toolName: 'finish_production', text: 'accepted' },
       { kind: 'text', text: 'neutral narration' },
@@ -100,7 +99,7 @@ describe('TurnTrace phase contract (spec §7.4, plan 2026-08-04 Task 1)', () => 
       entries,
     };
     expect(trace.phase?.state).toBe('dispatched');
-    expect(trace.entries).toHaveLength(4);
+    expect(trace.entries).toHaveLength(3);
   });
 
   it('keeps traces without phase legal (backward compatibility)', () => {
@@ -113,9 +112,10 @@ describe('TurnTrace phase contract (spec §7.4, plan 2026-08-04 Task 1)', () => 
       'production', 'production_complete', 'dispatching', 'dispatched', 'waiting_human', 'failed',
     ];
     const actions: Array<TurnPhaseDispatchAction | null> = [
-      'send_message', 'publish_artifact', 'submit_final_artifact', 'request_human_input', null,
+      'send_message', 'publish_artifact', 'forward_input_version', 'submit_final_artifact',
+      'request_human_input', null,
     ];
     expect(states).toHaveLength(6);
-    expect(actions).toHaveLength(5);
+    expect(actions).toHaveLength(6);
   });
 });

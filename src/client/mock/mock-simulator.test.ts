@@ -512,7 +512,7 @@ describe('skill steps and turn traces (plan Task E4 Step 1)', () => {
     expect(harness.events(task.id).some((event) => event.type === 'skill_loaded')).toBe(true);
   });
 
-  it('records a thinking entry plus the public text for the thinking result turn', async () => {
+  it('records the public text for the result turn and never the thinking block', async () => {
     const harness = createSimulatorHarness('happy_path');
     const task = await harness.createAndRun();
     await harness.clock.runAll();
@@ -521,7 +521,8 @@ describe('skill steps and turn traces (plan Task E4 Step 1)', () => {
     expect(trace).toEqual({
       turnId: `turn-${task.id}-2`,
       // Shipped scripts declare the display-only final phase; the engine passes
-      // it through untouched (plan 2026-08-04 Task 6).
+      // it through untouched (plan 2026-08-04 Task 6). The scripted thinking
+      // block is never durable (semantic audit P0, plan 2026-08-07).
       phase: {
         state: 'dispatched',
         dispatchAction: 'publish_artifact',
@@ -529,7 +530,6 @@ describe('skill steps and turn traces (plan Task E4 Step 1)', () => {
         message: null,
       },
       entries: [
-        { kind: 'thinking', text: templateFixture.sampleThinking },
         { kind: 'text', text: templateFixture.sampleArtifacts.v1.content },
       ],
     });
@@ -656,7 +656,6 @@ describe('live streaming preview while running (plan C realtime streaming)', () 
     expect(first.activeTurn?.turnId).toBe(turnIdFor(task.id, 2));
     expect(first.activeTurn?.status).toBe('running');
     expect(first.activeTurn?.text).toBe('');
-    expect(first.activeTurn?.thinking).toBe('');
 
     // Halfway through the window, roughly half the body has streamed in.
     harness.clock.advance(300);
@@ -665,7 +664,6 @@ describe('live streaming preview while running (plan C realtime streaming)', () 
     if (resultStep.kind !== 'result') throw new Error('expected the result step');
     expect(midway.activeTurn?.text.length).toBe(Math.ceil(resultStep.body.length * 0.5));
     expect(resultStep.body.startsWith(midway.activeTurn?.text ?? '')).toBe(true);
-    expect(midway.activeTurn?.thinking.length).toBeGreaterThan(0);
 
     // The window closes when the result fires; the preview disappears.
     harness.clock.advance(300);

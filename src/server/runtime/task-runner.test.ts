@@ -757,7 +757,6 @@ describe('TaskRunner final turn-trace recording (plan 2026-08-04 Task 5)', () =>
         message: '已发布产物「初稿 V1」v1',
       },
       entries: [
-        { kind: 'thinking', text: '先思考，再产出。' },
         { kind: 'text', text: '完成' },
       ],
     });
@@ -778,7 +777,6 @@ describe('TaskRunner final turn-trace recording (plan 2026-08-04 Task 5)', () =>
     expect(trace?.phase?.state).toBe('failed');
     expect(trace?.phase?.dispatchAction).toBeNull();
     expect(trace?.entries).toEqual([
-      { kind: 'thinking', text: '想了想。' },
       { kind: 'text', text: '只有文字。' },
     ]);
   });
@@ -1211,6 +1209,242 @@ describe('TaskRunner v7 forward path (spec §7.3, long-form-hub template)', () =
     // The last run was the controller submit, not a reviewer re-entry.
     expect(harness.runtime.turnInputs.at(-1)?.agent.id).toBe('controller');
     expect(harness.fake.countInvocations('reviewer')).toBe(1);
+  });
+});
+
+describe('TaskRunner v7 input assembly (semantic audit P0, plan 2026-08-07)', () => {
+  /** content.md body of a writer production turn. */
+  const V1_BODY = '第一章 V1 正文';
+  const V2_BODY = '第一章 V2 正文';
+
+  const writerPublishStep = (title: string, content: string) => ({
+    kind: 'result' as const,
+    publicText: `${title} 完成`,
+    actions: [
+      {
+        type: 'finish_production' as const,
+        source: 'inline' as const,
+        files: [{ name: 'content.md', content }],
+        format: 'markdown' as const,
+        artifactType: '章节',
+        title,
+      },
+      { type: 'publish_artifact' as const },
+    ],
+  });
+
+  it('reject -> writer receives summary AND content.md AND review.md in one input', async () => {
+    const harness = await hubRunnerHarness({
+      controller: [
+        {
+          kind: 'result',
+          publicText: '分配写作任务',
+          actions: [{ type: 'send_message', targetAgentId: 'writer', summary: '请写第一章。' }],
+        },
+        {
+          kind: 'result',
+          publicText: '审核通过，提交终稿。',
+          actions: [{ type: 'submit_final_artifact' }],
+        },
+      ],
+      writer: [
+        writerPublishStep('第一章 V1', V1_BODY),
+        writerPublishStep('第一章 V2', V2_BODY),
+      ],
+      reviewer: [
+        {
+          kind: 'result',
+          publicText: '需要修改',
+          actions: [
+            {
+              type: 'annotate_artifact',
+              file: 'review.md',
+              content: '---\nverdict: reject\n---\n## 意见\n第二段节奏太慢，请修改。\n',
+            },
+            { type: 'send_message', targetAgentId: 'writer', summary: '请修改第二段。' },
+          ],
+        },
+        {
+          kind: 'result',
+          publicText: '审核通过并转交',
+          actions: [
+            {
+              type: 'annotate_artifact',
+              file: 'review.md',
+              content: '---\nverdict: pass\n---\n## 意见\n通过',
+            },
+            { type: 'forward_input_version', targetAgentId: 'controller' },
+          ],
+        },
+      ],
+    });
+    await seedInput(harness, {
+      id: 'ev-input-controller',
+      agentId: 'controller',
+      sequence: 1,
+      body: '开始生产',
+    });
+
+    await harness.runner.runNext(harness.taskId, harness.controller.signal); // controller -> writer
+    await harness.runner.runNext(harness.taskId, harness.controller.signal); // writer publish V1 -> reviewer
+    await harness.runner.runNext(harness.taskId, harness.controller.signal); // reviewer reject -> writer message input
+
+    // The reject message routed to writer (V1 reference) must NOT have created
+    // a new version, and the writer's rework input is now pending.
+    const afterReject = await harness.workspace(harness.taskId);
+    expect(afterReject.artifacts.map((a) => a.version)).toEqual([1]);
+
+    // The writer's rework turn now runs: its AgentTurnInput must carry the
+    // message summary AND the declared inject files together (cross-layer).
+    await harness.runner.runNext(harness.taskId, harness.controller.signal); // writer rework
+    const writerTurns = harness.runtime.turnInputs.filter((t) => t.agent.id === 'writer');
+    expect(writerTurns).toHaveLength(2);
+    const inputText = writerTurns[1].inputText;
+    expect(inputText).toContain('请修改第二段。'); // send_message.summary (node.body)
+    expect(inputText).toContain('上一版正文'); // inject `as` label
+    expect(inputText).toContain(V1_BODY); // content.md injected
+    expect(inputText).toContain('返修意见'); // inject `as` label
+    expect(inputText).toContain('第二段节奏太慢'); // review.md injected
+
+    // The loop then continues to V2 -> pass -> submit.
+    await harness.runner.runNext(harness.taskId, harness.controller.signal); // writer publish V2 -> reviewer
+    await harness.runner.runNext(harness.taskId, harness.controller.signal); // reviewer pass -> forward controller
+    const submit = await harness.runner.runNext(harness.taskId, harness.controller.signal); // controller submit
+    expect(submit.taskCompleted).toBe(true);
+    const finalWorkspace = await harness.workspace(harness.taskId);
+    expect(finalWorkspace.artifacts.map((a) => a.version)).toEqual([1, 2]);
+    expect(finalWorkspace.artifacts.at(-1)?.final).toBe(true);
+  });
+
+  it('forward -> controller input is injected via the route declaration and stays zero-copy', async () => {
+    const harness = await hubRunnerHarness({
+      controller: [
+        {
+          kind: 'result',
+          publicText: '分配写作任务',
+          actions: [{ type: 'send_message', targetAgentId: 'writer', summary: '请写第一章。' }],
+        },
+        {
+          kind: 'result',
+          publicText: '审核通过，提交终稿。',
+          actions: [{ type: 'submit_final_artifact' }],
+        },
+      ],
+      writer: [writerPublishStep('第一章 V1', V1_BODY)],
+      reviewer: [
+        {
+          kind: 'result',
+          publicText: '审核通过并转交',
+          actions: [
+            {
+              type: 'annotate_artifact',
+              file: 'review.md',
+              content: '---\nverdict: pass\n---\n## 意见\n通过',
+            },
+            { type: 'forward_input_version', targetAgentId: 'controller' },
+          ],
+        },
+      ],
+    });
+    await seedInput(harness, {
+      id: 'ev-input-controller',
+      agentId: 'controller',
+      sequence: 1,
+      body: '开始生产',
+    });
+
+    await harness.runner.runNext(harness.taskId, harness.controller.signal); // controller -> writer
+    await harness.runner.runNext(harness.taskId, harness.controller.signal); // writer publish V1 -> reviewer
+    await harness.runner.runNext(harness.taskId, harness.controller.signal); // reviewer forward -> controller input
+
+    // Zero-copy so far: still exactly one version (the reviewer/controller
+    // never re-published anything).
+    const workspace = await harness.workspace(harness.taskId);
+    expect(workspace.artifacts.map((a) => a.version)).toEqual([1]);
+
+    // The controller's forwarded turn: input injected per the reviewer->
+    // controller artifact route declaration (通过的章节正文), not a blind
+    // content hand-off.
+    await harness.runner.runNext(harness.taskId, harness.controller.signal); // controller reads forwarded input
+    const controllerTurns = harness.runtime.turnInputs.filter((t) => t.agent.id === 'controller');
+    expect(controllerTurns).toHaveLength(2);
+    const inputText = controllerTurns[1].inputText;
+    expect(inputText).toContain('通过的章节正文');
+    expect(inputText).toContain(V1_BODY);
+
+    const submit = await harness.runner.runNext(harness.taskId, harness.controller.signal);
+    expect(submit.taskCompleted).toBe(true);
+    const finalWorkspace = await harness.workspace(harness.taskId);
+    expect(finalWorkspace.artifacts.map((a) => a.version)).toEqual([1]);
+    expect(finalWorkspace.artifacts.at(-1)?.final).toBe(true);
+  });
+
+  it('human synthesized guidance is preserved even when the input carries an inputVersion', async () => {
+    const harness = await hubRunnerHarness({
+      controller: [
+        {
+          kind: 'result',
+          publicText: '分配写作任务',
+          actions: [{ type: 'send_message', targetAgentId: 'writer', summary: '请写第一章。' }],
+        },
+        {
+          kind: 'result',
+          publicText: '提交终稿',
+          actions: [{ type: 'submit_final_artifact' }],
+        },
+      ],
+      writer: [writerPublishStep('第一章 V1', V1_BODY)],
+      // reviewer intentionally unscripted: its superseded input never runs.
+    });
+    await seedInput(harness, {
+      id: 'ev-input-controller',
+      agentId: 'controller',
+      sequence: 1,
+      body: '开始生产',
+    });
+    await harness.runner.runNext(harness.taskId, harness.controller.signal); // controller -> writer
+    await harness.runner.runNext(harness.taskId, harness.controller.signal); // writer publish V1 -> reviewer input
+
+    // Scheduler supersede+synthesize (spec §7.2): supersede every pending
+    // input, then synthesize a controller input carrying human guidance AND
+    // the latest inputVersion. The synthetic node has no delivering route.
+    const committed = await harness.events.read(harness.taskId);
+    const reviewerInput = committed
+      .map((entry) => entry.event)
+      .find(
+        (e): e is Extract<TaskEvent, { type: 'agent_input' }> =>
+          e.type === 'agent_input' && e.node.agentId === 'reviewer',
+      );
+    expect(reviewerInput).toBeDefined();
+    await harness.events.append(
+      harness.taskId,
+      makeTaskEvent({ type: 'pending_inputs_superseded', supersededNodeIds: [reviewerInput!.id] }),
+    );
+    await harness.events.append(
+      harness.taskId,
+      makeTaskEvent({
+        id: 'ev-synth-controller',
+        type: 'agent_input',
+        node: makeEventNode({
+          sequence: 20,
+          agentId: 'controller',
+          kind: 'input',
+          title: '人工引导',
+          body: '人工已批准，请按人工指示直接提交该版本。',
+          attemptCount: 1,
+          inputVersion: 1,
+          humanAuthorized: true,
+        }),
+      }),
+    );
+
+    const result = await harness.runner.runNext(harness.taskId, harness.controller.signal);
+    expect(result.committed).toBe(true);
+    const synthTurn = harness.runtime.turnInputs.at(-1);
+    expect(synthTurn?.agent.id).toBe('controller');
+    // The guidance must survive: inputVersion must not trigger a content
+    // hand-off that would replace the human instruction.
+    expect(synthTurn?.inputText).toContain('人工已批准，请按人工指示直接提交该版本。');
   });
 });
 

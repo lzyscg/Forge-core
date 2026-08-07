@@ -8,11 +8,23 @@
  */
 import { describe, expect, it } from 'vitest';
 import { Value } from 'typebox/value';
-import { taskWorkspaceSchema, turnTraceSchema } from './api-schemas';
+import { taskWorkspaceSchema, traceEntrySchema, turnTraceSchema } from './api-schemas';
 
 describe('turnTraceSchema phase compatibility (spec §7.5)', () => {
   it('accepts a trace without phase (backward compatible)', () => {
     expect(Value.Check(turnTraceSchema, { turnId: 'turn-1', entries: [] })).toBe(true);
+  });
+
+  it('rejects a thinking trace entry on the wire (semantic audit P0)', () => {
+    // Provider raw thinking is never durable or exposed via the API (plan
+    // 2026-08-07): a thinking-kind entry must fail the browser wire schema.
+    expect(Value.Check(traceEntrySchema, { kind: 'thinking', text: 'secret chain' })).toBe(false);
+    expect(
+      Value.Check(turnTraceSchema, {
+        turnId: 'turn-1',
+        entries: [{ kind: 'thinking', text: 'secret chain' }],
+      }),
+    ).toBe(false);
   });
 
   it('accepts a trace carrying the complete phase summary', () => {

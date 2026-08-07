@@ -3,6 +3,16 @@
 > 整晚自主开发日志。按 dev-plan 8 Phase 推进,每 Phase TDD + 全绿 + 本地 commit。
 > 设计基准：v7 定稿（`docs/2026-08-06-artifact-version-directory.md`）。
 
+## 语义审计修复（plan 2026-08-07，Phase A-E）
+
+（已完成；check 0 错、单测 1149/1149、e2e 44/44、build、verify:backend/runtime 全绿）
+
+- **Phase A（P0）TaskRunner 输入组装解耦**：`inputVersion` 不再决定 prompt 组装模式。新增 `resolveIncomingDelivery`（按投递边 kind+label 解析）；组装按入边语义——message 边保留 `node.body`（summary）+ 追加 route.inject（content/review），artifact 边按 inject 声明供料（无声明才 legacy 全文 fallback），初始/合成输入保留 guidance。跨层语义测试（真实 long-form-hub）：reject→writer 同时收到 summary+content+review、forward→controller 注入+零复制、人工合成 guidance 不被 inputVersion 覆盖。
+- **Phase B（P0）durable trace 去 raw thinking**：`TraceEntry`/`LivePatch`/`LiveTurn` 移除 thinking；pi-agent-runtime 收集与直播只留公开文本；api-schemas trace/live schema 去掉 thinking；TraceStore 读取期隔离 legacy thinking；ProcessTraceDialog/TurnCard 不再渲染思维段；mock/fake/e2e 同步。测试钉住：runtime trace 无 thinking、wire schema 拒绝、dialog/card 不渲染。
+- **Phase C（P1）annotate frontmatter 双校验 + artifactSchema.extract**：新 `annotate-verdict.ts` 共享 frontmatter/verdict 校验（仅格式契约，不 gate 路由）；pi-tool-factory 工具层 + ActionCommitter 双层拒绝（`ANNOTATE_FRONTMATTER_INVALID`，零写入）。投影器 `ArtifactVersion.files[].extract` 优先来自 `frozenTemplate.artifactSchema`（legacy 文件名回退）；ArtifactDrawer 未知 extract 显示原值而非「正文」。
+- **Phase D（P1）跨层语义 + 文档**：README 同步 v7（9 动作/版本目录/人工介入/v2-only）；新增 `docs/ARCHITECTURE.md`（不变量+数据流）、`docs/PROJECT-MAP.md`（模块地图+调用链+门禁）。
+- **Phase E（P2）**：long-form-hub writer prompt 去「第一人称」硬编码（叙事视角由输入声明）+ prompt 快照断言。continue/accept 崩溃半态自愈：`human_answered` 增可选 `decision` 字段（progress-guard 回答路径持久化）；`repairInterventionHalfState` 在 execute 循环头检测「supersede 已提交、合成缺失」并按持久化 decision 补合成（幂等、不重复 supersede、humanAuthorized 只由 accept 修复产生、不破坏可达性桥）。
+
 ## 总体策略与关键决策
 
 - **起步状态**：`main` 上模板被脏改为真实模型名（违反 `configured/*` 占位符协议），已 `git checkout templates/` 恢复为提交的占位符状态。提交模板必须保持 `configured/*`，真实验收才在工作副本替换标量（参考 `scripts/real-acceptance.ts`）。

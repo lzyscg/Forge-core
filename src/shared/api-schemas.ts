@@ -209,7 +209,6 @@ const liveTurnSchema = Type.Object({
   turnId: Type.String(),
   status: Type.Literal('running'),
   text: Type.String(),
-  thinking: Type.String(),
   tools: Type.Array(liveToolCallSchema),
   updatedAt: Type.String(),
 });
@@ -242,7 +241,6 @@ export const healthSchema = Type.Object({
 
 /** One observable step of a model Turn (display-only, never gates). */
 export const traceEntrySchema = Type.Union([
-  Type.Object({ kind: Type.Literal('thinking'), text: Type.String() }),
   Type.Object({
     kind: Type.Literal('tool_call'),
     toolName: Type.String(),

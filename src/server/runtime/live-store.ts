@@ -54,7 +54,6 @@ export class LiveStore {
       turnId: patch.turnId,
       status: 'running',
       text: patch.text ?? existing?.text ?? '',
-      thinking: patch.thinking ?? existing?.thinking ?? '',
       tools,
       updatedAt: this.#clock().toISOString(),
     });

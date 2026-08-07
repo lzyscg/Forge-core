@@ -110,7 +110,6 @@ describe('CoreService live streaming (plan C)', () => {
     expect(live.status).toBe('running');
     // The announce patch lands before any content has streamed.
     expect(live.text).toBe('');
-    expect(live.thinking).toBe('');
 
     deferred.resolve();
     await waitForStatus(environment, taskId, 'completed');

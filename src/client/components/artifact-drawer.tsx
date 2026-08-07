@@ -9,11 +9,17 @@ export interface ArtifactDrawerProps {
   onClose: () => void;
 }
 
-/** Display label for a template-declared extract slot (spec §5.1). */
+/**
+ * Display label for a template-declared extract slot (spec §5.1, semantic
+ * audit P1 plan 2026-08-07): known slots get their product label, and an
+ * unknown template-declared extract renders its own name instead of being
+ * mislabeled as 正文.
+ */
 function extractLabel(extract: string): string {
+  if (extract === 'content') return '正文';
   if (extract === 'review') return '审核意见';
   if (extract === 'revision') return '修订说明';
-  return '正文';
+  return extract;
 }
 
 /**

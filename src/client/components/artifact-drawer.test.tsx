@@ -79,6 +79,27 @@ describe('ArtifactDrawer', () => {
     expect(screen.getByText('审核结论：打回')).toBeVisible();
   });
 
+  it('renders a template-declared non-standard extract by its own name, not 正文', () => {
+    const ws = workspaceWithReturnLoop();
+    renderDrawer({
+      selectedVersion: 1,
+      workspace: {
+        ...ws,
+        artifacts: [
+          {
+            ...ws.artifacts[0]!,
+            files: [{ name: 'evaluation.md', extract: 'evaluation', content: '评估结论' }],
+          },
+        ],
+      },
+    });
+    // Semantic audit P1 (plan 2026-08-07): an unknown template extract is
+    // never mislabeled as 正文 — it renders its own extract name.
+    expect(screen.getByText('evaluation')).toBeVisible();
+    expect(screen.queryByText('正文')).toBeNull();
+    expect(screen.getByText('评估结论')).toBeVisible();
+  });
+
   it('renders the revision slot without a verdict badge for a creator version', () => {
     const ws = workspaceWithReturnLoop();
     renderDrawer({

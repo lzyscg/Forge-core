@@ -50,6 +50,7 @@ import type { CommittedEvent, EventStore } from '../storage/event-store';
 import type { EventNode, TaskEvent } from '../storage/task-events';
 import type { FrozenAgentConfig, TurnContract } from '../template/template-schema';
 import { RuntimeFailure } from './agent-runtime';
+import { parseAnnotateVerdict } from './annotate-verdict';
 import {
   FORGE_ACTION_LIMITS,
   ForgeActionValidationError,
@@ -79,6 +80,8 @@ export const COMMIT_ERROR_CODES = {
   ANNOTATE_VERSION_MISSING: 'ANNOTATE_VERSION_MISSING',
   ANNOTATE_FILE_NOT_ALLOWED: 'ANNOTATE_FILE_NOT_ALLOWED',
   ANNOTATE_DUPLICATE: 'ANNOTATE_DUPLICATE',
+  /** The annotation body lacks a valid `verdict: pass|reject` frontmatter. */
+  ANNOTATE_FRONTMATTER_INVALID: 'ANNOTATE_FRONTMATTER_INVALID',
 } as const;
 
 /** Maximum number of buffered actions one Turn may commit. */
@@ -565,6 +568,15 @@ export class ActionCommitter {
       throw new CommitFailure(
         COMMIT_ERROR_CODES.ANNOTATE_FILE_NOT_ALLOWED,
         '标注文件不在本回合契约声明的可标注文件之内。',
+      );
+    }
+    // Format contract (semantic audit P1, plan 2026-08-07): the annotation
+    // body must carry a leading frontmatter block with `verdict: pass|reject`.
+    // Structural only — the verdict never becomes a routing/delivery gate here.
+    if (parseAnnotateVerdict(annotate.content) === null) {
+      throw new CommitFailure(
+        COMMIT_ERROR_CODES.ANNOTATE_FRONTMATTER_INVALID,
+        '标注内容必须携带 frontmatter verdict: pass|reject。',
       );
     }
     // Uniqueness with self-exclusion (spec §8): a prior annotation of the same

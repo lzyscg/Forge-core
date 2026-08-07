@@ -255,11 +255,9 @@ export function createMockSimulator(
         };
         deps.append(taskId, { type: isInput ? 'agent_input' : 'agent_result', at, node });
         if (!isInput && turnId !== null) {
-          const entries: TraceEntry[] = [];
-          if (step.kind === 'result' && step.thinking !== undefined) {
-            entries.push({ kind: 'thinking', text: step.thinking });
-          }
-          entries.push({ kind: 'text', text: step.body });
+          // Provider thinking is never durable (semantic audit P0): the mock
+          // trace carries only public text (and tool steps when scripted).
+          const entries: TraceEntry[] = [{ kind: 'text', text: step.body }];
           deps.recordTrace(turnId, entries, step.phase);
         }
         break;
@@ -552,7 +550,6 @@ export function createMockSimulator(
         turnId: turnIdFor(taskId, run.nextStepIndex),
         status: 'running',
         text: reveal(step.body),
-        thinking: step.thinking !== undefined ? reveal(step.thinking) : '',
         tools: [],
         updatedAt: deps.timestamp(),
       };
