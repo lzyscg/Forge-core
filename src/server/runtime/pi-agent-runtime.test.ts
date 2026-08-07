@@ -9,7 +9,7 @@
  *
  * Coverage: the verbatim plan Step 1 adapter-configuration assertions
  * (in-memory session, built-in tools disabled, exactly five custom tools,
- * compaction/retry off), Turn completion through the ActionBuffer, failure
+ * compaction on / retry off), Turn completion through the ActionBuffer, failure
  * and abort boundaries, public-history replay with Forge-owned skill prompt
  * messages, hidden-thinking/secret exclusion, the buffer-only tool factory
  * and the no-discovery resource loader.
@@ -76,8 +76,11 @@ describe('adapter configuration (plan Phase E Task 2: five production + three wo
     expect(names.sort()).toEqual(
       [...FORGE_ACTION_NAMES, ...WORKSPACE_TOOL_NAMES, ...SKILL_SECTION_TOOL_NAMES].sort(),
     );
-    expect(harness.settings.getCompactionEnabled()).toBe(false);
+    expect(harness.settings.getCompactionEnabled()).toBe(true);
     expect(harness.settings.getRetryEnabled()).toBe(false);
+    // Phase 3 (within-turn context compression): Pi auto-compaction is on and
+    // the runtime explicitly enables it on the live session.
+    expect(harness.session.autoCompactionCalls).toContain(true);
   });
 
   it('splits the custom tools into the production, workspace and section sets', async () => {

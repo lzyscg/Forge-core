@@ -12,7 +12,11 @@
  * - Pi built-in tools, extensions, skills, prompt templates, themes and
  *   context files are disabled; exactly the five Forge actions are exposed
  *   as custom tools bound to the Turn's ActionBuffer;
- * - Pi auto-retry and auto-compaction are disabled (Forge owns attempts);
+ * - Pi auto-retry stays disabled (Forge owns attempts); Pi auto-compaction is
+ *   enabled for within-turn context compression (the system prompt lives
+ *   outside session history via the resource loader, so it is preserved);
+ *   every Turn still rebuilds a fresh session, so compaction never crosses
+ *   Turn boundaries — Forge events remain the only recovery source;
  * - only final assistant text blocks are returned; usage collapses to input/
  *   output counts; raw causes, credentials, headers and hidden thinking never
  *   surface in results, errors or logs (iron rule 6).
@@ -596,7 +600,7 @@ export class PiAgentRuntime implements AgentRuntime {
       }
 
       const settingsManager = SettingsManager.inMemory({
-        compaction: { enabled: false },
+        compaction: { enabled: true },
         retry: { enabled: false },
       });
       const resourceLoader = await createForgeResourceLoader({
@@ -655,7 +659,7 @@ export class PiAgentRuntime implements AgentRuntime {
         ],
       });
       live.session = session;
-      session.setAutoCompactionEnabled(false);
+      session.setAutoCompactionEnabled(true);
       this.#log(`pi-agent-runtime: turn started (agent=${input.agent.id})`);
 
       // Holder object: closure assignment would otherwise be invisible to
