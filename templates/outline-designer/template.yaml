@@ -1,0 +1,12 @@
+# 模板声明：大纲复刻生产（outline-designer）
+name: 大纲复刻生产
+description: 依据对标故事，按七轮工作流复刻出 imitation-blueprint 执行大纲。
+inputFields:
+  - id: source_story
+    label: 对标故事原文
+    kind: textarea
+    required: true
+    description: 需要复刻的对标故事全文（含冷开场与所有编号章节）。
+finalArtifact:
+  name: imitation_blueprint
+  format: markdown

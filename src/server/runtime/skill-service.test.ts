@@ -246,6 +246,29 @@ describe('SkillService section reads (plan 2026-08-07 Phase 1)', () => {
     ).rejects.toMatchObject({ code: 'SKILL_SECTION_NOT_AUTHORIZED' });
   });
 
+  it('accepts the short template-relative section path via a trailing-suffix match (review H1)', async () => {
+    // The template prompts name sections as `references/0N-…`; the frozen
+    // `sections` list carries the full `skills/…/references/0N-…` path. The
+    // trailing-suffix match must resolve the short form to the same content.
+    const full = await sectionsSkills.readSection(
+      sectionsTaskId,
+      'writer',
+      'style-guide',
+      'skills/style-guide/references/01.md',
+    );
+    const short = await sectionsSkills.readSection(
+      sectionsTaskId,
+      'writer',
+      'style-guide',
+      'references/01.md',
+    );
+    expect(short).toEqual(full);
+    // A path that is not a trailing suffix of any frozen section still rejects.
+    await expect(
+      sectionsSkills.readSection(sectionsTaskId, 'writer', 'style-guide', 'references/00.md'),
+    ).rejects.toMatchObject({ code: 'SKILL_SECTION_NOT_AUTHORIZED' });
+  });
+
   it('rejects an unknown skill with the authorization code', async () => {
     await expect(
       sectionsSkills.readSection(

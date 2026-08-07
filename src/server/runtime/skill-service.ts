@@ -329,14 +329,23 @@ export class SkillService {
   ): Promise<{ content: string; versionHash: string }> {
     const frozen = await this.frozenFor(taskId);
     const skill = this.authorizedSkill(frozen, agentId, skillId);
-    if (!skill.sections.includes(sectionPath)) {
+    // Authorize with an exact OR trailing-suffix match (plan 2026-08-07 Phase
+    // 4, review H1): the template prompts name sections with short
+    // template-relative paths (`references/0N-…`), while the frozen `sections`
+    // list carries the full template-relative paths (`skills/…/references/0N-…`).
+    // A trailing-suffix match accepts the short form while still constraining
+    // reads to the frozen list (never an arbitrary path).
+    const matched = skill.sections.find(
+      (candidate) => candidate === sectionPath || candidate.endsWith(`/${sectionPath}`),
+    );
+    if (matched === undefined) {
       throw new RuntimeFailure(
         SKILL_ERROR_CODES.SKILL_SECTION_NOT_AUTHORIZED,
         '该 section 不在本技能的可读范围之内。',
         false,
       );
     }
-    return this.readSnapshotPath(taskId, sectionPath, {
+    return this.readSnapshotPath(taskId, matched, {
       missing: SKILL_ERROR_CODES.SKILL_SECTION_MISSING,
       unsafe: SKILL_ERROR_CODES.SKILL_SECTION_PATH_UNSAFE,
     });

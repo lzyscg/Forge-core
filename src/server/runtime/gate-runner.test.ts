@@ -11,9 +11,10 @@
  * Validator sources in this file are test data — the GateRunner module itself
  * carries zero business vocabulary (iron rule 1).
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { CorePaths } from '../storage/core-paths';
 import { GateRunner, GATE_ERROR_CODES, type GateRunInput } from './gate-runner';
@@ -282,5 +283,187 @@ describe('GateRunner isolate cache', () => {
     expect(runner.cachedCount()).toBe(2);
     runner.disposeAll();
     expect(runner.cachedCount()).toBe(0);
+  });
+});
+
+describe('real outline-designer validator (plan 2026-08-07 Phase 4)', () => {
+  /** Copies the committed blueprint validator into a fresh task snapshot. */
+  function blueprintEnv(): { runner: GateRunner; taskId: string } {
+    const dataRoot = mkdtempSync(join(tmpdir(), 'forge-core-gate-blueprint-'));
+    tempRoots.push(dataRoot);
+    const paths = CorePaths.create({ dataRoot, templateRoot: dataRoot });
+    const taskId = 'task-blueprint';
+    const snapshotRoot = paths.taskSnapshotRoot(taskId);
+    mkdirSync(join(snapshotRoot, 'gates'), { recursive: true });
+    const validatorSource = fileURLToPath(
+      new URL('../../../templates/outline-designer/gates/validate-blueprint.js', import.meta.url),
+    );
+    copyFileSync(validatorSource, join(snapshotRoot, 'gates/validate-blueprint.js'));
+    return { runner: new GateRunner({ paths, timeoutMs: 3000 }), taskId };
+  }
+
+  const REQUIRED_H2 = [
+    '提取基准与章节边界',
+    '一句话主线',
+    '叙述契约',
+    '主题与价值冲突',
+    '叙事指纹',
+    '原文事实冲突与处理决定',
+    '源文功能覆盖总表',
+    '全局信息揭示表',
+    '全局生命周期调度',
+    '分章执行卡',
+    '主要人物与关系状态',
+    '伏笔与回收',
+    '复现门禁报告',
+  ];
+
+  const REQUIRED_H3 = [
+    '章节目的与退出状态',
+    '事实与知识边界',
+    '因果与篇幅',
+    '情绪执行与读者压力',
+    '声音、判断与对白',
+    '场景连续性与生命周期',
+    '章末钩子',
+  ];
+
+  function chapter(num: string, label: string, p0: string): string {
+    let text = `## ${num}｜${label}\n`;
+    for (const heading of REQUIRED_H3) {
+      text += `### ${heading}\n`;
+    }
+    text += `- P0：${p0}\n- 其他字段…\n`;
+    return text;
+  }
+
+  /** A structurally compliant blueprint: all 13 h2 + two chapters + P0 tags. */
+  function compliantBlueprint(): string {
+    let content = '# 《夜行档案》原文复现执行大纲\n\n';
+    for (const heading of REQUIRED_H2) {
+      content += `## ${heading}\n`;
+    }
+    content += `\n${chapter('00', '冷开场（B001）', '冷开场信号被目击 [FACT @L1-L3]')}`;
+    content += `\n${chapter('01', '原公开标签（B002）', '主角进场 [OBS @L5-L8]')}`;
+    // Pad past the 8k hanzi soft-check floor so the only judgement is structure.
+    while (content.replace(/[^一-鿿]/g, '').length < 8000) {
+      content += '缓冲文字。';
+    }
+    return content;
+  }
+
+  it('accepts a structurally compliant blueprint', async () => {
+    const { runner, taskId } = blueprintEnv();
+    const verdict = await runner.run({
+      taskId,
+      agentId: 'agent-a',
+      validatorPath: 'gates/validate-blueprint.js',
+      content: compliantBlueprint(),
+      artifactType: 'imitation_blueprint',
+    });
+    expect(verdict.pass).toBe(true);
+    expect(verdict.issues).toEqual([]);
+  });
+
+  it('rejects a blueprint missing a fixed title with a structured issue', async () => {
+    const { runner, taskId } = blueprintEnv();
+    let content = '# 《坏例》原文复现执行大纲\n\n';
+    for (const heading of REQUIRED_H2.filter((h) => h !== '伏笔与回收')) {
+      content += `## ${heading}\n`;
+    }
+    content += '\n## 00｜冷开场（B001）\n### 章节目的与退出状态\n- P0：无\n';
+    const verdict = await runner.run({
+      taskId,
+      agentId: 'agent-a',
+      validatorPath: 'gates/validate-blueprint.js',
+      content,
+      artifactType: 'imitation_blueprint',
+    });
+    expect(verdict.pass).toBe(false);
+    const stages = verdict.issues.map((issue) => issue.stage);
+    expect(stages).toContain('structure');
+    expect(verdict.issues.some((issue) => issue.evidence?.includes('伏笔与回收'))).toBe(true);
+    expect(verdict.issues.some((issue) => issue.evidence?.includes('冷开场 P0 不得写「无」'))).toBe(true);
+  });
+
+  /** All 13 fixed h2 + one chapter body, padded past the 8k soft-check floor. */
+  function blueprintWithOneChapter(p0Line: string): string {
+    let content = '# 《对抗》原文复现执行大纲\n\n';
+    for (const heading of REQUIRED_H2) {
+      content += `## ${heading}\n`;
+    }
+    content += '\n## 00｜冷开场（B001）\n';
+    for (const heading of REQUIRED_H3) {
+      content += `### ${heading}\n`;
+    }
+    content += `${p0Line}\n- 其他字段…\n`;
+    while (content.replace(/[^一-鿿]/g, '').length < 8000) {
+      content += '缓冲文字。';
+    }
+    return content;
+  }
+
+  it('rejects a chapter whose Bxxx-P0-n P0 lacks a source tag (review M2)', async () => {
+    const { runner, taskId } = blueprintEnv();
+    const verdict = await runner.run({
+      taskId,
+      agentId: 'agent-a',
+      validatorPath: 'gates/validate-blueprint.js',
+      content: blueprintWithOneChapter('- B001-P0-1：主角进场'),
+      artifactType: 'imitation_blueprint',
+    });
+    expect(verdict.pass).toBe(false);
+    expect(verdict.issues.some((issue) => issue.evidence?.includes('来源标签'))).toBe(true);
+  });
+
+  it('rejects a cold-open P0 written as 「无：原因」(review M1)', async () => {
+    const { runner, taskId } = blueprintEnv();
+    const verdict = await runner.run({
+      taskId,
+      agentId: 'agent-a',
+      validatorPath: 'gates/validate-blueprint.js',
+      // Tag present, but the P0 value still starts with 无：.
+      content: blueprintWithOneChapter('- P0：无：冷开场不适用 [FACT @L1-L3]'),
+      artifactType: 'imitation_blueprint',
+    });
+    expect(verdict.pass).toBe(false);
+    expect(verdict.issues.some((issue) => issue.evidence?.includes('冷开场 P0 不得写「无」'))).toBe(true);
+  });
+
+  it('validates a three-digit chapter card instead of silently skipping it (review M3)', async () => {
+    const { runner, taskId } = blueprintEnv();
+    let content = '# 《三位数》原文复现执行大纲\n\n';
+    for (const heading of REQUIRED_H2) {
+      content += `## ${heading}\n`;
+    }
+    // 3-digit card with only one h3: must be validated (and fail on the 6 missing h3).
+    content += '\n## 100｜冷开场\n### 章节目的与退出状态\n- P0：有来源 [FACT @L1-L3]\n';
+    const verdict = await runner.run({
+      taskId,
+      agentId: 'agent-a',
+      validatorPath: 'gates/validate-blueprint.js',
+      content,
+      artifactType: 'imitation_blueprint',
+    });
+    expect(verdict.pass).toBe(false);
+    expect(verdict.issues.some((issue) => issue.evidence?.includes('章节缺少三级标题'))).toBe(true);
+  });
+
+  it('flags a non-numeric chapter card as a structure issue (review M3)', async () => {
+    const { runner, taskId } = blueprintEnv();
+    let content = '# 《序章》原文复现执行大纲\n\n';
+    for (const heading of REQUIRED_H2) {
+      content += `## ${heading}\n`;
+    }
+    content += '\n## 序章｜冷开场\n- P0：有来源 [FACT @L1-L3]\n';
+    const verdict = await runner.run({
+      taskId,
+      agentId: 'agent-a',
+      validatorPath: 'gates/validate-blueprint.js',
+      content,
+      artifactType: 'imitation_blueprint',
+    });
+    expect(verdict.pass).toBe(false);
+    expect(verdict.issues.some((issue) => issue.evidence?.includes('未使用两位数字编号'))).toBe(true);
   });
 });

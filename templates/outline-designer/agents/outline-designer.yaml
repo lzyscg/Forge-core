@@ -1,0 +1,27 @@
+id: outline-designer
+name: 大纲复刻 Agent
+description: 依据对标故事，按七轮工作流在私有工作区产出中间分析，组装并自检后发布 imitation-blueprint。
+model: configured/outline-designer-model
+systemPromptFile: prompts/outline-designer-system.md
+skills:
+  - id: outline-designer
+    name: 大纲复刻七轮工作流
+    description: 来源边界->事实冲突->故事变化->人物压力->声音节拍->大纲组装->独立自检->定点返修。
+    contentPath: skills/outline-designer/SKILL.md
+    sectionsPath: skills/outline-designer/references
+gate:
+  validator: gates/validate-blueprint.js
+  artifactType: imitation_blueprint
+  mode: [self_check, commit]
+turnContract:
+  version: 2
+  production:
+    files: [content.md]
+    sources: [workspace_file]
+    formats: [markdown]
+  dispatch:
+    allowedActions:
+      - publish_artifact
+    targets:
+      publish_artifact:
+        - submitter

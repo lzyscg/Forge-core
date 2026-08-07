@@ -461,7 +461,15 @@ export class ActionCommitter {
       return; // No new artifact content lands with this dispatch.
     }
     if (content === null) {
-      return;
+      // Fail-closed: the dispatch would land new artifact content but the
+      // content could not be determined. Currently unreachable (the runner
+      // resolves workspace content before the commit; submit's received
+      // version is validated earlier), but a silent skip here would leave the
+      // declared commit gate silently unenforced (review L4).
+      throw new CommitFailure(
+        COMMIT_ERROR_CODES.GATE_RUNTIME_ERROR,
+        '模板声明了提交门禁，但无法确定待校验的产物内容。',
+      );
     }
     if (this.gateRunner === null) {
       throw new CommitFailure(

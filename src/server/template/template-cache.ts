@@ -73,18 +73,25 @@ async function writeJsonAtomic(directory: string, fileName: string, payload: unk
   }
 }
 
-/** Copies the load-relevant subset of a template directory (skips dotfiles). */
+/**
+ * Copies the load-relevant files of a template directory (skips dotfiles).
+ * Every top-level entry is copied: the loader reads whatever the agent YAML
+ * declares (skills/, prompts/, gates/, …), so the cache copy must not assume a
+ * fixed directory list — a template that declares a `gate.validator` under
+ * `gates/` needs that directory in the cached copy too (plan 2026-08-07 Phase
+ * 4 deviation: the previous hardcoded agents/skills/prompts list dropped it).
+ */
 async function copyTemplateFiles(sourceDir: string, destDir: string): Promise<void> {
   await mkdir(destDir, { recursive: true });
-  for (const fileName of ['template.yaml', 'pipeline.yaml']) {
-    await copyFile(join(sourceDir, fileName), join(destDir, fileName));
-  }
-  for (const dirName of ['agents', 'skills', 'prompts']) {
-    const from = join(sourceDir, dirName);
-    if (!(await pathExists(from))) {
+  for (const entry of await readdir(sourceDir, { withFileTypes: true })) {
+    if (entry.name.startsWith('.')) {
       continue;
     }
-    await copyTree(from, join(destDir, dirName));
+    if (entry.isDirectory()) {
+      await copyTree(join(sourceDir, entry.name), join(destDir, entry.name));
+    } else if (entry.isFile()) {
+      await copyFile(join(sourceDir, entry.name), join(destDir, entry.name));
+    }
   }
 }
 

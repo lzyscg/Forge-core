@@ -1,0 +1,23 @@
+# 有序 Agent、合法连线与最终出口（大纲复刻 · v7 / v2-only 适配）
+#
+# v2 适配偏差（dev-plan Phase 4 记录）：spec 假设「单 Agent 无 routes、自己
+# produce 自己 submit」（turnContract version 1 + productionPackageRef）。
+# 本平台 v2-only：submit_final_artifact 只能提交「接收到的输入版本」，无
+# sealedPackage 引用。故拆为两个 Agent——outline-designer 在单回合内跑七轮并
+# 发布 blueprint，经 artifact 边交给 submitter；submitter 作为最终提交者。
+agents:
+  - outline-designer
+  - submitter
+routes:
+  - from: outline-designer
+    to: submitter
+    kind: artifact
+    label: 交付执行大纲
+    inject:
+      - { version: input, file: content.md, as: 执行大纲全文 }
+artifactSchema:
+  files:
+    - { name: content.md, required: true, producer: outline-designer, extract: content, phase: create }
+finalOutput:
+  submitters:
+    - submitter
