@@ -10,4 +10,11 @@ export default defineConfig({
     outDir: 'dist/client',
     emptyOutDir: true,
   },
+  server: {
+    // Allow previewing the dev server through a public reverse-proxy tunnel
+    // (cloudflared quick tunnel -> *.trycloudflare.com). Vite 5 blocks unknown
+    // Host headers by default as a DNS-rebinding guard; allow the ephemeral
+    // trycloudflare subdomains. Dev-only; production serves the built client.
+    allowedHosts: ['.trycloudflare.com'],
+  },
 });

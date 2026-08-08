@@ -9,3 +9,7 @@ playwright-report/
 .DS_Store
 data/
 forge-core-overnight/
+.dev-data/
+.dev-templates/
+.od-smoke-data-root/
+vite.config.ts.bak

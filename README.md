@@ -112,6 +112,7 @@ A 产品形态(Mock) · B 文件/HTTP 后端 · C Pi Runtime/调度/恢复 · D 
 - `docs/ARCHITECTURE.md` —— 当前稳定架构与核心不变量（v2-only、9 动作、事件溯源、人工介入）。
 - `docs/PROJECT-MAP.md` —— 模块地图、关键类、调用链、数据目录、测试门禁。
 - `docs/IMPLEMENTATION-LOG.md` —— 实施历史（v7 各 Phase 做了什么/关键决策/已知局限）。
-- `docs/2026-08-07-*.md` —— v7 产物版本目录制 的 spec / dev-plan / 语义审计修复计划。
+- `docs/2026-08-07-*.md` —— v7 产物版本目录制 spec/dev-plan/语义审计修复计划、outline-designer 模板计划、平台补强（skill 渐进披露 / 门禁执行环境 / 回合内压缩）spec & dev-plan。
+- `docs/2026-08-08-structured-slots-three-role-design.md` —— 结构化槽位 + 编排/填空/审核三角色生产机制 设计草案。
 - 更早的 `docs/2026-08-0*.md` —— 历史设计与实现记录（保留作历史，不反映当前行为）。
 
