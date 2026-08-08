@@ -15,10 +15,10 @@
 
 ## 总体策略与关键决策
 
-- **起步状态**：`main` 上模板被脏改为真实模型名（违反 `configured/*` 占位符协议），已 `git checkout templates/` 恢复为提交的占位符状态。提交模板必须保持 `configured/*`，真实验收才在工作副本替换标量（参考 `scripts/real-acceptance.ts`）。
+- **起步状态**：`main` 上模板被脏改为真实模型名（违反 `configured/*` 占位符协议），已 `git checkout templates/` 恢复为提交的占位符状态。**2026-08-08 退役协议**：占位符取消，提交的 `templates/` 直接携带可运行 `deepseek/<model>` 模型规格；`.dev-templates` 工作副本、`scripts/smoke-*` 与 `scripts/real-acceptance.ts` 的复制+替换套路一并删除，脚本直接使用提交模板，`main.ts` 未设置 `FORGE_CORE_TEMPLATE_ROOT` 时默认 `<cwd>/templates`。
 - **Phase 0 连锁处理**：v2 契约把 `artifactVersion→inputVersion`、`ArtifactVersion.content→files[]`。这些字段被 ~30 个文件、84 处引用消费。为满足「每 Phase 全绿才 commit」，Phase 0 做一次全局机械 rename + 过渡行为修正，所有 consumer 与其测试同步更新；行为保持过渡态（单 content 文件、inputVersion 传播尚未接通），真正多文件/事件权威版本号在 Phase 1，传播在 Phase 4。
 - **legacy 兼容**：v1 在途任务 gate 为 `incompatible(SCHEMA_V2_REQUIRED)` 只读；event-store 读取期 transform 归一旧事件（artifactVersion→inputVersion、contentHash→files、缺省 humanAuthorized=false、缺省 source=agent_request）使其不 CORRUPTED。
-- **真实验收**：`scripts/real-acceptance.ts` 硬编码 zhihu-single-chapter（Phase 3 删除）。Phase 7 将写 dedicated long-form-hub 验收脚本（3 agent：controller/writer/reviewer 占位符替换）。
+- **真实验收**：`scripts/real-acceptance.ts` 硬编码 zhihu-single-chapter（Phase 3 删除）。Phase 7 将写 dedicated long-form-hub 验收脚本（3 agent：controller/writer/reviewer；2026-08-08 起直接使用提交模板，不再占位符替换）。
 
 ## Phase 7 — 迁移 + 集成验证（v2-only 门禁、运行时 fixture 迁移、e2e 重写、全量门禁）
 
@@ -51,7 +51,7 @@
 
 ### 已知局限与后续跟进
 - **崩溃半态自愈**（spec §11.6）未实现：resume 检测「human_answered+superseded 已提交、合成缺失」补合成留作后续（提交序已把半态压向安全方向）。
-- **zhihu-single-chapter 删除**：未做（见关键决策），后续需连带 mock fixture 迁移 + real-acceptance 重写为 long-form-hub（3 Agent 占位符替换）。
+- **zhihu-single-chapter 删除**：未做（见关键决策），后续需连带 mock fixture 迁移 + real-acceptance 重写为 long-form-hub（3 Agent；2026-08-08 起直接使用提交模板，不再占位符替换）。
 - **route.inject 带版本输入触发**：Phase 4 日志记录的已知偏差（inject 只在 inputVersion===null 分支触发）仍在——forward/send 带版本走 hand-off 交付，正确 inject 供料列后续。
 
 ## Phase 6 — 投影与 UI（产物链 extract 槽位、verdict 展示、superseded 渲染、accept 决策 UI）

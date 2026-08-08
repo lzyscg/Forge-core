@@ -56,7 +56,6 @@ import type { RouteKind, TaskWorkspace } from '../src/shared/contracts';
 import {
   ACCEPTANCE_TEMPLATE_ID,
   AcceptanceHttpError,
-  buildAcceptanceTemplateCopy,
   collectVersions,
   defaultCreateModelRuntime,
   defaultLoadEnv,
@@ -73,7 +72,6 @@ import {
   tsxBinary,
   waitForExit,
   waitForHttp,
-  type AcceptanceTemplateCopyResult,
   type BoundaryProbeRequest,
   type PreflightModelRuntime,
 } from './real-acceptance';
@@ -1020,19 +1018,10 @@ export async function runRecoveryAcceptanceCli(
     return preflightFailure('BOUNDARY_PROBE_FAILED');
   }
 
-  /* 6. Acceptance-only template copy (model scalars only). */
-  let copy: AcceptanceTemplateCopyResult;
-  try {
-    copy = await buildAcceptanceTemplateCopy({
-      committedTemplateDir,
-      dataRoot,
-      providerId: args.provider,
-      writerModelId: args.writerModel,
-      reviewerModelId: args.reviewerModel,
-    });
-  } catch {
-    return preflightFailure('TEMPLATE_COPY_FAILED');
-  }
+  /* 6. The committed templates are the runnable source (placeholder protocol
+   * retired): serve the committed `templates/` directory read-only as the
+   * server template root. */
+  const templateRoot = join(repoRoot, 'templates');
 
   /* ==== Server phase: from here on startedServer is true. ==== */
   log(RECOVERY_SERVER_START_MARKER);
@@ -1069,7 +1058,7 @@ export async function runRecoveryAcceptanceCli(
     server = await spawnServer({
       port,
       dataRoot,
-      templateRoot: copy.templateRoot,
+      templateRoot,
       signalDir: signalDirA,
       runtime: 'pi',
     });
@@ -1129,7 +1118,7 @@ export async function runRecoveryAcceptanceCli(
     server = await spawnServer({
       port,
       dataRoot,
-      templateRoot: copy.templateRoot,
+      templateRoot,
       signalDir: signalDirB,
       runtime: 'pi',
     });
@@ -1227,7 +1216,7 @@ export async function runRecoveryAcceptanceCli(
         // Three-view reconciliation while the restarted server still serves.
         reconciliation = await reconcileRecoveryViews(
           dataRoot,
-          copy.templateRoot,
+          templateRoot,
           server.url,
           taskId,
           domCounts,

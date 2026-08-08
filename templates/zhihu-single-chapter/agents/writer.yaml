@@ -1,8 +1,7 @@
 id: writer
 name: 章节写作 Agent
 description: 依据章节要求与原始素材，以第一人称写出完整章节正文，并按返修意见修订后重新发布完整稿件。
-# 占位模型：真实验收时由脚本复制到工作副本并仅替换该标量（单一 configured 命名空间）。
-model: configured/writer-model
+model: deepseek/deepseek-v4-flash
 systemPromptFile: prompts/writer-system.md
 skills:
   - id: chapter-drafting

@@ -88,6 +88,6 @@ data/tasks/<taskId>/
 | 构建 | `npm run build` | vite + tsc server |
 | 后端验证 | `npm run verify:backend` | gateway-contracts + server-modules + http-persistence |
 | 运行时验证 | `npm run verify:runtime` | runtime-modules + e2e-runtime-loop + recovery + pi-boundary（真实 probe） |
-| 真实验收 | `npm run acceptance:real` | 真实 Provider 端到端（需替换模板占位符） |
+| 真实验收 | `npm run acceptance:real` | 真实 Provider 端到端（直接使用提交的 `templates/`） |
 
 **测试纪律**：跨层语义测试（`task-runner.test.ts` 的 v7 input assembly / v7 forward path）直接断言下一个 Agent 实际收到的 `AgentTurnInput.inputText`，而不只验证事件字段。

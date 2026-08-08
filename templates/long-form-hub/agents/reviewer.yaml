@@ -1,7 +1,7 @@
 id: reviewer
 name: 审核 Agent
 description: 审读章节正文：不通过时直连退回写作 Agent 并给出可操作意见；通过时标注 review 并把输入版本转发给总控。
-model: configured/reviewer-model
+model: deepseek/deepseek-v4-flash
 systemPromptFile: prompts/reviewer-system.md
 turnContract:
   version: 2

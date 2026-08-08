@@ -1,7 +1,7 @@
 id: controller
 name: 总控 Agent
 description: 生产分配中枢：接收业务输入、分配生产任务、验收产物、决定下一跳，唯一提交终稿。
-model: configured/controller-model
+model: deepseek/deepseek-v4-flash
 systemPromptFile: prompts/controller-system.md
 turnContract:
   version: 2

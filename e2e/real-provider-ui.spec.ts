@@ -22,7 +22,7 @@
  */
 import { existsSync, readdirSync } from 'node:fs';
 import { createServer as createNetServer } from 'node:net';
-import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { expect, test } from '@playwright/test';
 import { CoreService } from '../src/server/core-service';
 import { createForgeCoreServer, type ForgeCoreServer } from '../src/server/http-server';
@@ -31,7 +31,11 @@ import type { TaskWorkspace } from '../src/shared/contracts';
 import { readRecoveryFileProjection } from '../scripts/real-recovery-acceptance';
 
 const GATEWAY_MODE_ENV = 'VITE_FORGE_CORE_MODE';
-const ACCEPTANCE_TEMPLATE_SOURCE_DIRNAME = 'acceptance-template-source';
+
+/** The committed business templates directory (read-only recovery source). */
+function committedTemplatesRoot(): string {
+  return fileURLToPath(new URL('../templates', import.meta.url));
+}
 
 const NODE_EVENT_TYPES = new Set([
   'agent_input',
@@ -84,7 +88,8 @@ function resolveRecoveryRoots(): RecoveryRoots | null {
   if (dataRoot === undefined || dataRoot.trim() === '') {
     return null;
   }
-  const templateRoot = join(dataRoot, ACCEPTANCE_TEMPLATE_SOURCE_DIRNAME);
+  // The recovery run serves the committed templates; only the data root varies.
+  const templateRoot = committedTemplatesRoot();
   const paths = CorePaths.create({ dataRoot, templateRoot });
   if (!existsSync(paths.tasksRoot)) {
     return null;

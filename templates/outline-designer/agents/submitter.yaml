@@ -1,7 +1,7 @@
 id: submitter
 name: 大纲交付 Agent
 description: 接收大纲复刻 Agent 已发布的执行大纲，并提交为任务终稿。
-model: configured/submitter-model
+model: deepseek/deepseek-v4-flash
 systemPromptFile: prompts/submitter-system.md
 turnContract:
   version: 2

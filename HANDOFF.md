@@ -86,14 +86,14 @@ spec §6 假设「单 Agent + routes:[] + turnContract version 1 + productionPac
 
 **其他偏差/决策**：
 - 8 份 references 从 `/tmp/outline-designer-references/` 原样复制，未重新生成。2 份 JSON schema（chapter-constraints / lifecycle）是盐选中间产物格式契约，本模板的中间产物是工作区 markdown，模型无需读 JSON schema，故未纳入；`validate-blueprint.js` 不依赖它们（沙箱无 FS，校验器自包含）。
-- 提交的模板用 `configured/*` 模型占位（与 long-form-hub 一致），真实运行由 smoke 脚本替换为 `deepseek/deepseek-v4-pro`。
+- 提交的模板直接携带可运行的 `deepseek/<model>` 模型规格（2026-08-08 退役 `configured/*` 占位符协议；`smoke`/`real-acceptance` 不再复制+替换，`.dev-templates` 副本已删）。
 - 产物文件命名对齐为 `imitation-blueprint.md`（模型自然命名），route inject 与 artifactSchema 同步（Phase 5 实测发现 submitter 输入 inject 落空，已修）。
 
 ---
 
 ## Phase 5 — 集成验证（真实 DeepSeek）
 
-**方法**：`scripts/smoke-outline-designer.ts`（仿 smoke-long-form-hub）：复制模板到临时 data-root、替换 `configured/*` → `deepseek/deepseek-v4-pro`（outline-designer）与 `deepseek/deepseek-v4-flash`（submitter）、spawn 真实 server、创建任务、驱动调度直至完成、读 turn trace / 产物 / server 日志。
+**方法**：`scripts/smoke-outline-designer.ts`（仿 smoke-long-form-hub）：直接用提交的 `templates/` 作为服务器模板根（只读）、spawn 真实 server、创建任务、驱动调度直至完成、读 turn trace / 产物 / server 日志。
 
 **输入**：自写短对标故事《夜半的敲门声》（冷开场 + 2 个编号章节，约 337 汉字，含人物/因果/反转/对白）。
 

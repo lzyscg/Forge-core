@@ -51,7 +51,6 @@ import type { TaskWorkspace } from '../src/shared/contracts';
 import {
   ACCEPTANCE_REPORT_KEYS,
   ACCEPTANCE_TEMPLATE_ID,
-  buildAcceptanceTemplateCopy,
   buildSanitizedReport,
   parseAcceptanceArgs,
   runAcceptanceCli,
@@ -559,58 +558,19 @@ describe('real acceptance strict preflight', () => {
   });
 });
 
-describe('acceptance-only template copy', () => {
-  it('replaces only the two model scalars and never touches the committed template', async () => {
-    const dataRoot = freshRoot('forge-acceptance-copy-');
-    const committedBefore = hashDirRecursive(committedZhihuTemplateDir());
-
-    const copy = await buildAcceptanceTemplateCopy({
-      committedTemplateDir: committedZhihuTemplateDir(),
-      dataRoot,
-      providerId: 'deepseek',
-      writerModelId: 'writer-model-id',
-      reviewerModelId: 'reviewer-model-id',
-    });
-
-    expect(copy.templateRoot).toBe(join(dataRoot, 'acceptance-template-source'));
-    expect(copy.templateDir).toBe(join(dataRoot, 'acceptance-template-source', ACCEPTANCE_TEMPLATE_ID));
-
-    // The copy reopens through the generic loader with the resolved models.
-    const reopened = await loadTemplateDirectory(copy.templateDir);
+describe('committed acceptance template models', () => {
+  it('carries runnable single-provider deepseek models and reopens through the loader', async () => {
+    const reopened = await loadTemplateDirectory(committedZhihuTemplateDir());
     expect(reopened.id).toBe(ACCEPTANCE_TEMPLATE_ID);
     const writer = reopened.agents.find((agent) => agent.id === 'writer');
     const reviewer = reopened.agents.find((agent) => agent.id === 'reviewer');
-    expect(writer?.model).toBe('deepseek/writer-model-id');
-    expect(reviewer?.model).toBe('deepseek/reviewer-model-id');
-
-    // Exactly the two model lines differ from the committed source; every
-    // other byte of every other file is identical.
-    const committedFiles = hashDirRecursive(committedZhihuTemplateDir());
-    const copiedFiles = hashDirRecursive(copy.templateDir);
-    expect(Object.keys(copiedFiles).sort()).toEqual(Object.keys(committedFiles).sort());
-    const differing = Object.entries(copiedFiles)
-      .filter(([rel, hash]) => committedFiles[rel] !== hash)
-      .map(([rel]) => rel);
-    expect(differing.sort()).toEqual(['agents/reviewer.yaml', 'agents/writer.yaml']);
-
-    const writerText = readFileSync(join(copy.templateDir, 'agents/writer.yaml'), 'utf8');
-    const reviewerText = readFileSync(join(copy.templateDir, 'agents/reviewer.yaml'), 'utf8');
-    expect(writerText).toContain('model: deepseek/writer-model-id');
-    expect(writerText).not.toContain('configured/writer-model');
-    expect(reviewerText).toContain('model: deepseek/reviewer-model-id');
-    expect(reviewerText).not.toContain('configured/reviewer-model');
-    const committedWriter = readFileSync(
-      join(committedZhihuTemplateDir(), 'agents/writer.yaml'),
-      'utf8',
-    );
-    expect(committedWriter).toContain('model: configured/writer-model');
-    // The untouched scalar neighbours survive the replacement.
-    expect(writerText).toContain('systemPromptFile: prompts/writer-system.md');
-
-    // No temporary sibling survives the copy, and the committed tree is intact.
-    const sourceEntries = readdirSync(copy.templateRoot);
-    expect(sourceEntries).toEqual([ACCEPTANCE_TEMPLATE_ID]);
-    expect(hashDirRecursive(committedZhihuTemplateDir())).toEqual(committedBefore);
+    expect(writer?.model).toBe('deepseek/deepseek-v4-flash');
+    expect(reviewer?.model).toBe('deepseek/deepseek-v4-flash');
+    // Single provider namespace and structurally valid <provider>/<model>.
+    expect(new Set(reopened.agents.map((agent) => agent.model.split('/')[0])).size).toBe(1);
+    for (const agent of reopened.agents) {
+      expect(agent.model).toMatch(/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/);
+    }
   });
 });
 
@@ -788,8 +748,8 @@ describe('full acceptance loop through public operations only', () => {
     expect(result.startedServer).toBe(true);
     expect(result.reportPath).toBe(env.reportPath);
 
-    // The template copy replaced exactly the model scalars for the server.
-    expect(spawnHolder.options?.templateRoot).toBe(join(env.dataRoot, 'acceptance-template-source'));
+    // The acceptance template is served from the committed templates tree.
+    expect(spawnHolder.options?.templateRoot).toBe(join(env.repoRoot, 'templates'));
 
     const report = JSON.parse(readFileSync(env.reportPath, 'utf8')) as Record<string, unknown>;
     expect(Object.keys(report).sort()).toEqual([...ACCEPTANCE_REPORT_KEYS].sort());
@@ -816,8 +776,9 @@ describe('full acceptance loop through public operations only', () => {
 
     // The committed template stayed untouched for the whole run.
     expect(hashDirRecursive(committedZhihuTemplateDir())).toEqual(committedBefore);
-    // The data root holds the acceptance template source and the task data.
-    expect(existsSync(join(env.dataRoot, 'acceptance-template-source', ACCEPTANCE_TEMPLATE_ID))).toBe(true);
+    // The acceptance template is served read-only from the committed tree, and
+    // the data root only holds the task data.
+    expect(existsSync(join(env.repoRoot, 'templates', ACCEPTANCE_TEMPLATE_ID))).toBe(true);
     expect(existsSync(join(env.dataRoot, 'tasks'))).toBe(true);
   }, 120_000);
 

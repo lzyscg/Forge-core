@@ -13,18 +13,17 @@
  *   4. 上下文不爆（无 context overflow / PROVIDER_ERROR）。
  *   5. 回合 trace 呈现 read_skill_section 多次调用（渐进式披露生效）。
  *
- * 不碰提交的模板：复制到临时 data-root，仅替换 configured/* 模型标量。
+ * 不碰提交的模板：直接用 `templates/` 作为服务器模板根（只读）；临时
+ * `.od-smoke-data-root` 只承载任务数据。
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createServer as createNetServer } from 'node:net';
 import {
-  cpSync,
   existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   rmSync,
-  writeFileSync,
 } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -36,15 +35,6 @@ const TEMPLATE_ID = 'outline-designer';
 const TASK_NAME = 'smoke-outline-designer';
 const DEADLINE_MS = 15 * 60 * 1000;
 const POLL_MS = 5000;
-
-const MODEL_BY_AGENT: Record<string, string> = {
-  'outline-designer': 'deepseek/deepseek-v4-pro',
-  submitter: 'deepseek/deepseek-v4-flash',
-};
-const PLACEHOLDER_BY_AGENT: Record<string, string> = {
-  'outline-designer': 'configured/outline-designer-model',
-  submitter: 'configured/submitter-model',
-};
 
 /** 短对标故事（2 个编号章节 + 冷开场），覆盖边界/事实/变化/人物压力/声音。 */
 const SOURCE_STORY = [
@@ -155,21 +145,11 @@ async function main(): Promise<void> {
   if (!key) throw new Error('DEEPSEEK_API_KEY not set');
   console.log(`[od-smoke] deepseek key configured (len=${key.length})`);
 
-  // 2. fresh data root + template copy with model scalars replaced
+  // 2. fresh data root (task data only); committed templates served read-only
   const dataRoot = join(REPO_ROOT, '.od-smoke-data-root');
   rmSync(dataRoot, { recursive: true, force: true });
   mkdirSync(dataRoot, { recursive: true });
-  const templateRoot = join(dataRoot, 'templates');
-  const templateDir = join(templateRoot, TEMPLATE_ID);
-  cpSync(join(REPO_ROOT, 'templates', TEMPLATE_ID), templateDir, { recursive: true });
-  for (const agent of Object.keys(MODEL_BY_AGENT)) {
-    const file = join(templateDir, 'agents', `${agent}.yaml`);
-    let text = readFileSync(file, 'utf8');
-    text = text.replace(PLACEHOLDER_BY_AGENT[agent], MODEL_BY_AGENT[agent]);
-    if (!text.includes(MODEL_BY_AGENT[agent])) throw new Error(`model scalar not replaced in ${agent}.yaml`);
-    writeFileSync(file, text, 'utf8');
-    console.log(`[od-smoke] ${agent}.yaml model -> ${MODEL_BY_AGENT[agent]}`);
-  }
+  const templateRoot = join(REPO_ROOT, 'templates');
 
   // 3. spawn server
   const port = await reservePort();

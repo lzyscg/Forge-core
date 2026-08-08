@@ -80,7 +80,8 @@ npm install && npx playwright install chromium
 cp .env.example .env   # 填 DEEPSEEK_API_KEY（真实运行必需）
 
 # 真实后端（HTTP 模式）
-FORGE_CORE_DATA_ROOT=$PWD/data FORGE_CORE_TEMPLATE_ROOT=$PWD/templates \
+# FORGE_CORE_TEMPLATE_ROOT 可选（默认 $PWD/templates，即提交的业务模板）
+FORGE_CORE_DATA_ROOT=$PWD/data \
 FORGE_CORE_PORT=3210 VITE_FORGE_CORE_MODE=http npm run dev   # http://127.0.0.1:3210
 
 # Mock 演示（零 token）

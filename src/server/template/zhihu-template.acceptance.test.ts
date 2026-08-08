@@ -9,10 +9,9 @@
  * single final submitter `reviewer`.
  *
  * The committed fixture must validate with **no Provider call**: its Agents carry
- * non-live `configured/<model>` placeholder identifiers in a single provider
- * namespace, so `loadTemplateDirectory` succeeds purely on structure. The real
- * acceptance runner (Task 2) copies this directory and replaces only those model
- * scalars before reload.
+ * concrete single-provider `deepseek/<model>` identifiers, so
+ * `loadTemplateDirectory` succeeds purely on structure (model specs are parsed
+ * structurally; the provider is never contacted at load time).
  *
  * Business vocabulary lives only inside the template directory and this test;
  * the platform template modules under test carry none (iron rule 1).
@@ -75,12 +74,12 @@ describe('zhihu single-chapter acceptance template', () => {
     expect(template.finalOutput.format).toBe('markdown');
   });
 
-  it('uses non-live single-provider model placeholders so no Provider call is needed', async () => {
+  it('declares runnable single-provider (deepseek) models loaded without any Provider call', async () => {
     const template = await loadTemplateDirectory(zhihuTemplateRoot());
     const writer = template.agents.find((agent) => agent.id === 'writer');
     const reviewer = template.agents.find((agent) => agent.id === 'reviewer');
-    expect(writer?.model).toBe('configured/writer-model');
-    expect(reviewer?.model).toBe('configured/reviewer-model');
+    expect(writer?.model).toBe('deepseek/deepseek-v4-flash');
+    expect(reviewer?.model).toBe('deepseek/deepseek-v4-flash');
     // Single provider namespace and structurally valid <provider>/<model>.
     const namespaces = template.agents.map((agent) => agent.model.split('/')[0]);
     expect(new Set(namespaces).size).toBe(1);

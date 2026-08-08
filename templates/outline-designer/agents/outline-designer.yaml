@@ -1,7 +1,7 @@
 id: outline-designer
 name: 大纲复刻 Agent
 description: 依据对标故事，按七轮工作流在私有工作区产出中间分析，组装并自检后发布 imitation-blueprint。
-model: configured/outline-designer-model
+model: deepseek/deepseek-v4-flash
 systemPromptFile: prompts/outline-designer-system.md
 skills:
   - id: outline-designer

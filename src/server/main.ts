@@ -6,6 +6,10 @@
  * `npm run npm run dev` from the repository root).
  *
  * Environment-only switches (never exposed through the UI or the HTTP API):
+ * - `FORGE_CORE_TEMPLATE_ROOT` template root. Optional: defaults to the
+ *   committed business templates at `<cwd>/templates` when unset (the
+ *   placeholder-protocol dev copy `.dev-templates/` is retired; the committed
+ *   templates now carry runnable `deepseek/<model>` specs).
  * - `FORGE_CORE_MODE` development | production | test (test = API routes
  *   only, no client files — used by the process-recovery e2e children).
  * - `FORGE_CORE_RUNTIME` pi | fake (default pi). `fake` selects the
@@ -99,7 +103,11 @@ function buildRuntime(kind: 'fake' | 'pi', paths: CorePaths): AgentRuntime {
 
 async function main(): Promise<void> {
   const dataRoot = requireEnv('FORGE_CORE_DATA_ROOT', process.env.FORGE_CORE_DATA_ROOT);
-  const templateRoot = requireEnv('FORGE_CORE_TEMPLATE_ROOT', process.env.FORGE_CORE_TEMPLATE_ROOT);
+  const explicitTemplateRoot = process.env.FORGE_CORE_TEMPLATE_ROOT;
+  const templateRoot =
+    explicitTemplateRoot !== undefined && explicitTemplateRoot.trim() !== ''
+      ? explicitTemplateRoot
+      : join(process.cwd(), 'templates');
   const mode = resolveMode(process.env.FORGE_CORE_MODE);
   const runtimeKind = resolveRuntimeKind(process.env.FORGE_CORE_RUNTIME);
 

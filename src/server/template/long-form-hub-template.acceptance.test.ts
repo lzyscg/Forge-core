@@ -10,7 +10,8 @@
  * budget.
  *
  * The committed fixture must validate with no Provider call: Agents carry
- * non-live `configured/<model>` placeholders in a single provider namespace.
+ * concrete single-provider `deepseek/<model>` identifiers (model specs are
+ * parsed structurally; the provider is never contacted at load time).
  *
  * Business vocabulary lives only inside the template directory and this test;
  * the platform template modules under test carry none (iron rule 1).

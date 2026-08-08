@@ -1,7 +1,7 @@
 id: writer
 name: 写作 Agent
 description: 依据任务指令起草完整章节正文，并按退回意见修订后重新发布完整稿件。
-model: configured/writer-model
+model: deepseek/deepseek-v4-flash
 systemPromptFile: prompts/writer-system.md
 turnContract:
   version: 2

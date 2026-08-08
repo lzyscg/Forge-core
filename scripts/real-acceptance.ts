@@ -21,10 +21,10 @@
  *   5. the Phase C Pi boundary probe must pass (subprocess `probe:pi`,
  *      report at `forge-core-overnight/evidence/sanitized-reports/
  *      pi-boundary.json`);
- *   6. the committed template is copied through a temporary sibling into
- *      `<data-root>/acceptance-template-source/zhihu-single-chapter` with
- *      ONLY the two model scalars replaced, then reopened through the
- *      generic template loader. The committed files are never modified.
+ *   6. the committed `templates/` directory is validated once through the
+ *      generic template loader and used directly (read-only) as the server
+ *      template root — the committed templates already carry runnable
+ *      `deepseek/<model>` model specs (placeholder protocol retired).
  *
  * Exit codes: 0 = completed with zero secret findings; 1 = a failure after
  * the server phase started; 2 = preflight failure (no server constructed).
@@ -35,19 +35,15 @@
  *     --report <report.json>
  */
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import {
-  cpSync,
   existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   realpathSync,
-  renameSync,
-  rmSync,
   statSync,
 } from 'node:fs';
-import { readFile, writeFile } from 'node:fs/promises';
 import { createServer as createNetServer } from 'node:net';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -91,7 +87,6 @@ export const ACCEPTANCE_REPORT_KEYS = [
 
 export type AcceptanceOutcome = 'completed' | 'task_failed' | 'deadline_exceeded' | 'server_failed';
 
-const ACCEPTANCE_TEMPLATE_SOURCE_DIRNAME = 'acceptance-template-source';
 const ACCEPTANCE_TASK_NAME = '真实提供方验收任务';
 const TASK_ID_PREFIX_LENGTH = 8;
 const DEFAULT_DEADLINE_MS = 30 * 60 * 1000;
@@ -112,11 +107,6 @@ const TERMINAL_TASK_STATUSES: ReadonlySet<string> = new Set([
   'waiting_human',
   'corrupt',
 ]);
-
-const MODEL_PLACEHOLDER_BY_AGENT = {
-  writer: 'configured/writer-model',
-  reviewer: 'configured/reviewer-model',
-} as const;
 
 /** the project root — derived from this script's location (scripts -> one up). */
 const WORKSPACE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -551,74 +541,6 @@ export function isDirectory(path: string): boolean {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Acceptance-only template copy                                                */
-/* -------------------------------------------------------------------------- */
-
-export interface AcceptanceTemplateCopyOptions {
-  committedTemplateDir: string;
-  dataRoot: string;
-  providerId: string;
-  writerModelId: string;
-  reviewerModelId: string;
-}
-
-export interface AcceptanceTemplateCopyResult {
-  templateRoot: string;
-  templateDir: string;
-}
-
-/** Replaces the exact placeholder scalar (must occur exactly once). */
-async function replaceModelScalar(file: string, placeholder: string, modelSpec: string): Promise<void> {
-  const text = await readFile(file, 'utf8');
-  const occurrences = text.split(placeholder).length - 1;
-  if (occurrences !== 1) {
-    throw new Error(
-      `acceptance: the model placeholder must occur exactly once in agents/${basename(file)}`,
-    );
-  }
-  await writeFile(file, text.replace(placeholder, modelSpec), 'utf8');
-}
-
-/**
- * Copies the committed template through a temporary sibling into
- * `<dataRoot>/acceptance-template-source/zhihu-single-chapter`, replaces ONLY
- * the two `model` scalars with the CLI-supplied identifiers and reopens the
- * copy through the generic template loader before promoting it. The committed
- * template files are never modified.
- */
-export async function buildAcceptanceTemplateCopy(
-  options: AcceptanceTemplateCopyOptions,
-): Promise<AcceptanceTemplateCopyResult> {
-  const templateRoot = join(options.dataRoot, ACCEPTANCE_TEMPLATE_SOURCE_DIRNAME);
-  const templateDir = join(templateRoot, ACCEPTANCE_TEMPLATE_ID);
-  if (existsSync(templateDir)) {
-    throw new Error('acceptance: the acceptance template copy already exists');
-  }
-  mkdirSync(templateRoot, { recursive: true });
-  const stagingDir = join(templateRoot, `.staging-${randomUUID()}`);
-  cpSync(options.committedTemplateDir, stagingDir, { recursive: true });
-  try {
-    await replaceModelScalar(
-      join(stagingDir, 'agents', 'writer.yaml'),
-      MODEL_PLACEHOLDER_BY_AGENT.writer,
-      `${options.providerId}/${options.writerModelId}`,
-    );
-    await replaceModelScalar(
-      join(stagingDir, 'agents', 'reviewer.yaml'),
-      MODEL_PLACEHOLDER_BY_AGENT.reviewer,
-      `${options.providerId}/${options.reviewerModelId}`,
-    );
-    // Reopen through the generic loader: the copy must validate before use.
-    await loadTemplateDirectory(stagingDir);
-    renameSync(stagingDir, templateDir);
-  } catch (error) {
-    rmSync(stagingDir, { recursive: true, force: true });
-    throw error;
-  }
-  return { templateRoot, templateDir };
-}
-
-/* -------------------------------------------------------------------------- */
 /* Sanitized report construction                                                */
 /* -------------------------------------------------------------------------- */
 
@@ -813,19 +735,16 @@ export async function runAcceptanceCli(
     return preflightFailure('BOUNDARY_PROBE_FAILED');
   }
 
-  /* 6. Acceptance-only template copy (model scalars only). */
-  let copy: AcceptanceTemplateCopyResult;
+  /* 6. The committed templates are the runnable source (placeholder protocol
+   * retired): validate the acceptance template once through the generic loader
+   * (no Provider call), then serve the committed `templates/` directory as the
+   * read-only server template root. */
   try {
-    copy = await buildAcceptanceTemplateCopy({
-      committedTemplateDir,
-      dataRoot,
-      providerId: args.provider,
-      writerModelId: args.writerModel,
-      reviewerModelId: args.reviewerModel,
-    });
+    await loadTemplateDirectory(committedTemplateDir);
   } catch {
-    return preflightFailure('TEMPLATE_COPY_FAILED');
+    return preflightFailure('TEMPLATE_SOURCE_INVALID');
   }
+  const templateRoot = join(repoRoot, 'templates');
 
   /* ==== Server phase: from here on startedServer is true. ==== */
   log(SERVER_START_MARKER);
@@ -840,7 +759,7 @@ export async function runAcceptanceCli(
     server = await (deps.spawnServer ?? defaultSpawnServer)({
       port,
       dataRoot,
-      templateRoot: copy.templateRoot,
+      templateRoot,
     });
     await waitForHttp(`${server.url}/api/health`, HEALTH_WAIT_MS);
     await httpJson('POST', `${server.url}/api/templates/${ACCEPTANCE_TEMPLATE_ID}/reload`, null, publicErrorCodes);

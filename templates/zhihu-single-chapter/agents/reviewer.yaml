@@ -1,8 +1,7 @@
 id: reviewer
 name: 章节审核 Agent
 description: 审读章节正文：不通过时直连退回写作 Agent 并给出可操作意见；通过时标注 review.md 并申请系统最终交付。
-# 占位模型：真实验收时由脚本复制到工作副本并仅替换该标量（单一 configured 命名空间）。
-model: configured/reviewer-model
+model: deepseek/deepseek-v4-flash
 systemPromptFile: prompts/reviewer-system.md
 skills:
   - id: chapter-review
