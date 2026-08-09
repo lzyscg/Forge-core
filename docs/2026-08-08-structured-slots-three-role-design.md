@@ -1,5 +1,8 @@
 # 结构化槽位 + 三角色生产机制 - 设计文档（Design）
 
+> **历史文档提示：本文已被 `docs/STRUCTURED-SLOT-ENGINE-DESIGN.md` 取代。**
+> 本文保留最初的问题发现、三角色思路和 skill 映射，仅作为设计历史；结构槽当前权威边界与后续更新统一以新文档为准。
+>
 > 状态：**设计草案（Draft）**，用于设计回看与交接给实施 agent。尚未进入 dev-plan。
 > 背景：承接 outline-designer（远端已实现）之后的 4 个 skill（outline-drafter / chapter-packet / chapter-drafter / production-director）落地评估，识别出平台缺一个通用能力；本设计将其形式化。
 > 实施谱系：**远端 standalone**（`/Users/lzy/Desktop/ForgeCore`），9 动作 + 产物版本目录 + live update，且已完成渐进式披露 / 门禁执行环境 / 回合内压缩 / outline-designer 模板（见远端 `HANDOFF.md`）。
