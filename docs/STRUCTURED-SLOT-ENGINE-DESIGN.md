@@ -2,7 +2,7 @@
 
 > 状态：**Living Design / 当前权威设计**
 > 首次冻结：2026-08-10
-> 最近批量收敛：2026-08-10（全部剩余 P1 与最终接缝审计 L01–L05 均按推荐方案接受）
+> 最近批量收敛：2026-08-10（全部剩余 P1、接缝审计 L01–L05、对抗审查 Round 1 的 M01–M07、Round 2 的 N01–N03 与 Round 3 的 N04 均已回写；同一独立 reviewer 于 Round 5 给出 `APPROVED`）
 > 维护规则：结构槽后续的已接受结论统一更新在本文，不再新建平行权威设计文档；尚待评审的问题可以暂存于非权威评审队列，接受后必须回写本文。
 > 文档性质：系统设计，不是实施计划。进入开发前仍需基于本文编写独立 dev plan。
 > 历史来源：本文承接并取代 `docs/2026-08-08-structured-slots-three-role-design.md`；旧文档仅保留问题发现过程与历史背景。
@@ -71,7 +71,7 @@ Slot Engine 不理解“章节、场景、标题、段落、知乎故事、报�
 
 “编排 Agent、填充 Agent、审核 Agent”是常见流程角色，不是平台硬编码的互斥身份。
 
-平台使用 capability 和 SlotGrant 表达权力。同一个 Agent 可以组合多种能力；模板也可以让不同 Agent 分担能力。Slot Engine 不要求模板必须拆成三个 Agent。
+平台使用 capability 和按 session kind 判别的 SlotSessionGrant 表达权力。同一个 Agent 可以组合多种能力；模板也可以让不同 Agent 分担能力。Slot Engine 不要求模板必须拆成三个 Agent。
 
 v1 不为“审核 Agent”增加专门的 slot session、capability、审核状态或证据模型。Seal 前若审核必须读取并修订槽内容，就把它建模为普通 fill/revision 流程并提交 Draft；纯只读审核沿用 Seal 后的现有 artifact Route。v1 不提供一个只读 Slot 审核 turn 来单独产出审核裁决。专门的审核裁决与证据协议待出现多人审核、合规留痕等明确需求后独立版本化。
 
@@ -81,11 +81,11 @@ v1 不为“审核 Agent”增加专门的 slot session、capability、审核状
 |---|---|
 | production case | 一次独立的模板生产实例；在当前仓库中对应一个 Task / `taskId` |
 | TemplateRuntimeSnapshot | case 使用的完整冻结运行契约；应扩展现有 `FrozenTemplate` 与任务 `snapshot/`，不是第二套快照 |
-| ActionAttempt | 一次可恢复的生产动作尝试；v1 直接复用当前 Turn 的 `turnId` 作为稳定身份，不再创建平行 attempt ID |
+| ActionAttempt | 一次 structured v3 生产动作尝试；复用 `turnId` 作为稳定身份，并由持久化、单调的 attempt epoch 显式分配，不创建平行 attempt ID |
 | StructureProposal | 编排 Agent 的私有候选槽树，不是权威 scaffold |
 | Scaffold Generation | 一代不可原地修改的结构与 spec；case 同时只有一个 active generation |
 | SlotInstance | scaffold 树中的统一节点，具有平台 ID、typeId、spec 和可选 content |
-| SlotGrant | 平台为当前 Agent 和 ActionAttempt 解析出的具体槽读写授权 |
+| SlotSessionGrant | 平台为当前 Agent、ActionAttempt 和 session kind 解析出的具体授权；structure 与 fill/seal 使用不同判别分支 |
 | FillDraft | 绑定 ActionAttempt 与 baseRevision 的私有 content overlay |
 | SealRecord | sealed scaffold 与正式派生文件之间的不可变来源记录 |
 
@@ -145,7 +145,7 @@ v1 不为“审核 Agent”增加专门的 slot session、capability、审核状
 | Route | 决定何时调用哪个 Agent、成功或失败后如何流转 |
 | ActionAttempt | 作为 StructureProposal / FillDraft 的执行归属与恢复边界 |
 | ActionCommitter / custody | 承担不可绕过的最终提交与原子发布边界 |
-| EventStore | 记录权威结构、内容、generation 切换和 Seal 事实 |
+| EventStore | 记录 structured Attempt 起止、权威结构、内容、generation 切换和 Seal 事实 |
 | ArtifactStore | 保存 Seal 后的正式派生文件及既有基础模式产物 |
 | GateRunner | 作为受信 validator 隔离执行环境的现有基础，后续扩展输入契约 |
 | TaskProjector | 从冻结快照和追加事件投影当前 active scaffold、状态与交付结果 |
@@ -168,8 +168,8 @@ flowchart TD
     G -->|"通过"| H["冻结 structure commit candidate"]
     H --> H2["现有 dispatch + ActionCommitter 原子创建 active Scaffold Generation"]
     H2 --> I["Route 启动串行填充 Action"]
-    I --> J["平台解析 access profile 与 selector，签发 SlotGrant"]
-    J --> K["创建或恢复 ActionAttempt 绑定的 FillDraft"]
+    I --> J["平台解析 access profile 与 selector，签发 FillSessionGrant"]
+    J --> K["为 active ActionAttempt 幂等创建 FillDraft"]
     K --> L["Agent 从前文槽目录渐进读取内容并替换 draft content"]
     L --> M["建议性 validate_draft"]
     M --> N{"submit_draft / Merge Gate"}
@@ -183,7 +183,12 @@ flowchart TD
     P -->|"是"| S{"生产是否完成？"}
     S -->|"否"| I
     S -->|"是"| T["Seal Gate：全量结构与内容校验"]
-    T -->|"失败"| I
+    T -->|"可靠 failed"| T2["冻结 seal rework receipt"]
+    T2 --> T3["send_message + ActionCommitter 原子回到 fill/structure"]
+    T3 --> T5{"rework target"}
+    T5 -->|"fill"| I
+    T5 -->|"structure"| Q
+    T -->|"incomplete"| T4["同 Attempt 重试 / runtime retry / 请求人工"]
     T -->|"通过"| U["同一 Seal 事务内由 Assembler 在 staging 中确定性生成"]
     U --> V["Seal Gate：校验 manifest、路径与 artifactSchema"]
     V --> W["冻结 turn-bound sealed candidate"]
@@ -197,7 +202,7 @@ flowchart TD
 1. StructureProposal 只在当前 turn 内形成 candidate；ActionCommitter 提交前，权威 scaffold 不存在或不变化。
 2. FillDraft 只在当前 turn 内形成 merge candidate；ActionCommitter 提交前，权威 content 不变化。
 3. Seal Gate 与 Assembler 只形成 staging candidate；ActionCommitter 提交前，正式 artifact、SealRecord 和 sealed 状态不存在或不变化。
-4. 权威状态转换与该 turn 的现有 dispatch 必须作为一个可恢复提交全有或全无。
+4. 权威状态转换与该 turn 的现有 dispatch 必须作为一个可恢复提交全有或全无；Seal 的可靠失败返工 dispatch 同样原子提交，但不改变 scaffold phase/revision。
 
 ---
 
@@ -344,6 +349,8 @@ productionMode: structured_slots
 - 现有 template loader 仍是唯一加载入口，不新增平行 Slot Template Loader。
 - Loader 先读取 `productionMode`，再按模式要求加载或拒绝 `slots/` 契约。
 - Agent capability、pipeline 绑定、access profile、selector、validator 和 Assembler 引用必须做完整交叉引用校验。
+- structured pipeline 必须按 11.6 的 scaffold typestate 对所有可达 Route 做数据流校验；初始输入不能绕过 structure，任何 fill/seal 或 Seal 后 v2 节点都必须被相应 scaffold 状态支配。
+- structured mode 的 `artifactSchema` 至少有一个 `required: true, phase: create` 文件；所有 `phase: annotate` 文件必须显式 `required: false`。该限制只适用于 structured v1，不改变历史 basic snapshot 的解释。
 - 所有引用必须限制在当前 Template Package 内；缺失、路径越界、未声明资源或摘要异常都 fail closed。
 - 规范化的 `slots/contract.yaml`、所有被引用资源的内容及受信实现摘要必须进入现有 `versionHash`。
 - 历史模板缺失 `productionMode` 时，canonicalization 必须保持原有 hash 稳定；不能因为新增默认字段而把已冻结 task 判为损坏。
@@ -371,7 +378,7 @@ Slot Schema / LayoutGrammar 局部语义约束
 
 平台 hard ceiling 是部署安全边界，不属于模板可配置能力。平台收紧 hard ceiling 可以阻止新模板和新 case；既有 case 只有在环境仍满足其冻结包络时才能继续运行，不能被隐式降级。
 
-v1 模板包络固定为六组、十六个必填正整数字段：
+v1 模板包络最终固定为七组、二十八个必填正整数字段：
 
 ```ts
 type PositiveInteger = number;
@@ -397,7 +404,21 @@ interface StructuredSlotLimitsV1 {
     maxChangedSlots: PositiveInteger;
     maxDraftBytes: PositiveInteger;
   };
+  attempt: {
+    maxSlotToolCallsPerAttempt: PositiveInteger;
+    maxValidationRunsPerAttempt: PositiveInteger;
+    maxValidatorInvocationsPerAttempt: PositiveInteger;
+    maxAggregateValidatorCpuMsPerAttempt: PositiveInteger;
+    maxAggregateValidatorWallClockMsPerAttempt: PositiveInteger;
+    maxValidatorOutputBytesPerAttempt: PositiveInteger;
+    maxAttemptWallClockMs: PositiveInteger;
+  };
   validation: {
+    maxValidators: PositiveInteger;
+    maxValidatorInvocationsPerGate: PositiveInteger;
+    maxAggregateValidatorCpuMsPerGate: PositiveInteger;
+    maxAggregateValidatorWallClockMsPerGate: PositiveInteger;
+    maxValidatorOutputBytesPerGate: PositiveInteger;
     maxIssuesPerRun: PositiveInteger;
   };
   output: {
@@ -417,10 +438,17 @@ interface StructuredSlotLimitsV1 {
 - `maxChangedSlots` 统计一个 FillDraft overlay 中不同的槽位数；`maxDraftBytes` 统计该 overlay 的规范化变更 payload。
 - `maxChangedSlots <= maxSlots`；单槽 spec/content 上限分别不得超过 `maxScaffoldPayloadBytes`。
 - `maxArtifactBytesPerFile <= maxTotalArtifactBytes`；artifactSchema 声明文件数不得超过 `maxArtifactFiles`。
-- `maxIssuesPerRun` 只限制单次返回的结构化 issue 数。达到上限后结果仍为失败并返回 `truncated: true`，不能把截断解释为验证通过。
+- `maxSlotToolCallsPerAttempt` 统计一次 structured Attempt 中到达平台的 Slot Tool 调用签名 `(toolCallId, canonicalArgsHash)`；只有同 key、同参数且可直接重放已缓存结果的真正幂等重放不重复计数。同 key 换参数的每个新冲突签名、参数无效、权限失败和业务失败调用都先占用一次额度，meter 达限后不再解析新的调用签名。`maxValidationRunsPerAttempt` 统计其中首次执行或尝试执行 `validate_structure_proposal`、`submit_structure_proposal`、`validate_draft`、`submit_draft` 或 `request_seal` 的调用签名，必须小于等于 Slot Tool 总调用上限。
+- `maxValidatorInvocationsPerAttempt`、`maxAggregateValidatorCpuMsPerAttempt`、`maxAggregateValidatorWallClockMsPerAttempt` 与 `maxValidatorOutputBytesPerAttempt` 分别累计该 Attempt 内所有 validation run 的 validator target 调用、实际 CPU、validator phase elapsed wall-clock 与 result stream 原始字节。它们必须分别大于等于对应的每 Gate 上限，防止一个合法 Gate 本身无法运行。
+- `maxAttemptWallClockMs` 从 `structured_slot_attempt_started` batch 可见时开始，以平台单调时钟覆盖 provider、Slot Tool、validator、Assembler 与 dispatch，直到 terminal batch 提交；它必须大于等于 `maxAggregateValidatorWallClockMsPerAttempt`。模型上下文压缩、provider session 续接或工具重放都不能重置任一 Attempt 计数器。
+- `maxValidators` 限制 contract 注册项总数；`maxValidatorInvocationsPerGate` 独立限制一次 Merge/Seal Gate 中实际的 `(validatorId, logical target)` 执行数。二者不建立简单大小关系，因为 trigger/selector 可以使已注册 validator 在某个 Gate 没有适用 target。
+- Gate 在执行前解析全部适用 target，并以各注册项 budget 计算最坏 CPU 预算和调用数；计划值超过 `maxValidatorInvocationsPerGate` 或 `maxAggregateValidatorCpuMsPerGate` 时，一个 validator 都不运行，返回 `RESOURCE_LIMIT_EXCEEDED` + `incomplete`。执行中还要按实际 CPU 与整个 validator phase 的 elapsed wall-clock 强制 `maxAggregateValidatorCpuMsPerGate` / `maxAggregateValidatorWallClockMsPerGate`。
+- `maxValidatorOutputBytesPerGate` 统计所有沙箱 result stream 在完整解析前已经发出/编码的累计原始字节，无效返回也计入；runner 必须流式计量并在越界时停止，不能先无界读入再规范化。`maxIssuesPerRun` 统计一次完整 Gate verdict 在内部形成的累计 issue 数。任一累计值超过上限时停止继续执行，verdict 固定为 `incomplete` 并返回 `truncated: true`，不能把截断解释为验证通过。
+- v1 validator 在一个 Gate 内严格串行，因此各调用的沙箱内存不做求和；Gate peak memory 的封闭上界由“最大单调用 `memoryMiB` budget + 固定 runner overhead + 受 `maxValidatorOutputBytesPerGate` / `maxIssuesPerRun` 约束的结果累加器”构成，并受平台 hard ceiling 和 Gate 可用内存约束。未来并行执行必须新增聚合内存协议，不能复用此口径。
+- 每次 validation run 在启动前还要以 declared worst-case 检查剩余 Attempt 调用/CPU/wall 包络；运行中同时扣减实际累计量。恰好消耗到某项最大值合法；只有新调用或运行中实际消耗将使累计值严格超过上限，或总 wall-clock deadline 到期时，平台才触发超限。触发后平台立即 abort 当前 provider/sandbox、清理未提交 staging，把 Proposal/Draft/candidate 转为 abandoned，并以一个 batch 写 `RESOURCE_LIMIT_EXCEEDED` Agent result 与 `failed/runtime_failure` terminal。总 wall-clock 必须由平台 deadline timer 主动中断，不得依赖模型再次调用工具才被发现。该 Attempt 此后不能再调用 Slot Tool、dispatch 或 `request_human_input`；自动/人工 retry 只能由 scheduler 在既有有界 retry policy 下创建新 Attempt。
 - 缺失字段、未知字段、非整数、零、负数或跨字段关系不合法都使模板加载失败。
 
-validator 与 Assembler 的 CPU、内存和 wall-clock timeout 不进入这组通用数据包络；它们后续在各自的执行注册契约中显式声明，并受平台 hard ceiling 控制。
+每个 validator 与 Assembler 仍在执行注册中声明单次 CPU、内存和 timeout budget，并受平台 hard ceiling 控制；validation 组额外约束一次 Gate 的聚合 validator 工作量。Assembler 不与 validator 共用这组 Gate 聚合预算。
 
 模板字段名称、单位和语义不再开放。绝对平台 hard ceiling 数值可以在实施基准测试后确定，但必须受稳定的兼容版本协议约束。
 
@@ -514,11 +542,11 @@ v1 的精确关键字白名单为：
 - schema、字符串、数组、对象、枚举和嵌套深度都受模板 `limits` 与平台 hard ceiling 约束。
 - Schema 只验证，不执行默认值填充、类型转换、字段删除、字符串修剪或任何输入改写。
 
-非白名单能力在 Loader meta-validation 阶段 fail closed，包括但不限于 `default`、`format`、`examples`、`$id`、`$schema`、`$defs` / `definitions`、引用、组合、条件和自定义关键字。运行期校验器和错误格式只能按 snapshot 冻结的 dialect 解释，不能因为底层依赖升级而改变历史 case 语义。
+非白名单能力在 Loader meta-validation 阶段 fail closed，包括但不限于 `multipleOf`、`default`、`format`、`examples`、`$id`、`$schema`、`$defs` / `definitions`、引用、组合、条件和自定义关键字。运行期校验器和错误格式只能按 snapshot 冻结的 dialect 解释，不能因为底层依赖升级而改变历史 case 语义。
 
 content 的根值仍可由模板声明为任意合法 JSON 类型，基础引擎不把它限定为字符串、段落或文档。`contentPresence: unset` 是槽实例外层状态，与 content schema 允许的合法 `null` 不同。
 
-关键字数值参数与计量口径按 25.2 冻结，模板 limits 按 7.6 冻结；平台 hard ceiling 的首个部署数值只允许在 25.11 所述基准范围内校准。关键字白名单、对象/数组开放性、纯验证语义、加载期拒绝未知能力以及 spec/content 复用同一验证内核均不再开放。
+关键字数值参数与计量口径按 25.2 冻结，模板 limits 按 7.6 冻结；平台 hard ceiling 的首个部署数值只允许在 25.13 所述基准范围内校准。关键字白名单、对象/数组开放性、纯验证语义、加载期拒绝未知能力以及 spec/content 复用同一验证内核均不再开放。
 
 ### 8.4 一个 typeId 只对应一种 Schema 形态
 
@@ -711,6 +739,8 @@ interface SlotInstance {
 
 编排 Agent 不直接增量修改权威 scaffold，而是在 ActionAttempt 绑定的私有 `StructureProposal` 上工作。
 
+首次 structure Attempt 的 started 事件提交后，平台先按 `turnId` 确定性预分配 `proposalId` 并幂等创建 open Proposal，再签发绑定该身份的 StructureSessionGrant，最后才把工具暴露给模型。这个顺序不需要 active scaffold，也不允许模型自行提交 proposalId；如果 Grant 签发或模型启动失败，恢复器按 11.5 关闭 Attempt 并把该 Proposal abandoned。
+
 首版模型接口：
 
 - `get_structure_contract`
@@ -800,26 +830,55 @@ type SlotCapabilityV1 =
 
 能力可以组合，不能强制映射为互斥角色。v1 不加入 `audit_slots`；普通只读状态查询由当前合法 slot session 隐含允许，不另造 capability。
 
-### 10.3 SlotGrant
+### 10.3 SlotSessionGrant 使用按 kind 判别的联合
 
-平台根据冻结模板、当前 Action、Agent、active scaffold 和 access profile 生成内部 Grant：
+structure session 发生在 active scaffold 创建前，不能伪造 scaffoldId 或 revision。平台根据冻结模板、当前 Action/Agent 和 session kind 生成以下内部 Grant 联合：
 
 ```ts
-interface SlotGrant {
+interface SlotSessionGrantBaseV1 {
   grantId: string;
+  kind: 'structure' | 'fill' | 'seal';
   caseId: string;
   turnId: string;
+  agentId: string;
+  snapshotHash: string;
+  capabilities: SlotCapabilityV1[];
+}
+
+interface StructureSessionGrantV1 extends SlotSessionGrantBaseV1 {
+  kind: 'structure';
+  proposalId: string;
+}
+
+interface FillSessionGrantV1 extends SlotSessionGrantBaseV1 {
+  kind: 'fill';
+  accessProfileId: string;
   scaffoldId: string;
   baseRevision: number;
-  agentId: string;
-  capabilities: SlotCapabilityV1[];
   readableSlotIds: string[];
   writableSlotIds: string[];
-  draftId: string | null;
+  draftId: string;
 }
+
+interface SealSessionGrantV1 extends SlotSessionGrantBaseV1 {
+  kind: 'seal';
+  accessProfileId: string;
+  scaffoldId: string;
+  baseRevision: number;
+  readableSlotIds: string[];
+  writableSlotIds: [];
+  draftId: null;
+}
+
+type SlotSessionGrantV1 =
+  | StructureSessionGrantV1
+  | FillSessionGrantV1
+  | SealSessionGrantV1;
 ```
 
-v1 Grant 不使用墙钟过期时间。它在 `turnId` 终止、active generation 改变、`baseRevision` 失效或 Draft 进入终态时立即失效；时间型租约留到未来并行或远程执行协议。
+所有 Grant 都绑定冻结 snapshot。structure Grant 只授权 contract/Proposal 工具，并绑定当前 Proposal；它不存在 slot selector、readable/writable slot 集合或 access profile。fill/seal Grant 才基于 active scaffold、revision、冻结 access profile 和 selector 解析具体槽集合，并保存解析所依据的 `accessProfileId` 以供审计；模型仍不能提交该 ID。
+
+v1 Grant 不使用墙钟过期时间。所有 Grant 在 `turnId` 终止或 snapshot 不匹配时失效；structure Grant 还在 Proposal 终态时失效，fill/seal Grant 还在 active generation 改变或 `baseRevision` 失效时失效，fill Grant 另在 Draft 终态时失效。seal candidate 形成后该 Attempt 只保留安全 receipt，不再允许用原 Grant 重新执行 Seal。时间型租约留到未来并行或远程执行协议。
 
 ### 10.4 授权不变量
 
@@ -827,7 +886,7 @@ v1 Grant 不使用墙钟过期时间。它在 `turnId` 终止、active generatio
 - Agent 只接收授权范围内的槽位投影；隐藏槽在其视角中不存在。
 - 写权限不自动等于整树读权限。
 - 祖先、依赖、邻接或前文上下文必须由 profile 显式授予只读访问。
-- Grant 绑定具体 case、`turnId`、scaffold、revision、Agent 和 draft，不能跨任务复用。
+- 所有 Grant 绑定具体 case、`turnId` 与 Agent；structure 额外绑定 snapshot/Proposal，fill/seal 额外绑定 scaffold/revision，fill 再绑定 Draft。任何 Grant 都不能跨 session kind、turn 或 task 复用。
 - Merge Gate 再次检查实际 changes 没有越过 writable scope。
 - validation issue 也要经过授权过滤，不能通过错误消息泄露隐藏槽内容或关系。
 - ACL 属于控制面，不能进入 slot spec 或 content。
@@ -926,7 +985,7 @@ draft.baseRevision === activeScaffold.contentRevision
 - ActionCommitter 复核 candidate、active generation、revision 和 snapshot 后，把权威状态转换与 dispatch 作为一个可恢复提交落地；
 - turn 失败、取消、receipt 失配或提交前状态变化时，candidate abandoned，权威状态不变。
 
-Slot session 形成 candidate 后禁止继续写 Proposal/Draft、重新执行 Gate 或 Assembler，也禁止请求人工输入；模型只能读取安全 receipt 摘要，并按下表执行与该 completion 绑定的现有 dispatch：
+Slot session 形成 candidate 后禁止继续写 Proposal/Draft、重新执行 Gate 或 Assembler；模型只能读取安全 receipt 摘要，并按下表执行与该 completion 绑定的现有 dispatch：
 
 | slotSession kind | completion | candidate 后的合法 dispatch |
 |---|---|---|
@@ -934,7 +993,11 @@ Slot session 形成 candidate 后禁止继续写 Proposal/Draft、重新执行 G
 | `fill` | `merge_candidate_created` | 只能 `send_message` |
 | `seal` | `seal_candidate_created` | `publish_artifact` 或 `submit_final_artifact`；模板可声明其一或两者，但运行时仍只能选择一个 |
 
-`request_human_input` 是 candidate 形成前的中断出口，不属于上表的完成 dispatch。`forward_input_version`、`annotate_artifact` 及基于输入 artifact 的最终提交只属于 Seal 后的 v2 artifact 流程，不能结束 v3 structure/fill/seal session。
+Seal 还有一个与成功 completion 明确分离的失败结果：只有当所有适用 evaluator 都可靠完成且 `StructuredVerdictV1.status === 'failed'` 时，平台冻结 turn/revision/snapshot-bound `seal_rework_required` receipt。该 receipt 不是 candidate，不创建 artifact/SealRecord，也不改变 scaffold；它只允许 seal Agent 以 `send_message` 把安全 issue 摘要发给模板冻结的 v3 fill/structure target。ActionCommitter 复核 receipt、active scaffold/revision 和目标后，把 Gate 失败结果、Agent result、Attempt terminal 与 Route/input 放进一个原子 batch，scaffold phase 保持 `active_unsealed`。
+
+`status === 'incomplete'` 表示 evaluator、资源或执行可靠性没有完成，不能伪装为“内容需要返工”，因此不生成 rework receipt。在 7.6 的 Attempt 剩余包络内，seal Agent 可以重试 `request_seal`、由 runtime 结束为 retryable failure，或使用下面的人工出口；Attempt 包络一旦触发则立即失败关闭，不能再使用这些出口。它不能用 `send_message` 把系统故障错误路由成内容修订。
+
+`request_human_input` 是与上表 completion dispatch 互斥的安全放弃出口，不代表 candidate 完成。它可以在 completion dispatch 前的任意时刻调用，包括 Proposal/Draft 已变更、Gate 失败或 candidate 已冻结之后；平台必须先废弃本 Attempt 的 Proposal/Draft/candidate 与 Seal staging，再把相应 terminal/abandonment 事实、Agent result 和 human request 放进一个原子 batch。任何私有状态或 receipt 都不能跨到回答后的新 Attempt。`forward_input_version`、`annotate_artifact` 及基于输入 artifact 的最终提交只属于 Seal 后的 v2 artifact 流程，不能结束 v3 structure/fill/seal session。
 
 ### 11.4 Structured TurnContract v3
 
@@ -959,6 +1022,10 @@ type StructuredSlotSessionV3 =
       accessProfile: string;
       capabilities: SlotCapabilityV1[];
       completion: 'seal_candidate_created';
+      failureDispatch: {
+        when: 'seal_gate_failed';
+        action: 'send_message';
+      };
     };
 
 const SLOT_SESSION_CAPABILITY_ALLOWLIST_V3 = {
@@ -978,20 +1045,118 @@ const SLOT_SESSION_CAPABILITY_ALLOWLIST_V3 = {
   seal: ['read_slot_spec', 'read_slot_content', 'request_seal'],
 } as const;
 
-const SLOT_SESSION_COMPLETION_CAPABILITY_V3 = {
-  structure: 'submit_structure_proposal',
-  fill: 'submit_draft',
-  seal: 'request_seal',
+const SLOT_SESSION_REQUIRED_CAPABILITIES_V3 = {
+  structure: [
+    'read_structure_contract',
+    'write_structure_proposal',
+    'submit_structure_proposal',
+  ],
+  fill: [
+    'read_slot_spec',
+    'read_slot_content',
+    'write_draft_content',
+    'submit_draft',
+  ],
+  seal: ['request_seal'],
 } as const;
 ```
 
 一个 v3 Agent 节点只能固定声明一种 `slotSession.kind`，不能按某次 Route 或模型输出临时切换 kind，也不能同时声明 v2 的 `production` 或 `annotate`。相同底层 model、system prompt 或 Skill 可以被多个不同 Agent 节点复用，但每个节点仍各自冻结 session kind、capability 和 Route 身份。
 
-Loader 必须验证 kind、completion、capabilities、access profile、Agent capability 上限和 pipeline dispatch 的完整交叉引用：capabilities 必须是该 kind allowlist 的子集并包含对应 completion capability；除可选的人工中断出口外，structure/fill 的 allowedActions 必须且只能包含 `send_message`，seal 必须声明至少一个且只能声明 `publish_artifact` / `submit_final_artifact`。每类 v3 节点都可以额外声明 `request_human_input`，但它只能在本 turn 第一次私有状态变更前作为唯一 dispatch：只读 Slot Tool 和建议性 validate 不关闭这条出口；首次 Proposal/Draft replace、unset、submit 或 `request_seal` 后立即禁止。中断结束 turn，不保留可跨 turn 继续编辑的 Proposal、Draft 或 candidate。
+Loader 必须验证 kind、completion、capabilities、access profile、Agent capability 上限和 pipeline dispatch 的完整交叉引用：capabilities 必须包含该 kind 的完整 required set，且不能超出 allowlist。structure 的 read-contract/write/submit 与 fill 的 read-spec/read-content/write/submit 保证节点在首次运行时真实可完成；对应 validate capability 仍可选。seal 只要求 `request_seal` 是有意允许的最小机械节点，因为它不产生模型内容，全部输入重验和 Assembler 都由平台执行；需要模型在 Seal 前阅读的模板再显式加入 read capability。
+
+除可选的人工中断出口外，structure/fill 的 allowedActions 必须且只能包含 `send_message`。seal 必须声明 `send_message`、至少一个 `publish_artifact` / `submit_final_artifact`，且不能声明其他 dispatch；其 `send_message` targets 至少有一个并全部指向 v3 fill 或 structure 节点。Loader 必须按结果阶段而不是仅按 allowedActions 集合解释 seal：
+
+- `seal_candidate_created` 后只能 `publish_artifact` / `submit_final_artifact`；
+- `seal_rework_required` 后只能 `send_message` 到冻结 rework target；
+- `incomplete` 不形成 candidate 或 rework receipt，不能 `send_message`；在 Attempt 剩余包络内，只能以新 toolCallId 重试 `request_seal`、让 runtime 将 Attempt 记为 retryable failure，或原子 `request_human_input`。Attempt meter 超限则上述出口全部关闭。
+
+每类 v3 节点都可以额外声明 `request_human_input`；一旦选择它，本 Attempt 的所有私有状态按 11.3 原子 abandoned，不能再执行 completion/rework dispatch。回答人工问题时创建新 Attempt，不恢复旧 Proposal/Draft/candidate/receipt。
 
 Seal 后的 v2 Agent 只能使用 artifact read/annotate 与 coordinate 能力，不得声明 `production`、`finish_production` 或任何 Slot capability；其 dispatch 只允许 `forward_input_version`、`submit_final_artifact` 或 `request_human_input`，不能重新 publish 或 send 回槽阶段。pipeline 也不得从 Seal 后的 v2 节点回边到任一 v3 节点。`SlotCapabilityV1` 使用 10.2 的封闭枚举，运行时不能接受模板自定义 capability 名称。
 
 历史 v1/v2 snapshot 保持其原始版本和既有可运行性判断；平台不把旧契约原地重写为 v3。structured template 的 Seal 前槽节点缺失 v3、Seal 后 v2 节点声明 production、Route 阶段逆行或任一节点包含互斥能力时都 fail closed。
+
+### 11.5 Structured ActionAttempt 身份与中断恢复
+
+`turnId` 是一次 structured v3 逻辑 ActionAttempt 的唯一身份，不是 provider session ID，也不能仅由当前 `agent_attempt_failed` 数量临时推导。平台在调用模型前先追加：
+
+```ts
+interface StructuredSlotAttemptStartedV1 {
+  type: 'structured_slot_attempt_started';
+  inputNodeId: string;
+  agentId: string;
+  attemptEpoch: number;
+  turnId: string;
+  sessionKind: 'structure' | 'fill' | 'seal';
+}
+
+interface StructuredSlotAttemptTerminalV1 {
+  type: 'structured_slot_attempt_terminal';
+  inputNodeId: string;
+  attemptEpoch: number;
+  turnId: string;
+  status: 'committed' | 'failed' | 'abandoned' | 'waiting_human';
+  reason:
+    | 'completion_dispatch'
+    | 'rework_dispatch'
+    | 'runtime_failure'
+    | 'task_stop'
+    | 'crash_recovery'
+    | 'human_request';
+}
+```
+
+`attemptEpoch` 对同一 inputNodeId 从 1 开始严格单调递增，`turnId` 由平台以 `inputNodeId + attemptEpoch` 确定性派生。started 事件是 epoch 分配的权威事实；创建 Proposal/Draft、签发 Grant 和 Slot Tool 幂等都只能引用该 turnId。
+
+每个 started attempt 最终必须由恰好一个 terminal 事件关闭；`inputNodeId + attemptEpoch + turnId` 必须与 started 事件完全匹配。合法 status/reason 只允许 `committed/completion_dispatch`、`committed/rework_dispatch`、`failed/runtime_failure`、`abandoned/task_stop`、`abandoned/crash_recovery`、`waiting_human/human_request` 六种组合。terminal 与该终止路径实际产生的 Agent result、dispatch/lifecycle、Draft terminal 或其他权威事实处于同一 TaskEvent batch；未产生的事件不伪造占位。状态机固定为：
+
+```text
+active ──completion dispatch──> committed
+  ├─────seal rework dispatch─> committed
+  ├─────runtime failure───────> failed
+  ├─────stop / crash recovery─> abandoned
+  └─────abandon + human───────> waiting_human
+```
+
+started 分配与 terminal 关闭都必须在 task 级互斥/CAS 边界内验证 active Attempt。terminal batch 的前置条件是对应 started 已存在且尚无 terminal；completion、stop、runtime failure 与 crash recovery 竞争时只能一个提交成功，后来者读取已存在的 terminal 并丢弃 stale 模型结果/candidate，不能补写第二终态或覆盖先发生的权威事实。
+
+- 同一 inputNode 的 retry、显式 stop 后 resume 和进程崩溃后 resume 都创建更高 epoch 的新 turnId；human answer 沿用现有 scheduler 语义，先追加已确认回答与一个全新的 `agent_input`，该新 inputNodeId 从自己的 epoch 1 开始，因此同样得到新 turnId。两类路径都让旧 Proposal/Draft/candidate 永久 abandoned，不自动克隆 overlay，也不重新注入旧 receipt。
+- stop 必须在一个 batch 中关闭 active structured attempt、abandon 私有对象并追加 `task_stopped`。进程崩溃时，恢复器在任务重新可运行前用一个 batch 追加 attempt abandoned、相关 Draft terminal 与 `task_interrupted`；只有该恢复 batch 完成后才能 resume。
+- runtime failure 与自动/人工 retry 同样先关闭旧 attempt，再开始新 epoch。响应丢失时先读事件：若 completion 或 seal rework terminal batch 已存在，直接返回原提交结果；若不存在，旧 candidate/rework receipt 不是权威事实，新 Attempt 从最后确认状态重做。
+- 每个 started Attempt 同时创建按 `turnId` 持久化的 resource meter；7.6 的 Slot Tool、validation、validator aggregate 与总 wall-clock 计数在 terminal 前只增不减，context compaction、provider session 续接和新 toolCallId 都不能重置。上限触发立即走 `failed/runtime_failure` terminal，关闭 Grant 并禁止该 Attempt 的后续工具、dispatch 与人工请求。
+- waiting-human 不持有 active Grant 或私有创作状态；answer 产生新的 confirmed input 与 Attempt，只注入已提交的人类回答和确认历史。
+- basic TurnContract v2 继续保留当前 partial-commit replay 与 turnId 行为；上述 attempt epoch 是 structured v3 新协议，不能反向改写历史 basic task。
+
+structured v3 的模型人工请求还冻结以下回答事务，不能沿用“先 append `human_answered`、再 append `agent_input`”的非原子顺序：
+
+1. 平台解析当前尚未回答的 `human_requested`，验证其来源是 structured Agent request，并取得稳定 request event ID、请求 Agent 与冻结 snapshot。
+2. 以该 request event ID 派生稳定 answer commitId，以及 `human_answered` / fresh `agent_input` 的确定性事件 ID；新 input 指回同一请求 Agent，body 为已校验的人类回答。
+3. 使用一次 `appendBatch` 同时提交 `human_answered` 与 fresh confirmed `agent_input`。batch 前崩溃仍保持原问题可回答；batch 后新 input 必然存在并可由 run loop 开始自己的 epoch 1。
+4. answer API 在按当前 task status 拒绝前，先查询该 request 的 answer commit：同 commitId + 同 canonical answer 重放原成功结果；同 request + 不同 answer 返回幂等冲突，不能覆盖第一次回答。
+
+这项原子回答协议只新增于 structured v3 的 Agent request；basic v2 与 progress-guard 的既有回答/修复语义不被本文反向改写。
+
+### 11.6 Pipeline scaffold typestate 与首个 structure 支配
+
+structured case 创建后的 scaffold phase 初始固定为 `no_scaffold`。Loader 对 pipeline 初始节点和全部可达 dispatch Route 执行有限状态数据流分析，状态转移固定为：
+
+| 节点类别 | 允许输入 phase | 成功 completion dispatch 后的 phase |
+|---|---|---|
+| v3 `structure` | `no_scaffold` 或 `active_unsealed` | `active_unsealed` |
+| v3 `fill` | 只能 `active_unsealed` | `active_unsealed` |
+| v3 `seal` | 只能 `active_unsealed` | `sealed` |
+| Seal 后受限 v2 artifact 节点 | 只能 `sealed` | `sealed` |
+
+规则：
+
+- 当前 pipeline 只有一个初始 Agent，因此它必须是 v3 structure；若未来支持多入口，则每个初始入口都必须满足同一 `no_scaffold` 前置条件。
+- structure 的成功原子提交支配所有首次 fill/seal；Seal 的成功原子提交支配所有 v2 artifact 节点。任何 Route 绕过、join 的任一入边状态不满足、fill/seal 作为首节点或 Seal 前进入 v2 都使模板加载失败。
+- seal 的 `seal_rework_required + send_message` 是独立失败边：输入与输出 phase 都为 `active_unsealed`，target 只能是 v3 fill/structure。它不满足 Seal 对后续 v2 的支配，也不能被传播成 `sealed`。
+- structure 可以在 `active_unsealed` 下创建新 generation，状态仍为 `active_unsealed`；任何 v3 节点在 `sealed` 后都非法，与既有 no-backedge 规则一致。
+- `request_human_input`、runtime failure、retry、`incomplete` 和未提交 candidate 都不改变 scaffold phase；ActionCommitter 成功的 structure/fill/seal completion batch 执行表中状态转移，seal rework batch 只提交 Route 而保持 `active_unsealed`。
+- Loader 使用固定点传播到所有可达节点，循环必须在有限三状态域内收敛；现有最终提交者和 Route 可达性校验继续生效，不能用“运行时也许不会走这条边”跳过非法路径。
+- 运行时在开始 v3/v2 节点、签发 Grant 以及 ActionCommitter 提交时再次验证当前 phase。Loader 是静态拒绝边界，运行时复核防止损坏 snapshot 或 projector 状态绕过。
 
 ---
 
@@ -1011,7 +1176,7 @@ Agent 的创作体验是一份授权槽树副本；物理实现保存：
 
 ### 12.2 上下文绑定的窄 Slot API
 
-模型工具自动绑定当前 ActionAttempt、FillDraft 和 SlotGrant。模型不传入 caseId、scaffoldId、draftId、agentId、revision、Grant 或 ACL。
+模型工具自动绑定当前 ActionAttempt、FillDraft 和 `FillSessionGrantV1`。模型不传入 caseId、scaffoldId、draftId、agentId、revision、Grant 或 ACL。
 
 概念接口：
 
@@ -1059,18 +1224,17 @@ open ──────> merged
 - `stale`：baseRevision 不再匹配，永久禁止提交。
 - `abandoned`：ActionAttempt 取消、确定失败或 active generation 被替换，永久只读。
 
-业务校验失败不是生命周期状态。校验失败时 Draft 保持 `open`，只更新 validation issues。
+业务校验失败不是生命周期状态。校验失败时 Draft 保持 `open`，只更新 validation issues；Agent 可以继续修正，也可以选择原子 abandon + `request_human_input`，但不能把 open Draft 带到回答后的新 Attempt。
 
 成功形成 merge candidate 后，Draft 在 ActionCommitter 完成前仍未 `merged`，但被 turn-level submission lock 锁定，不能继续写入或再次提交。ActionCommitter 成功后转为 `merged`；turn 失败、取消或 candidate 失效时转为 `abandoned`。
 
 恢复规则：
 
-- FillDraft 持久化，不依赖模型上下文或进程内存。
-- 同一 ActionAttempt 使用幂等 `getOrCreateDraft(turnId)` 语义找回同一草稿。
-- 恢复时重新校验 Agent、Grant、active scaffold、baseRevision 和模板快照。
-- 新 ActionAttempt 默认创建新草稿，不自动继承失败 Attempt 的 overlay。
+- FillDraft 持久化，不依赖模型上下文或进程内存；持久化用于同一 active Attempt 内的工具幂等、终态审计和崩溃后确定性关闭，不表示可跨 Attempt 续写。
+- 同一仍处于 active 的 ActionAttempt 使用幂等 `getOrCreateDraft(turnId)` 语义找回同一草稿，并重新校验 Agent、Grant、active scaffold、baseRevision 和模板快照。
+- stop、process crash、runtime failure、human interrupt 或其他 Attempt 终止后，恢复器先把旧 Draft 转为 `abandoned`；同 input 的 resume/retry 使用更高 attempt epoch，answer 使用新 confirmed input 的独立 epoch，二者都创建全新 Draft 且不自动继承 overlay。
 - v1 不提供跨 Attempt 自动续写或草稿克隆。
-- merge 必须幂等；如果提交成功但响应丢失，重放返回原提交结果，不再次提升 revision。
+- merge 必须幂等；如果 completion batch 已成功但响应丢失，事件投影返回原提交结果，不再次提升 revision。若 batch 不存在，candidate 随旧 Attempt abandoned，由新 Attempt 从权威 content 重做。
 - `merged`、`stale`、`abandoned` Draft 均随 task 保留为只读审计记录，直到 task 按平台数据治理规则被删除；运行投影默认只索引 `open` / active 对象，终态 Draft 默认隐藏且绝不参与 Assembler。模板不能自定义保留期。
 
 ---
@@ -1120,7 +1284,13 @@ Seal Gate 是一个覆盖“输入全量重验、staging 生成、输出校验�
 - Assembler 在隔离 staging 中成功生成；
 - 候选输出的 manifest 与 artifactSchema 匹配。
 
-Seal Gate 失败时不能发布部分正式文件。
+Seal Gate 返回三种互斥结果：
+
+- `passed`：冻结 sealed candidate，等待 publish/final-submit completion dispatch；
+- `failed`：所有 evaluator 可靠完成但存在 error，冻结 `seal_rework_required` receipt，允许按 11.3 原子 `send_message` 回 v3 fill/structure，不能发布文件；
+- `incomplete`：执行可靠性未完成，不生成 candidate/rework receipt；允许受 7.6 Attempt 包络约束的同 Attempt 重试、runtime retry 或人工中断，不能路由成内容返工。
+
+任何失败或 incomplete 都不能发布部分正式文件；rework batch 不修改 scaffold、revision、artifact 或 Seal 状态。
 
 ### 14.5 Validator 契约
 
@@ -1138,7 +1308,9 @@ validator 接收固定、只读的 canonical JSON 输入信封，只包含其 sc
 
 validator 本身只返回窄 `{ pass, issues }`，不能指定平台 code 或 severity。可靠执行后，`pass: false` 按注册项的 enforcement 适配：`blocking` 固定产生 `VALIDATOR_REJECTED` / `error` 并阻塞，`advisory` 固定产生 `VALIDATOR_ADVISORY` / `warning` 而不阻塞。平台继续负责 location、`not_run`、`pending`、缓存与输入哈希失效。
 
-enforcement 只控制“业务规则可靠拒绝”后的严重级别，不控制执行可靠性。无论 blocking 还是 advisory，编译失败、异常、超时、内存越限、无效返回和 issue 越限都形成 `incomplete` 并 fail closed，模板不能把它们降级为 warning。Seal 无条件重跑全部适用 validator；advisory 也必须完成，只是其可靠拒绝允许 verdict 以 warning 通过。
+enforcement 只控制“业务规则可靠拒绝”后的严重级别，不控制执行可靠性。无论 blocking 还是 advisory，编译失败、异常、超时、内存越限、无效返回和单项/聚合输出越限都形成 `incomplete` 并 fail closed，模板不能把它们降级为 warning。Seal 无条件重跑全部适用 validator；advisory 也必须完成，只是其可靠拒绝允许 verdict 以 warning 通过。
+
+每次 Merge/Seal Gate 在启动沙箱前必须解析适用 validator 与 logical target，按 7.6 的 validator 数量、调用数和 aggregate CPU 预算做 preflight；超限时零执行并返回 `RESOURCE_LIMIT_EXCEEDED` + `incomplete`。v1 调用严格串行，运行器同时监测累计实际 CPU、整个 validator phase wall-clock、沙箱 result stream 原始字节与内部 issue 数；任何聚合上限触发都停止当前/后续调用并保持 fail closed。单调用 memoryMiB/timeout 继续由注册 budget 限制；串行 Gate peak memory 是最大单调用预算、固定 runner overhead 与有界结果累加器之和，不把各次沙箱预算相加。
 
 v1 可以使用保守的受影响范围重跑策略；以后优化依赖图不能改变外部通过/失败语义。
 
@@ -1197,7 +1369,7 @@ Assembler 必须：
 - 不从未校验 content 构造任意输出路径；
 - 在隔离 staging 中产生候选文件。
 
-v1 contract 只注册一个 `forge-assembler/v1` Assembler。它只能返回 `{ routeId, content }[]`，其中 content 是 UTF-8 文本；route 必须一一映射冻结 `artifactSchema` 中 `phase: create` 的文件。所有 create 文件的 `producer` 必须是同一个执行当前 `request_seal`、随后 publish/final-submit 的 v3 seal Agent 节点；一个 artifact 不能把本次确定性生成的 create 文件声明给多个 producer。平台补齐文件名、producer、media type、required 和 phase，Assembler 无权动态声明这些控制字段。
+v1 contract 只注册一个 `forge-assembler/v1` Assembler。它只能返回 `{ routeId, content }[]`，其中 content 是 UTF-8 文本；route 必须一一映射冻结 `artifactSchema` 中 `phase: create` 的文件。所有 create 文件的 `producer` 必须是同一个执行当前 `request_seal`、随后 publish/final-submit 的 v3 seal Agent 节点；一个 artifact 不能把本次确定性生成的 create 文件声明给多个 producer。平台补齐文件名、producer、media type、required 和 phase，Assembler 无权动态声明这些控制字段。Seal manifest 的 required 完整性只针对 create 子集；annotate 文件不参与 Assembler 或 Seal Gate。
 
 v1 文件名必须是安全单段静态名称。所有 create 文件统一继承冻结的 `finalOutput.format`，一个 artifact 不能混用 Markdown/Text：全局 `markdown` 映射为 `text/markdown; charset=utf-8`，全局 `text` 映射为 `text/plain; charset=utf-8`。JSON 序列化内容只能在全局格式为 `text` 时作为文本文件并由 artifact validator 校验，不能在 Markdown artifact 中伪装出局部 JSON 媒体类型；binary、base64、stream、动态文件名和嵌套目录必须通过未来新 ABI 扩展。
 
@@ -1212,7 +1384,7 @@ v1 文件名必须是安全单段静态名称。所有 create 文件统一继承
 1. 固定当前 `activeScaffoldId + contentRevision`。
 2. 执行全量 Seal Gate。
 3. Assembler 在 staging 中生成候选文件。
-4. 校验 artifactSchema、create producer、全局 finalOutput.format、路径安全、媒体类型、大小和 manifest。
+4. 校验 artifactSchema 的 create 子集、create producer、全局 finalOutput.format、路径安全、媒体类型、大小和 manifest；不等待 Seal 后 annotation。
 5. 计算 scaffold tree hash 与各文件 SHA-256。
 6. 提交前再次确认 active scaffold 与 revision 未变化。
 7. 冻结与当前 turn、scaffold revision 和 snapshot 绑定的 sealed candidate；此时文件仍只存在于 custody staging，不创建正式 artifact、SealRecord 或 sealed 状态。
@@ -1265,6 +1437,7 @@ interface SealRecord {
 - Seal 后 Route 单调进入 v2 artifact 阶段，只允许读取/标注 artifact、`forward_input_version`、`submit_final_artifact` 或 `request_human_input`；不得回到 v3 structure/fill/seal 节点，也不得通过 `send_message` 构造回写槽树的拒绝循环。
 - 合法 final submitter 可以在同一 seal turn 直接提交 sealed candidate，也可以由后续 v2 Agent 审阅 artifact 后提交，不强制增加无业务价值的中转 Agent。
 - v2 的 `annotate_artifact` 只能新增 `phase: annotate` 文件，不能覆盖任何 create 文件。annotation 由既有 `artifact_annotated` 事件单独证明并保存自身来源/摘要；它不进入或改写 SealRecord，也不改变 scaffold tree hash、create outputs hash 或 Seal 身份。
+- structured v1 的 annotation 永远是 `required: false` sidecar；Seal 与 final submission 的文件完整性只检查 required create 文件。模板若需要强制审核裁决、合规证据或 required annotation，必须等待未来独立审核协议，不能借现有 `required` 字段暗示一个运行时并未执行的门禁。
 
 ---
 
@@ -1287,7 +1460,7 @@ interface SealRecord {
 
 结构槽采用“权威小事件 + task 内不可变大对象 + 私有候选 journal/checkpoint”的三层模型：
 
-1. **TaskEvent / 权威提交记录**：只追加 generation、merge、seal、dispatch 等权威状态转换及其不可变对象摘要；一个 ActionCommitter 提交内的多个逻辑事件通过原子 batch 一次可见，不把几十 MiB 的完整 scaffold/content 反复嵌入事件。
+1. **TaskEvent / 权威提交记录**：只追加 structured Attempt 起止、generation、merge、seal、dispatch 等权威状态转换及其不可变对象摘要；一个提交边界内的多个逻辑事件通过原子 batch 一次可见，不把几十 MiB 的完整 scaffold/content 反复嵌入事件。
 2. **task 内 content-addressed blob**：保存规范化 scaffold generation、content revision snapshot、Seal 输入和其他大对象。事件以 digest、kind、byteLength 和协议版本引用 blob；blob 永不原地改写。
 3. **私有 Proposal/Draft store**：使用可恢复 journal 与不可变 checkpoint 保存尚未提交的整树替换、content overlay 和提交锁定状态。它们不是权威 content，不能被主投影器误认为已经 merge。
 
@@ -1297,6 +1470,8 @@ interface SealRecord {
 
 - 当前 active scaffold、content revision、Draft lifecycle 和 seal status 由权威事件加可验证 blob 投影；checkpoint 只是加速，不能覆盖或压缩主 TaskEvent 历史。
 - 私有草稿写入必须可恢复，但只有 ActionCommitter 的成功提交事件才能让 candidate 进入权威状态。
+- 每次 structured v3 Attempt 在模型调用前以独立原子 start batch 分配 epoch/turnId；其 terminal 事件必须与对应的成功提交、runtime failure、stop/crash recovery 或 human request 事实处于同一原子 batch。不存在没有 started 事件的私有对象，也不存在 terminal 后仍有效的 Grant。
+- structured Agent request 的 `human_answered + fresh agent_input` 也是一个不可拆分的 answer batch；pending request ID 是回答提交的稳定幂等身份，响应丢失后相同 answer 重放原结果。
 - generation 切换、merge 和 Seal 必须有稳定、幂等的提交身份。
 - 当前 turn 的结构权威转换、Draft 终态、artifact/Seal、Agent result、Route 和 final submission 等逻辑事件必须由同一个 ActionCommitter batch 全有或全无；不能通过依次调用单事件 append 模拟原子性。
 
@@ -1393,7 +1568,7 @@ interface StructuredVerdictV1 {
 - `IssueLocation` 使用固定六类判别联合，分别定位规范化 contract、模板资源、Proposal 节点、正式槽、artifact 和无具体内容节点的平台操作；精确定义见 19.2。
 - `details` 是由 `code` 决定形状的判别数据，不是任意日志袋；必须是有界、可序列化、可按授权过滤的 JSON 对象。
 - operation 顶层结果 code 与 `StructuredIssueV1.code` 分工不同：前者说明调用整体为何失败，例如“校验未通过”；后者逐项说明具体可修正原因，例如“出现了不允许的 child type”。
-- issue 数量受 `limits.validation.maxIssuesPerRun` 限制；`truncated` 属于 verdict/result 包装层，不伪装成一条 issue，也不能被解释为通过。
+- 一次完整 Merge/Seal Gate 的内部 issue 总数受 `limits.validation.maxIssuesPerRun` 限制；超过上限意味着 evaluator 输出没有可靠完成，verdict 为 `incomplete` 且 `truncated: true`。`truncated` 属于 verdict/result 包装层，不伪装成一条 issue，也不能被解释为通过。
 - code registry 在平台侧固定每个 code 的 source、允许 phase、severity、details schema 和 location kind；模板和 Agent 不能新增 code、改变含义或在运行中降低严重程度。
 - 只有 `error` 阻塞，`warning` 只提供建议。blocking validator 的可靠拒绝映射为 `VALIDATOR_REJECTED` / error，advisory validator 的可靠拒绝映射为 `VALIDATOR_ADVISORY` / warning；两类 validator 的执行失败都不是“建议”，而是 `incomplete`，与 `failed` 一样阻止权威提交。`passed` 要求全部适用 evaluator 可靠完成且没有 error，可以同时携带 warning。
 
@@ -1482,7 +1657,7 @@ v1 code registry 的最小集合、details 安全形状和授权投影顺序按�
 - validator 与 Assembler 只能在受限环境执行，不能获得任意 FS、网络、`require` 或进程能力。
 - 工具返回、validation issue 和统计信息都必须避免隐藏槽侧漏。
 - Secret 只在需要时通过逻辑引用解析，不写进模板快照、SlotGrant、Draft、事件或 SealRecord。
-- 资源限制必须覆盖 Proposal 节点数/深度/大小、单槽 content 大小、Draft 总大小、validator CPU/内存/超时和 Assembler 输出大小。
+- 资源限制必须覆盖 Proposal 节点数/深度/大小、单槽 content 大小、Draft 总大小、每 Attempt Slot Tool/validation 次数与总 wall-clock、Attempt/Gate 两层 validator CPU/wall/output/invocation、单次 validator 内存/超时和 Assembler 输出大小。
 
 ---
 
@@ -1491,6 +1666,8 @@ v1 code registry 的最小集合、details 安全形状和授权投影顺序按�
 结构槽模式至少应能追踪：
 
 - case 使用的 snapshotHash；
+- structured Attempt 的 inputNode、epoch、turnId、session kind、started/terminal 状态与终止原因；
+- structured Attempt 的 Slot Tool/validation 调用计数、validator 累计资源与剩余 wall-clock 包络；
 - StructureProposal 的 ActionAttempt、校验和提交结果；
 - scaffold generation 创建与 supersede 链；
 - SlotGrant 的主体、profile 与解析范围摘要；
@@ -1512,12 +1689,18 @@ v1 code registry 的最小集合、details 安全形状和授权投影顺序按�
 - 未声明结构槽的旧模板仍按基础模式运行；
 - structured template 的类型、grammar、profile、validator 和 assembler 引用 fail closed；
 - Slot Schema 拒绝数组 type、组合关键字、未知关键字以及与 type 不一致的 enum/const；
+- Slot Schema v1 明确拒绝 `multipleOf`；历史问题记录中的数值域说明不能使它成为受支持关键字；
 - Slot Schema 校验不会填充 default、转换类型、移除字段或改写输入；
 - 局部约束超过模板 limits、模板 limits 超过平台 hard ceiling 时拒绝加载，且不静默裁剪；
 - limits 任一字段缺失、未知、非正整数或违反跨字段关系时拒绝加载；
+- Attempt limits 小于对应每 Gate 上限、validation runs 大于 Slot Tool calls、或 Attempt 总 wall 小于 validator aggregate wall 时拒绝加载；
+- validator 注册数、计划调用数或计划 aggregate CPU 超过模板包络时 Gate 零执行并返回 incomplete；实际累计 CPU、wall-clock、输出字节或 issues 越界时中止剩余调用并保持 incomplete；
 - validator 缺失/伪造 enforcement 时拒绝加载；blocking/advisory 的可靠拒绝分别稳定映射 error/warning；
-- 每个 v3 Agent 节点只能声明一个固定 slotSession kind，capability 和 completion dispatch 必须符合 kind 矩阵；相同 model/prompt 可由多个合法节点复用；
+- 每个 v3 Agent 节点只能声明一个固定 slotSession kind，capability 必须包含该 kind 的完整 required set，且 completion dispatch 必须符合 kind 矩阵；相同 model/prompt 可由多个合法节点复用；
 - structured pipeline 可以按 Seal 边界混用 v3 与 v2，但 Seal 后 v2 production、阶段回边、create producer 非 v3 seal Agent、多 create producer 或单 artifact 混合输出格式都在加载期拒绝；
+- scaffold typestate 从 `no_scaffold` 开始；首节点为 fill/seal、任一初始/Route 路径绕过 committed structure、Seal 前进入 v2、join 含非法入边或 sealed 后回到 v3 均在加载期拒绝；
+- seal 必须声明条件式 rework `send_message` 且全部 target 为 v3 fill/structure；其 reliable-failure edge 传播 `active_unsealed`，不能被当作 Seal success 或进入 v2；
+- structured artifactSchema 至少包含一个 required create 文件，所有 annotate 文件必须显式 `required: false`；required annotate 在加载期拒绝；
 - 同内容快照 hash 稳定；任一受控输入变化都会改变 hash；
 - 运行中修改模板源目录不影响既有 case；
 - snapshot 缺失、摘要不一致或恢复环境无法满足冻结资源包络时不可恢复运行。
@@ -1540,6 +1723,7 @@ v1 code registry 的最小集合、details 安全形状和授权投影顺序按�
 
 ### 22.3 授权
 
+- 首次 structure session 在没有 active scaffold 时仍能签发只绑定 snapshot/Proposal 的 StructureSessionGrant；fill/seal Grant 则必须绑定 access profile、active scaffold 与 revision；三类 Grant 不能跨 kind 使用；
 - hidden slot 不能通过 list/read/error/validator issue 侧漏；
 - writable scope 外的 change 整批拒绝；
 - 知道其他 draftId 或 slotId 不能越权访问；
@@ -1548,15 +1732,20 @@ v1 code registry 的最小集合、details 安全形状和授权投影顺序按�
 - 前文目录不携带 content 或模型生成摘要；Agent 只有显式 `read_slot` 后才能获得所选槽的完整有效 content；
 - 文档顺序、目录分页和重复读取结果稳定；同一 Draft 对前序工作槽的读取能看到自己的 overlay。
 
-### 22.4 FillDraft 与 Merge
+### 22.4 FillDraft、Attempt 与 Merge
 
-- Draft 在进程重启后可由同一 Attempt 恢复；
+- 同一仍 active 的 Attempt 内，Draft journal/checkpoint 可支持工具幂等重放；stop、crash recovery、runtime retry 或 human answer 前必须先把旧 Attempt 与旧 Draft 终结，新的 epoch/turnId 不恢复或克隆旧 overlay；
+- 每个 structured Attempt 只有一个 started 和一个 terminal 事件；epoch 对同一 inputNode 严格递增，stop/resume、crash/resume、retry 与 human answer 均不能复用旧 turnId；
+- completion 与并发 stop/abort 的竞态只允许一个 terminal batch 胜出；loser 读取已提交终态并丢弃 stale result/candidate，不能产生双终态或 stop 后提交；
+- structured human answer 以一个 batch 同时追加 `human_answered` 与确定性 fresh `agent_input`；在 batch 原子点前后注入崩溃不会产生“问题已回答但没有新输入”，相同 answer 的响应丢失重试返回原成功、不同 answer 冲突；
+- 除完全相同且可直接返回缓存结果的幂等重放外，反复 read/write/validate/request-seal（包括复用 toolCallId 但更换参数）都会累计 Attempt meter；compaction 和 provider session 续接不重置。恰好达到上限合法，下一次将超出或 wall deadline 到期时 abort 当前执行并原子写 `RESOURCE_LIMIT_EXCEEDED + failed/runtime_failure`，旧 Attempt 不能继续工具、dispatch 或请求人工；
 - validation 失败保持 open；
 - 批量草稿写入全有或全无；
-- request ID 重放无重复副作用；
+- `toolCallId` 重放无重复副作用，同 key 不同参数稳定冲突；
 - baseRevision 不匹配稳定返回 `DRAFT_STALE`；
 - Merge Gate 任一检查失败时 scaffold revision 和 content 零变化；
 - Merge Gate 通过但 turn/dispatch 提交失败时，candidate abandoned，scaffold revision 和 content 仍零变化；
+- Proposal/Draft 已变更、Gate 失败或 candidate 已形成后仍可选择 `request_human_input`；平台以一个 batch 原子 abandon 私有对象/candidate/staging、终结 Attempt 并记录 Agent result 与 human request，回答后从新 Attempt 开始；
 - no-op Draft 正常经过 Gate，成功后 `changeCount: 0`、Draft 为 merged、revision 不变且不创建 content snapshot；失败和重放保持同样语义；
 - merge 响应丢失后的重试返回原 revision；
 - 权威 generation/merge 事件只引用可验证的不可变 blob，不把完整大对象反复嵌入 TaskEvent；私有 journal/checkpoint 不能被投影为已合并 content。
@@ -1567,12 +1756,15 @@ v1 code registry 的最小集合、details 安全形状和授权投影顺序按�
 - 成功切换原子更新 active 指针并废弃旧 open Draft；
 - 不发生自动 content 迁移或 slotId 复用；
 - Seal Gate/Assembler 通过只形成 turn-bound candidate；ActionCommitter 前不存在正式 artifact、SealRecord 或 sealed 状态；
+- Seal Gate 的可靠 `failed` 只形成 rework receipt；ActionCommitter 只能原子 `send_message` 到 v3 fill/structure，Attempt 以 `committed/rework_dispatch` 结束且 scaffold/revision/phase 不变；响应丢失重放原 rework batch；
+- Seal Gate 的 `incomplete` 不形成 rework receipt，不能 send 到填充节点；在 Attempt 预算内可以重试，或走 runtime retry/人工中断；
 - Seal 任一步或后续 dispatch commit 失败不留下正式文件或 SealRecord；
 - 多文件发布全有或全无；
 - Seal 重放幂等；
 - 文件哈希损坏可被检测；
 - sealed scaffold 拒绝进一步填充或重编排；所有可能改槽的审核都位于 Seal 前，Seal 后 Route 不能回到 v3，改稿必须新建 case/task；
 - SealRecord 只证明全局 finalOutput.format 下的 create files；v2 annotation 不能覆盖 create file，由 `artifact_annotated` 单独证明且不改变 Seal/hash；
+- structured v1 的 annotation 只能是 optional sidecar；Seal 与 final submission 只检查 required create 完整性，不把 annotation 当作强制审核门禁；
 - `publish_artifact` 可以把 sealed candidate 送入后续 artifact Route 但不完成 Task；合法 final submitter 可以直接 `submit_final_artifact`；只有 `final_submission_accepted` 完成 Task；
 - 在 blob/artifact promote 前、过程中、batch 原子创建前后分别注入崩溃：batch 前不出现任何权威/Route/正式产物投影，batch 后全部逻辑事件和引用对象一次可见。
 
@@ -1581,7 +1773,7 @@ v1 code registry 的最小集合、details 安全形状和授权投影顺序按�
 - 平台结构槽模块源码不出现业务模板词；
 - 基础模式现有单测、集成测试和真实模板 acceptance 全部保持通过；
 - basic 模式只使用原有 TurnContract v2；structured 模式的 Seal 前节点使用 v3、Seal 后节点可使用非 production v2，v3 slotSession 与 production/annotate 互斥，九个 ForgeAction registry 保持不变；
-- structure/fill/seal candidate 后的 dispatch 分别严格限制为 send/send/publish-or-submit；request_human_input 在首次私有变更后被拒绝，forward/annotate 不能结束 v3 turn；
+- structure/fill/seal candidate 后的 completion dispatch 分别严格限制为 send/send/publish-or-submit；seal reliable-failure receipt 后只允许 rework send，incomplete 不允许 send；在合法 dispatch 前且 Attempt 未因资源越界关闭时保留“原子 abandon + request_human_input”这一互斥出口，forward/annotate 不能结束 v3 turn；
 - 模型工具 schema 不暴露工程字段；
 - validator / assembler 的沙箱限制有超时、内存、FS 和网络逃逸测试。
 - 模板加载、Structure、Merge 与 Seal 的公开 issue 都符合 `StructuredIssueV1`；消费端只依赖稳定 code，不依赖 message 文案；
@@ -1591,8 +1783,9 @@ v1 code registry 的最小集合、details 安全形状和授权投影顺序按�
 - 六种 `IssueLocation` 能分别往返序列化；RFC 6901 转义、空根指针、0-based UTF-16 文本范围和逻辑相对路径拒绝规则有边界测试；
 - Proposal clientKey 重复时仍能用不同 instancePath 定位每个出现位置；Draft content issue 只暴露授权 slotId，不暴露 draftId；
 - 不可见 related location 被移除；不可见 primary location 触发整条抑制或重新生成安全的 operation issue，不产生字段残缺的 location；
-- issues 超过 `maxIssuesPerRun` 时 verdict 明确 `truncated: true`，且结果保持失败。
+- issues 或 validator 聚合输出超过 Gate 上限时 verdict 明确 `truncated: true`，且结果保持 incomplete；validator 数量、调用数、aggregate CPU/wall 和串行 peak-memory 口径均有边界测试。
 - advisory validator 的可靠拒绝允许 passed + warning，但 advisory 的超时、异常、无效返回和未运行与 blocking 一样得到 incomplete 并阻止提交；
+- Attempt start/terminal、Draft terminal、Agent result、human request、stop/interrupted、completion 或 rework dispatch 的要求组合均做 batch 原子性与崩溃恢复测试；响应丢失时，有 completion/rework terminal batch 就重放原结果，没有则新 Attempt 从最后权威状态重做；
 - EventStore batch 对全部成员预校验、连续逻辑序号、整批 idempotent replay、payload 冲突、历史单事件混读、物理 batch 损坏和 projector 平铺都有边界/恢复测试；任何 ActionCommitter 提交都不能回退为逐事件可见。
 
 ---
@@ -1606,13 +1799,13 @@ v1 code registry 的最小集合、details 安全形状和授权投影顺序按�
 3. 扩展现有冻结模板快照以包含结构槽规则、显式模板运行包络、运行兼容身份和所有引用资源摘要。
 4. 持久化 StructureProposal，整树校验后冻结 structure candidate，再由现有 ActionCommitter 与 dispatch 原子创建 scaffold。
 5. SlotTypeDefinition 使用无业务默认值的全显式契约，只定义节点内在属性；每个 typeId 使用单一 Schema 形态，spec 固定为对象、content 保持任意 JSON，二者共用有精确关键字白名单且只验证不改写数据的版本化 Schema 方言；LayoutGrammar 使用结构化 Production AST 统一定义结构关系，只允许 Loader 可证明存在有限出口且可静态无歧义匹配的规则；SlotInstance 使用单根有序树并严格分离 spec/content。
-6. 模板上限 + 运行期 SlotGrant 两层授权；写 selector 保持静态，平台以 `precedingFilled` 封闭只读关系开放已完成前文，并通过槽目录 + `read_slot` 按槽渐进披露。
-7. Production Action/Route 调度，单 case 串行；九个 ForgeAction 不变。Seal 前 v3 Agent 节点固定一种 slotSession kind 并使用封闭 capability/completion dispatch 矩阵；Seal 后可使用禁止 production 的 v2 artifact Agent，Route 不得逆行。
+6. 模板上限 + 运行期判别式 SlotSessionGrant 两层授权；structure Grant 不依赖尚不存在的 scaffold，fill/seal Grant 才绑定 access profile、active scaffold 与 revision。写 selector 保持静态，平台以 `precedingFilled` 封闭只读关系开放已完成前文，并通过槽目录 + `read_slot` 按槽渐进披露。
+7. Production Action/Route 调度，单 case 串行；九个 ForgeAction 不变。structured pipeline 从 `no_scaffold` typestate 开始，首节点及所有首次生产路径必须由 committed structure 支配；fill/seal 只能在 active unsealed scaffold 上运行，Seal 后才可进入禁止 production 的 v2 artifact Agent，Route 不得逆行。Seal 前 v3 Agent 节点固定一种 slotSession kind，并使用封闭 allowlist、最小 required capability set 与 completion dispatch 矩阵；seal reliable failure 通过 turn-bound rework receipt 原子 send 回 fill/structure，incomplete 只可重试/runtime retry/human。
 8. 持久化 FillDraft、窄 Slot API、严格全局 baseRevision；Proposal/Merge/Seal 均先形成 turn-bound candidate。FillDraft 允许 `changeCount: 0` 的 no-op completion，但不制造 content revision 或审核证据。
-9. 草稿自检、Merge Gate、Seal Gate 三层校验；validator 注册固定 blocking/advisory enforcement，可靠拒绝分别映射 error/warning，任何执行不完整都 fail closed。
+9. 草稿自检、Merge Gate、Seal Gate 三层校验；validator 注册固定 blocking/advisory enforcement，可靠拒绝分别映射 error/warning，任何执行不完整都 fail closed。模板同时冻结每 Gate 与每 Attempt 两层 validator 工作量、Slot Tool/validation 次数和 Attempt 总 wall-clock，v1 严格串行并以单调用预算约束 peak memory；任何 Attempt 上限超限都自动终结，不能靠 compaction、重试 toolCallId 或人工出口在同 Attempt 绕过。
 10. 不可变 Scaffold Generation 的封存前整代替换。
-11. 确定性 Assembler、staging、sealed candidate、SealRecord 与多文件原子发布；create producer 是 v3 seal Agent，所有 create 文件统一继承 finalOutput.format，Seal 后 annotation 不改变 Seal。sealed candidate 可进入单调的后续 artifact Route 或由合法 final submitter 直接提交，只有 `final_submission_accepted` 完成 Task。
-12. 权威小事件、task 内不可变 content-addressed blob、私有 Proposal/Draft journal + checkpoint 三层持久化；ActionCommitter 使用原子 TaskEvent batch 让状态、Agent result、Route、artifact/Seal 和 final submission 一次可见。
+11. 确定性 Assembler、staging、sealed candidate、SealRecord 与多文件原子发布；create producer 是 v3 seal Agent，所有 create 文件统一继承 finalOutput.format，Seal 后 annotation 只能是 optional sidecar 且不改变 Seal。sealed candidate 可进入单调的后续 artifact Route 或由合法 final submitter 直接提交，只有 `final_submission_accepted` 完成 Task。
+12. 权威小事件、task 内不可变 content-addressed blob、私有 Proposal/Draft journal + checkpoint 三层持久化；structured Attempt 使用显式递增 epoch 和 started/terminal 事件，stop/crash/retry/human answer 均关闭旧 Attempt 后再开新 turnId；structured human answer 以一个幂等 batch 同时提交回答与 fresh input；ActionCommitter 使用原子 TaskEvent batch 让状态、Agent result、Route、artifact/Seal 和 final submission 一次可见。
 13. 统一版本化 `StructuredIssueV1` 信封；`IssueLocation` 固定为 contract、template_resource、proposal、slot、artifact、operation 六类；现有 `GateIssue` 只作为沙箱 validator 边界输入并由平台适配。
 14. 基础模式零行为变化。
 15. `contract.yaml`、Slot Schema、canonical JSON、capability、validator/Assembler ABI、issue/verdict、事件和 Seal 引用使用第 25 节冻结的 v1 契约。
@@ -1644,7 +1837,7 @@ v1 code registry 的最小集合、details 安全形状和授权投影顺序按�
 
 ## 25. v1 已冻结的详细系统契约
 
-2026-08-10 已将 [`STRUCTURED-SLOT-ENGINE-REMAINING-DECISIONS.md`](./STRUCTURED-SLOT-ENGINE-REMAINING-DECISIONS.md) 中全部剩余 P1 按推荐方案整组接受，并在最终跨模块审计中接受 L01–L05。本节是这些结论的权威落点；原清单只保留问题背景、备选方案和编号追溯，不再是开放评审队列。
+2026-08-10 已将 [`STRUCTURED-SLOT-ENGINE-REMAINING-DECISIONS.md`](./STRUCTURED-SLOT-ENGINE-REMAINING-DECISIONS.md) 中全部剩余 P1 按推荐方案整组接受，并在最终跨模块审计中接受 L01–L05。随后独立对抗式审查 Round 1 发现 M01–M07、Round 2 发现 N01–N03、Round 3 发现 N04，均已回写；同一 reviewer 在最终 Round 5 确认没有未闭合的 material P0/P1 并给出 `APPROVED`。本节是所有当前结论的权威落点；原清单只保留问题背景、备选方案和编号追溯，不再是开放评审队列。
 
 ### 25.1 Contract 与 Loader（A01–A05）
 
@@ -1655,7 +1848,7 @@ v1 code registry 的最小集合、details 安全形状和授权投影顺序按�
 
 ### 25.2 Slot Schema 与 canonical JSON（B01–B05、C02–C03）
 
-- **B01｜数值边界**：长度、数量和属性个数关键字必须是 JavaScript safe integer 范围内的非负整数，且 `min <= max`。数值边界必须为有限 JSON number；`multipleOf` 为有限正数；exclusive 边界只接受数值形式。运行时 `integer` 还必须是 safe integer；更大精确整数由模板建模为字符串。
+- **B01｜数值边界**：长度、数量和属性个数关键字必须是 JavaScript safe integer 范围内的非负整数，且 `min <= max`。数值边界必须为有限 JSON number；exclusive 边界只接受数值形式。运行时 `integer` 还必须是 safe integer；更大精确整数由模板建模为字符串。`multipleOf` 不在 Slot Schema v1 白名单中，Loader 必须拒绝；其参数语义不属于 v1。
 - **B02｜长度口径**：`minLength` / `maxLength` 按 Unicode code point 计数；payload 限额单独按 canonical JSON 的 UTF-8 字节计数。v1 不做 Unicode normalization，也不改写用户内容。
 - **B03｜安全正则**：`pattern` 固定使用 `forge-safe-regex/v1` 的 RE2 兼容子集，禁止回溯引用、lookaround、内联 flags 和宿主扩展。Loader 加载期编译；运行期继续受输入长度与预算约束。默认是子串搜索，整串匹配必须显式写锚点。
 - **B04｜常量范围**：v1 的 `enum` / `const` 只接受 string、有限 number、boolean、null；对象和数组常量后置。枚举项按类型敏感的 canonical value 去重。
@@ -1666,18 +1859,18 @@ v1 code registry 的最小集合、details 安全形状和授权投影顺序按�
 ### 25.3 Capability、授权投影与 Grant（D01–D06）
 
 - **D01｜封闭能力**：使用 10.2 的 `SlotCapabilityV1` 十项枚举；v1 不加入 `audit_slots`。Seal 前审核若要读取并修订槽内容，使用普通 fill/revision 流程；纯只读审核走 Seal 后的现有 artifact Route。Slot Engine 不增加审核 session、状态或证据模型。
-- **D02｜三层绑定**：Agent YAML 声明静态能力上限；TurnContract v3 声明本 turn 所需能力与 fill/seal access profile，structure 显式为 `accessProfile: null`；平台验证所需能力是 Agent 上限子集后再解析 SlotGrant。模型不能传 profileId、capability 或原始 slotId 集合，角色名不参与授权计算。
+- **D02｜三层绑定**：Agent YAML 声明静态能力上限；TurnContract v3 声明本 turn 所需能力与 fill/seal access profile，structure 显式为 `accessProfile: null`；平台验证所需能力是 Agent 上限子集且包含 session kind 的完整 required set 后，再解析按 kind 判别的 SlotSessionGrant。StructureSessionGrant 绑定 snapshot/Proposal 而不伪造 scaffold，Fill/SealSessionGrant 才绑定 access profile、active scaffold 与 revision。模型不能传 profileId、capability 或原始 slotId 集合，角色名不参与授权计算。
 - **D04｜可见树闭包**：投影分 `outline | spec | content`。任何可见深层节点自动补齐到 root 的 ancestor outline shell，但不补未授权 sibling；可写节点至少能看到自身 type、spec 和有效 content。shell 不含 spec/content、真实 child 数、隐藏 sibling 或任何隐藏存在性提示。投影 children 可连续展示，但不得伪装成权威 `order`。
 - **D05｜防存在性探测**：按 slot 操作对“对象不存在”和“存在但不可见”统一返回 `SLOT_NOT_VISIBLE`，位置为 `operation`，不回显 slotId 或关系。批量调用含隐藏对象时整批失败，不允许部分成功枚举边界。
-- **D06｜Grant 生命周期**：v1 不设时间租约。Grant 在 turn 终止、active generation 改变、baseRevision 失效或 Draft 终态时立即失效。
+- **D06｜Grant 生命周期**：v1 不设时间租约。所有 Grant 在 turn 终止或 snapshot 不匹配时失效；structure 另受 Proposal 终态约束，fill/seal 另受 active generation 与 baseRevision 约束，fill 再受 Draft 终态约束。Grant 不跨 session kind、Attempt 或 task 复用。
 
 ### 25.4 Validator 与 Assembler（E01–E07）
 
-- **E01｜注册**：validator 显式声明 `id`、`scope`、`trigger`、`enforcement: blocking | advisory`、静态 selector、`implementation { abi, path }` 与 `budget { cpuMs, timeoutMs, memoryMiB }`；scope 只允许 `slot | subtree | scaffold`，trigger 只允许 `merge-and-seal | seal`，ABI 为 `forge-validator/v1`。未知字段、重复 id、缺失 enforcement、空 selector、越界预算和不兼容 ABI 都加载失败。
+- **E01｜注册**：validator 显式声明 `id`、`scope`、`trigger`、`enforcement: blocking | advisory`、静态 selector、`implementation { abi, path }` 与 `budget { cpuMs, timeoutMs, memoryMiB }`；scope 只允许 `slot | subtree | scaffold`，trigger 只允许 `merge-and-seal | seal`，ABI 为 `forge-validator/v1`。未知字段、重复 id、缺失 enforcement、空 selector、越界预算和不兼容 ABI 都加载失败；注册总数不得超过 `limits.validation.maxValidators`。
 - **E02｜输入**：沙箱只接收固定、只读的 canonical JSON 信封，内容限于声明 scope 内的可验证 type/spec/content/tree 投影、必要模板声明和稳定逻辑位置；不得包含宿主路径、Grant、Agent、事件、task 存储位置、secret 或服务句柄。
-- **E03｜重跑**：Merge 重跑所有可能受本次 overlay 影响且 trigger 包含 merge 的 validator；不能可靠证明无影响时就重跑，no-op 时 scaffold 级 merge validator 仍运行。Seal 无条件运行全部适用 validator；缓存只能做语义等价优化，advisory 也不能被省略执行。
+- **E03｜重跑**：Merge 重跑所有可能受本次 overlay 影响且 trigger 包含 merge 的 validator；不能可靠证明无影响时就重跑，no-op 时 scaffold 级 merge validator 仍运行。Seal 无条件运行全部适用 validator；缓存只能做语义等价优化，advisory 也不能被省略执行。Gate 启动前必须解析全部 `(validatorId, logical target)`，调用数和预算计划超限时零执行并返回 incomplete。
 - **E04｜沙箱**：结构槽使用独立纯函数 ABI 和受限执行器；实现不能加载任意 npm 包、`require`、FS、网络或进程，Date、随机数、locale 和环境变量等非确定输入被禁用或固定。snapshot 冻结 ABI 与实现摘要，不冻结宿主绝对路径。
-- **E05｜预算与失败**：每个实现必须显式声明不超过平台 hard ceiling 的预算，不提供隐式默认。enforcement 只改变可靠业务拒绝的严重级别；blocking/advisory 的编译失败、异常、超时、内存越限、无效返回和 issue 越限一律 `incomplete` 并 fail closed。
+- **E05｜预算与失败**：每个实现必须显式声明不超过平台 hard ceiling 的单调用预算，不提供隐式默认；模板 limits 同时冻结每 Gate 与每 Attempt 的 validator 调用、aggregate CPU/wall/output，以及每 Attempt Slot Tool/validation 次数与总 wall-clock。v1 validator 严格串行，peak memory 由最大单调用 `memoryMiB`、固定 runner overhead 与受 output/issues 上限约束的结果累加器共同决定；未来并行必须升级聚合内存协议。enforcement 只改变可靠业务拒绝的严重级别；blocking/advisory 的编译失败、异常、超时、内存越限、无效返回或任一聚合上限越界一律 fail closed。单 Gate 执行不完整返回 `incomplete`；Attempt 包络超限则立即原子终结为 `RESOURCE_LIMIT_EXCEEDED + failed/runtime_failure`，不能继续同 Attempt。
 - **E06｜输出路由**：contract 只注册一个 Assembler，声明 `id`、`implementation { abi: 'forge-assembler/v1', path }`、预算和 routes。每个 route 精确映射 `phase: create` 的一个冻结 artifact 文件，且全部 create 文件的 producer 必须等于执行本次 request_seal 的同一个 v3 seal Agent；annotate 文件仍由后续 v2 Agent 产生。沙箱只返回 `{ routeId, content }[]`，控制字段由平台补齐，并要求必填 create 文件精确覆盖且无额外输出。
 - **E07｜输出类型**：v1 Assembler 只输出 UTF-8 string；全部 create 文件统一继承 artifact 的全局 `finalOutput.format: markdown | text`，不支持单文件混用。JSON 只可在全局 text 格式下作为文本并额外验证；binary、base64 和 stream 需要未来新 ABI。
 
@@ -1715,16 +1908,16 @@ artifact:       ARTIFACT_SCHEMA_MISMATCH, ARTIFACT_INTEGRITY_FAILED, PUBLISH_FAI
 
 ### 25.6 权威事件、幂等与恢复（G02–G07）
 
-- **G02｜事件最小集合**：主 TaskEvent 只记录权威边界。v1 使用 `structured_scaffold_generation_committed`（创建并激活新 generation，可原子 supersede 旧 active）、`structured_fill_draft_opened`、`structured_fill_draft_terminal`（`merged | stale | abandoned`）和 `structured_scaffold_sealed`；事件只带稳定身份、状态、revision、摘要和 blob/artifact 引用。Proposal 替换、Draft content 替换、建议性校验和 checkpoint 只进私有 journal。
-- **G03｜身份**：`turnId` 就是 ActionAttempt 身份。Proposal/Draft 由平台按 turn 上下文 get-or-create；工具调用使用运行器提供的 `toolCallId` 做幂等键，模型不传 requestId。权威提交另生成稳定 receipt key 并保存原结果，以便响应丢失后重放。
+- **G02｜事件最小集合**：主 TaskEvent 只记录权威边界。v1 使用 `structured_slot_attempt_started`、`structured_slot_attempt_terminal`、`structured_scaffold_generation_committed`（创建并激活新 generation，可原子 supersede 旧 active）、`structured_fill_draft_opened`、`structured_fill_draft_terminal`（`merged | stale | abandoned`）和 `structured_scaffold_sealed`；事件只带稳定身份、状态、revision、摘要和 blob/artifact 引用。Attempt start 在模型调用前以独立原子 batch 分配身份；terminal 与成功 completion/rework、失败、stop/crash recovery 或 human request 的对应事实同 batch。既有 `human_answered` 与其 fresh `agent_input` 在 structured Agent request 路径也必须同 answer batch。Proposal 替换、Draft content 替换、建议性校验、resource meter 和 checkpoint 只进私有 journal。
+- **G03｜身份**：`turnId` 就是 structured ActionAttempt 身份，由同一 inputNodeId 下持久化、严格递增的 `attemptEpoch` 确定性派生，不能根据 `agent_attempt_failed` 数量临时猜测。started/terminal 通过 task 级互斥或等价 CAS 保证单次分配、恰好一终态，stop 与 completion 竞态只有一个 batch 胜出。Proposal/Draft 由平台按 active turn 上下文 get-or-create；工具调用使用运行器提供的 `toolCallId` 做幂等键，模型不传 requestId。权威提交另生成稳定 receipt key 并保存原结果；structured answer commitId 由 pending human request ID 派生，同 canonical answer 重放、不同 answer 冲突。
 - **G05｜崩溃提交**：大对象先写 staging、fsync/校验 digest 并 promote 到最终内容寻址/custody 地址，随后以一个不可变 TaskEvent batch 作为唯一可见性提交点。batch 前崩溃只留下无主数据，batch 后全部引用对象已就位；恢复器依据 commitId、事件和 hash 复用/清理无主对象，不以目录存在性猜测成功。
 - **G07｜终态保留**：merged/stale/abandoned Draft 随 task 保留为只读审计记录直至 task 删除；普通运行投影只索引 open/active 对象，终态 Draft 默认隐藏、不能重新提交、不能进入 Assembler。独立保留期以后由平台数据治理决定，模板无权配置。
 
 ### 25.7 Slot Tool、turn 与 dispatch（H03–H06）
 
-- **H03｜Attempt 身份**：实现和公共事件统一使用 `turnId`；“ActionAttempt”只保留为设计语义名。重试产生新 turnId，因此默认创建新 Proposal/Draft，旧对象转 abandoned。
+- **H03｜Attempt 身份**：实现和公共事件统一使用 `turnId`；“ActionAttempt”只保留为设计语义名。每个 started Attempt 必须有且只有一个 `committed | failed | abandoned | waiting_human` terminal；committed reason 可以是 completion 或 seal rework dispatch。retry、stop 后 resume 与 crash recovery 后 resume 在同一 inputNode 下使用更高 epoch，human answer 则创建新的 confirmed input 并从其 epoch 1 开始，两者都先关闭旧 Attempt 且绝不复用旧 turnId。旧 Proposal/Draft/candidate/rework receipt 不跨 Attempt 恢复或克隆；basic v2 的既有身份与 replay 语义不变。
 - **H04｜工具幂等**：Slot Tool 从执行上下文读取 `toolCallId`。同 key + 同规范化参数重放原结果；同 key + 不同参数返回 `IDEMPOTENCY_CONFLICT`。模型参数不得出现 requestId、turnId、draftId、revision 或 Grant。
-- **H05｜完成与提交**：达到 slotSession completion 后禁止继续写、重跑 Gate 或请求人工输入，模型只获得不含 blob、Grant 或内部提交 ID 的安全 receipt 摘要，随后只能执行 kind 矩阵允许的 completion dispatch。`request_human_input` 只可发生在首次私有状态变更前。ActionCommitter 校验 receipt、turn、revision 后，把权威事件与 dispatch 作为一个原子 batch；失败、取消或失配只废弃 candidate，不改权威状态。
+- **H05｜完成、返工、人工与提交**：达到 slotSession completion 后禁止继续写或重跑 Gate，模型只获得不含 blob、Grant 或内部提交 ID 的安全 receipt 摘要，随后可以执行 kind 矩阵允许的 completion dispatch。Seal Gate 可靠 failed 时改为生成 rework receipt，只允许原子 `send_message` 到冻结 v3 fill/structure target；incomplete 不生成 receipt，只能在 Attempt 包络内重试/runtime retry/human。合法 dispatch 前可以选择互斥的 `request_human_input`；后者先原子 abandon 私有状态，再把 Attempt terminal、生命周期、Agent result 与 human request 放进同一 batch。回答时用另一个幂等 batch 同时提交 `human_answered + fresh agent_input`。ActionCommitter 校验 receipt、turn、revision 后原子提交 completion/rework dispatch；资源包络超限已关闭 Attempt，不能再走人工出口。
 - **H06｜无隐式队列**：v1 不实现“自动领取下一个未填槽”。profile 静态解析工作范围，一个 Draft 处理整个 writable set；后续 Route 仍由 pipeline 决定。逐实例领取、锁、游标和动态 anchor 属于未来 Slot Scheduler。
 
 ### 25.8 TaskWorkspace、API、Agent 投影与 UI（I01–I07）
@@ -1738,19 +1931,36 @@ artifact:       ARTIFACT_SCHEMA_MISMATCH, ARTIFACT_INTEGRITY_FAILED, PUBLISH_FAI
 ### 25.9 Seal、artifact custody 与输出边界（J03–J06）
 
 - **J03｜正式版本引用**：SealRecord 必须保存 `{ artifactId, version }` 的稳定 ArtifactVersion 引用，并继续记录 Seal 时每个 create route/path 的 byteLength 与 SHA-256；create 集合不可变且不得保存 staging 路径。后续 annotation 即使挂接同一 version，也只是由独立事件证明的追加 sidecar，不改变该引用所指的 create 身份。
-- **J04｜静态平面文件**：route 一一映射当前 v3 seal Agent 负责、`phase: create` 的 `artifactSchema.files[].name`，所有 create producer 必须相同，文件名必须是安全单段名称，Assembler 只返回 routeId。后续 annotate 文件由 `artifact_annotated` 单独证明且不改变 SealRecord；嵌套目录、多 route 同名和由 content 派生动态文件名全部后置。
+- **J04｜静态平面文件**：route 一一映射当前 v3 seal Agent 负责、`phase: create` 的 `artifactSchema.files[].name`，所有 create producer 必须相同，文件名必须是安全单段名称，Assembler 只返回 routeId。structured v1 至少有一个 required create，所有 annotate 文件必须 `required: false`，并由 `artifact_annotated` 单独证明且不改变 SealRecord；Seal/final submission 只检查 required create。嵌套目录、多 route 同名、required annotation 和由 content 派生动态文件名全部后置。
 - **J05｜媒体类型**：所有 create 文件统一继承 `finalOutput.format`；平台冻结 `markdown -> text/markdown; charset=utf-8`、`text -> text/plain; charset=utf-8` 的映射，Assembler 无权逐文件声明 format/mediaType。JSON 只允许作为全局 text artifact 的文本；binary 需要同时升级 pipeline schema 与 Assembler ABI。
 - **J06｜Seal 幂等**：内容身份由 task、scaffoldId、revision、snapshotHash、Assembler 实现摘要和规范化输入 hash 派生；attempt receipt 另绑定 `turnId + toolCallId`。同 Attempt 重放返回同 candidate，已提交同内容身份返回原 SealRecord。新 Attempt 可以复用已校验的内容寻址字节，但必须重签 receipt、复核 active revision 并重新经过 ActionCommitter；revision 变化 fail closed。
 
 ### 25.10 最终接缝审计（L01–L05）
 
-- **L01｜Session 与 dispatch 矩阵**：一个 v3 Agent 节点永久固定为 structure、fill 或 seal 之一；同一 model/prompt 可以通过多个节点复用。三类 capability 使用 11.4 的封闭 allowlist，并分别强制包含 submit_structure_proposal、submit_draft、request_seal。candidate 后 structure/fill 只能 send_message，seal 只能 publish_artifact 或 submit_final_artifact；request_human_input 只可在首次私有状态变更前中断，forward/annotate 只属于 Seal 后 v2 流程。
+- **L01｜Session、typestate 与 dispatch 矩阵**：一个 v3 Agent 节点永久固定为 structure、fill 或 seal 之一；同一 model/prompt 可以通过多个节点复用。pipeline 从 `no_scaffold` 开始，首节点必须 structure；Loader 对全部 Route 做 typestate 传播，committed structure 支配 fill/seal，committed Seal 支配后续 v2 artifact 节点。三类 capability 使用 11.4 的封闭 allowlist 和 required set：structure 强制 read-contract/write/submit，fill 强制 read-spec/read-content/write/submit，seal 最小只需 request-seal。candidate 后的 completion dispatch 中，structure/fill 只能 send_message，seal 只能 publish_artifact 或 submit_final_artifact；seal reliable-failure edge 只能 send 到 v3 fill/structure 并保持 active_unsealed，incomplete 不能 dispatch。合法 dispatch 前且 Attempt 未因资源超限终结时允许原子 abandon + `request_human_input`，forward/annotate 只属于 Seal 后 v2 流程。
 - **L02｜No-op FillDraft**：允许 `submit_draft` 在 `changeCount: 0` 时通过正常 Merge Gate 并形成 candidate。提交后 Draft 为 merged，但不创建 content snapshot、不提升 contentRevision；Draft 终态与 send_message 仍在同一 batch 提交。该 receipt 不是审核或批准证据。
 - **L03｜Seal 与契约版本边界**：所有可能改槽的审核必须在 Seal 前作为 v3 fill/revision；Seal 后只允许 v2 artifact annotate/forward/final-submit/human 流程且不能回到 v3，需修改时创建新 case/task。structured template 可以混用这两类节点，但 Seal 后 v2 节点禁止 production。SealRecord 只证明 create 文件，annotation 由 `artifact_annotated` 证明；create producer 固定为 v3 seal Agent，且所有 create 文件继承一个全局 finalOutput.format。
 - **L04｜Validator enforcement**：注册项必须选择 blocking 或 advisory，模板和实现都不能指定 code/severity。可靠拒绝分别映射 `VALIDATOR_REJECTED` error 与 `VALIDATOR_ADVISORY` warning；两类执行失败、超时或无效返回都形成 incomplete 并 fail closed。
 - **L05｜原子 TaskEvent batch**：ActionCommitter 的结构状态、Draft 终态、Agent result、Route、artifact/Seal 与 final submission 事件必须由 `appendBatch` 或等价 primitive 一次可见。存储先验证全部成员并分配连续逻辑序号，再写一个不可变 batch 文件；reader 平铺读取并兼容历史单事件文件。同 commitId + 同 canonical payload 幂等重放，不同 payload 冲突；blob/artifact 先 promote，batch 文件是唯一可见性提交点。
 
-### 25.11 直接进入 dev plan 的实施默认项
+### 25.11 对抗式审查收敛（M01–M07）
+
+- **M01｜Grant 判别联合**：10.3 的 `SlotSessionGrantV1` 取代单一 scaffold-bound Grant。structure 不依赖 active scaffold，fill/seal 才绑定 profile/scaffold/revision；该变化只属于尚未上线的 structured v1，没有历史数据迁移。
+- **M02｜最小可完成能力**：kind allowlist 之外新增 required set，Loader 必须同时验证“没有越权”和“节点具备完成该阶段的最小能力”。该项补强 L01，不改变十项 capability 枚举。
+- **M03｜显式 Attempt epoch**：11.5 的 started/terminal 事件与单调 epoch **supersede** 原 H03 中“由当前重试计数自然获得新 turnId”的不足。stop、crash、retry、human answer 均关闭旧 Attempt 后创建新 turnId；basic v2 不受影响。
+- **M04｜安全人工出口**：原 H05/L01 的“首次私有变更后禁止请求人工”被 **superseded**。新规则是在 completion dispatch 前始终允许原子 abandon + human；任何私有状态、candidate 或 receipt 都不跨回答后的新 Attempt。
+- **M05｜Annotation 完整性**：structured v1 禁止 required annotation；Seal/final submission 只以 required create 为文件完整性。该限制不重解释历史 basic snapshot，未来强制审核必须使用独立版本化协议。
+- **M06｜`multipleOf` 不支持**：25.2 B01 中旧的参数域表述被 **superseded**；`multipleOf` 保持非白名单关键字并在 Loader 阶段拒绝。structured v1 尚未发布，因此无模板迁移。
+- **M07｜Gate 聚合预算**：六组 limits 从十六项扩为二十一项，新增 validator 注册数、每 Gate 调用数与 aggregate CPU/wall/output；原 `maxIssuesPerRun` 明确为 Gate 内部总 issue 数。v1 严格串行，peak memory 由单调用预算、runner overhead 与有界结果累加器共同决定。
+
+### 25.12 对抗式审查 Round 2–3 收敛（N01–N04）
+
+- **N01｜人工回答原子性**：11.5 的 structured answer batch 补齐 M04 只覆盖“请求侧”而未覆盖“回答侧”的半状态。`human_answered` 与 fresh confirmed `agent_input` 必须以 pending request ID 派生的稳定 commitId 一次提交；相同回答重放、不同回答冲突。该协议只新增于 structured v3，不反向改变 basic v2/progress-guard。
+- **N02｜Scaffold typestate 支配**：11.6 要求 structured pipeline 从 `no_scaffold` 开始，当前唯一首节点必须 structure；Loader 通过三状态数据流证明 structure 成功提交支配所有 fill/seal、Seal 成功提交支配所有后续 v2 artifact 节点。运行时在节点启动、Grant 签发和 ActionCommitter 提交时复核；因此不能加载“首节点 fill/seal”或 Route 绕过结构创建的必死模板。
+- **N03｜Seal 可靠失败返工**：Seal Gate 的 reliable `failed` 形成 turn/revision-bound rework receipt，而不是 candidate；seal Agent 只能 `send_message` 到冻结 v3 fill/structure target，ActionCommitter 原子提交 failure result、Attempt terminal 与 Route，phase 保持 `active_unsealed`。`incomplete` 不形成 rework receipt，只能在预算内重试、runtime retry 或人工中断。
+- **N04｜Per-Attempt 硬包络**：M07 的每 Gate 预算不足以约束同一模型回合反复调用。7.6 新增 attempt limits，冻结非幂等重放的 Slot Tool/validation 调用次数、累计 validator invocation/CPU/wall/output 与 Attempt 总 wall-clock；meter 不因 compaction、session 续接、新 toolCallId 或同 key 换参数重置。恰好达到上限合法，下一次将超出或 wall deadline 到期时立即原子 `RESOURCE_LIMIT_EXCEEDED + failed/runtime_failure`，该 Attempt 不得继续工具、dispatch 或人工请求。最终 limits 因此从 M07 的六组二十一项扩为七组二十八项。
+
+### 25.13 直接进入 dev plan 的实施默认项
 
 以下 D/K 项不再作为产品问题重新评审，但仍必须由代码审查、测试和基准验证：
 
@@ -1774,10 +1984,11 @@ artifact:       ARTIFACT_SCHEMA_MISMATCH, ARTIFACT_INTEGRITY_FAILED, PUBLISH_FAI
 | scaffold 槽数 / 树深 / 单节点 children | 10,000 / 32 / 1,000 |
 | 单槽 spec / 单槽 content / scaffold payload | 64 KiB / 1 MiB / 64 MiB |
 | 单 Draft 变更槽数 / payload | 2,000 / 16 MiB |
-| 单次公开 issues | 500 |
+| 每 Attempt Slot Tool / validation runs / validator 调用 / CPU / validator wall / 输出 / 总 wall | 512 / 16 / 40,000 / 240,000 ms / 480,000 ms / 16 MiB / 600,000 ms |
+| validator 注册 / Gate 调用 / aggregate CPU / wall / 输出 / 内部 issues | 64 / 10,000 / 60,000 ms / 120,000 ms / 4 MiB / 500 |
 | artifact 文件数 / 单文件 / 总量 | 64 / 16 MiB / 64 MiB |
 
-dev plan 必须先对最坏 Grammar/Schema、10k 槽遍历、最大 Draft、500 issues、全量 Seal 和崩溃恢复做 CPU、内存、响应与磁盘基准，再冻结实际部署 profile；模板只能声明更小值。
+后续 dev plan 必须先对最坏 Grammar/Schema、10k 槽遍历、最大 Draft、最大 validator 注册/target fanout/aggregate Gate、同 Attempt 重复 validation/Seal、500 issues、全量 Seal 和崩溃恢复做 CPU、wall-clock、内存、响应与磁盘基准，再冻结实际部署 profile；模板只能声明更小值。
 
 ---
 
@@ -1813,7 +2024,7 @@ dev plan 必须先对最坏 Grammar/Schema、10k 槽遍历、最大 Draft、500 
 | 2026-08-10 | Slot Schema v1 禁止组合关键字和类型联合；一个 typeId 只对应一种确定形态 |
 | 2026-08-10 | Slot Schema v1 使用有界实用关键字白名单，只验证、不转换或改写数据 |
 | 2026-08-10 | 资源限制采用局部语义约束、模板显式包络、平台 hard ceiling 三层模型；超限拒绝且不静默裁剪 |
-| 2026-08-10 | structured_slots v1 模板 limits 固定为六组十六个必填正整数字段，执行器预算另行声明 |
+| 2026-08-10 | structured_slots v1 模板 limits 最终固定为七组二十八个必填正整数字段；除单调用与每 Gate 预算外，attempt 组还封闭整回合的工具次数、累计验证工作量和总 wall-clock |
 | 2026-08-10 | LayoutGrammar v1 采用结构化 Production AST，以 rootType + productions 表达有序 children 语法 |
 | 2026-08-10 | LayoutGrammar v1 固定 slot/sequence/choice/optional/repeat/empty 六种节点，重复必须有限且不得消费可空表达式 |
 | 2026-08-10 | LayoutGrammar v1 允许直接或互相递归，但 Loader 必须证明每个根可达 type 都存在完整有限子树；无出口的强制循环加载期拒绝 |
@@ -1832,13 +2043,21 @@ dev plan 必须先对最坏 Grammar/Schema、10k 槽遍历、最大 Draft、500 
 | 2026-08-10 | 平台 code registry 控制 issue severity；warning 不阻塞，error 和 incomplete 阻止权威提交 |
 | 2026-08-10 | merged/stale/abandoned Draft 随 task 保留为默认隐藏的只读审计记录，直至 task 删除 |
 | 2026-08-10 | 人类 UI v1 只读查看和审计，不提供槽编辑、拖拽、人工 Merge 或文件反向同步；模型写入只能通过 turn-bound Slot Tool |
-| 2026-08-10 | TaskEvent 只记录结构 generation、Draft lifecycle 与 Seal 等权威边界；turnId/toolCallId 分别承担 Attempt 与工具幂等身份 |
+| 2026-08-10 | TaskEvent 只记录 Attempt 起止、结构 generation、Draft lifecycle 与 Seal 等权威边界；structured turnId 由持久化 attempt epoch 派生，toolCallId 承担工具幂等身份 |
 | 2026-08-10 | SealRecord 必须引用正式 ArtifactVersion；route、文件名和媒体类型由冻结 artifactSchema 控制，Assembler 不能动态发明 |
-| 2026-08-10 | L01：一个 v3 Agent 节点固定一种 slotSession；structure/fill/seal 使用封闭 capability 与 send/send/publish-or-submit 完成矩阵，request_human_input 只允许首次私有变更前中断 |
+| 2026-08-10 | L01（经 M02/M04 修订）：一个 v3 Agent 节点固定一种 slotSession；三类 session 使用封闭 allowlist、最小 required capability set 与 send/send/publish-or-submit 完成矩阵；completion dispatch 前始终允许原子 abandon + request_human_input |
 | 2026-08-10 | L02：FillDraft 允许 no-op 提交；通过正常 Gate 后 Draft 转 merged，但不创建 content snapshot、不提升 revision，也不构成审核证据 |
 | 2026-08-10 | L03：改槽审核全部前置到 Seal 前；Seal 后只走无 production 的 v2 artifact 流程且不得回到 v3，修改需新 case；Seal 只证明统一格式的 create files，annotation 单独追加证明 |
 | 2026-08-10 | L04：validator 注册必须选择 blocking/advisory；可靠拒绝分别映射 error/warning，两类执行不完整都 fail closed |
 | 2026-08-10 | L05：结构状态与 dispatch 事实通过原子 TaskEvent batch 一次可见；大对象先 promote，batch 文件作为唯一提交点并兼容历史单事件文件 |
+| 2026-08-10 | M01/M02：SlotSessionGrant 改为按 structure/fill/seal 判别的联合，且 Loader 强制每类节点具备最小可完成能力 |
+| 2026-08-10 | M03/M04：structured v3 使用显式 attempt epoch 与 started/terminal 事件；stop/crash/retry/human answer 开新 turnId，人工出口改为原子放弃私有状态后随时可用 |
+| 2026-08-10 | M05/M06：structured v1 的 annotation 必须 optional，required 只约束 create；Slot Schema v1 明确不支持 multipleOf |
+| 2026-08-10 | M07：validator 除单项预算外必须受注册数、每 Gate 调用数和 aggregate CPU/wall/output/issues 上限约束，v1 严格串行 |
+| 2026-08-10 | N01：structured Agent request 的回答必须把 human_answered 与 fresh agent_input 放进同一幂等 batch；相同回答可重放，不同回答冲突 |
+| 2026-08-10 | N02：structured pipeline 使用 no_scaffold/active_unsealed/sealed typestate；首节点必须 structure，Loader 与运行时共同保证 structure/Seal 对后续阶段的支配关系 |
+| 2026-08-10 | N03：Seal Gate 可靠 failed 通过 turn-bound rework receipt 原子 send 回 v3 fill/structure 并保持 active_unsealed；incomplete 不得伪装成内容返工 |
+| 2026-08-10 | N04：每 Attempt 冻结 Slot Tool/validation 次数、累计 validator CPU/wall/output/invocation 和总 wall-clock；超限自动失败并关闭全部工具/dispatch/人工出口 |
 
 ---
 

@@ -6,6 +6,7 @@
 > 用途：保留本轮问题背景、推荐方案、备选方案和稳定编号，供追溯；不再承载开放决策。
 > 已处理：D03、G01、H01、H02、J01、J02 以及全部剩余 P1 已于 2026-08-10 接受并回写权威设计；D 类按推荐作为 dev plan 默认项。
 > 后续审计：跨模块接缝问题 L01–L05 也已于 2026-08-10 全部按推荐接受，权威结论见主设计 25.10；本文不因此重新开放。
+> 对抗复审：Round 1 的 M01–M07、Round 2–3 的 N01–N04 已修订或补强部分旧结论，权威关系见主设计 25.11–25.12；本文保留原文作为决策演进记录。
 
 本文不是第二份系统设计。全部接受结论已回写权威设计第 25、26 节；本文只保存评审过程。若本文与权威设计冲突，以权威设计为准。
 
@@ -112,6 +113,8 @@ C01 数值等基准测试后冻结。
 
 **推荐方案**：长度、数量和属性个数参数必须是 JavaScript safe integer 范围内的非负整数，并满足 `min <= max`。数值 schema 边界必须是有限 JSON number；`multipleOf` 必须为有限正数；`exclusiveMinimum` / `exclusiveMaximum` 采用数值形式，不接受旧版布尔形式。所有运行时 number 必须可表示为有限 IEEE-754 double；`integer` 还必须位于 safe integer 范围并满足数学整数语义。超出安全整数范围的精确整数应由模板建模为带 pattern 的字符串，平台不能在 JSON 解析时悄悄舍入。
 
+> **M06 superseded 注记**：上段关于 `multipleOf` 参数域的句子不再属于 structured v1；该关键字不在白名单中，Loader 必须拒绝。其余数值边界结论继续有效。structured v1 尚未发布，无历史模板迁移。
+
 ### B02｜字符串长度与字节限制分离（P1｜已接受并回写）
 
 **问题**：字符串长度可能按 UTF-16、Unicode code point 或 UTF-8 字节计算。
@@ -152,7 +155,7 @@ C01 数值等基准测试后冻结。
 
 ### C01｜首个平台 hard ceiling（D）
 
-**问题**：十六个模板 limits 已冻结，但平台首批绝对上限尚无数值。
+**问题**：模板 limits 已冻结，但平台首批绝对上限尚无数值。
 
 **推荐方案**：先以以下数值作为基准测试候选，而不是立即写成长期兼容承诺：
 
@@ -162,10 +165,15 @@ C01 数值等基准测试后冻结。
 | scaffold 槽数 / 树深 / 单节点 children | 10,000 / 32 / 1,000 |
 | 单槽 spec / 单槽 content / scaffold payload | 64 KiB / 1 MiB / 64 MiB |
 | 单 Draft 变更槽数 / payload | 2,000 / 16 MiB |
-| 单次公开 issues | 500 |
+| 每 Attempt Slot Tool / validation runs / validator 调用 / CPU / validator wall / 输出 / 总 wall | 512 / 16 / 40,000 / 240,000 ms / 480,000 ms / 16 MiB / 600,000 ms |
+| validator 注册 / Gate 调用 / aggregate CPU / wall / 输出 / 内部 issues | 64 / 10,000 / 60,000 ms / 120,000 ms / 4 MiB / 500 |
 | artifact 文件数 / 单文件 / 总量 | 64 / 16 MiB / 64 MiB |
 
-实施前用最坏 Grammar、Schema、10k 槽遍历、全量 Seal 和恢复测试验证 CPU、内存与响应大小，再冻结首个部署 profile。模板可以声明更小值，不能放宽这些上限。
+实施前用最坏 Grammar、Schema、10k 槽遍历、最大 Draft、validator target fanout/aggregate Gate、全量 Seal 和恢复测试验证 CPU、wall-clock、内存与响应大小，再冻结首个部署 profile。模板可以声明更小值，不能放宽这些上限。
+
+> **M07 扩展注记**：validation limits 现为 validator 注册数、每 Gate 调用数、aggregate CPU/wall/output 与内部 issues；整套模板 limits 从六组十六项扩为六组二十一项。v1 validator 严格串行，peak memory 由单调用预算、固定 runner overhead 与受 output/issues 上限约束的结果累加器共同决定。
+
+> **N04 superseded 注记**：M07 的二十一项不是最终数量。为封闭同一 Attempt 反复调用，新增 attempt 组七项；最终为七组二十八项。除同 key、同参数且直接重放缓存结果的幂等调用外，每个新调用签名都计数；恰好达到上限合法，下一次将超出或 wall deadline 到期时原子终结 Attempt，不能继续工具、dispatch 或人工出口。
 
 ### C02｜Canonical JSON 协议（P1｜已接受并回写）
 
@@ -216,6 +224,8 @@ type SlotCapabilityV1 =
 **问题**：Agent 声明的能力、Action 请求的能力和 profile 之间如何合并。
 
 **推荐方案**：Agent YAML 声明静态 capability 上限；structured TurnContract 为当前 Action 声明所需 capability，并在 fill/seal 会话中声明 access profile；structure 会话显式使用 `accessProfile: null`。平台验证所需集合是 Agent 上限的子集，再根据 active scaffold 解析 SlotGrant。模型不能传 profileId、capability 或原始 slotId 集合。角色名不参与授权计算。
+
+> **M01/M02 补强注记**：运行时 Grant 已改为按 kind 判别的 `SlotSessionGrantV1`。structure 只绑定 snapshot/Proposal，不依赖 active scaffold；fill/seal 才绑定 profile/scaffold/revision。Loader 还必须验证每类 session 的完整 required capability set，而不只是 allowlist 子集。
 
 ### D03｜Selector v1 的表达边界（P0｜已接受并回写）
 
@@ -323,6 +333,10 @@ interface AccessProfileV1 {
 **问题**：validator/Assembler 的 CPU、内存和超时不在十六个通用 limits 中。
 
 **推荐方案**：每个注册项显式声明预算，且不得超过平台 hard ceiling；缺失不设默认。编译失败、异常、超时、内存越限、无效返回和 issue 超限均 fail closed，并映射为平台 code。模板实现不能自行决定把执行失败降为 warning。
+
+> **M07 补强注记**：单注册项预算之外，一次 Gate 还受 validator 数量、调用次数、aggregate CPU/wall/output/issues 上限约束；preflight 超限时零执行，运行期超限为 `incomplete`。v1 严格串行，各沙箱预算不求和，但 peak memory 还包含固定 runner overhead 与有界结果累加器。
+
+> **N04 补强注记**：每 Gate 有界仍不足。每 Attempt 另冻结 Slot Tool/validation 次数、validator invocation/CPU/wall/output 和总 wall-clock；除同 key/同参数的缓存重放外，新 toolCallId、同 key 换参数、失败调用、compaction 或 provider session 续接都不能绕过或重置 meter。恰好达到上限合法，下一次将超出或 wall deadline 到期时直接 `RESOURCE_LIMIT_EXCEEDED + failed/runtime_failure`。
 
 ### E06｜Assembler 注册与输出路由（P1｜已接受并回写）
 
@@ -440,11 +454,15 @@ interface StructuredVerdictV1 {
 
 **推荐方案**：主 TaskEvent 只新增权威边界事件，例如 generation committed/activated/superseded、Draft opened/merged/terminal、scaffold sealed。Proposal 整树替换、Draft content 替换、建议性 validation 和 checkpoint 属于各自私有 store/journal，不进入全局业务事件流；提交事件携带它们的最终摘要和 blob 引用。
 
+> **M03 补强注记**：权威边界还包括 `structured_slot_attempt_started` 与 `structured_slot_attempt_terminal`。start 在模型调用前分配 epoch/turnId；terminal 与对应成功提交、失败、stop/crash recovery 或 human request 事实同 batch。
+
 ### G03｜身份与幂等键（P1｜已接受并回写）
 
 **问题**：正文同时出现 ActionAttempt、turn、request ID 和提交身份，容易重复建模。
 
 **推荐方案**：当前代码的 `turnId` 就是结构槽语义中的 `actionAttemptId`，不再创建平行 ID。Proposal/Draft 使用平台基于 turn 上下文的 get-or-create 身份；每次模型工具调用使用平台已有 `toolCallId` 作为 request idempotency key，模型不传 requestId。权威 commit 另生成稳定 receipt key，并保存原结果用于响应丢失后的重放。
+
+> **M03 superseded 注记**：`turnId === ActionAttempt` 仍成立，但不能由现有 `agent_attempt_failed` 数量隐式推导。structured v3 改由同 inputNode 下持久化、严格递增的 attempt epoch 派生；stop/crash/retry 在同 input 使用更高 epoch，human answer 使用新的 confirmed input，所有路径都先关闭旧 Attempt 并创建新 turnId。basic v2 不变。
 
 ### G04｜Blob 身份与删除（D）
 
@@ -514,6 +532,8 @@ Loader 验证 kind、capabilities、profile 和 Agent 上限一致。basic 模�
 
 一个 v3 turn 只能声明 `slotSession`，不能同时声明 v2 的 `production` 或 `annotate` 能力；它继续复用同一份 `dispatch` 契约。这样模型不会在同一个 turn 中同时调用 `finish_production`、`annotate_artifact` 和结构槽提交工具。
 
+> **N02 补强注记**：单节点契约合法还不够。structured pipeline 从 `no_scaffold` 开始，当前首节点必须 structure；Loader 对全部 Route 传播 `no_scaffold | active_unsealed | sealed`，证明 committed structure 支配 fill/seal、committed Seal 支配 Seal 后 v2 artifact 节点。
+
 **备选方案**：把这些字段散落到 pipeline Action 或 Agent YAML。这样短期少一个 TurnContract 版本，但运行时需要跨文件猜测本 turn 的完成条件，也削弱现有“TurnContract 是模型工具与提交边界”的设计。推荐 v3。
 
 ### H03｜ActionAttempt 复用 `turnId`（P1｜已接受并回写）
@@ -521,6 +541,8 @@ Loader 验证 kind、capabilities、profile 和 Agent 上限一致。basic 模�
 **问题**：主设计使用概念名 ActionAttempt，而当前实现的稳定执行身份是 turnId。
 
 **推荐方案**：实现和公共事件统一复用 `turnId`；设计文档可保留 ActionAttempt 作为语义名称，并明确二者一一对应。重试创建新 turnId，因此默认创建新 Proposal/Draft；旧私有对象进入 abandoned，符合现有设计。
+
+> **M03 superseded 注记**：新 turnId 的触发条件已扩展并被事件化：retry、stop 后 resume、crash recovery 后 resume 在同 input 创建更高 epoch；human answer 创建新的 confirmed input。旧 Proposal/Draft/candidate 不跨 Attempt 恢复或克隆。
 
 ### H04｜工具幂等（P1｜已接受并回写）
 
@@ -533,6 +555,12 @@ Loader 验证 kind、capabilities、profile 和 Agent 上限一致。basic 模�
 **问题**：Proposal/Merge/Seal 成功后，现有“一 turn 恰好一次 dispatch”如何继续。
 
 **推荐方案**：Slot session 达到 TurnContract 的 completion 后禁止进一步写操作，平台向同一 turn 注入一个安全 receipt 摘要；模型随后只能执行允许的 dispatch 或请求人工输入。ActionCommitter 在 commit 时验证 completion receipt 与当前 revision/turn 一致，再原子落权威事件和 dispatch。turn 失败、取消或 receipt 失配时 candidate 转为 abandoned，staging 可恢复清理，权威状态不变。模型看不到 blob、Grant 或内部提交 ID。
+
+> **M04 澄清注记**：`request_human_input` 可以发生在 completion dispatch 前的任意时刻，包括私有写入、Gate 失败或 candidate 形成之后；它与 completion dispatch 互斥，并必须在同一 batch 中先 abandon 本 Attempt 的全部私有状态/staging，再写 terminal、Agent result 与 human request。回答后创建新 Attempt。
+
+> **N01 补强注记**：回答侧也必须原子化。structured Agent request 的 `human_answered` 与 fresh confirmed `agent_input` 使用 pending request ID 派生的 commitId 同 batch 提交；相同 answer 重放原结果，不同 answer 冲突，不能留下已清除问题却没有新输入的半状态。
+
+> **N03 补强注记**：Seal Gate reliable failed 形成 rework receipt，seal 只能原子 `send_message` 到 v3 fill/structure，scaffold 保持 active/unsealed；incomplete 不形成返工 receipt，只能在 Attempt 预算内重试、runtime retry 或 human。
 
 ### H06｜不引入隐式工作队列（P1｜已接受并回写）
 
@@ -622,6 +650,8 @@ Loader 验证 kind、capabilities、profile 和 Agent 上限一致。basic 模�
 **问题**：现有 `artifactSchema.files[].name` 是受控文件名，而概念 Assembler 支持 path。
 
 **推荐方案**：v1 route 必须一一映射当前 structured producer 负责、`phase: create` 的现有 artifactSchema file name，且只允许安全单段文件名；Assembler 只返回 routeId。annotate 文件不参与该映射。嵌套目录、多 route 写同一路径和动态 content 派生文件名全部后置。这样可直接复用现有 ArtifactStore 和文件契约。
+
+> **M05 补强注记**：structured v1 至少要求一个 required create，所有 annotate 文件必须 `required: false`。Seal 与 final submission 只校验 required create；强制审核或 required annotation 等待未来独立协议。
 
 ### J05｜格式与媒体类型（P1｜已接受并回写）
 
