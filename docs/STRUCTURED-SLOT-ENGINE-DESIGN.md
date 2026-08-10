@@ -268,7 +268,32 @@ slots/
 | `slots/validators/*` | contract 引用的受信校验实现或声明资源 |
 | `slots/assembler/*` | contract 引用的确定性组装实现或声明资源 |
 
-### 7.2 模式启用与兼容规则
+### 7.2 contract.yaml 的权威性与拆分边界
+
+`slots/contract.yaml` 是结构槽契约的单一、完整、声明式权威入口，采用“声明内联、实现外置”的组织方式。它的顶层固定分区为：
+
+```yaml
+version: 1
+slotTypes: []
+layoutGrammar: {}
+accessProfiles: []
+validators: []
+assembler: {}
+limits: {}
+```
+
+具体字段继续逐项收敛，但以下归属不再开放：
+
+- SlotTypeDefinition、LayoutGrammar、access profile、validator/Assembler 的注册与绑定、资源限制必须直接声明在 `contract.yaml`。
+- validator、Assembler 的受信实现文件或大型静态资源可以放在固定的 `slots/validators/*`、`slots/assembler/*` 下，由 contract 使用 package-local 安全相对路径引用。
+- `contract.yaml` 不能嵌入可执行代码；给 Agent 的结构契约投影也不能暴露实现源码或工程路径。
+- v1 不提供任意 YAML include、通用 `$ref` 文件组合、跨 Template Package 引用、外部 URL、递归导入或运行时网络解析。
+- 未知顶层键、路径越界、缺失资源、未声明资源、未引用资源或任何外部引用都 fail closed。
+- Loader 必须在运行前解析并校验全部引用；规范化声明和引用资源内容或稳定实现摘要共同进入 package 的 `versionHash` 与 snapshot。
+
+这不是一个通用模板模块系统。未来若出现跨模板复用需求，需要独立设计带版本锁定和依赖解析的模块协议，不能通过放宽 v1 文件引用规则隐式获得。
+
+### 7.3 模式启用与兼容规则
 
 `pipeline.yaml` 负责选择生产模式：
 
@@ -282,7 +307,7 @@ productionMode: structured_slots
 - `slots/contract.yaml` 必须声明自己的契约版本，例如 `version: 1`。
 - exact field schema 后续继续收敛，但固定路径、模式归属和单 package 版本语义不再开放。
 
-### 7.3 控制面职责
+### 7.4 控制面职责
 
 结构槽模板冻结以下控制面：
 
@@ -301,7 +326,7 @@ productionMode: structured_slots
 
 `artifactSchema` 只描述最终派生文件，不嵌套槽树。槽树是结构槽模式的创作事实源，Assembler 负责将 sealed scaffold 映射成符合 artifactSchema 的输出 manifest。
 
-### 7.4 Loader、校验与版本哈希
+### 7.5 Loader、校验与版本哈希
 
 - 现有 template loader 仍是唯一加载入口，不新增平行 Slot Template Loader。
 - Loader 先读取 `productionMode`，再按模式要求加载或拒绝 `slots/` 契约。
@@ -898,7 +923,7 @@ interface SealRecord {
 首版结构槽引擎需要完成的最小闭环是：
 
 1. 模板可选择 `basic` 或 `structured_slots`。
-2. 结构槽模板保持单一 Template Package，并使用固定的 `slots/contract.yaml` 分文件契约。
+2. 结构槽模板保持单一 Template Package；固定 `slots/contract.yaml` 使用“声明内联、实现外置”的分文件契约。
 3. 扩展现有冻结模板快照以包含结构槽规则和所有引用资源摘要。
 4. 持久化 StructureProposal，整树校验后原子创建 scaffold。
 5. 单根有序统一 SlotInstance 树，spec/content 分离。
@@ -936,7 +961,7 @@ interface SealRecord {
 
 主流程已经冻结，以下属于进入 dev plan 前仍需在本文继续讨论并定稿的实现级系统契约：
 
-1. `slots/contract.yaml` 的最终 YAML/TypeScript 字段 schema；文件归属、固定路径和单 package 版本语义已经冻结。
+1. `slots/contract.yaml` 各顶层分区的最终 YAML/TypeScript 字段 schema；权威入口、分区、声明/实现边界、固定路径和单 package 版本语义已经冻结。
 2. LayoutGrammar 的声明语言、表达能力和错误定位格式。
 3. SlotTypeDefinition 的最终字段及 `specSchema` / `contentSchema` 规范。
 4. 中性 slot selector DSL 与 access profile 解析规则。
@@ -975,6 +1000,7 @@ interface SealRecord {
 | 2026-08-10 | 交付使用确定性 Assembler、不可变 SealRecord 和多文件原子发布 |
 | 2026-08-10 | production case 启动时冻结完整 TemplateRuntimeSnapshot，中途不升级 |
 | 2026-08-10 | 结构槽模板是单一 Template Package，按职责拆分为 pipeline、agent 与固定 slots contract 文件 |
+| 2026-08-10 | slots contract 采用声明内联、实现外置；v1 禁止任意 include、跨包和外部引用 |
 
 ---
 
