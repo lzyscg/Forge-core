@@ -1141,7 +1141,7 @@ interface StructuredIssueV1 {
 - `code` 是稳定的机器契约；Agent、UI、测试和重试逻辑不得解析 `message` 做判断。`message` 只提供当前语言下的可读说明，可以在不改变语义的情况下改写。
 - `phase` 表示问题发生在哪个运行阶段，`source` 表示由哪个平台子系统或受信适配器产生；二者使用平台封闭枚举，模板和 Agent 不能自定义。
 - `primaryLocation` 指向首要修正对象；`relatedLocations` 表达冲突规则、关联槽或输出位置等辅助上下文，不用自然语言拼接第二位置。
-- `IssueLocation` 使用判别联合，至少覆盖 contract JSON Pointer、Proposal 的 `clientKey + instancePath`、正式槽的 `slotId + valuePath`、artifact route/path 和无具体内容节点时的平台操作位置。精确 kind 与字段继续收敛。
+- `IssueLocation` 使用固定六类判别联合，分别定位规范化 contract、模板资源、Proposal 节点、正式槽、artifact 和无具体内容节点的平台操作；精确定义见 19.2。
 - `details` 是由 `code` 决定形状的判别数据，不是任意日志袋；必须是有界、可序列化、可按授权过滤的 JSON 对象。
 - operation 顶层结果 code 与 `StructuredIssueV1.code` 分工不同：前者说明调用整体为何失败，例如“校验未通过”；后者逐项说明具体可修正原因，例如“出现了不允许的 child type”。
 - issue 数量受 `limits.validation.maxIssuesPerRun` 限制；`truncated` 属于 verdict/result 包装层，不伪装成一条 issue，也不能被解释为通过。
@@ -1149,6 +1149,64 @@ interface StructuredIssueV1 {
 现有 `GateIssue { stage?, evidence?, scope? }` 保留为沙箱 validator 的窄返回边界。它不是平台全局 issue 类型：平台继续丢弃未知字段并规范化允许字段，再由受信适配器补充平台控制的 code、severity、phase、source 和 location，转换为 `StructuredIssueV1`。validator 不能直接声明平台错误码、工程 ID、授权范围或定位对象。
 
 所有 issue 在返回 Agent、UI 或外部 API 前必须经过与调用主体一致的授权投影。内部审计可以保存更完整的受信定位，但公开投影不能通过 primary/related location、details 或 message 泄露隐藏槽。
+
+### 19.2 `IssueLocation` v1 固定为六类
+
+```ts
+type JsonPointer = string;
+
+interface TextSpan {
+  start: { line: number; column: number };
+  end: { line: number; column: number };
+}
+
+type IssueLocation =
+  | {
+      kind: 'contract';
+      pointer: JsonPointer;
+    }
+  | {
+      kind: 'template_resource';
+      resourcePath: string;
+      span: TextSpan | null;
+    }
+  | {
+      kind: 'proposal';
+      clientKey: string;
+      instancePath: JsonPointer;
+      field: 'node' | 'typeId' | 'spec' | 'children';
+      valuePointer: JsonPointer;
+    }
+  | {
+      kind: 'slot';
+      slotId: string;
+      field: 'node' | 'spec' | 'content' | 'children';
+      valuePointer: JsonPointer;
+    }
+  | {
+      kind: 'artifact';
+      routeId: string;
+      artifactPath: string;
+      valuePointer: JsonPointer;
+    }
+  | {
+      kind: 'operation';
+    };
+```
+
+位置语义：
+
+- 所有 `JsonPointer` 都严格使用 RFC 6901；空字符串 `""` 表示对应目标值的根。`contract.pointer` 从冻结、规范化后的 `slots/contract.yaml` 文档根开始。
+- `proposal.instancePath` 从本次 Proposal 的规范化整树根开始，精确定位该节点出现位置；`clientKey` 是提交者给出的局部身份。即使 clientKey 重复导致 Proposal 非法，instancePath 仍能区分各次出现。
+- `proposal.valuePointer` 和 `slot.valuePointer` 相对各自 `field` 的值；空字符串表示整个字段。`node` 表示整个节点对象。
+- `slotId` 是 scaffold generation 内的权威节点身份；Draft overlay 的 content issue 仍定位到对应 slot，不暴露 draftId。
+- `template_resource.resourcePath` 是 Template Package 内的规范化 POSIX 逻辑相对路径。`span` 为 `null` 表示整个资源或实现无法提供可靠文本范围；非空 span 的 line/column 都是非负整数，使用从 0 开始、end-exclusive 的行列坐标，column 按 UTF-16 code unit 计数，且 end 不得早于 start。
+- `artifactPath` 是发布 manifest 中的规范化 POSIX 逻辑相对路径；`valuePointer` 为空时定位整个 artifact，非空时定位其可结构化投影中的值。`routeId` 指向冻结 Assembler 声明中的 route。
+- `operation` 只用于没有更具体且有权暴露的内容位置，不携带 caseId、scaffoldId、draftId、grantId、actionAttemptId 或 revision。
+- `resourcePath` 与 `artifactPath` 禁止绝对路径、反斜杠、空段、`.` / `..` 段和 NUL；任何 location 都不得包含宿主机真实文件路径。
+- 六种 kind 的字段都是封闭的；未知 kind、缺失字段或额外字段不能进入公开 issue 投影。
+
+授权投影不能通过把敏感字段设为 `null` 或空字符串来制造不完整 location。不可见的 related location 直接移除；primary location 不可见时，平台只能抑制整条 issue，或根据固定映射生成新的、无隐藏信息的 `operation` issue，不能保留原 code/details 后只替换位置。
 
 已冻结的关键失败语义：
 
@@ -1262,6 +1320,9 @@ interface StructuredIssueV1 {
 - 模板加载、Structure、Merge 与 Seal 的公开 issue 都符合 `StructuredIssueV1`；消费端只依赖稳定 code，不依赖 message 文案；
 - 沙箱 validator 不能通过额外字段伪造平台 code、source、phase、location 或工程 ID，合法 `GateIssue` 经受信适配器投影；
 - primary/related location、details 和 message 均经过授权过滤，隐藏槽不会通过 issue 侧漏；
+- 六种 `IssueLocation` 能分别往返序列化；RFC 6901 转义、空根指针、0-based UTF-16 文本范围和逻辑相对路径拒绝规则有边界测试；
+- Proposal clientKey 重复时仍能用不同 instancePath 定位每个出现位置；Draft content issue 只暴露授权 slotId，不暴露 draftId；
+- 不可见 related location 被移除；不可见 primary location 触发整条抑制或重新生成安全的 operation issue，不产生字段残缺的 location；
 - issues 超过 `maxIssuesPerRun` 时 verdict 明确 `truncated: true`，且结果保持失败。
 
 ---
@@ -1281,7 +1342,7 @@ interface StructuredIssueV1 {
 9. 草稿自检、Merge Gate、Seal Gate 三层校验。
 10. 不可变 Scaffold Generation 的封存前整代替换。
 11. 确定性 Assembler、staging、SealRecord 与多文件原子发布。
-12. 统一版本化 `StructuredIssueV1` 信封和判别式位置模型；现有 `GateIssue` 只作为沙箱 validator 边界输入并由平台适配。
+12. 统一版本化 `StructuredIssueV1` 信封；`IssueLocation` 固定为 contract、template_resource、proposal、slot、artifact、operation 六类；现有 `GateIssue` 只作为沙箱 validator 边界输入并由平台适配。
 13. 基础模式零行为变化。
 
 ---
@@ -1311,12 +1372,12 @@ interface StructuredIssueV1 {
 主流程已经冻结，以下属于进入 dev plan 前仍需在本文继续讨论并定稿的实现级系统契约：
 
 1. `slots/contract.yaml` 各顶层分区的最终 YAML/TypeScript 字段 schema；权威入口、分区、声明/实现边界、固定路径和单 package 版本语义已经冻结。
-2. LayoutGrammar v1 的 issue code/details 和精确位置字段；统一 issue 信封与判别式定位方向、FIRST/FOLLOW 静态无歧义、单遍无回溯匹配、可终止递归、强制循环拒绝、六种 AST kind、有限重复、显式叶子、nullable repeat 拒绝、结构化 Production AST 与路径化定位已经冻结。
+2. LayoutGrammar v1 的 issue code/details；统一 issue 信封、六类精确位置、FIRST/FOLLOW 静态无歧义、单遍无回溯匹配、可终止递归、强制循环拒绝、六种 AST kind、有限重复、显式叶子、nullable repeat 拒绝、结构化 Production AST 与路径化定位已经冻结。
 3. Slot Schema v1 各关键字数值参数和 safe pattern 约束；精确白名单、对象/数组开放性、纯验证语义、单一形态和 SlotTypeDefinition 外层契约已经冻结。
 4. 平台 hard ceiling 的绝对数值和兼容版本协议；模板 `limits` 的六组十六字段、单位、跨字段关系、三层限制模型与禁止静默裁剪已经冻结。
 5. 中性 slot selector DSL 与 access profile 解析规则。
 6. validator / Assembler 的注册、快照、沙箱和版本协议。
-7. `StructuredIssueV1` 的 phase/source 枚举、`IssueLocation` 精确联合、各阶段 code/details 集合与 verdict 包装；统一信封和现有 `GateIssue` 的受信适配边界已经冻结。
+7. `StructuredIssueV1` 的 phase/source 枚举、各阶段 code/details 集合与 verdict 包装；统一信封、六类 `IssueLocation` 精确联合和现有 `GateIssue` 的受信适配边界已经冻结。
 8. 追加事件联合、私有 Draft Store、checkpoint 和磁盘目录布局。
 9. 结构槽 Action 与现有九动作/TurnContract 的精确适配方式。
 10. TaskWorkspace、API 和 UI 需要暴露的最小只读投影。
@@ -1364,6 +1425,7 @@ interface StructuredIssueV1 {
 | 2026-08-10 | LayoutGrammar v1 允许直接或互相递归，但 Loader 必须证明每个根可达 type 都存在完整有限子树；无出口的强制循环加载期拒绝 |
 | 2026-08-10 | LayoutGrammar v1 必须通过 FIRST/FOLLOW 静态无歧义检查；Structure Gate 单遍左到右匹配，不回溯且不存在分支优先级 |
 | 2026-08-10 | 结构槽各阶段统一投影为版本化 StructuredIssueV1 信封和判别式位置；现有 GateIssue 仅作为沙箱 validator 输入并由平台受信适配 |
+| 2026-08-10 | IssueLocation v1 固定为 contract/template_resource/proposal/slot/artifact/operation 六类，统一使用安全逻辑路径与精确指针语义 |
 
 ---
 
