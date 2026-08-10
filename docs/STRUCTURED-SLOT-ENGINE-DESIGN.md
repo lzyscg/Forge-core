@@ -405,28 +405,32 @@ Loader 不得根据名称或说明推断 schema，不得把缺失 schema 解释�
 
 `specSchema` 与 `contentSchema` 共用一套由平台版本化、白名单控制的 JSON Schema 子集。它沿用 JSON Schema 的声明结构和常用关键字语义，但不承诺支持完整 JSON Schema；contract v1 对应固定的 Slot Schema dialect v1，规范化 snapshot 必须显式保存或可确定性推导该 dialect 身份。
 
-v1 支持的能力类别包括：
+v1 的精确关键字白名单为：
 
-- `string`、`number`、`integer`、`boolean`、`object`、`array`、`null` 基础类型；
-- `properties`、`required`、`additionalProperties` 对象约束；
-- `items`、`minItems`、`maxItems` 数组约束；
-- `enum`、`const` 值集合约束；
-- 字符串长度、模式和数值范围等有界基础约束。
+| 适用类型 | 允许关键字 |
+|---|---|
+| 所有类型 | `type`、`description`、`enum`、`const` |
+| `string` | `minLength`、`maxLength`、`pattern` |
+| `number` / `integer` | `minimum`、`maximum`、`exclusiveMinimum`、`exclusiveMaximum` |
+| `object` | `properties`、`required`、`additionalProperties`、`minProperties`、`maxProperties` |
+| `array` | `items`、`minItems`、`maxItems`、`uniqueItems` |
+| `boolean` / `null` | 无专用关键字 |
 
-v1 明确禁止：
+配套语义：
 
-- `$ref`、跨位置或外部 schema 引用；
-- 递归 schema；
-- `if / then / else` 条件执行；
-- 任意模板自定义或可执行关键字；
-- 未进入当前 dialect 白名单的关键字；
-- 形成通用程序或无界求值复杂度的组合能力。
+- 每个 schema 节点都是显式映射且必须声明单一 `type`；布尔 schema 不属于 v1。
+- object 必须显式声明 `additionalProperties`；其值只允许 `false` 或另一个 Slot Schema v1 schema，不允许无约束 `true`。
+- array 必须声明一个统一的 `items` schema，不支持 tuple items。
+- `enum` 与 `const` 互斥，值必须同时符合当前 `type` 和同节点其他约束。
+- `pattern` 只能使用平台认可的安全正则子集，并受长度与求值预算限制。
+- schema、字符串、数组、对象、枚举和嵌套深度都受模板 `limits` 与平台 hard ceiling 约束。
+- Schema 只验证，不执行默认值填充、类型转换、字段删除、字符串修剪或任何输入改写。
 
-Loader 必须在模板加载期对 schema 本身执行 meta-validation。未知关键字、非法关键字组合、超出深度/节点数/正则长度等资源限制都 fail closed，不能被底层 schema 库静默忽略。运行期校验器和错误格式只能按 snapshot 冻结的 dialect 解释，不能因依赖库升级而改变历史 case 语义。
+非白名单能力在 Loader meta-validation 阶段 fail closed，包括但不限于 `default`、`format`、`examples`、`$id`、`$schema`、`$defs` / `definitions`、引用、组合、条件和自定义关键字。运行期校验器和错误格式只能按 snapshot 冻结的 dialect 解释，不能因为底层依赖升级而改变历史 case 语义。
 
 content 的根值仍可由模板声明为任意合法 JSON 类型，基础引擎不把它限定为字符串、段落或文档。`contentPresence: unset` 是槽实例外层状态，与 content schema 允许的合法 `null` 不同。
 
-精确关键字白名单以及每个关键字的参数限制继续收敛；受限方言、加载期拒绝未知能力以及 spec/content 复用同一验证内核的方向不再开放。
+关键字数值参数、模板 limits 与平台 hard ceiling 的具体边界继续收敛；关键字白名单、对象/数组开放性、纯验证语义、加载期拒绝未知能力以及 spec/content 复用同一验证内核的方向不再开放。
 
 ### 8.4 一个 typeId 只对应一种 Schema 形态
 
@@ -990,6 +994,7 @@ interface SealRecord {
 - 未声明结构槽的旧模板仍按基础模式运行；
 - structured template 的类型、grammar、profile、validator 和 assembler 引用 fail closed；
 - Slot Schema 拒绝数组 type、组合关键字、未知关键字以及与 type 不一致的 enum/const；
+- Slot Schema 校验不会填充 default、转换类型、移除字段或改写输入；
 - 同内容快照 hash 稳定；任一受控输入变化都会改变 hash；
 - 运行中修改模板源目录不影响既有 case；
 - snapshot 缺失或摘要不一致时不可恢复运行。
@@ -1047,7 +1052,7 @@ interface SealRecord {
 2. 结构槽模板保持单一 Template Package；固定 `slots/contract.yaml` 使用“声明内联、实现外置”的分文件契约。
 3. 扩展现有冻结模板快照以包含结构槽规则和所有引用资源摘要。
 4. 持久化 StructureProposal，整树校验后原子创建 scaffold。
-5. SlotTypeDefinition 使用无业务默认值的全显式契约，只定义节点内在属性；每个 typeId 使用单一 Schema 形态，spec 固定为对象、content 保持任意 JSON，二者共用版本化的受限 JSON Schema 方言；LayoutGrammar 统一定义结构关系；SlotInstance 使用单根有序树并严格分离 spec/content。
+5. SlotTypeDefinition 使用无业务默认值的全显式契约，只定义节点内在属性；每个 typeId 使用单一 Schema 形态，spec 固定为对象、content 保持任意 JSON，二者共用有精确关键字白名单且只验证不改写数据的版本化 Schema 方言；LayoutGrammar 统一定义结构关系；SlotInstance 使用单根有序树并严格分离 spec/content。
 6. 模板上限 + 运行期 SlotGrant 两层授权。
 7. Production Action/Route 调度，单 case 串行。
 8. 持久化 FillDraft、窄 Slot API、严格全局 baseRevision。
@@ -1084,7 +1089,7 @@ interface SealRecord {
 
 1. `slots/contract.yaml` 各顶层分区的最终 YAML/TypeScript 字段 schema；权威入口、分区、声明/实现边界、固定路径和单 package 版本语义已经冻结。
 2. LayoutGrammar 的声明语言、表达能力和错误定位格式。
-3. Slot Schema v1 精确关键字白名单、对象/数组开放性和参数限制；组合关键字与类型联合已排除，SlotTypeDefinition 外层字段、条件组合、无业务默认值、spec/content 根形状、受限方言和类型职责边界已经冻结。
+3. Slot Schema v1 各关键字数值参数、safe pattern 约束、模板 limits 与平台 hard ceiling；精确白名单、对象/数组开放性、纯验证语义、单一形态和 SlotTypeDefinition 外层契约已经冻结。
 4. 中性 slot selector DSL 与 access profile 解析规则。
 5. validator / Assembler 的注册、快照、沙箱和版本协议。
 6. Structure / Merge / Seal issue 的统一 schema 与错误码集合。
@@ -1127,6 +1132,7 @@ interface SealRecord {
 | 2026-08-10 | spec 始终为对象且不可省略，content 保持模板定义的任意 JSON，unset 与 null 分离 |
 | 2026-08-10 | SlotTypeDefinition 核心字段全部显式；禁止 Loader 猜测 schema、presence 或内容类型 |
 | 2026-08-10 | Slot Schema v1 禁止组合关键字和类型联合；一个 typeId 只对应一种确定形态 |
+| 2026-08-10 | Slot Schema v1 使用有界实用关键字白名单，只验证、不转换或改写数据 |
 
 ---
 
