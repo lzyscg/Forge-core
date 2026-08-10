@@ -23,13 +23,25 @@
  * GATE_* codes. Reading the validator follows the same static + realpath
  * containment discipline as skill reads, so a validator can never escape the
  * task snapshot.
+ *
+ * The sandbox creation/call mechanics are shared with the structured
+ * evaluator ABI via `isolated-sandbox.ts`; this module keeps only the
+ * GateRunner-specific cache, source containment and GATE_* code mapping, so
+ * its public behavior is unchanged (Task 8 Step 4).
  */
 import { createHash } from 'node:crypto';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, resolve, sep } from 'node:path';
-import ivm from 'isolated-vm';
 import type { CorePaths } from '../storage/core-paths';
 import { RuntimeFailure } from './agent-runtime';
+import {
+  compileModuleSandbox,
+  normalizeGateIssues,
+  SandboxError,
+  SANDBOX_ERROR_CODES,
+  type CompiledSandbox,
+  type GateIssue,
+} from './isolated-sandbox';
 
 /** Stable gate error codes owned by this module. */
 export const GATE_ERROR_CODES = {
@@ -44,11 +56,7 @@ export const GATE_ERROR_CODES = {
 } as const;
 
 /** One validator issue; only the three optional string keys are kept. */
-export interface GateIssue {
-  stage?: string;
-  evidence?: string;
-  scope?: string;
-}
+export type { GateIssue } from './isolated-sandbox';
 
 /** The normalized validator verdict the platform consumes. */
 export interface GateVerdict {
@@ -75,12 +83,6 @@ export interface GateRunnerOptions {
   memoryLimitMb?: number;
 }
 
-/** A compiled, cached validator isolate pair. */
-interface CachedValidator {
-  isolate: ivm.Isolate;
-  context: ivm.Context;
-}
-
 function sha256(content: string): string {
   return createHash('sha256').update(content, 'utf8').digest('hex');
 }
@@ -89,19 +91,15 @@ function gateFailure(code: string, message: string): RuntimeFailure {
   return new RuntimeFailure(code, message, false);
 }
 
-function isTimeout(error: unknown): boolean {
-  return error instanceof Error && error.message.startsWith('Script execution timed out');
-}
-
-/** Maps any isolate-side error to a typed gate failure. */
-function classifyError(error: unknown): RuntimeFailure {
-  const message = error instanceof Error ? error.message : String(error);
-  const name = error instanceof Error ? error.name : '';
-  if (message.startsWith('Script execution timed out')) {
-    return gateFailure(GATE_ERROR_CODES.GATE_TIMEOUT, '门禁校验超时，提交被拒绝。');
-  }
-  if (name === 'SyntaxError' || message.includes('SyntaxError')) {
-    return gateFailure(GATE_ERROR_CODES.GATE_COMPILE_FAILED, '门禁校验器无法编译。');
+/** Maps a shared sandbox failure to this module's GATE_* codes. */
+function mapSandboxError(error: unknown): RuntimeFailure {
+  if (error instanceof SandboxError) {
+    if (error.code === SANDBOX_ERROR_CODES.SANDBOX_TIMEOUT) {
+      return gateFailure(GATE_ERROR_CODES.GATE_TIMEOUT, '门禁校验超时，提交被拒绝。');
+    }
+    if (error.code === SANDBOX_ERROR_CODES.SANDBOX_COMPILE_FAILED) {
+      return gateFailure(GATE_ERROR_CODES.GATE_COMPILE_FAILED, '门禁校验器无法编译。');
+    }
   }
   return gateFailure(GATE_ERROR_CODES.GATE_RUNTIME_ERROR, '门禁校验器执行失败。');
 }
@@ -120,25 +118,9 @@ function normalizeVerdict(raw: unknown): GateVerdict {
     if (!Array.isArray(record.issues)) {
       throw gateFailure(GATE_ERROR_CODES.GATE_CONTRACT_INVALID, '门禁校验器返回值不合规。');
     }
-    issues = record.issues.map(normalizeIssue);
+    issues = normalizeGateIssues(record.issues);
   }
   return { pass: record.pass, issues };
-}
-
-/** Keeps only stage/evidence/scope; drops other keys; coerces non-strings. */
-function normalizeIssue(value: unknown): GateIssue {
-  if (typeof value !== 'object' || value === null) {
-    return {};
-  }
-  const record = value as Record<string, unknown>;
-  const issue: GateIssue = {};
-  for (const key of ['stage', 'evidence', 'scope'] as const) {
-    if (record[key] === undefined || record[key] === null) {
-      continue;
-    }
-    issue[key] = String(record[key]);
-  }
-  return issue;
 }
 
 export class GateRunner {
@@ -148,7 +130,7 @@ export class GateRunner {
 
   private readonly memoryLimitMb: number;
 
-  private readonly cache = new Map<string, CachedValidator>();
+  private readonly cache = new Map<string, CompiledSandbox>();
 
   constructor(options: GateRunnerOptions) {
     this.paths = options.paths;
@@ -164,11 +146,7 @@ export class GateRunner {
   /** Releases every cached isolate (called on process shutdown). */
   disposeAll(): void {
     for (const entry of this.cache.values()) {
-      try {
-        entry.isolate.dispose();
-      } catch {
-        // Disposal is best-effort; the isolate is memory-only.
-      }
+      entry.dispose();
     }
     this.cache.clear();
   }
@@ -192,10 +170,7 @@ export class GateRunner {
         artifactType: input.artifactType,
         context: input.context ?? null,
       })})`;
-      const raw = cached.isolate.compileScriptSync(callSource).runSync(cached.context, {
-        timeout: this.timeoutMs,
-        copy: true,
-      });
+      const raw = cached.call(callSource, this.timeoutMs);
       return normalizeVerdict(raw);
     } catch (error) {
       // A typed RuntimeFailure already carries the right code (contract
@@ -203,15 +178,11 @@ export class GateRunner {
       if (error instanceof RuntimeFailure) {
         throw error;
       }
-      if (isTimeout(error)) {
+      if (error instanceof SandboxError && error.code === SANDBOX_ERROR_CODES.SANDBOX_TIMEOUT) {
         this.cache.delete(cacheKey);
-        try {
-          cached.isolate.dispose();
-        } catch {
-          // Best-effort disposal of the evicted isolate.
-        }
+        cached.dispose();
       }
-      throw classifyError(error);
+      throw mapSandboxError(error);
     }
   }
 
@@ -262,26 +233,17 @@ export class GateRunner {
    * as a global. Any failure (syntax error, wrapper execution error, wrapper
    * timeout on a top-level loop) disposes the isolate and throws typed.
    */
-  private compileValidator(source: string): CachedValidator {
-    const isolate = new ivm.Isolate({ memoryLimit: this.memoryLimitMb });
+  private compileValidator(source: string): CompiledSandbox {
     try {
-      const context = isolate.createContextSync();
-      const wrapper = [
-        'const __module = { exports: {} };',
-        '(function(module, exports) {',
-        source,
-        '})(__module, __module.exports);',
-        'globalThis.__validate = __module.exports.validate;',
-      ].join('\n');
-      isolate.compileScriptSync(wrapper).runSync(context, { timeout: this.timeoutMs });
-      return { isolate, context };
+      return compileModuleSandbox(source, {
+        memoryLimitMb: this.memoryLimitMb,
+        timeoutMs: this.timeoutMs,
+        hardened: false,
+        exportName: 'validate',
+        globalName: '__validate',
+      });
     } catch (error) {
-      try {
-        isolate.dispose();
-      } catch {
-        // Best-effort disposal on the failure path.
-      }
-      throw classifyError(error);
+      throw mapSandboxError(error);
     }
   }
 }
