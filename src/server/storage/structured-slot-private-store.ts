@@ -52,6 +52,27 @@ export interface ProposalNode {
   children: ProposalNode[];
 }
 
+/**
+ * Turn-bound structure commit candidate (design §9.3, spec §9.1). Formed by
+ * the Structure Gate and stored in PRIVATE state only — it is never written to
+ * a TaskEvent (Task 15's committer creates the generation). The `slotId`
+ * mapping is derived from `scaffoldId + generationId + instancePath`, never
+ * from `clientKey`, and is frozen here until the committer promotes it. The
+ * candidate itself carries no scaffoldId/revision/grant internals.
+ */
+export interface StructureCommitCandidate {
+  taskId: string;
+  turnId: string;
+  proposalId: string;
+  snapshotHash: string;
+  generationId: string;
+  rootSlotId?: string;
+  slotCount: number;
+  slotIdByClientKey: Record<string, string>;
+  normalizedTree: ProposalNode;
+  contentRevision: 0;
+}
+
 /** Draft binding context supplied from the `draft_opened` event. */
 export interface DraftContext {
   scaffoldId: string;
@@ -79,6 +100,7 @@ export interface ProposalView {
   locked: boolean;
   opCount: number;
   tree: ProposalNode | null;
+  candidate: StructureCommitCandidate | null;
   toolRecords: ToolRecord[];
 }
 
@@ -112,10 +134,11 @@ type ObjectKind = keyof typeof CHECKPOINT_KIND;
 
 interface JournalOp {
   seq: number;
-  op: 'materialize' | 'replace' | 'replace_content' | 'unset_content' | 'lock' | 'tool';
+  op: 'materialize' | 'replace' | 'candidate' | 'replace_content' | 'unset_content' | 'lock' | 'tool';
   at: string;
   turnId?: string;
   tree?: ProposalNode | null;
+  candidate?: StructureCommitCandidate | null;
   slotId?: string;
   value?: JsonValue;
   toolCallId?: string;
@@ -133,6 +156,7 @@ interface ProposalPrivateState {
   locked: boolean;
   turnId: string;
   tree: ProposalNode | null;
+  candidate: StructureCommitCandidate | null;
   toolRecords: ToolRecord[];
 }
 
@@ -158,6 +182,7 @@ interface PrivateCheckpointV1 {
   locked: boolean;
   turnId: string;
   tree?: ProposalNode | null;
+  candidate?: StructureCommitCandidate | null;
   overlay?: Record<string, DraftOverlayEntry>;
   scaffoldId?: string;
   generationId?: string;
@@ -274,7 +299,7 @@ export function resolveProposalLifecycle(
 
 function emptyState(kind: ObjectKind, id: string): PrivateState {
   if (kind === 'proposal') {
-    return { kind, id, opCount: 0, locked: false, turnId: '', tree: null, toolRecords: [] };
+    return { kind, id, opCount: 0, locked: false, turnId: '', tree: null, candidate: null, toolRecords: [] };
   }
   return {
     kind,
@@ -299,6 +324,9 @@ function applyOp(state: PrivateState, op: JournalOp): void {
           break;
         case 'replace':
           state.tree = op.tree ?? null;
+          break;
+        case 'candidate':
+          state.candidate = op.candidate ?? null;
           break;
         case 'lock':
           state.locked = true;
@@ -354,6 +382,7 @@ function toCheckpoint(state: PrivateState): PrivateCheckpointV1 {
       locked: state.locked,
       turnId: state.turnId,
       tree: state.tree,
+      candidate: state.candidate,
       toolRecords: state.toolRecords,
     };
   }
@@ -380,6 +409,7 @@ function stateFromCheckpoint(cp: PrivateCheckpointV1, id: string): PrivateState 
       locked: cp.locked,
       turnId: cp.turnId,
       tree: cp.tree ?? null,
+      candidate: cp.candidate ?? null,
       toolRecords: cp.toolRecords,
     };
   }
@@ -439,6 +469,20 @@ export class StructuredSlotPrivateStore {
     await this.append('proposal', proposalId, { op: 'lock', at: now() });
   }
 
+  /**
+   * Freezes the turn-bound structure candidate into the private journal
+   * (design §9.3 / spec §9.1). The candidate is PRIVATE state — never a
+   * TaskEvent; Task 15's committer creates the generation from it. Written
+   * before the lock so the lock op can still follow. Rejected once locked.
+   */
+  async storeProposalCandidate(proposalId: string, candidate: StructureCommitCandidate): Promise<void> {
+    assertNonEmptyString(proposalId, 'proposalId');
+    if (!isPlainObject(candidate)) {
+      throw invalidInput('Proposal candidate 必须是对象。');
+    }
+    await this.append('proposal', proposalId, { op: 'candidate', at: now(), candidate });
+  }
+
   /** Journals a tool signature/result against an open Proposal. */
   async recordProposalTool(
     proposalId: string,
@@ -469,6 +513,7 @@ export class StructuredSlotPrivateStore {
       locked: proposal.locked,
       opCount: proposal.opCount,
       tree: proposal.tree,
+      candidate: proposal.candidate,
       toolRecords: proposal.toolRecords,
     };
   }

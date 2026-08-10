@@ -315,6 +315,15 @@ export class StructuredSlotBlobStore {
   }
 
   /**
+   * Public accessor for a generation's index (Task 12 seam adaptation for the
+   * Task 10 `StructuredSlotDataSource`). Reads and validates only `index.json`;
+   * it never deserializes the scaffold records.
+   */
+  async getGenerationIndex(generationId: string): Promise<GenerationIndexV1> {
+    return this.readGenerationIndex(generationId);
+  }
+
+  /**
    * Reads ONE slot through the index: index.json plus the single byte range of
    * its NDJSON line — never a full-scaffold parse. Returns null when the slot
    * is not part of this generation; any structural or bounds inconsistency is
