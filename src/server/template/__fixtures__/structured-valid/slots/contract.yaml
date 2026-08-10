@@ -1,0 +1,121 @@
+# Structured Slot contract v1 fixture.
+#
+# Platform-neutral: generic slot types (document/title/body), one static
+# access profile, one validator and one assembler route. Every limit value is
+# at or below 25% of the design §25.13 candidate profile, so this same
+# acceptance fixture stays legal under any profile Task 19 is permitted to
+# freeze. Business vocabulary (document/title/body) lives only in this fixture
+# subtree; the compiler itself is vocabulary-free.
+version: 1
+slotTypes:
+  - id: document
+    name: Document
+    description: Root container slot whose children follow the layout grammar.
+    specSchema:
+      type: object
+      additionalProperties: false
+    content:
+      presence: forbidden
+  - id: title
+    name: Title
+    description: Leaf slot holding a short required title string.
+    specSchema:
+      type: object
+      additionalProperties: false
+    content:
+      presence: required
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 200
+  - id: body
+    name: Body
+    description: Leaf slot holding a required length-bounded body string.
+    specSchema:
+      type: object
+      additionalProperties: false
+    content:
+      presence: required
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 10000
+layoutGrammar:
+  rootType: document
+  productions:
+    document:
+      children:
+        kind: sequence
+        items:
+          - kind: slot
+            type: title
+          - kind: repeat
+            min: 0
+            max: 64
+            item:
+              kind: slot
+              type: body
+    title:
+      children:
+        kind: empty
+    body:
+      children:
+        kind: empty
+accessProfiles:
+  - id: editor
+    read:
+      - targets:
+          kind: all
+        targetLevel: content
+        context:
+          level: content
+          ancestors: 1
+          descendants: 1
+          directSiblings: false
+    writeContent:
+      - targets:
+          kind: all
+    continuity:
+      precedingFilled: false
+validators:
+  - id: title-check
+    scope: slot
+    trigger: merge-and-seal
+    enforcement: blocking
+    selector:
+      kind: types
+      typeIds: [title]
+    implementation:
+      abi: forge-validator/v1
+      path: slots/validators/validate.js
+    budget: { cpuMs: 50, timeoutMs: 200, memoryMiB: 64 }
+assembler:
+  id: render
+  implementation:
+    abi: forge-assembler/v1
+    path: slots/assembler/render.js
+  budget: { cpuMs: 100, timeoutMs: 500, memoryMiB: 128 }
+  routes:
+    - id: document-md
+      artifactFile: document.md
+limits:
+  schema: { maxSchemaDepth: 4, maxSchemaNodes: 1024, maxEnumItems: 64, maxPatternLength: 128 }
+  structure: { maxSlots: 2500, maxTreeDepth: 8, maxChildrenPerSlot: 250 }
+  payload: { maxSpecBytesPerSlot: 16384, maxContentBytesPerSlot: 262144, maxScaffoldPayloadBytes: 16777216 }
+  draft: { maxChangedSlots: 500, maxDraftBytes: 4194304 }
+  attempt:
+    maxSlotToolCallsPerAttempt: 128
+    maxValidationRunsPerAttempt: 4
+    maxValidatorInvocationsPerAttempt: 10000
+    maxAggregateValidatorCpuMsPerAttempt: 60000
+    maxAggregateValidatorWallClockMsPerAttempt: 120000
+    maxValidatorOutputBytesPerAttempt: 4194304
+    maxAttemptWallClockMs: 150000
+  validation:
+    maxValidators: 16
+    maxValidatorInvocationsPerGate: 2500
+    maxAggregateValidatorCpuMsPerGate: 15000
+    maxAggregateValidatorWallClockMsPerGate: 30000
+    maxValidatorOutputBytesPerGate: 1048576
+    maxIssuesPerRun: 125
+  output: { maxArtifactFiles: 16, maxArtifactBytesPerFile: 4194304, maxTotalArtifactBytes: 16777216 }
