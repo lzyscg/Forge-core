@@ -536,7 +536,45 @@ Slot Schema dialect v1 不支持联合或组合 schema。每个 `typeId` 的 `sp
 
 这个约束只稳定编排意图的形状，不限制模板实际交付内容的粒度或类型。
 
-### 8.6 单根有序统一节点树
+### 8.6 LayoutGrammar 使用结构化 Production AST
+
+LayoutGrammar v1 使用纯 YAML/JSON 的结构化 Production AST，不使用文本 EBNF，也不退化为无序的父子白名单。顶层由唯一根类型和按父槽 typeId 索引的 productions 组成：
+
+```yaml
+layoutGrammar:
+  rootType: document
+  productions:
+    document:
+      children:
+        kind: sequence
+        items:
+          - { kind: slot, type: title }
+          - kind: optional
+            item: { kind: slot, type: subtitle }
+          - kind: repeat
+            min: 1
+            max: 20
+            item:
+              kind: choice
+              items:
+                - { kind: slot, type: paragraph }
+                - { kind: slot, type: quote }
+```
+
+上例等价于 `title, subtitle?, (paragraph | quote){1,20}`，但该文本不是模板语言；AST 本身才是权威契约。
+
+规则：
+
+- production 按父槽 typeId 定义其有序 children 语法；根节点自身由 `rootType` 唯一确定。
+- Grammar 只读取 typeId 和 children 顺序/基数，不读取 spec/content，不负责渲染、权限或 validator 执行。
+- root、production key 和 AST 中的 type 引用都必须指向当前 package 已声明的 SlotTypeDefinition。
+- Loader 对未知 kind、未知字段、未知 type、缺失 production、不可达规则或超出 grammar 资源上限 fail closed。
+- Structure Gate 使用确定性左到右匹配；issue 同时定位规则 AST 路径和实际 slot/clientKey 路径。
+- `get_structure_contract` 给编排 Agent 返回同构的声明式投影，但不暴露平台内部编译状态。
+
+精确 AST kind 集合、递归/循环、歧义和空匹配策略继续收敛；结构化 AST、rootType + productions、纯结构职责和路径化错误定位不再开放。
+
+### 8.7 单根有序统一节点树
 
 每个 scaffold 是一棵单根、有序树。所有布局节点统一为 `SlotInstance`，不另设 container node 与 leaf slot 两套实体。
 
@@ -549,7 +587,7 @@ Slot Schema dialect v1 不支持联合或组合 schema。每个 `typeId` 的 `sp
 
 跨槽依赖不放进布局树。布局树只表达所有权、嵌套和渲染顺序；语义依赖、校验依赖和未来的失效传播使用独立关系模型。
 
-### 8.7 概念数据结构
+### 8.8 概念数据结构
 
 ```ts
 type JsonValue =
@@ -576,7 +614,7 @@ interface SlotInstance {
 
 具体持久化实现可以把 tree、spec 和 content 分表或分文件保存；概念契约不要求物理上嵌在同一个对象中。
 
-### 8.8 `spec` 与 `content` 严格分离
+### 8.9 `spec` 与 `content` 严格分离
 
 `spec` 由编排阶段产生，用于表达“这个槽应当完成什么”；`content` 由填充阶段产生，用于表达“实际写了什么”。
 
@@ -1080,6 +1118,7 @@ interface SealRecord {
 
 - 非法中间 Proposal 可以保存并获得 issues；
 - clientKey 重复、过深、过大或包含工程字段时拒绝写入；
+- LayoutGrammar 未知 type/kind、缺失或不可达 production 在模板加载期失败；实例不匹配时 issue 同时包含 rulePath 与 clientKey/instancePath；
 - Structure Gate 失败零权威写入；
 - 成功提交只创建一个 generation，并生成唯一 slotId；
 - 重放 submit 返回同一结果。
@@ -1129,7 +1168,7 @@ interface SealRecord {
 2. 结构槽模板保持单一 Template Package；固定 `slots/contract.yaml` 使用“声明内联、实现外置”的分文件契约。
 3. 扩展现有冻结模板快照以包含结构槽规则、显式模板运行包络、运行兼容身份和所有引用资源摘要。
 4. 持久化 StructureProposal，整树校验后原子创建 scaffold。
-5. SlotTypeDefinition 使用无业务默认值的全显式契约，只定义节点内在属性；每个 typeId 使用单一 Schema 形态，spec 固定为对象、content 保持任意 JSON，二者共用有精确关键字白名单且只验证不改写数据的版本化 Schema 方言；LayoutGrammar 统一定义结构关系；SlotInstance 使用单根有序树并严格分离 spec/content。
+5. SlotTypeDefinition 使用无业务默认值的全显式契约，只定义节点内在属性；每个 typeId 使用单一 Schema 形态，spec 固定为对象、content 保持任意 JSON，二者共用有精确关键字白名单且只验证不改写数据的版本化 Schema 方言；LayoutGrammar 使用结构化 Production AST 统一定义结构关系；SlotInstance 使用单根有序树并严格分离 spec/content。
 6. 模板上限 + 运行期 SlotGrant 两层授权。
 7. Production Action/Route 调度，单 case 串行。
 8. 持久化 FillDraft、窄 Slot API、严格全局 baseRevision。
@@ -1165,7 +1204,7 @@ interface SealRecord {
 主流程已经冻结，以下属于进入 dev plan 前仍需在本文继续讨论并定稿的实现级系统契约：
 
 1. `slots/contract.yaml` 各顶层分区的最终 YAML/TypeScript 字段 schema；权威入口、分区、声明/实现边界、固定路径和单 package 版本语义已经冻结。
-2. LayoutGrammar 的声明语言、表达能力和错误定位格式。
+2. LayoutGrammar v1 的精确 AST kind 集合、递归/循环、歧义、空匹配与 issue 字段；结构化 Production AST、rootType + productions、纯结构职责和路径化定位已经冻结。
 3. Slot Schema v1 各关键字数值参数和 safe pattern 约束；精确白名单、对象/数组开放性、纯验证语义、单一形态和 SlotTypeDefinition 外层契约已经冻结。
 4. 平台 hard ceiling 的绝对数值和兼容版本协议；模板 `limits` 的六组十六字段、单位、跨字段关系、三层限制模型与禁止静默裁剪已经冻结。
 5. 中性 slot selector DSL 与 access profile 解析规则。
@@ -1213,6 +1252,7 @@ interface SealRecord {
 | 2026-08-10 | Slot Schema v1 使用有界实用关键字白名单，只验证、不转换或改写数据 |
 | 2026-08-10 | 资源限制采用局部语义约束、模板显式包络、平台 hard ceiling 三层模型；超限拒绝且不静默裁剪 |
 | 2026-08-10 | structured_slots v1 模板 limits 固定为六组十六个必填正整数字段，执行器预算另行声明 |
+| 2026-08-10 | LayoutGrammar v1 采用结构化 Production AST，以 rootType + productions 表达有序 children 语法 |
 
 ---
 
