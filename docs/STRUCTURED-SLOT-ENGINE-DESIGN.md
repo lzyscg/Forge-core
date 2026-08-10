@@ -364,7 +364,44 @@ productionMode: structured_slots
 
 `specSchema` / `contentSchema` 的具体受限 schema 语言继续收敛，但类型与结构语法的职责边界不再开放。
 
-### 8.2 specSchema 与 contentSchema 的统一方言
+### 8.2 SlotTypeDefinition 全显式契约
+
+SlotTypeDefinition 的外层字段没有猜测槽语义的业务默认值。每个条目都必须显式声明 `id`、`name`、`description`、`specSchema` 和 `content`：
+
+```yaml
+slotTypes:
+  - id: paragraph
+    name: 正文段落
+    description: 承载一段连续正文
+    specSchema:
+      type: object
+      additionalProperties: false
+      properties:
+        purpose:
+          type: string
+      required: [purpose]
+    content:
+      presence: required
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 5000
+```
+
+规则：
+
+- `id` 是 package 内唯一的安全标识；SlotInstance 使用该值作为 `typeId`。
+- `name` 与 `description` 必须是非空字符串，且可以安全投影给 Agent。
+- `specSchema.type` 必须显式为 `object`，根层必须显式 `additionalProperties: false`。
+- `content.presence` 必须显式为 `forbidden | optional | required`。
+- `presence: forbidden` 时禁止声明 `content.schema`，槽始终保持 content unset。
+- `presence: optional | required` 时必须声明 `content.schema`；规范化后分别形成 `contentPresence` 与 `contentSchema`。
+- `required` 不阻止创建尚未填充的 scaffold 或开放 Draft；它只要求 Seal Gate 前 content 已 set。Merge Gate 不因其他 required 槽仍 unset 而阻塞合法的局部合并。
+- SlotTypeDefinition、content wrapper 和 schema 中的未知字段或不合法组合全部在 Loader 阶段拒绝。
+
+Loader 不得根据名称或说明推断 schema，不得把缺失 schema 解释为 any，也不得把缺失 presence 默认成 optional/string。Slot Schema 内部某个白名单关键字未出现时，仍按冻结 dialect 为该关键字定义的确定语义解释；“全显式”针对槽类型的业务契约，不要求机械写出所有无关 schema 关键字。
+
+### 8.3 specSchema 与 contentSchema 的统一方言
 
 `specSchema` 与 `contentSchema` 共用一套由平台版本化、白名单控制的 JSON Schema 子集。它沿用 JSON Schema 的声明结构和常用关键字语义，但不承诺支持完整 JSON Schema；contract v1 对应固定的 Slot Schema dialect v1，规范化 snapshot 必须显式保存或可确定性推导该 dialect 身份。
 
@@ -391,7 +428,7 @@ content 的根值仍可由模板声明为任意合法 JSON 类型，基础引擎
 
 精确关键字白名单、每个关键字的参数限制和组合规则继续收敛；受限方言、加载期拒绝未知能力以及 spec/content 复用同一验证内核的方向不再开放。
 
-### 8.3 spec 固定为对象，content 保持任意 JSON
+### 8.4 spec 固定为对象，content 保持任意 JSON
 
 每个 ProposalNode 和正式 SlotInstance 的 `spec` 始终存在，根值固定为 JSON object。没有实例级编排意图时，spec 的值为严格空对象 `{}`；不能省略，也不能使用字符串、数组、数值、布尔值或 `null`。
 
@@ -406,7 +443,7 @@ content 的根值仍可由模板声明为任意合法 JSON 类型，基础引擎
 
 这个约束只稳定编排意图的形状，不限制模板实际交付内容的粒度或类型。
 
-### 8.4 单根有序统一节点树
+### 8.5 单根有序统一节点树
 
 每个 scaffold 是一棵单根、有序树。所有布局节点统一为 `SlotInstance`，不另设 container node 与 leaf slot 两套实体。
 
@@ -419,7 +456,7 @@ content 的根值仍可由模板声明为任意合法 JSON 类型，基础引擎
 
 跨槽依赖不放进布局树。布局树只表达所有权、嵌套和渲染顺序；语义依赖、校验依赖和未来的失效传播使用独立关系模型。
 
-### 8.5 概念数据结构
+### 8.6 概念数据结构
 
 ```ts
 type JsonValue =
@@ -446,7 +483,7 @@ interface SlotInstance {
 
 具体持久化实现可以把 tree、spec 和 content 分表或分文件保存；概念契约不要求物理上嵌在同一个对象中。
 
-### 8.6 `spec` 与 `content` 严格分离
+### 8.7 `spec` 与 `content` 严格分离
 
 `spec` 由编排阶段产生，用于表达“这个槽应当完成什么”；`content` 由填充阶段产生，用于表达“实际写了什么”。
 
@@ -995,7 +1032,7 @@ interface SealRecord {
 2. 结构槽模板保持单一 Template Package；固定 `slots/contract.yaml` 使用“声明内联、实现外置”的分文件契约。
 3. 扩展现有冻结模板快照以包含结构槽规则和所有引用资源摘要。
 4. 持久化 StructureProposal，整树校验后原子创建 scaffold。
-5. SlotTypeDefinition 只定义节点内在契约，spec 固定为对象、content 保持任意 JSON，二者共用版本化的受限 JSON Schema 方言；LayoutGrammar 统一定义结构关系；SlotInstance 使用单根有序树并严格分离 spec/content。
+5. SlotTypeDefinition 使用无业务默认值的全显式契约，只定义节点内在属性；spec 固定为对象、content 保持任意 JSON，二者共用版本化的受限 JSON Schema 方言；LayoutGrammar 统一定义结构关系；SlotInstance 使用单根有序树并严格分离 spec/content。
 6. 模板上限 + 运行期 SlotGrant 两层授权。
 7. Production Action/Route 调度，单 case 串行。
 8. 持久化 FillDraft、窄 Slot API、严格全局 baseRevision。
@@ -1032,7 +1069,7 @@ interface SealRecord {
 
 1. `slots/contract.yaml` 各顶层分区的最终 YAML/TypeScript 字段 schema；权威入口、分区、声明/实现边界、固定路径和单 package 版本语义已经冻结。
 2. LayoutGrammar 的声明语言、表达能力和错误定位格式。
-3. SlotTypeDefinition 的最终字段、Slot Schema v1 精确关键字白名单、参数限制和默认值规则；spec 固定对象、content 任意 JSON、受限方言和类型职责边界已经冻结。
+3. Slot Schema v1 精确关键字白名单、组合能力和参数限制；SlotTypeDefinition 外层字段、条件组合、无业务默认值、spec/content 根形状、受限方言和类型职责边界已经冻结。
 4. 中性 slot selector DSL 与 access profile 解析规则。
 5. validator / Assembler 的注册、快照、沙箱和版本协议。
 6. Structure / Merge / Seal issue 的统一 schema 与错误码集合。
@@ -1073,6 +1110,7 @@ interface SealRecord {
 | 2026-08-10 | SlotTypeDefinition 只定义节点内在契约，所有节点关系统一归 LayoutGrammar |
 | 2026-08-10 | specSchema 与 contentSchema 共用平台版本化的 JSON Schema 白名单子集，未知能力加载期拒绝 |
 | 2026-08-10 | spec 始终为对象且不可省略，content 保持模板定义的任意 JSON，unset 与 null 分离 |
+| 2026-08-10 | SlotTypeDefinition 核心字段全部显式；禁止 Loader 猜测 schema、presence 或内容类型 |
 
 ---
 
