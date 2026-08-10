@@ -169,6 +169,7 @@ export function sampleTurnInput(overrides: Partial<AgentTurnInput> = {}): AgentT
       ],
       turnContract: publisherContract('agent-beta'),
       gate: null,
+      slotCapabilities: [],
     },
     inputNodeId: 'node-input-1',
     inputText: 'neutral input text',
@@ -629,6 +630,9 @@ export function frozenSnapshotFixture(): FrozenTemplate {
     description: 'Neutral two-agent frozen snapshot for runtime tests.',
     versionHash: NEUTRAL_FIXTURE_VERSION_HASH,
     budget: null,
+    productionMode: 'basic',
+    structuredSlots: null,
+    structuredPhases: null,
     inputFields: [],
     agents: [
       {
@@ -649,6 +653,7 @@ export function frozenSnapshotFixture(): FrozenTemplate {
         ],
         turnContract: publisherContract('agent-beta'),
         gate: null,
+        slotCapabilities: [],
       },
       {
         id: 'agent-beta',
@@ -668,6 +673,7 @@ export function frozenSnapshotFixture(): FrozenTemplate {
         ],
         turnContract: reviewerContract('agent-alpha'),
         gate: null,
+        slotCapabilities: [],
       },
     ],
     routes: [

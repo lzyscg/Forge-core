@@ -29,8 +29,17 @@ import {
 } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { CorePaths } from '../storage/core-paths';
+import type { StructuredRuntimeEnvironmentV1 } from '../structured-slots/runtime-capability';
 import { loadTemplateDirectory } from './template-loader';
-import { TEMPLATE_ERROR_CODES, TemplateError, type FrozenAgentConfig, type FrozenTemplate } from './template-schema';
+import {
+  TEMPLATE_ERROR_CODES,
+  TemplateError,
+  type BasicTurnContractV1,
+  type FrozenAgentConfig,
+  type FrozenTemplate,
+  type StructuredTurnContractV3,
+  type TurnContract,
+} from './template-schema';
 
 const TMP_PREFIX = '.tmp-';
 
@@ -56,12 +65,17 @@ async function pathExists(path: string): Promise<boolean> {
 }
 
 /** Writes one JSON file via same-directory temp + full close + atomic rename. */
-async function writeJsonAtomic(directory: string, fileName: string, payload: unknown): Promise<void> {
+async function writeJsonAtomic(
+  directory: string,
+  fileName: string,
+  payload: unknown,
+  replacer?: (key: string, value: unknown) => unknown,
+): Promise<void> {
   const tempFile = join(directory, `${TMP_PREFIX}${fileName}-${randomUUID()}`);
   try {
     const handle = await open(tempFile, 'wx');
     try {
-      await handle.writeFile(JSON.stringify(payload), 'utf8');
+      await handle.writeFile(JSON.stringify(payload, replacer), 'utf8');
       await handle.sync();
     } finally {
       await handle.close();
@@ -71,6 +85,24 @@ async function writeJsonAtomic(directory: string, fileName: string, payload: unk
     await rm(tempFile, { force: true }).catch(() => undefined);
     throw error;
   }
+}
+
+/**
+ * Manifest JSON replacer: the frozen structured slot contract embeds compiled
+ * runtime internals (Sets, regex `test` functions) that are not JSON values.
+ * Sets become arrays and functions are dropped so `manifest.json` stays pure
+ * JSON; readers of the manifest therefore see a structurally degraded but
+ * hash-verified contract (identity/hash only — the loader recompiles from the
+ * cached YAML whenever the full contract is needed).
+ */
+function manifestJsonReplacer(key: string, value: unknown): unknown {
+  if (value instanceof Set) {
+    return [...value];
+  }
+  if (typeof value === 'function') {
+    return undefined;
+  }
+  return value;
 }
 
 /**
@@ -123,31 +155,55 @@ function isManifestFrozen(value: unknown): value is ManifestJson {
 }
 
 /**
- * Normalizes legacy cached manifests (plan 2026-08-06): pre-change manifests
- * store dispatch targets as scalar ids; coerce them to one-element candidate
- * sets so downstream consumers (the committer's includes check, the turn
- * checklist) always see arrays — a raw scalar would break
- * `String.prototype.includes` substring semantics.
+ * Normalizes one frozen contract's dispatch targets into candidate sets.
+ * Legacy manifests store scalar ids; coerce them to one-element candidate sets
+ * so downstream consumers always see arrays. Handles the v3 union by branch.
  */
-function normalizeManifestTargets(frozen: FrozenTemplate): FrozenTemplate {
+function normalizeContractTargets(contract: TurnContract): TurnContract {
+  const rawTargets = contract.dispatch.targets;
+  if (contract.version === 3) {
+    const targets: StructuredTurnContractV3['dispatch']['targets'] = {};
+    for (const [intent, value] of Object.entries(rawTargets)) {
+      if (value === undefined) continue;
+      if (intent === 'send_message' || intent === 'publish_artifact') {
+        targets[intent] = typeof value === 'string' ? [value] : [...value];
+      }
+    }
+    return { ...contract, dispatch: { ...contract.dispatch, targets } };
+  }
+  const targets: BasicTurnContractV1['dispatch']['targets'] = {};
+  for (const [intent, value] of Object.entries(rawTargets)) {
+    if (value === undefined) continue;
+    if (intent !== 'request_human_input') {
+      targets[intent as keyof typeof targets] = typeof value === 'string' ? [value] : [...value];
+    }
+  }
+  return { ...contract, dispatch: { ...contract.dispatch, targets } };
+}
+
+/**
+ * Normalizes cached manifests (plan 2026-08-06 + Task 5): scalar dispatch
+ * targets become candidate sets, and legacy manifests without the new
+ * production-mode fields default to `basic` / `structuredSlots: null` /
+ * `structuredPhases: null` (and empty agent `slotCapabilities`) — the shape
+ * the frozen type now requires. The stored `versionHash` is never touched, so
+ * the caller's hash verification (versionHash === hash-directory name) is
+ * unaffected: historical manifests only surface AFTER their original hash
+ * verifies.
+ */
+function normalizeManifestFrozen(frozen: FrozenTemplate): FrozenTemplate {
+  const legacy = frozen as Partial<FrozenTemplate> & { agents: FrozenAgentConfig[] };
   return {
     ...frozen,
-    agents: frozen.agents.map((agent) => {
+    productionMode: legacy.productionMode ?? 'basic',
+    structuredSlots: legacy.structuredSlots ?? null,
+    structuredPhases: legacy.structuredPhases ?? null,
+    agents: legacy.agents.map((agent) => {
       const contract = agent.turnContract;
-      if (contract === null) {
-        return agent;
-      }
-      const targets: NonNullable<FrozenAgentConfig['turnContract']>['dispatch']['targets'] = {};
-      for (const [intent, value] of Object.entries(contract.dispatch.targets)) {
-        if (typeof value === 'string') {
-          targets[intent as keyof typeof targets] = [value];
-        } else if (Array.isArray(value)) {
-          targets[intent as keyof typeof targets] = value as string[];
-        }
-      }
       return {
         ...agent,
-        turnContract: { ...contract, dispatch: { ...contract.dispatch, targets } },
+        slotCapabilities: agent.slotCapabilities ?? [],
+        turnContract: contract === null ? null : normalizeContractTargets(contract),
       };
     }),
   };
@@ -161,7 +217,7 @@ async function readManifest(versionRoot: string): Promise<CachedVersion | null> 
       return null;
     }
     const { cachedAt, ...frozen } = manifest;
-    return { frozen: normalizeManifestTargets(frozen), cachedAt, versionRoot };
+    return { frozen: normalizeManifestFrozen(frozen), cachedAt, versionRoot };
   } catch {
     return null;
   }
@@ -236,9 +292,15 @@ export async function loadLastValidCached(
 /**
  * Caches a validated frozen template and atomically repoints current.json.
  * Never overwrites an existing hash directory; failures leave current.json
- * untouched.
+ * untouched. The runtime environment is threaded into the cache reopen so a
+ * structured template re-validates against the same capability/profile the
+ * Catalog uses (spec §5 / design O05).
  */
-export async function cacheTemplate(paths: CorePaths, frozen: FrozenTemplate): Promise<CachedVersion> {
+export async function cacheTemplate(
+  paths: CorePaths,
+  frozen: FrozenTemplate,
+  runtimeEnvironment?: StructuredRuntimeEnvironmentV1,
+): Promise<CachedVersion> {
   const versionRoot = paths.templateCacheVersionRoot(frozen.id, frozen.versionHash);
   const templateCacheDir = dirname(versionRoot);
   await mkdir(templateCacheDir, { recursive: true });
@@ -247,7 +309,7 @@ export async function cacheTemplate(paths: CorePaths, frozen: FrozenTemplate): P
     const stageDir = join(templateCacheDir, `${TMP_PREFIX}stage-${randomUUID()}`);
     try {
       await copyTemplateFiles(frozen.sourcePath, stageDir);
-      const reopened = await loadTemplateDirectory(stageDir);
+      const reopened = await loadTemplateDirectory(stageDir, { runtimeEnvironment });
       if (reopened.versionHash !== frozen.versionHash) {
         throw new TemplateError(
           TEMPLATE_ERROR_CODES.TEMPLATE_INVALID,
@@ -262,7 +324,12 @@ export async function cacheTemplate(paths: CorePaths, frozen: FrozenTemplate): P
         sourcePath: versionRoot,
       };
       const stagedAt = new Date().toISOString();
-      await writeJsonAtomic(stageDir, 'manifest.json', { ...manifestFrozen, cachedAt: stagedAt });
+      await writeJsonAtomic(
+        stageDir,
+        'manifest.json',
+        { ...manifestFrozen, cachedAt: stagedAt },
+        manifestJsonReplacer,
+      );
       try {
         await rename(stageDir, versionRoot);
       } catch (renameError) {

@@ -25,6 +25,7 @@ import { CorePathError } from './core-paths';
 import { STORAGE_ERROR_CODES, StorageError, writeNewAtomic } from './atomic-file';
 import { loadTemplateDirectory } from '../template/template-loader';
 import { TEMPLATE_ERROR_CODES, TemplateError, type FrozenTemplate } from '../template/template-schema';
+import type { StructuredRuntimeEnvironmentV1 } from '../structured-slots/runtime-capability';
 import type { TemplateCatalog } from '../template/template-catalog';
 
 export interface CreateTaskRequest {
@@ -154,6 +155,13 @@ export class TaskStore {
   private readonly catalog: TemplateCatalog;
 
   /**
+   * The structured runtime environment obtained from THIS catalog (design
+   * O05): the same capability/profile the Catalog and cache reopen use. The
+   * store never reads or accepts a second default.
+   */
+  private readonly runtimeEnvironment: StructuredRuntimeEnvironmentV1;
+
+  /**
    * In-memory frozen-snapshot cache (plan 2026-08-06): a task snapshot is
    * immutable once frozen, so repeated reads may serve the cached object.
    * The scheduler consults it every guard iteration; without the cache each
@@ -165,6 +173,7 @@ export class TaskStore {
   constructor(paths: CorePaths, catalog: TemplateCatalog) {
     this.paths = paths;
     this.catalog = catalog;
+    this.runtimeEnvironment = catalog.runtimeEnvironment;
   }
 
   /**
@@ -175,6 +184,17 @@ export class TaskStore {
   async create(request: CreateTaskRequest): Promise<CreatedTask> {
     const frozen = this.catalog.getFrozen(request.templateId);
     if (frozen === undefined) {
+      // A known-but-unavailable structured template must surface the runtime
+      // gate, never masquerade as a missing template (design O05).
+      const diagnostic = this.catalog.getDiagnostic(request.templateId);
+      if (diagnostic?.code === TEMPLATE_ERROR_CODES.TEMPLATE_RUNTIME_UNAVAILABLE) {
+        throw new TemplateError(
+          TEMPLATE_ERROR_CODES.TEMPLATE_RUNTIME_UNAVAILABLE,
+          `结构化运行时能力未就绪，无法为模板 ${request.templateId} 创建任务。`,
+          null,
+          '等待结构化运行时就绪后重新创建。',
+        );
+      }
       throw new TemplateError(
         TEMPLATE_ERROR_CODES.TEMPLATE_NOT_FOUND,
         `未找到模板 ${request.templateId}。`,
@@ -216,7 +236,10 @@ export class TaskStore {
     const snapshotRoot = this.paths.taskSnapshotRoot(taskId);
     let frozen: FrozenTemplate;
     try {
-      frozen = await loadTemplateDirectory(snapshotRoot, { historicalSnapshot: true });
+      frozen = await loadTemplateDirectory(snapshotRoot, {
+        historicalSnapshot: true,
+        runtimeEnvironment: this.runtimeEnvironment,
+      });
     } catch {
       throw new StorageError(
         STORAGE_ERROR_CODES.TASK_CORRUPTED,
@@ -411,7 +434,9 @@ export class TaskStore {
       const snapshotRoot = join(stageDir, 'snapshot');
       const cacheVersionRoot = this.paths.templateCacheVersionRoot(frozen.id, frozen.versionHash);
       await copyTree(cacheVersionRoot, snapshotRoot);
-      const reopened = await loadTemplateDirectory(snapshotRoot);
+      const reopened = await loadTemplateDirectory(snapshotRoot, {
+        runtimeEnvironment: this.runtimeEnvironment,
+      });
       if (reopened.versionHash !== frozen.versionHash) {
         throw new TemplateError(
           TEMPLATE_ERROR_CODES.TEMPLATE_INVALID,

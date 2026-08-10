@@ -41,6 +41,7 @@ import type { TaskStore } from '../storage/task-store';
 import type { TaskEvent } from '../storage/task-events';
 import type { TraceStore } from '../storage/trace-store';
 import type { FrozenAgentConfig, FrozenTemplate } from '../template/template-schema';
+import { isStructuredTurnContractV3 } from '../template/template-schema';
 import { RuntimeAbortedError, RuntimeFailure } from './agent-runtime';
 import type { AgentRuntime, AgentTurnInput, LivePatch } from './agent-runtime';
 import {
@@ -508,6 +509,12 @@ export function buildTurnChecklist(agent: FrozenAgentConfig, frozen: FrozenTempl
   if (contract === null) {
     return '';
   }
+  // v3 slot-session contracts are never run by the basic runner (the
+  // scheduler gates them); fail closed with no checklist until Task 17 owns
+  // structured execution.
+  if (isStructuredTurnContractV3(contract)) {
+    return '';
+  }
   const agentNameOf = (agentId: string): string =>
     frozen.agents.find((candidate) => candidate.id === agentId)?.name ?? agentId;
   const lines: string[] = ['【本回合任务清单】'];
@@ -688,6 +695,14 @@ export class TaskRunner {
       throw RuntimeFailure.permanent(
         'TURN_CONTRACT_REQUIRED',
         '任务冻结快照缺少当前回合契约，无法执行。',
+      );
+    }
+    // Structured v3 slot contracts are never run by the basic runner; the
+    // basic path fails closed until Task 17 owns structured execution.
+    if (isStructuredTurnContractV3(agent.turnContract)) {
+      throw RuntimeFailure.permanent(
+        'STRUCTURED_TURN_NOT_RUNNABLE',
+        '结构化回合契约不能由基础运行器执行。',
       );
     }
 

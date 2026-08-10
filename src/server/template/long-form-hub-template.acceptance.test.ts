@@ -20,6 +20,20 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { loadTemplateDirectory } from './template-loader';
+import {
+  isBasicTurnContract,
+  type BasicTurnContractV1,
+  type BasicTurnContractV2,
+  type TurnContract,
+} from './template-schema';
+
+/** The basic member of a turn contract, or null when absent/structured. */
+function basicContract(tc: TurnContract | null | undefined): BasicTurnContractV1 | BasicTurnContractV2 | null {
+  if (tc === null || tc === undefined || !isBasicTurnContract(tc)) {
+    return null;
+  }
+  return tc;
+}
 
 function hubTemplateRoot(): string {
   return fileURLToPath(new URL('../../../templates/long-form-hub', import.meta.url));
@@ -58,8 +72,8 @@ describe('long-form hub acceptance template', () => {
         targets: { send_message: ['writer', 'reviewer'] },
       },
     });
-    expect(controller?.turnContract?.production).toBeUndefined();
-    expect(controller?.turnContract?.annotate).toBeUndefined();
+    expect(basicContract(controller?.turnContract)?.production).toBeUndefined();
+    expect(basicContract(controller?.turnContract)?.annotate).toBeUndefined();
   });
 
   it('gives the reviewer an operate contract (annotate + forward/send)', async () => {
@@ -76,7 +90,7 @@ describe('long-form hub acceptance template', () => {
         },
       },
     });
-    expect(reviewer?.turnContract?.production).toBeUndefined();
+    expect(basicContract(reviewer?.turnContract)?.production).toBeUndefined();
   });
 
   it('gives the writer a production contract with publish_artifact', async () => {
@@ -93,7 +107,7 @@ describe('long-form hub acceptance template', () => {
         targets: { publish_artifact: ['reviewer'] },
       },
     });
-    expect(writer?.turnContract?.annotate).toBeUndefined();
+    expect(basicContract(writer?.turnContract)?.annotate).toBeUndefined();
   });
 
   it('does not hardcode a narrative voice in the writer system prompt', () => {

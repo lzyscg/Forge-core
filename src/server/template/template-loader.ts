@@ -13,11 +13,13 @@
 import { createHash } from 'node:crypto';
 import { readFile, readdir, realpath, stat } from 'node:fs/promises';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import type { StructuredRuntimeEnvironmentV1 } from '../structured-slots/runtime-capability';
 import {
   TEMPLATE_ERROR_CODES,
   TemplateError,
   type FrozenAgentConfig,
   type FrozenTemplate,
+  type ScaffoldPhase,
 } from './template-schema';
 import {
   parseYamlFile,
@@ -32,6 +34,11 @@ import {
   type ValidatedTemplateFile,
   type ValidatedTurnContract,
 } from './template-validator';
+import {
+  loadStructuredSlotContract,
+  type FrozenStructuredSlotContractV1,
+} from './structured-slot-contract';
+import { validateStructuredPipeline } from './structured-pipeline-validator';
 
 const RELOAD_ACTION = '修正模板文件后重新加载模板。';
 
@@ -266,8 +273,15 @@ function hashCanonicalContract(contract: ValidatedTurnContract): unknown {
   return { ...contract, dispatch: { ...contract.dispatch, targets } };
 }
 
-function computeVersionHash(source: CanonicalSource): string {
-  const canonical = canonicalize({
+/**
+ * The deterministic canonical source of a template (basic mode). The basic
+ * canonical form deliberately OMITS the `productionMode` default: a template
+ * without (or with) `productionMode: basic` hashes identically to the
+ * pre-change form, so old basic version hashes stay byte-for-byte identical
+ * (spec §3.2 / design A03).
+ */
+function buildBasicCanonical(source: CanonicalSource): unknown {
+  return canonicalize({
     template: source.template,
     pipeline: {
       agents: source.pipeline.agents,
@@ -323,9 +337,37 @@ function computeVersionHash(source: CanonicalSource): string {
             },
           }
         : {}),
+      // A slot-capability ceiling enters the hash only when declared (v3 slot
+      // agents); basic agents carry an empty ceiling whose key is omitted so
+      // every pre-existing basic version hash stays byte-for-byte identical.
+      ...(agent.slotCapabilities.length > 0 ? { slotCapabilities: agent.slotCapabilities } : {}),
     })),
   });
-  return createHash('sha256').update(JSON.stringify(canonical), 'utf8').digest('hex');
+}
+
+function computeVersionHash(source: CanonicalSource): string {
+  return createHash('sha256').update(JSON.stringify(buildBasicCanonical(source)), 'utf8').digest('hex');
+}
+
+/**
+ * Structured mode hash (design A03): the basic canonical plus the production
+ * mode and the slot contract's semantic digest — which itself covers the
+ * normalized contract, the sorted resource digest and the ABI/profile identity
+ * (computed by the Task 4 contract compiler).
+ */
+function computeStructuredVersionHash(source: CanonicalSource, semanticDigest: string): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify(
+        canonicalize({
+          productionMode: 'structured_slots',
+          base: buildBasicCanonical(source),
+          structuredContract: semanticDigest,
+        }),
+      ),
+      'utf8',
+    )
+    .digest('hex');
 }
 
 async function loadAgents(
@@ -388,11 +430,80 @@ export interface LoadTemplateDirectoryOptions {
    * tasks stay readable and gateable. Current-template loads never set this.
    */
   historicalSnapshot?: boolean;
+  /**
+   * The structured runtime environment (spec §5 / design O05): its profile
+   * supplies the platform hard ceiling for the slots contract. Required for
+   * `structured_slots` templates (fail closed with `TEMPLATE_RUNTIME_UNAVAILABLE`
+   * when missing/disabled), ignored for basic templates.
+   */
+  runtimeEnvironment?: StructuredRuntimeEnvironmentV1;
+}
+
+/** True when `slots/contract.yaml` exists under the template root. */
+async function slotsContractExists(sourcePath: string): Promise<boolean> {
+  try {
+    await stat(join(sourcePath, 'slots', 'contract.yaml'));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolves the mode split (spec §3.2 / §15): basic rejects a slots contract or
+ * any v3 binding; structured requires the runtime environment's profile and
+ * compiles the slots contract. Returns `null` for basic.
+ */
+async function resolveStructuredSlots(
+  sourcePath: string,
+  mode: 'basic' | 'structured_slots',
+  agents: CanonicalSource['agents'],
+  options: { runtimeEnvironment?: StructuredRuntimeEnvironmentV1 },
+): Promise<{ contract: FrozenStructuredSlotContractV1; semanticDigest: string } | null> {
+  if (mode === 'basic') {
+    if (await slotsContractExists(sourcePath)) {
+      throw new TemplateError(
+        TEMPLATE_ERROR_CODES.TEMPLATE_INVALID,
+        'basic 模板不能包含 slots/contract.yaml。',
+        'slots/contract.yaml',
+        RELOAD_ACTION,
+      );
+    }
+    if (agents.some((agent) => agent.turnContract !== null && agent.turnContract.version === 3)) {
+      throw new TemplateError(
+        TEMPLATE_ERROR_CODES.TEMPLATE_INVALID,
+        'basic 模板不能声明 v3 回合契约。',
+        'pipeline.yaml',
+        RELOAD_ACTION,
+      );
+    }
+    return null;
+  }
+  const env = options.runtimeEnvironment;
+  if (env === undefined || env.capability.status !== 'enabled' || env.profile === null) {
+    throw new TemplateError(
+      TEMPLATE_ERROR_CODES.TEMPLATE_RUNTIME_UNAVAILABLE,
+      '结构化运行时能力未就绪，无法加载该模板。',
+      null,
+      '等待结构化运行时就绪后重新加载。',
+    );
+  }
+  const contract = await loadStructuredSlotContract(sourcePath, env.profile.limits);
+  return { contract, semanticDigest: contract.semanticDigest };
+}
+
+/** Serializes the compiled phase contract into the frozen snapshot. */
+function toPhasesRecord(phases: Map<string, ReadonlySet<ScaffoldPhase>>): Record<string, readonly ScaffoldPhase[]> {
+  const record: Record<string, readonly ScaffoldPhase[]> = {};
+  for (const [agentId, set] of phases) {
+    record[agentId] = [...set];
+  }
+  return record;
 }
 
 async function loadValidated(
   sourcePath: string,
-  options: { historicalSnapshot: boolean },
+  options: { historicalSnapshot: boolean; runtimeEnvironment?: StructuredRuntimeEnvironmentV1 },
 ): Promise<FrozenTemplate> {
   const template = validateTemplateFile(
     'template.yaml',
@@ -434,7 +545,12 @@ async function loadValidated(
     agentsWithContents.push({ ...agent, skillContents, skillSections, gateValidatorContent });
   }
 
-  const versionHash = computeVersionHash({ template, pipeline, agents: agentsWithContents });
+  const structured = await resolveStructuredSlots(sourcePath, pipeline.productionMode, agentsWithContents, options);
+
+  const versionHash =
+    structured === null
+      ? computeVersionHash({ template, pipeline, agents: agentsWithContents })
+      : computeStructuredVersionHash({ template, pipeline, agents: agentsWithContents }, structured.semanticDigest);
   const frozenAgents: FrozenAgentConfig[] = agentsWithContents.map((agent) => ({
     id: agent.id,
     name: agent.name,
@@ -457,10 +573,41 @@ async function loadValidated(
             artifactType: agent.gate.artifactType,
             mode: [...agent.gate.mode],
           },
+    slotCapabilities: [...agent.slotCapabilities],
     turnContract: agent.turnContract,
   }));
 
-  return {
+  const mode = pipeline.productionMode;
+  if (structured === null) {
+    return {
+      id: basename(sourcePath),
+      name: template.name,
+      description: template.description,
+      versionHash,
+      inputFields: template.inputFields,
+      agents: frozenAgents,
+      routes: pipeline.routes.map((route) => ({
+        from: route.from,
+        to: route.to,
+        kind: route.kind,
+        label: route.label,
+        ...(route.inject.length > 0 ? { inject: route.inject } : {}),
+      })),
+      artifactSchema: pipeline.artifactSchema,
+      finalOutput: {
+        name: template.finalArtifact.name,
+        format: template.finalArtifact.format,
+        submitters: [...pipeline.submitters],
+      },
+      budget: pipeline.budget,
+      productionMode: 'basic',
+      structuredSlots: null,
+      structuredPhases: null,
+      sourcePath,
+    };
+  }
+
+  const baseFrozen: Omit<FrozenTemplate, 'productionMode' | 'structuredSlots' | 'structuredPhases'> = {
     id: basename(sourcePath),
     name: template.name,
     description: template.description,
@@ -483,6 +630,21 @@ async function loadValidated(
     budget: pipeline.budget,
     sourcePath,
   };
+  // Typestate + capability + dispatch matrices run on the frozen pipeline; the
+  // compiled phase contract is stored in the frozen template (and thus the
+  // task snapshot).
+  const phases = validateStructuredPipeline({
+    ...baseFrozen,
+    productionMode: 'structured_slots',
+    structuredSlots: structured.contract,
+    structuredPhases: null,
+  });
+  return {
+    ...baseFrozen,
+    productionMode: 'structured_slots',
+    structuredSlots: structured.contract,
+    structuredPhases: toPhasesRecord(phases),
+  };
 }
 
 /** Loads and validates one template directory into a frozen template. */
@@ -503,6 +665,7 @@ export async function loadTemplateDirectory(
     }
     return await loadValidated(sourcePath, {
       historicalSnapshot: options.historicalSnapshot ?? false,
+      runtimeEnvironment: options.runtimeEnvironment,
     });
   } catch (error) {
     if (error instanceof TemplateError) {

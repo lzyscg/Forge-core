@@ -516,18 +516,47 @@ describe('ActionCommitter contract conformance (spec §6)', () => {
       committer.validateAndCommit(context, [finishInline(), PUBLISH_CURRENT]),
     ).rejects.toMatchObject({ code: 'ACTION_SET_INVALID', retryable: false });
   });
+
+  it('fails closed on a v3 structured contract (Task 5)', async () => {
+    const v3Contract: import('../template/template-schema').StructuredTurnContractV3 = {
+      version: 3,
+      slotSession: {
+        kind: 'structure',
+        accessProfile: null,
+        capabilities: [
+          'read_structure_contract',
+          'write_structure_proposal',
+          'submit_structure_proposal',
+        ],
+        completion: 'structure_commit_candidate_created',
+      },
+      dispatch: { allowedActions: ['send_message'], targets: { send_message: ['fill'] } },
+    };
+    const v3Agent = {
+      ...env.frozen.agents[0],
+      turnContract: v3Contract,
+    };
+    const context: CommitContext = {
+      ...buildCommitContext(env, 'writer'),
+      currentAgent: v3Agent,
+      turnContract: v3Agent.turnContract,
+    };
+    await expect(
+      committer.validateAndCommit(context, [finishInline(), PUBLISH_CURRENT]),
+    ).rejects.toMatchObject({ code: 'ACTION_SET_INVALID', retryable: false });
+  });
 });
 
 describe('ActionCommitter multi-target dispatch candidate sets (plan 2026-08-06)', () => {
   /** Builds a context whose contract dispatches to a custom candidate set. */
   function contextWithTargets(
     agentId: 'writer' | 'reviewer',
-    targets: NonNullable<CommitContext['turnContract']>['dispatch']['targets'],
+    targets: Extract<NonNullable<CommitContext['turnContract']>, { version: 2 }>['dispatch']['targets'],
   ): CommitContext {
     const base = buildCommitContext(env, agentId);
     const contract = base.turnContract;
-    if (contract === null) {
-      throw new Error('the fixture contract is null');
+    if (contract === null || contract.version !== 2) {
+      throw new Error('the fixture contract is not a basic v2 contract');
     }
     return {
       ...base,
@@ -789,11 +818,14 @@ function forwardChainFrozen(): FrozenTemplate {
     name: 'Forward Chain',
     description: 'Three-agent forward-chain fixture for Phase 4 committer tests.',
     versionHash: 'a'.repeat(64),
+    productionMode: 'basic',
+    structuredSlots: null,
+    structuredPhases: null,
     inputFields: [],
     agents: [
-      { id: 'writer', name: '写作 Agent', description: '', systemPrompt: '', model: 'configured/writer-model', skills: [], gate: null, turnContract: writerContract },
-      { id: 'reviewer', name: '审核 Agent', description: '', systemPrompt: '', model: 'configured/reviewer-model', skills: [], gate: null, turnContract: reviewerContract },
-      { id: 'controller', name: '总控 Agent', description: '', systemPrompt: '', model: 'configured/controller-model', skills: [], gate: null, turnContract: controllerContract },
+      { id: 'writer', name: '写作 Agent', description: '', systemPrompt: '', model: 'configured/writer-model', skills: [], gate: null, slotCapabilities: [], turnContract: writerContract },
+      { id: 'reviewer', name: '审核 Agent', description: '', systemPrompt: '', model: 'configured/reviewer-model', skills: [], gate: null, slotCapabilities: [], turnContract: reviewerContract },
+      { id: 'controller', name: '总控 Agent', description: '', systemPrompt: '', model: 'configured/controller-model', skills: [], gate: null, slotCapabilities: [], turnContract: controllerContract },
     ],
     routes: [
       { from: 'controller', to: 'writer', kind: 'message', label: '分配写作任务' },

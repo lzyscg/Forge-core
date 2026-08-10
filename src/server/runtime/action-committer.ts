@@ -62,6 +62,7 @@ import type { ArtifactStore } from '../storage/artifact-store';
 import type { CommittedEvent, EventStore } from '../storage/event-store';
 import type { EventNode, TaskEvent } from '../storage/task-events';
 import type { FrozenAgentConfig, TurnContract } from '../template/template-schema';
+import { isBasicTurnContract, isStructuredTurnContractV3 } from '../template/template-schema';
 import { RuntimeFailure } from './agent-runtime';
 import { parseAnnotateVerdict } from './annotate-verdict';
 import {
@@ -366,6 +367,14 @@ export class ActionCommitter {
     if (contract === null) {
       throw invalid('任务冻结快照缺少当前回合契约，无法提交生产动作。');
     }
+    // Structured v3 slot contracts are never committed by the basic committer;
+    // fail closed until Task 17 owns structured execution.
+    if (isStructuredTurnContractV3(contract)) {
+      throw invalid('结构化回合契约不能由基础提交器处理。');
+    }
+    if (!isBasicTurnContract(contract)) {
+      throw invalid('回合契约版本不受支持，无法提交生产动作。');
+    }
 
     // Contract conformance of finish + dispatch (spec §15).
     if (finish !== null) {
@@ -616,7 +625,10 @@ export class ActionCommitter {
         '转发目标不在模板声明的合法产物连线之内。',
       );
     }
-    const contractTargets = context.turnContract?.dispatch.targets.forward_input_version;
+    const contractTargets =
+      context.turnContract !== null && isBasicTurnContract(context.turnContract)
+        ? context.turnContract.dispatch.targets.forward_input_version
+        : undefined;
     if (contractTargets !== undefined && !contractTargets.includes(targetAgentId)) {
       throw new CommitFailure(
         COMMIT_ERROR_CODES.ROUTE_NOT_ALLOWED,
@@ -669,7 +681,8 @@ export class ActionCommitter {
       );
     }
     const contract = context.turnContract;
-    const allowedFiles = contract?.annotate?.files;
+    const allowedFiles =
+      contract !== null && isBasicTurnContract(contract) ? contract.annotate?.files : undefined;
     if (allowedFiles === undefined || !allowedFiles.includes(annotate.file)) {
       throw new CommitFailure(
         COMMIT_ERROR_CODES.ANNOTATE_FILE_NOT_ALLOWED,

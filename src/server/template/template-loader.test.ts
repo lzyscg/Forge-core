@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { CorePaths } from '../storage/core-paths';
 import { PROGRESS_POLICY_CEILING } from '../runtime/progress-guard';
+import { createTestRuntimeEnvironment } from '../structured-slots/runtime-capability';
 import { loadTemplateDirectory } from './template-loader';
 import { TemplateCatalog } from './template-catalog';
 
@@ -957,5 +958,123 @@ describe('agent gate (plan 2026-08-07 Phase 2, spec §4.1)', () => {
       code: 'TEMPLATE_INVALID',
       location: 'agents/writer.yaml',
     });
+  });
+});
+
+describe('structured production mode (Task 5, spec §3.2/§15)', () => {
+  it('loads the structured-valid fixture with an enabled runtime environment', async () => {
+    const root = makeTempDir('forge-core-t2-structured-');
+    const dest = copyFixture('structured-valid', 'structured', root);
+    const frozen = await loadTemplateDirectory(dest, {
+      runtimeEnvironment: createTestRuntimeEnvironment(),
+    });
+    expect(frozen.productionMode).toBe('structured_slots');
+    expect(frozen.structuredSlots?.version).toBe(1);
+    expect(frozen.agents.map((agent) => agent.id)).toEqual(['structure', 'fill', 'seal', 'submitter']);
+    expect(frozen.agents[0]?.turnContract?.version).toBe(3);
+    expect(frozen.agents[0]?.slotCapabilities).toEqual([
+      'read_structure_contract',
+      'write_structure_proposal',
+      'submit_structure_proposal',
+    ]);
+    expect(frozen.structuredPhases).toEqual({
+      structure: ['no_scaffold'],
+      fill: ['active_unsealed'],
+      seal: ['active_unsealed'],
+      submitter: ['sealed'],
+    });
+    expect(frozen.versionHash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('derives the same structured hash for identical content in different directories', async () => {
+    const rootA = makeTempDir('forge-core-t2-structhash-a-');
+    const rootB = makeTempDir('forge-core-t2-structhash-b-');
+    const destA = copyFixture('structured-valid', 'structhash-a', rootA);
+    const destB = copyFixture('structured-valid', 'structhash-b', rootB);
+    const env = createTestRuntimeEnvironment();
+    expect((await loadTemplateDirectory(destB, { runtimeEnvironment: env })).versionHash).toBe(
+      (await loadTemplateDirectory(destA, { runtimeEnvironment: env })).versionHash,
+    );
+  });
+
+  it('changes the structured hash when the slots contract changes', async () => {
+    const rootA = makeTempDir('forge-core-t2-structcontract-a-');
+    const rootB = makeTempDir('forge-core-t2-structcontract-b-');
+    const destA = copyFixture('structured-valid', 'structcontract-a', rootA);
+    const destB = copyFixture('structured-valid', 'structcontract-b', rootB);
+    const contractFile = join(destB, 'slots/contract.yaml');
+    writeFileSync(
+      contractFile,
+      readFileSync(contractFile, 'utf8').replace('maxSlots: 2500', 'maxSlots: 2400'),
+      'utf8',
+    );
+    const env = createTestRuntimeEnvironment();
+    expect((await loadTemplateDirectory(destB, { runtimeEnvironment: env })).versionHash).not.toBe(
+      (await loadTemplateDirectory(destA, { runtimeEnvironment: env })).versionHash,
+    );
+  });
+
+  it('rejects structured loading without an enabled runtime environment', async () => {
+    const root = makeTempDir('forge-core-t2-structured-gated-');
+    const dest = copyFixture('structured-valid', 'structured-gated', root);
+    await expect(loadTemplateDirectory(dest)).rejects.toMatchObject({
+      code: 'TEMPLATE_RUNTIME_UNAVAILABLE',
+    });
+  });
+
+  it('rejects an unknown productionMode value', async () => {
+    const root = makeTempDir('forge-core-t2-mode-unknown-');
+    const dest = withContracts(copyFixture('valid', 'mode-unknown', root));
+    writeFileSync(
+      join(dest, 'pipeline.yaml'),
+      `${readFileSync(join(dest, 'pipeline.yaml'), 'utf8')}\nproductionMode: experimental\n`,
+      'utf8',
+    );
+    await expect(loadTemplateDirectory(dest)).rejects.toMatchObject({
+      code: 'TEMPLATE_INVALID',
+      location: 'pipeline.yaml',
+    });
+  });
+
+  it('rejects a basic template that contains slots/contract.yaml', async () => {
+    const root = makeTempDir('forge-core-t2-basic-slots-');
+    const dest = withContracts(copyFixture('valid', 'basic-slots', root));
+    mkdirSync(join(dest, 'slots'), { recursive: true });
+    writeFileSync(join(dest, 'slots/contract.yaml'), 'version: 1\n', 'utf8');
+    await expect(loadTemplateDirectory(dest)).rejects.toMatchObject({
+      code: 'TEMPLATE_INVALID',
+      location: 'slots/contract.yaml',
+    });
+  });
+
+  it('rejects a basic template with a v3 binding', async () => {
+    const root = makeTempDir('forge-core-t2-basic-v3-');
+    const dest = withContracts(copyFixture('valid', 'basic-v3', root));
+    writeFileSync(
+      join(dest, 'agents/writer.yaml'),
+      `${readFixtureAgent(dest, 'writer').replace(/\nturnContract:[\s\S]*$/, '')}\nturnContract:\n  version: 3\n  slotSession:\n    kind: structure\n    accessProfile: null\n    capabilities: [read_structure_contract, write_structure_proposal, submit_structure_proposal]\n    completion: structure_commit_candidate_created\n  dispatch:\n    allowedActions: [send_message]\n    targets:\n      send_message: reviewer\n`,
+      'utf8',
+    );
+    await expect(loadTemplateDirectory(dest)).rejects.toMatchObject({
+      code: 'TEMPLATE_INVALID',
+      location: 'pipeline.yaml',
+    });
+  });
+
+  it('rejects an invalid structured route graph (seal as the first agent)', async () => {
+    const root = makeTempDir('forge-core-t2-structured-badgraph-');
+    const dest = copyFixture('structured-valid', 'structured-badgraph', root);
+    const pipelineFile = join(dest, 'pipeline.yaml');
+    writeFileSync(
+      pipelineFile,
+      readFileSync(pipelineFile, 'utf8').replace(
+        '  - structure\n  - fill\n  - seal\n  - submitter',
+        '  - seal\n  - structure\n  - fill\n  - submitter',
+      ),
+      'utf8',
+    );
+    await expect(
+      loadTemplateDirectory(dest, { runtimeEnvironment: createTestRuntimeEnvironment() }),
+    ).rejects.toMatchObject({ code: 'TEMPLATE_INVALID', location: 'pipeline.yaml' });
   });
 });

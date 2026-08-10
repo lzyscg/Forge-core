@@ -202,7 +202,7 @@ describe('zhihu single-chapter acceptance template', () => {
         targets: { send_message: ['writer'] },
       },
     });
-    expect(reviewer?.turnContract?.production).toBeUndefined();
+    expect('production' in (reviewer?.turnContract ?? {})).toBe(false);
   });
 
   it('system prompts teach the v7 turn contract (finish_production for writers, annotate/submit for reviewers)', async () => {

@@ -18,6 +18,8 @@ import type {
 } from '../../shared/contracts';
 import type { PublicCoreError } from '../../shared/errors';
 import { CorePathError, CorePaths } from '../storage/core-paths';
+import type { StructuredRuntimeEnvironmentV1 } from '../structured-slots/runtime-capability';
+import { createProductionRuntimeEnvironment } from '../structured-slots/runtime-capability';
 import { cacheTemplate, loadLastValidCached, type CachedVersion } from './template-cache';
 import { loadTemplateDirectory } from './template-loader';
 import { TEMPLATE_ERROR_CODES, TemplateError, type FrozenTemplate } from './template-schema';
@@ -103,18 +105,48 @@ function toSummary(detail: TemplateDetail): TemplateSummary {
 export class TemplateCatalog {
   readonly paths: CorePaths;
 
+  /**
+   * The ONE immutable structured runtime environment the Catalog owns (spec
+   * §5 / design O05). Production defaults to the checked-in disabled manifest
+   * with a null profile; tests inject a matching enabled capability + profile.
+   * `cacheTemplate` receives it explicitly and TaskStore obtains it from here.
+   */
+  readonly runtimeEnvironment: StructuredRuntimeEnvironmentV1;
+
   private readonly entries = new Map<string, CatalogEntry>();
 
   /** Source ids observed at startup; lets reload operate on known sources. */
   private readonly knownSourceIds = new Set<string>();
 
-  constructor(paths: CorePaths) {
+  /**
+   * Internal availability diagnostics for known structured sources/caches that
+   * the runtime cannot execute while the capability is disabled (design O05):
+   * the Catalog never exposes a runnable frozen structured template, but
+   * TaskStore uses this to map the case to `TEMPLATE_RUNTIME_UNAVAILABLE`
+   * instead of `TEMPLATE_NOT_FOUND`.
+   */
+  private readonly unavailable = new Map<string, PublicCoreError>();
+
+  constructor(
+    paths: CorePaths,
+    options: { runtimeEnvironment?: StructuredRuntimeEnvironmentV1 } = {},
+  ) {
     this.paths = paths;
+    this.runtimeEnvironment = options.runtimeEnvironment ?? createProductionRuntimeEnvironment();
+  }
+
+  /** True when the structured runtime may execute structured templates. */
+  private isStructuredRunnable(): boolean {
+    return (
+      this.runtimeEnvironment.capability.status === 'enabled' &&
+      this.runtimeEnvironment.profile !== null
+    );
   }
 
   async initialize(): Promise<void> {
     this.entries.clear();
     this.knownSourceIds.clear();
+    this.unavailable.clear();
 
     for (const templateId of this.scanSourceIds()) {
       this.knownSourceIds.add(templateId);
@@ -151,7 +183,11 @@ export class TemplateCatalog {
 
   /** In-memory public diagnostic for a source that failed to load, if any. */
   getDiagnostic(templateId: string): PublicCoreError | null {
-    return this.entries.get(templateId)?.diagnostic ?? null;
+    return (
+      this.entries.get(templateId)?.diagnostic ??
+      this.unavailable.get(templateId) ??
+      null
+    );
   }
 
   /**
@@ -193,14 +229,20 @@ export class TemplateCatalog {
       );
     }
     try {
-      const frozen = await loadTemplateDirectory(sourcePath);
-      const cached = await cacheTemplate(this.paths, frozen);
+      const frozen = await loadTemplateDirectory(sourcePath, {
+        runtimeEnvironment: this.runtimeEnvironment,
+      });
+      const cached = await cacheTemplate(this.paths, frozen, this.runtimeEnvironment);
       const detail = toDetail(cached.frozen, 'valid', cached.cachedAt);
       this.entries.set(templateId, { detail, frozen: cached.frozen, diagnostic: null });
+      this.unavailable.delete(templateId);
       this.knownSourceIds.add(templateId);
       return detail;
     } catch (error) {
       if (error instanceof TemplateError) {
+        if (error.code === TEMPLATE_ERROR_CODES.TEMPLATE_RUNTIME_UNAVAILABLE) {
+          this.unavailable.set(templateId, toPublicError(error));
+        }
         throw error;
       }
       throw new TemplateError(
@@ -235,12 +277,20 @@ export class TemplateCatalog {
   private async refreshFromSource(templateId: string): Promise<void> {
     let diagnostic: PublicCoreError | null = null;
     try {
-      const frozen = await loadTemplateDirectory(this.paths.templateSource(templateId));
-      const cached = await cacheTemplate(this.paths, frozen);
+      const frozen = await loadTemplateDirectory(this.paths.templateSource(templateId), {
+        runtimeEnvironment: this.runtimeEnvironment,
+      });
+      const cached = await cacheTemplate(this.paths, frozen, this.runtimeEnvironment);
       this.adopt(templateId, cached, 'valid', null);
       return;
     } catch (error) {
       diagnostic = toPublicError(error);
+      if (diagnostic.code === TEMPLATE_ERROR_CODES.TEMPLATE_RUNTIME_UNAVAILABLE) {
+        // Known structured source gated by runtime readiness (design O05):
+        // keep the internal diagnostic so TaskStore maps it correctly, and
+        // never adopt a runnable frozen structured template.
+        this.unavailable.set(templateId, diagnostic);
+      }
     }
     await this.serveFromCache(templateId, diagnostic);
   }
@@ -253,6 +303,17 @@ export class TemplateCatalog {
       cached = null;
     }
     if (cached !== null) {
+      if (cached.frozen.productionMode === 'structured_slots' && !this.isStructuredRunnable()) {
+        // A structured cache exists but the runtime cannot execute it while
+        // disabled: retain the availability diagnostic, never expose it.
+        this.unavailable.set(templateId, {
+          code: TEMPLATE_ERROR_CODES.TEMPLATE_RUNTIME_UNAVAILABLE,
+          message: '结构化运行时能力未就绪，无法使用该模板。',
+          location: null,
+          action: '等待结构化运行时就绪后重新加载。',
+        });
+        return;
+      }
       this.adopt(templateId, cached, 'invalid_using_cache', diagnostic);
     }
   }

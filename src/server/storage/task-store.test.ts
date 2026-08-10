@@ -11,16 +11,20 @@
  * Failed creations are isolated and never listed as usable; a corrupt
  * `task.json` is listed as `corrupt` without throwing (spec §8.3).
  */
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, cpSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   catalogWithOneTemplate,
   disposeAllTestRoots,
+  makeTempCorePaths,
   validTaskRequest,
 } from '../test-support';
+import { createTestRuntimeEnvironment } from '../structured-slots/runtime-capability';
 import { loadTemplateDirectory } from '../template/template-loader';
+import { TemplateCatalog } from '../template/template-catalog';
 import type { CorePaths } from './core-paths';
 import { TaskStore, type CreateTaskRequest } from './task-store';
 
@@ -336,6 +340,79 @@ describe('TaskStore.deleteTask', () => {
     const taskStore = new TaskStore(paths, catalog);
     await expect(taskStore.deleteTask('../escape')).rejects.toMatchObject({
       code: 'CORE_PATH_INVALID',
+    });
+  });
+});
+
+describe('TaskStore structured mode (Task 5, spec §5 / O05)', () => {
+  const STRUCTURED_FIXTURE = fileURLToPath(
+    new URL('../template/__fixtures__/structured-valid', import.meta.url),
+  );
+
+  /** A catalog over the structured-valid fixture with an enabled runtime. */
+  async function catalogWithStructured(
+    options: { runtimeEnvironment?: ReturnType<typeof createTestRuntimeEnvironment> } = {},
+  ): Promise<{ paths: CorePaths; catalog: TemplateCatalog; templateId: string }> {
+    const { paths, templateRoot } = makeTempCorePaths('forge-core-structured-');
+    cpSync(STRUCTURED_FIXTURE, join(templateRoot, 'structured-test'), { recursive: true });
+    const catalog = new TemplateCatalog(paths, {
+      runtimeEnvironment: options.runtimeEnvironment,
+    });
+    await catalog.initialize();
+    if (options.runtimeEnvironment !== undefined) {
+      const detail = catalog.get('structured-test');
+      if (!detail || detail.status !== 'valid') {
+        throw new Error('task-store test-support: structured fixture did not initialize as valid');
+      }
+    }
+    return { paths, catalog, templateId: 'structured-test' };
+  }
+
+  function structuredRequest(templateId: string): CreateTaskRequest {
+    return { templateId, name: 'Structured Task', input: { 'source-text': 'neutral source text' } };
+  }
+
+  it('creates a structured task with an enabled runtime and reopens the snapshot', async () => {
+    const { paths, catalog, templateId } = await catalogWithStructured({
+      runtimeEnvironment: createTestRuntimeEnvironment(),
+    });
+    const taskStore = new TaskStore(paths, catalog);
+    const task = await taskStore.create(structuredRequest(templateId));
+    expect(task.templateVersion).toMatch(FULL_HASH);
+    const frozen = await taskStore.readFrozenTemplate(task.id);
+    expect(frozen.productionMode).toBe('structured_slots');
+    expect(frozen.structuredSlots).not.toBeNull();
+    expect(frozen.versionHash).toBe(task.templateVersion);
+    // The task snapshot carries the slots contract subtree.
+    expect(relativeTree(paths.taskSnapshotRoot(task.id))).toContain('slots/contract.yaml');
+  });
+
+  it('reopens the structured snapshot after a catalog reload (source -> cache -> task)', async () => {
+    const { paths, catalog, templateId } = await catalogWithStructured({
+      runtimeEnvironment: createTestRuntimeEnvironment(),
+    });
+    const taskStore = new TaskStore(paths, catalog);
+    const task = await taskStore.create(structuredRequest(templateId));
+    await catalog.reload(templateId);
+    const frozen = await taskStore.readFrozenTemplate(task.id);
+    expect(frozen.productionMode).toBe('structured_slots');
+    expect(frozen.versionHash).toBe(task.templateVersion);
+  });
+
+  it('maps a gated structured template to TEMPLATE_RUNTIME_UNAVAILABLE, never TEMPLATE_NOT_FOUND', async () => {
+    const { paths, catalog, templateId } = await catalogWithStructured();
+    const taskStore = new TaskStore(paths, catalog);
+    await expect(taskStore.create(structuredRequest(templateId))).rejects.toMatchObject({
+      code: 'TEMPLATE_RUNTIME_UNAVAILABLE',
+    });
+    expect(await usableTaskDirectories(paths)).toEqual([]);
+  });
+
+  it('rejects a gated structured template that the catalog has never seen as TEMPLATE_NOT_FOUND', async () => {
+    const { paths, catalog } = await catalogWithStructured();
+    const taskStore = new TaskStore(paths, catalog);
+    await expect(taskStore.create(structuredRequest('template-missing'))).rejects.toMatchObject({
+      code: 'TEMPLATE_NOT_FOUND',
     });
   });
 });

@@ -12,19 +12,74 @@
 import type { InputField } from '../../shared/contracts';
 import type { ProgressPolicy } from '../runtime/progress-guard';
 import type { PublicCoreError } from '../../shared/errors';
+import type { FrozenStructuredSlotContractV1 } from './structured-slot-contract';
 
 /**
- * The per-agent turn contract of the v7 production/operate/coordinate model
- * (plan 2026-08-07, spec §15). A production turn declares `production` and
- * dispatches `publish_artifact`; an operate turn declares `annotate` and
- * dispatches `forward_input_version`/`send_message`/`submit_final_artifact`;
- * a coordinate (dispatch-only) turn declares neither and only dispatches.
- * `request_human_input` may interrupt any turn. The v2 shape drops the v1
- * `productionPackageRef`/`cardinality` (kept optional here so legacy v1
- * snapshots still type-check until Phase 3 rewrites the fixtures).
+ * Closed ten-value Slot capability enum v1 (spec §3.2 / design §10.2 D01).
+ * The runtime never accepts template-custom capability names.
  */
-export interface TurnContract {
-  version: 1 | 2;
+export type SlotCapabilityV1 =
+  | 'read_structure_contract'
+  | 'write_structure_proposal'
+  | 'validate_structure_proposal'
+  | 'submit_structure_proposal'
+  | 'read_slot_spec'
+  | 'read_slot_content'
+  | 'write_draft_content'
+  | 'validate_draft'
+  | 'submit_draft'
+  | 'request_seal';
+
+/** v3 slot session union (spec §3.2). structure binds no profile. */
+export type StructuredSlotSessionV3 =
+  | {
+      kind: 'structure';
+      accessProfile: null;
+      capabilities: SlotCapabilityV1[];
+      completion: 'structure_commit_candidate_created';
+    }
+  | {
+      kind: 'fill';
+      accessProfile: string;
+      capabilities: SlotCapabilityV1[];
+      completion: 'merge_candidate_created';
+    }
+  | {
+      kind: 'seal';
+      accessProfile: string;
+      capabilities: SlotCapabilityV1[];
+      completion: 'seal_candidate_created';
+      failureDispatch: {
+        when: 'seal_gate_failed';
+        action: 'send_message';
+      };
+    };
+
+/**
+ * Structured TurnContract v3 (spec §3.2). A slot agent fixes exactly one
+ * `slotSession.kind`; v2 `production`/`annotate` are mutually exclusive with
+ * the slot session and never appear on v3 (design §11.4).
+ */
+export interface StructuredTurnContractV3 {
+  version: 3;
+  slotSession: StructuredSlotSessionV3;
+  dispatch: {
+    allowedActions: Array<
+      'send_message' | 'publish_artifact' | 'submit_final_artifact' | 'request_human_input'
+    >;
+    targets: Partial<Record<'send_message' | 'publish_artifact', string[]>>;
+  };
+}
+
+/**
+ * Shared basic v1/v2 turn-contract fields (plan 2026-08-07, spec §15). A
+ * production turn declares `production` and dispatches `publish_artifact`; an
+ * operate turn declares `annotate` and dispatches
+ * `forward_input_version`/`send_message`/`submit_final_artifact`; a coordinate
+ * (dispatch-only) turn declares neither and only dispatches.
+ * `request_human_input` may interrupt any turn.
+ */
+interface BasicTurnContractFields {
   production?: {
     completionAction?: 'finish_production';
     output: {
@@ -65,6 +120,40 @@ export interface TurnContract {
   };
 }
 
+/** Historical basic version-1 turn contract (kept unchanged). */
+export interface BasicTurnContractV1 extends BasicTurnContractFields {
+  version: 1;
+}
+
+/** Current basic version-2 turn contract (kept unchanged). */
+export interface BasicTurnContractV2 extends BasicTurnContractFields {
+  version: 2;
+}
+
+/** Every supported turn contract (spec §3.2 / design §11.4). */
+export type TurnContract = BasicTurnContractV1 | BasicTurnContractV2 | StructuredTurnContractV3;
+
+/** True when the contract is a v1/v2 basic contract (production/annotate shape). */
+export function isBasicTurnContract(
+  contract: TurnContract | null,
+): contract is BasicTurnContractV1 | BasicTurnContractV2 {
+  return contract !== null && (contract.version === 1 || contract.version === 2);
+}
+
+/** True when the contract is a structured v3 slot-session contract. */
+export function isStructuredTurnContractV3(
+  contract: TurnContract | null,
+): contract is StructuredTurnContractV3 {
+  return contract !== null && contract.version === 3;
+}
+
+/**
+ * Scaffold phase used by the structured pipeline typestate (spec §6 / design
+ * §11.6): the compiled phase contract maps each agent id to the set of input
+ * phases it may run under.
+ */
+export type ScaffoldPhase = 'no_scaffold' | 'active_unsealed' | 'sealed';
+
 /** One frozen Skill: identity + content file plus optional section files. */
 export interface FrozenSkill {
   id: string;
@@ -104,6 +193,11 @@ export interface FrozenAgentConfig {
   /** Optional JS validator gate; null when the agent declares none. */
   gate: FrozenGate | null;
   /**
+   * Static capability ceiling declared by the agent YAML (v3 slot agents, spec
+   * §3.2 / design D02). Basic agents carry an empty ceiling.
+   */
+  slotCapabilities: SlotCapabilityV1[];
+  /**
    * The agent's turn contract. Every CURRENT template agent declares one
    * (enforced by the validator); historical frozen task snapshots loaded in
    * relaxed mode carry `null` here, which marks the whole snapshot
@@ -140,6 +234,23 @@ export interface FrozenTemplate {
    * template; null when the pipeline declares none (platform default).
    */
   budget: ProgressPolicy | null;
+  /**
+   * Production mode (spec §3.2): `basic` for the existing v2 model,
+   * `structured_slots` for the structured slot engine. Historical manifests
+   * without the field normalize to `basic`.
+   */
+  productionMode: 'basic' | 'structured_slots';
+  /**
+   * The compiled structured-slot contract v1 (spec §3.4); null for basic
+   * templates and historical manifests.
+   */
+  structuredSlots: FrozenStructuredSlotContractV1 | null;
+  /**
+   * The compiled pipeline scaffold-phase contract (spec §6 / design §11.6):
+   * each agent id maps to the set of input `ScaffoldPhase`s it may run under.
+   * Null for basic templates.
+   */
+  structuredPhases: Record<string, readonly ScaffoldPhase[]> | null;
   sourcePath: string;
 }
 
@@ -169,6 +280,8 @@ export const TEMPLATE_ERROR_CODES = {
   TEMPLATE_FINAL_SUBMITTER_UNKNOWN: 'TEMPLATE_FINAL_SUBMITTER_UNKNOWN',
   TEMPLATE_SKILL_MISSING: 'TEMPLATE_SKILL_MISSING',
   TEMPLATE_NOT_FOUND: 'TEMPLATE_NOT_FOUND',
+  /** Structured template known but the host runtime cannot run it (spec §5). */
+  TEMPLATE_RUNTIME_UNAVAILABLE: 'TEMPLATE_RUNTIME_UNAVAILABLE',
 } as const;
 
 export type TemplateErrorCode = (typeof TEMPLATE_ERROR_CODES)[keyof typeof TEMPLATE_ERROR_CODES];

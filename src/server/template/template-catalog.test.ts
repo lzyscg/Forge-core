@@ -19,6 +19,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { CorePaths } from '../storage/core-paths';
+import { createTestRuntimeEnvironment } from '../structured-slots/runtime-capability';
 import { TemplateCatalog } from './template-catalog';
 
 const tempRoots: string[] = [];
@@ -327,5 +328,70 @@ describe('TemplateCatalog', () => {
     await expect(catalog.reload('test-template')).rejects.toMatchObject({ code: 'TEMPLATE_INVALID' });
     // The cached version stays usable.
     expect(catalog.get('test-template')?.status).toBe('valid');
+  });
+});
+
+describe('TemplateCatalog structured readiness gate (Task 5, spec §5 / O05)', () => {
+  /** Raw copy of the structured fixture (no contract injection). */
+  async function structuredCatalog(
+    options: { runtimeEnvironment?: ReturnType<typeof createTestRuntimeEnvironment> } = {},
+  ): Promise<{ paths: CorePaths; catalog: TemplateCatalog }> {
+    const dataRoot = makeTempDir('forge-core-t2s-data-');
+    const templateRoot = makeTempDir('forge-core-t2s-templates-');
+    cpSync(fixturePath('structured-valid'), join(templateRoot, 'structured-gated'), { recursive: true });
+    const paths = CorePaths.create({ dataRoot, templateRoot });
+    const catalog = new TemplateCatalog(paths, {
+      runtimeEnvironment: options.runtimeEnvironment,
+    });
+    await catalog.initialize();
+    return { paths, catalog };
+  }
+
+  it('does not expose a runnable structured template while disabled', async () => {
+    // Production default environment: disabled capability + null profile.
+    const { catalog } = await structuredCatalog();
+    expect(catalog.get('structured-gated')).toBeUndefined();
+    expect(catalog.getFrozen('structured-gated')).toBeUndefined();
+    expect(catalog.getDiagnostic('structured-gated')?.code).toBe('TEMPLATE_RUNTIME_UNAVAILABLE');
+  });
+
+  it('loads, caches and exposes a structured template with an enabled runtime', async () => {
+    const { paths, catalog } = await structuredCatalog({
+      runtimeEnvironment: createTestRuntimeEnvironment(),
+    });
+    const detail = catalog.get('structured-gated');
+    expect(detail?.status).toBe('valid');
+    const frozen = catalog.getFrozen('structured-gated');
+    expect(frozen?.productionMode).toBe('structured_slots');
+    expect(frozen?.structuredSlots).not.toBeNull();
+    // The cache copy reopens with the same environment (design O05).
+    const hashDir = readdirSync(join(paths.templateCacheRoot, 'structured-gated')).find((name) =>
+      /^[0-9a-f]{64}$/.test(name),
+    );
+    expect(hashDir).toBeDefined();
+    expect(detail?.version).toBe(hashDir?.slice(0, 12));
+    // The manifest carries the production mode and phase contract JSON-clean.
+    const manifest = JSON.parse(
+      readFileSync(join(paths.templateCacheRoot, 'structured-gated', hashDir as string, 'manifest.json'), 'utf8'),
+    ) as { productionMode?: unknown; structuredPhases?: unknown };
+    expect(manifest.productionMode).toBe('structured_slots');
+    expect(manifest.structuredPhases).toEqual({
+      structure: ['no_scaffold'],
+      fill: ['active_unsealed'],
+      seal: ['active_unsealed'],
+      submitter: ['sealed'],
+    });
+  });
+
+  it('retains the availability diagnostic for a known structured cache while disabled', async () => {
+    const { paths } = await structuredCatalog({
+      runtimeEnvironment: createTestRuntimeEnvironment(),
+    });
+    // Break the source so a restarted disabled catalog would boot from cache.
+    rmSync(paths.templateSource('structured-gated'), { recursive: true, force: true });
+    const restarted = new TemplateCatalog(paths); // production default (disabled)
+    await restarted.initialize();
+    expect(restarted.get('structured-gated')).toBeUndefined();
+    expect(restarted.getDiagnostic('structured-gated')?.code).toBe('TEMPLATE_RUNTIME_UNAVAILABLE');
   });
 });

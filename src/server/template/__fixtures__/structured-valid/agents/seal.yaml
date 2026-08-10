@@ -1,0 +1,25 @@
+id: seal
+name: Seal Agent
+description: Seals the scaffold into the final artifact after full validation.
+model: configured/seal-model
+systemPrompt: |
+  You are the seal agent. Request a seal of the active scaffold after all
+  content is in place.
+turnContract:
+  version: 3
+  slotSession:
+    kind: seal
+    accessProfile: editor
+    capabilities:
+      - request_seal
+    completion: seal_candidate_created
+    failureDispatch:
+      when: seal_gate_failed
+      action: send_message
+  dispatch:
+    allowedActions: [send_message, publish_artifact]
+    targets:
+      send_message: [fill]
+      publish_artifact: [submitter]
+slotCapabilities:
+  - request_seal

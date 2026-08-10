@@ -10,7 +10,12 @@
 import { parse } from 'yaml';
 import type { InputField } from '../../shared/contracts';
 import { PROGRESS_POLICY_CEILING, type ProgressPolicy } from '../runtime/progress-guard';
-import { TEMPLATE_ERROR_CODES, TemplateError } from './template-schema';
+import {
+  TEMPLATE_ERROR_CODES,
+  TemplateError,
+  type SlotCapabilityV1,
+  type StructuredTurnContractV3,
+} from './template-schema';
 
 const RELOAD_ACTION = '修正模板文件后重新加载模板。';
 
@@ -212,6 +217,11 @@ export interface ValidatedArtifactSchema {
 }
 
 export interface ValidatedPipelineFile {
+  /**
+   * Production mode (spec §3.2): `basic` when `productionMode` is missing.
+   * Unknown values are rejected.
+   */
+  productionMode: 'basic' | 'structured_slots';
   agents: string[];
   routes: ValidatedRoute[];
   submitters: string[];
@@ -268,6 +278,11 @@ function validateInject(fileName: string, raw: unknown, index: number): Validate
 export function validatePipelineFile(fileName: string, raw: unknown): ValidatedPipelineFile {
   const root = asRecord(fileName, raw, 'pipeline.yaml');
 
+  let productionMode: 'basic' | 'structured_slots' = 'basic';
+  if (root.productionMode !== undefined && root.productionMode !== null) {
+    productionMode = asEnum(fileName, root.productionMode, 'productionMode', ['basic', 'structured_slots']);
+  }
+
   const agents = asArray(fileName, root.agents, 'agents').map((entry, index) =>
     asSafeId(fileName, entry, `agents[${index}]`),
   );
@@ -317,7 +332,7 @@ export function validatePipelineFile(fileName: string, raw: unknown): ValidatedP
     if (turns < 1 || turns > PROGRESS_POLICY_CEILING) invalid(fileName, `budget.maxTurnsSinceHumanAnswer 必须在 1 到 ${PROGRESS_POLICY_CEILING} 之间。`);
     budget = Object.freeze({ maxTurnsSinceHumanAnswer: turns });
   }
-  return { agents, routes, submitters, artifactSchema, budget };
+  return { productionMode, agents, routes, submitters, artifactSchema, budget };
 }
 export interface ValidatedAgentSkill {
   id: string;
@@ -335,8 +350,8 @@ export interface ValidatedAgentGate {
   mode: Array<'self_check' | 'commit'>;
 }
 
-/** Structural shape of one validated turn contract (spec §6). */
-export interface ValidatedTurnContract {
+/** Structural shape of one validated turn contract (spec §6 / §3.2). */
+export interface ValidatedBasicTurnContract {
   version: 1 | 2;
   production?: {
     files?: string[];
@@ -355,16 +370,144 @@ export interface ValidatedTurnContract {
   };
 }
 
+/** Structural shape of one validated v3 structured turn contract (spec §3.2). */
+export type ValidatedTurnContractV3 = StructuredTurnContractV3;
+
+export type ValidatedTurnContract = ValidatedBasicTurnContract | ValidatedTurnContractV3;
+
+/** The ten closed slot capabilities v1 (design §10.2). */
+export const SLOT_CAPABILITIES_V1: readonly SlotCapabilityV1[] = [
+  'read_structure_contract',
+  'write_structure_proposal',
+  'validate_structure_proposal',
+  'submit_structure_proposal',
+  'read_slot_spec',
+  'read_slot_content',
+  'write_draft_content',
+  'validate_draft',
+  'submit_draft',
+  'request_seal',
+];
+
 const PRODUCTION_SOURCES = ['inline', 'workspace_file', 'current_input_artifact'] as const;
 const DISPATCH_INTENTS = ['send_message', 'publish_artifact', 'submit_final_artifact', 'forward_input_version', 'request_human_input'] as const;
+const V3_DISPATCH_INTENTS = ['send_message', 'publish_artifact', 'submit_final_artifact', 'request_human_input'] as const;
+const V3_SESSION_KINDS = ['structure', 'fill', 'seal'] as const;
+const V3_COMPLETIONS = [
+  'structure_commit_candidate_created',
+  'merge_candidate_created',
+  'seal_candidate_created',
+] as const;
+
+/** Validates a v3 structured turn contract (spec §3.2 / design §11.4). */
+function validateTurnContractV3(
+  fileName: string,
+  contract: Record<string, unknown>,
+): ValidatedTurnContractV3 {
+  if (contract.production !== undefined && contract.production !== null) {
+    invalid(fileName, 'v3 turnContract 不能声明 production。');
+  }
+  if (contract.annotate !== undefined && contract.annotate !== null) {
+    invalid(fileName, 'v3 turnContract 不能声明 annotate。');
+  }
+  const session = asRecord(fileName, contract.slotSession, 'turnContract.slotSession');
+  const kind = asEnum(fileName, session.kind, 'turnContract.slotSession.kind', V3_SESSION_KINDS);
+  const capabilities = asArray(
+    fileName,
+    session.capabilities,
+    'turnContract.slotSession.capabilities',
+  ).map((entry, index) =>
+    asEnum(fileName, entry, `turnContract.slotSession.capabilities[${index}]`, SLOT_CAPABILITIES_V1),
+  );
+  const completion = asEnum(fileName, session.completion, 'turnContract.slotSession.completion', V3_COMPLETIONS);
+  const expectedCompletion =
+    kind === 'structure'
+      ? 'structure_commit_candidate_created'
+      : kind === 'fill'
+        ? 'merge_candidate_created'
+        : 'seal_candidate_created';
+  if (completion !== expectedCompletion) {
+    invalid(fileName, `turnContract.slotSession.completion 与 ${kind} 节点不匹配。`);
+  }
+
+  let slotSession: ValidatedTurnContractV3['slotSession'];
+  if (kind === 'structure') {
+    if (session.accessProfile !== null) {
+      invalid(fileName, 'structure 的 accessProfile 必须为 null。');
+    }
+    if (session.failureDispatch !== undefined && session.failureDispatch !== null) {
+      invalid(fileName, '仅 seal 节点可以声明 failureDispatch。');
+    }
+    slotSession = { kind: 'structure', accessProfile: null, capabilities, completion: 'structure_commit_candidate_created' };
+  } else if (kind === 'fill') {
+    if (session.failureDispatch !== undefined && session.failureDispatch !== null) {
+      invalid(fileName, '仅 seal 节点可以声明 failureDispatch。');
+    }
+    const accessProfile = asString(fileName, session.accessProfile, 'turnContract.slotSession.accessProfile', {
+      required: true,
+    });
+    slotSession = { kind: 'fill', accessProfile, capabilities, completion: 'merge_candidate_created' };
+  } else {
+    const accessProfile = asString(fileName, session.accessProfile, 'turnContract.slotSession.accessProfile', {
+      required: true,
+    });
+    const fd = asRecord(fileName, session.failureDispatch, 'turnContract.slotSession.failureDispatch');
+    const failureDispatch = {
+      when: asEnum(fileName, fd.when, 'turnContract.slotSession.failureDispatch.when', ['seal_gate_failed']),
+      action: asEnum(fileName, fd.action, 'turnContract.slotSession.failureDispatch.action', ['send_message']),
+    };
+    slotSession = {
+      kind: 'seal',
+      accessProfile,
+      capabilities,
+      completion: 'seal_candidate_created',
+      failureDispatch,
+    };
+  }
+
+  const dispatch = asRecord(fileName, contract.dispatch, 'turnContract.dispatch');
+  const seen = new Set<string>();
+  const allowedActions = asArray(fileName, dispatch.allowedActions, 'turnContract.dispatch.allowedActions').map((entry, index) => {
+    const intent = asEnum(fileName, entry, `turnContract.dispatch.allowedActions[${index}]`, V3_DISPATCH_INTENTS);
+    if (seen.has(intent)) invalid(fileName, `turnContract.dispatch.allowedActions 中 ${intent} 重复。`);
+    seen.add(intent);
+    return intent;
+  });
+  if (allowedActions.length === 0) {
+    invalid(fileName, 'turnContract.dispatch.allowedActions 至少需要一个发送意图。');
+  }
+  const targets: ValidatedTurnContractV3['dispatch']['targets'] = {};
+  if (dispatch.targets !== undefined && dispatch.targets !== null) {
+    const map = asRecord(fileName, dispatch.targets, 'turnContract.dispatch.targets');
+    for (const [intent, target] of Object.entries(map)) {
+      if (!(V3_DISPATCH_INTENTS as readonly string[]).includes(intent)) {
+        invalid(fileName, `turnContract.dispatch.targets 包含未知发送意图 ${intent}。`);
+      }
+      if (!seen.has(intent)) {
+        invalid(fileName, `turnContract.dispatch.targets.${intent} 未在 allowedActions 中声明。`);
+      }
+      if (intent === 'send_message' || intent === 'publish_artifact') {
+        targets[intent] = asSafeIdList(fileName, target, `turnContract.dispatch.targets.${intent}`);
+      }
+    }
+  }
+  return {
+    version: 3,
+    slotSession,
+    dispatch: { allowedActions, targets },
+  };
+}
 
 /** Validates the required `turnContract` block of one agent file (spec §6). */
 function validateTurnContract(fileName: string, raw: unknown): ValidatedTurnContract {
   const contract = asRecord(fileName, raw, 'turnContract');
   const version = contract.version;
-  if (version !== 1 && version !== 2) invalid(fileName, 'turnContract.version 仅支持 1 或 2。');
+  if (version === 3) {
+    return validateTurnContractV3(fileName, contract);
+  }
+  if (version !== 1 && version !== 2) invalid(fileName, 'turnContract.version 仅支持 1、2 或 3。');
 
-  let production: ValidatedTurnContract['production'];
+  let production: ValidatedBasicTurnContract['production'];
   if (contract.production !== undefined && contract.production !== null) {
     const p = asRecord(fileName, contract.production, 'turnContract.production');
     // v2 carries files/sources/formats directly under production; v1 wrapped
@@ -379,7 +522,7 @@ function validateTurnContract(fileName: string, raw: unknown): ValidatedTurnCont
     production = { completionAction: 'finish_production', output: { formats: formats as Array<'markdown'|'text'>, sources: sources as Array<'inline'|'workspace_file'|'current_input_artifact'> }, ...(files ? { files } : {}) };
   }
 
-  let annotate: ValidatedTurnContract['annotate'];
+  let annotate: ValidatedBasicTurnContract['annotate'];
   if (contract.annotate !== undefined && contract.annotate !== null) {
     const a = asRecord(fileName, contract.annotate, 'turnContract.annotate');
     annotate = { files: asArray(fileName,a.files,'turnContract.annotate.files').map((e,i)=>asSafeId(fileName,e,`turnContract.annotate.files[${i}]`)) };
@@ -393,13 +536,13 @@ function validateTurnContract(fileName: string, raw: unknown): ValidatedTurnCont
     if(seen.has(intent)) invalid(fileName,`turnContract.dispatch.allowedActions 中 ${intent} 重复。`); seen.add(intent); return intent;
   });
   if (allowedActions.length===0) invalid(fileName,'turnContract.dispatch.allowedActions 至少需要一个发送意图。');
-  const targets: ValidatedTurnContract['dispatch']['targets'] = {};
+  const targets: ValidatedBasicTurnContract['dispatch']['targets'] = {};
   if (dispatch.targets !== undefined && dispatch.targets !== null) {
     const map=asRecord(fileName,dispatch.targets,'turnContract.dispatch.targets');
     for (const [intent,target] of Object.entries(map)) {
       if (!(DISPATCH_INTENTS as readonly string[]).includes(intent)) invalid(fileName,`turnContract.dispatch.targets 包含未知发送意图 ${intent}。`);
       if (!seen.has(intent)) invalid(fileName,`turnContract.dispatch.targets.${intent} 未在 allowedActions 中声明。`);
-      if (intent !== 'request_human_input') targets[intent as keyof typeof targets]=asSafeIdList(fileName,target,`turnContract.dispatch.targets.${intent}`);
+      if (intent !== 'request_human_input') targets[intent as keyof ValidatedBasicTurnContract['dispatch']['targets']]=asSafeIdList(fileName,target,`turnContract.dispatch.targets.${intent}`);
     }
   }
   const productionPackageRef = dispatch.productionPackageRef === undefined ? undefined : asEnum(fileName,dispatch.productionPackageRef,'turnContract.dispatch.productionPackageRef',['current']);
@@ -420,6 +563,12 @@ export interface ValidatedAgentFile {
   skills: ValidatedAgentSkill[];
   /** Optional JS validator gate; null when the agent declares none. */
   gate: ValidatedAgentGate | null;
+  /**
+   * Static capability ceiling declared by the agent YAML (spec §3.2); empty
+   * for basic agents and historical snapshots. v3 slot agents must declare a
+   * ceiling that covers their session capabilities (validated downstream).
+   */
+  slotCapabilities: SlotCapabilityV1[];
   /**
    * Null only in the relaxed historical-snapshot mode: a missing or
    * unsupported contract marks the snapshot non-runnable, never invalid
@@ -545,6 +694,15 @@ export function validateAgentFile(
       ? validateAgentGate(fileName, root.gate)
       : null;
 
+  // Static slot-capability ceiling (spec §3.2): absent or empty for basic
+  // agents; v3 slot agents declare the capabilities their sessions may use.
+  const slotCapabilities =
+    'slotCapabilities' in root && root.slotCapabilities !== undefined && root.slotCapabilities !== null
+      ? asArray(fileName, root.slotCapabilities, 'slotCapabilities').map((entry, index) =>
+          asEnum(fileName, entry, `slotCapabilities[${index}]`, SLOT_CAPABILITIES_V1),
+        )
+      : [];
+
   return {
     id: asSafeId(fileName, root.id, 'id'),
     name: asString(fileName, root.name, 'name', { required: true }),
@@ -554,6 +712,7 @@ export function validateAgentFile(
     model,
     skills,
     gate,
+    slotCapabilities,
     turnContract,
   };
 }

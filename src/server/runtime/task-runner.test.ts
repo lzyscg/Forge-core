@@ -965,6 +965,31 @@ describe('TaskRunner per-turn checklist (plan 2026-08-06)', () => {
     expect(buildTurnChecklist({ ...writer!, turnContract: null }, frozen)).toBe('');
   });
 
+  it('fails closed (empty checklist) for a v3 structured contract (Task 5)', async () => {
+    const harness = await runnerHarness({});
+    const frozen = await harness.service.tasks.readFrozenTemplate(harness.taskId);
+    const writer = frozen.agents.find((agent) => agent.id === 'writer');
+    expect(writer).toBeDefined();
+    const v3: import('../template/template-schema').StructuredTurnContractV3 = {
+      version: 3,
+      slotSession: {
+        kind: 'structure',
+        accessProfile: null,
+        capabilities: [
+          'read_structure_contract',
+          'write_structure_proposal',
+          'submit_structure_proposal',
+        ],
+        completion: 'structure_commit_candidate_created',
+      },
+      dispatch: {
+        allowedActions: ['send_message'],
+        targets: { send_message: ['fill'] },
+      },
+    };
+    expect(buildTurnChecklist({ ...writer!, turnContract: v3 }, frozen)).toBe('');
+  });
+
   it('injects the checklist after the input body, never into events or replayed history', async () => {
     const harness = await runnerHarness({
       writer: [writerPublishTurn('初稿 V1'), writerPublishTurn('初稿 V2')],

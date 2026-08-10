@@ -38,6 +38,7 @@ import { projectTask } from './storage/task-projector';
 import type { TaskEvent } from './storage/task-events';
 import { TraceStore } from './storage/trace-store';
 import { TemplateCatalog } from './template/template-catalog';
+import type { StructuredRuntimeEnvironmentV1 } from './structured-slots/runtime-capability';
 import type { AgentRuntime } from './runtime/agent-runtime';
 import type { AcceptanceStopHook } from './acceptance-boundary';
 import { PiAgentRuntime } from './runtime/pi-agent-runtime';
@@ -52,6 +53,13 @@ import { TaskScheduler, type HumanAnswerRequest } from './runtime/task-scheduler
 export interface CoreServiceOptions {
   /** Injected runtime (tests use the deterministic fake); defaults to Pi. */
   runtime?: AgentRuntime;
+  /**
+   * The one structured runtime environment (spec §5 / design O05): injected
+   * into the TemplateCatalog, from which TaskStore derives it and (Task 17)
+   * the Scheduler reuses the same reference. Defaults to the checked-in
+   * production manifest (disabled, no profile).
+   */
+  runtimeEnvironment?: StructuredRuntimeEnvironmentV1;
   /**
    * Acceptance-only boundary seam (plan Phase D Task 4), threaded into the
    * scheduler; production entry points leave it undefined.
@@ -130,7 +138,12 @@ export class CoreService {
 
   constructor(paths: CorePaths, options: CoreServiceOptions = {}) {
     this.paths = paths;
-    this.templates = new TemplateCatalog(paths);
+    // The catalog owns ONE structured runtime environment; TaskStore derives
+    // it from the catalog and Task 17 will reuse the same reference for the
+    // Scheduler (design O05).
+    this.templates = new TemplateCatalog(paths, {
+      runtimeEnvironment: options.runtimeEnvironment,
+    });
     this.tasks = new TaskStore(paths, this.templates);
     this.events = new EventStore(paths);
     this.artifacts = new ArtifactStore(paths, this.events);
