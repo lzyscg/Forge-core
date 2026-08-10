@@ -240,6 +240,50 @@ interface TemplateRuntimeSnapshot {
 
 ## 7. 模板负责什么
 
+### 7.1 一个 Template Package，而不是多个子模板
+
+结构槽模板仍然是一个不可分割的 Template Package。把配置拆成多个文件只是模块化组织，不引入可独立运行、独立版本化或动态组合的“子模板”。整个 package 只有一个 `templateId`、一个 `versionHash`、一次完整校验和一份 case snapshot。
+
+固定文件分层为：
+
+```text
+template.yaml
+pipeline.yaml
+agents/*.yaml
+
+slots/
+  contract.yaml
+  validators/*
+  assembler/*
+```
+
+文件职责：
+
+| 文件 | 职责 |
+|---|---|
+| `template.yaml` | 产品元信息、用户输入字段、最终产物描述 |
+| `pipeline.yaml` | productionMode、Agent 顺序、Route、artifactSchema、最终提交者与流程级策略 |
+| `agents/*.yaml` | 模型、提示词、Skill、Gate、TurnContract 与 Agent 的 slot capability 上限 |
+| `slots/contract.yaml` | SlotTypeDefinition、LayoutGrammar、access profile、validator、Assembler 与结构槽资源限制 |
+| `slots/validators/*` | contract 引用的受信校验实现或声明资源 |
+| `slots/assembler/*` | contract 引用的确定性组装实现或声明资源 |
+
+### 7.2 模式启用与兼容规则
+
+`pipeline.yaml` 负责选择生产模式：
+
+```yaml
+productionMode: structured_slots
+```
+
+- 字段缺失时语义默认为 `basic`，保持现有模板和历史 snapshot 可读、可复核。
+- `structured_slots` 模式必须存在并完整校验固定路径 `slots/contract.yaml`。
+- `basic` 模式出现 `slots/contract.yaml` 或结构槽专用绑定时必须 fail closed，不能静默忽略死配置。
+- `slots/contract.yaml` 必须声明自己的契约版本，例如 `version: 1`。
+- exact field schema 后续继续收敛，但固定路径、模式归属和单 package 版本语义不再开放。
+
+### 7.3 控制面职责
+
 结构槽模板冻结以下控制面：
 
 1. **交付格式与 artifactSchema**：最终要生成哪些文件、格式和媒体类型。
@@ -254,6 +298,18 @@ interface TemplateRuntimeSnapshot {
 10. **Route / Action 流程**：调用顺序、失败与成功后的流程走向。
 
 模板定义的是一门受约束的结构语言；编排 Agent 只在这门语言中构造实例，不能创建新类型、放宽 grammar、注入执行代码或扩大权限。
+
+`artifactSchema` 只描述最终派生文件，不嵌套槽树。槽树是结构槽模式的创作事实源，Assembler 负责将 sealed scaffold 映射成符合 artifactSchema 的输出 manifest。
+
+### 7.4 Loader、校验与版本哈希
+
+- 现有 template loader 仍是唯一加载入口，不新增平行 Slot Template Loader。
+- Loader 先读取 `productionMode`，再按模式要求加载或拒绝 `slots/` 契约。
+- Agent capability、pipeline 绑定、access profile、selector、validator 和 Assembler 引用必须做完整交叉引用校验。
+- 所有引用必须限制在当前 Template Package 内；缺失、路径越界、未声明资源或摘要异常都 fail closed。
+- 规范化的 `slots/contract.yaml`、所有被引用资源的内容及受信实现摘要必须进入现有 `versionHash`。
+- 历史模板缺失 `productionMode` 时，canonicalization 必须保持原有 hash 稳定；不能因为新增默认字段而把已冻结 task 判为损坏。
+- 任务创建时仍把整个已验证 package 复制到现有 `snapshot/`，运行期只读取该快照。
 
 ---
 
@@ -842,16 +898,17 @@ interface SealRecord {
 首版结构槽引擎需要完成的最小闭环是：
 
 1. 模板可选择 `basic` 或 `structured_slots`。
-2. 扩展现有冻结模板快照以包含结构槽规则。
-3. 持久化 StructureProposal，整树校验后原子创建 scaffold。
-4. 单根有序统一 SlotInstance 树，spec/content 分离。
-5. 模板上限 + 运行期 SlotGrant 两层授权。
-6. Production Action/Route 调度，单 case 串行。
-7. 持久化 FillDraft、窄 Slot API、严格全局 baseRevision。
-8. 草稿自检、Merge Gate、Seal Gate 三层校验。
-9. 不可变 Scaffold Generation 的封存前整代替换。
-10. 确定性 Assembler、staging、SealRecord 与多文件原子发布。
-11. 基础模式零行为变化。
+2. 结构槽模板保持单一 Template Package，并使用固定的 `slots/contract.yaml` 分文件契约。
+3. 扩展现有冻结模板快照以包含结构槽规则和所有引用资源摘要。
+4. 持久化 StructureProposal，整树校验后原子创建 scaffold。
+5. 单根有序统一 SlotInstance 树，spec/content 分离。
+6. 模板上限 + 运行期 SlotGrant 两层授权。
+7. Production Action/Route 调度，单 case 串行。
+8. 持久化 FillDraft、窄 Slot API、严格全局 baseRevision。
+9. 草稿自检、Merge Gate、Seal Gate 三层校验。
+10. 不可变 Scaffold Generation 的封存前整代替换。
+11. 确定性 Assembler、staging、SealRecord 与多文件原子发布。
+12. 基础模式零行为变化。
 
 ---
 
@@ -879,7 +936,7 @@ interface SealRecord {
 
 主流程已经冻结，以下属于进入 dev plan 前仍需在本文继续讨论并定稿的实现级系统契约：
 
-1. `structuredSlots` 的最终模板 YAML/TypeScript schema。
+1. `slots/contract.yaml` 的最终 YAML/TypeScript 字段 schema；文件归属、固定路径和单 package 版本语义已经冻结。
 2. LayoutGrammar 的声明语言、表达能力和错误定位格式。
 3. SlotTypeDefinition 的最终字段及 `specSchema` / `contentSchema` 规范。
 4. 中性 slot selector DSL 与 access profile 解析规则。
@@ -917,6 +974,7 @@ interface SealRecord {
 | 2026-08-10 | 封存前重编排使用不可变 Scaffold Generation 整代替换，不迁移 content |
 | 2026-08-10 | 交付使用确定性 Assembler、不可变 SealRecord 和多文件原子发布 |
 | 2026-08-10 | production case 启动时冻结完整 TemplateRuntimeSnapshot，中途不升级 |
+| 2026-08-10 | 结构槽模板是单一 Template Package，按职责拆分为 pipeline、agent 与固定 slots contract 文件 |
 
 ---
 
