@@ -358,7 +358,58 @@ Slot Schema / LayoutGrammar 局部语义约束
 
 平台 hard ceiling 是部署安全边界，不属于模板可配置能力。平台收紧 hard ceiling 可以阻止新模板和新 case；既有 case 只有在环境仍满足其冻结包络时才能继续运行，不能被隐式降级。
 
-具体 limits 字段分组和绝对数值继续收敛。绝对平台数值可以在实施基准测试后确定，但字段语义、比较规则和“不静默裁剪”已经冻结。
+v1 模板包络固定为六组、十六个必填正整数字段：
+
+```ts
+type PositiveInteger = number;
+
+interface StructuredSlotLimitsV1 {
+  schema: {
+    maxSchemaDepth: PositiveInteger;
+    maxSchemaNodes: PositiveInteger;
+    maxEnumItems: PositiveInteger;
+    maxPatternLength: PositiveInteger;
+  };
+  structure: {
+    maxSlots: PositiveInteger;
+    maxTreeDepth: PositiveInteger;
+    maxChildrenPerSlot: PositiveInteger;
+  };
+  payload: {
+    maxSpecBytesPerSlot: PositiveInteger;
+    maxContentBytesPerSlot: PositiveInteger;
+    maxScaffoldPayloadBytes: PositiveInteger;
+  };
+  draft: {
+    maxChangedSlots: PositiveInteger;
+    maxDraftBytes: PositiveInteger;
+  };
+  validation: {
+    maxIssuesPerRun: PositiveInteger;
+  };
+  output: {
+    maxArtifactFiles: PositiveInteger;
+    maxArtifactBytesPerFile: PositiveInteger;
+    maxTotalArtifactBytes: PositiveInteger;
+  };
+}
+```
+
+计量口径与交叉规则：
+
+- `maxSchemaDepth` 对任一 schema 计算，根为 1；`maxSchemaNodes` 统计 contract 内全部 spec/content schema 节点总数；`maxEnumItems` 按单个 enum 计；`maxPatternLength` 统计 pattern 源文本的 Unicode code point。
+- `maxTreeDepth` 根为 1；`maxSlots` 统计全树节点；`maxChildrenPerSlot` 统计单个直接父节点的 children。
+- JSON payload 字节统一按平台 canonical JSON 的 UTF-8 编码计量；artifact 按实际输出 UTF-8/二进制字节计量。
+- `maxScaffoldPayloadBytes` 统计全部 spec 与已 set content，不包括 ID、事件、索引或数据库内部元数据。
+- `maxChangedSlots` 统计一个 FillDraft overlay 中不同的槽位数；`maxDraftBytes` 统计该 overlay 的规范化变更 payload。
+- `maxChangedSlots <= maxSlots`；单槽 spec/content 上限分别不得超过 `maxScaffoldPayloadBytes`。
+- `maxArtifactBytesPerFile <= maxTotalArtifactBytes`；artifactSchema 声明文件数不得超过 `maxArtifactFiles`。
+- `maxIssuesPerRun` 只限制单次返回的结构化 issue 数。达到上限后结果仍为失败并返回 `truncated: true`，不能把截断解释为验证通过。
+- 缺失字段、未知字段、非整数、零、负数或跨字段关系不合法都使模板加载失败。
+
+validator 与 Assembler 的 CPU、内存和 wall-clock timeout 不进入这组通用数据包络；它们后续在各自的执行注册契约中显式声明，并受平台 hard ceiling 控制。
+
+模板字段名称、单位和语义不再开放。绝对平台 hard ceiling 数值可以在实施基准测试后确定，但必须受稳定的兼容版本协议约束。
 
 ---
 
@@ -1020,6 +1071,7 @@ interface SealRecord {
 - Slot Schema 拒绝数组 type、组合关键字、未知关键字以及与 type 不一致的 enum/const；
 - Slot Schema 校验不会填充 default、转换类型、移除字段或改写输入；
 - 局部约束超过模板 limits、模板 limits 超过平台 hard ceiling 时拒绝加载，且不静默裁剪；
+- limits 任一字段缺失、未知、非正整数或违反跨字段关系时拒绝加载；
 - 同内容快照 hash 稳定；任一受控输入变化都会改变 hash；
 - 运行中修改模板源目录不影响既有 case；
 - snapshot 缺失、摘要不一致或恢复环境无法满足冻结资源包络时不可恢复运行。
@@ -1115,7 +1167,7 @@ interface SealRecord {
 1. `slots/contract.yaml` 各顶层分区的最终 YAML/TypeScript 字段 schema；权威入口、分区、声明/实现边界、固定路径和单 package 版本语义已经冻结。
 2. LayoutGrammar 的声明语言、表达能力和错误定位格式。
 3. Slot Schema v1 各关键字数值参数和 safe pattern 约束；精确白名单、对象/数组开放性、纯验证语义、单一形态和 SlotTypeDefinition 外层契约已经冻结。
-4. 模板 `limits` 的精确字段分组、跨字段关系和平台 hard ceiling 的兼容版本协议；三层限制模型与禁止静默裁剪已经冻结。
+4. 平台 hard ceiling 的绝对数值和兼容版本协议；模板 `limits` 的六组十六字段、单位、跨字段关系、三层限制模型与禁止静默裁剪已经冻结。
 5. 中性 slot selector DSL 与 access profile 解析规则。
 6. validator / Assembler 的注册、快照、沙箱和版本协议。
 7. Structure / Merge / Seal issue 的统一 schema 与错误码集合。
@@ -1160,6 +1212,7 @@ interface SealRecord {
 | 2026-08-10 | Slot Schema v1 禁止组合关键字和类型联合；一个 typeId 只对应一种确定形态 |
 | 2026-08-10 | Slot Schema v1 使用有界实用关键字白名单，只验证、不转换或改写数据 |
 | 2026-08-10 | 资源限制采用局部语义约束、模板显式包络、平台 hard ceiling 三层模型；超限拒绝且不静默裁剪 |
+| 2026-08-10 | structured_slots v1 模板 limits 固定为六组十六个必填正整数字段，执行器预算另行声明 |
 
 ---
 
