@@ -176,6 +176,57 @@ export interface SealRecord {
 }
 
 /**
+ * Platform limits profile (spec §5). Seven groups of twenty-eight
+ * positive-integer fields; field names and units are frozen and must not
+ * change. The exact shape is reproduced verbatim from the spec. Task 2 only
+ * consumes the `schema` group; later tasks consume the rest.
+ */
+export interface StructuredSlotLimitsV1 {
+  schema: {
+    maxSchemaDepth: number;
+    maxSchemaNodes: number;
+    maxEnumItems: number;
+    maxPatternLength: number;
+  };
+  structure: {
+    maxSlots: number;
+    maxTreeDepth: number;
+    maxChildrenPerSlot: number;
+  };
+  payload: {
+    maxSpecBytesPerSlot: number;
+    maxContentBytesPerSlot: number;
+    maxScaffoldPayloadBytes: number;
+  };
+  draft: {
+    maxChangedSlots: number;
+    maxDraftBytes: number;
+  };
+  attempt: {
+    maxSlotToolCallsPerAttempt: number;
+    maxValidationRunsPerAttempt: number;
+    maxValidatorInvocationsPerAttempt: number;
+    maxAggregateValidatorCpuMsPerAttempt: number;
+    maxAggregateValidatorWallClockMsPerAttempt: number;
+    maxValidatorOutputBytesPerAttempt: number;
+    maxAttemptWallClockMs: number;
+  };
+  validation: {
+    maxValidators: number;
+    maxValidatorInvocationsPerGate: number;
+    maxAggregateValidatorCpuMsPerGate: number;
+    maxAggregateValidatorWallClockMsPerGate: number;
+    maxValidatorOutputBytesPerGate: number;
+    maxIssuesPerRun: number;
+  };
+  output: {
+    maxArtifactFiles: number;
+    maxArtifactBytesPerFile: number;
+    maxTotalArtifactBytes: number;
+  };
+}
+
+/**
  * Optional TaskWorkspace structured-slots summary (spec §14 / design I01).
  * Absent for basic tasks; never embeds content, the full tree, Grants or
  * private Drafts.
