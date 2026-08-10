@@ -181,6 +181,8 @@ export function sampleTurnInput(overrides: Partial<AgentTurnInput> = {}): AgentT
       { id: 'skill-alpha', name: 'Skill Alpha', description: 'Neutral skill summary.' },
     ],
     loadedSkills: [],
+    // Basic turns pass an explicit null slot session (Task 11 contract).
+    slotSession: null,
     ...overrides,
   };
 }

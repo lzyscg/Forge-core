@@ -66,6 +66,8 @@ describe('Forge runtime contract (plan Phase C Task 1 Step 1)', () => {
     expect(input.agent.skills.map((skill) => skill.id)).toEqual(['skill-alpha']);
     expect(input.availableSkills.map((skill) => skill.id)).toEqual(['skill-alpha']);
     expect(input.publicHistory.map((entry) => entry.role)).toEqual(['user', 'assistant']);
+    // Basic turns never carry a structured slot session (Task 11 contract).
+    expect(input.slotSession).toBeNull();
   });
 
   it('allows usage to be null in a turn result', () => {

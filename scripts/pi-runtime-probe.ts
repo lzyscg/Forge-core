@@ -262,6 +262,8 @@ async function main(): Promise<void> {
     publicHistory: [],
     availableSkills: [],
     loadedSkills: [],
+    // Basic probe turn: no structured slot session (Task 11 contract).
+    slotSession: null,
   };
 
   const violations: string[] = [];

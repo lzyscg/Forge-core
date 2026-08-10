@@ -352,6 +352,8 @@ describe('TaskRunner one-node execution', () => {
     );
     expect(turnInput?.turnId).toBe('ev-input-writer-2-t1');
     expect(turnInput?.agent.id).toBe('writer');
+    // Basic turns pass an explicit null slot session (Task 11 contract).
+    expect(turnInput?.slotSession).toBeNull();
     expect(turnInput?.publicHistory).toEqual([
       { role: 'user', text: '第一轮输入' },
       { role: 'assistant', text: '第一轮结果' },

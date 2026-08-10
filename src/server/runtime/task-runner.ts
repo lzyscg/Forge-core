@@ -791,6 +791,10 @@ ${checklist}`;
           description,
         })),
         loadedSkills,
+        // Basic turns never carry a structured slot session (Task 11
+        // contract); the structured runNext path (Task 17) supplies the
+        // coordinator-built SessionHandle.
+        slotSession: null,
       };
 
       let turnResult: Awaited<ReturnType<AgentRuntime['run']>>;

@@ -26,6 +26,28 @@ export interface AgentTurnInput {
   publicHistory: Array<{ role: 'user' | 'assistant' | 'tool'; text: string }>;
   availableSkills: SkillSummary[];
   loadedSkills: Array<{ id: string; content: string; versionHash: string }>;
+  /**
+   * Internal opaque structured-slot session handle (Task 11 contract): carries
+   * the session kind and the composite abort signal (attempt deadline/resource
+   * closure combined with the scheduler stop signal). Structured v3 turns
+   * receive the handle built by the coordinator (Tasks 12-17); every basic
+   * turn passes an explicit null. The field is required so no basic path can
+   * silently skip the later structured wiring.
+   */
+  slotSession: SessionHandle | null;
+}
+
+/**
+ * Internal opaque handle for one structured slot attempt (Task 11). Minimal
+ * by design: the session kind plus the composite abort signal; grant and
+ * projection access for Tasks 12-14 is added later. `sessionKind` mirrors the
+ * closed `StructuredSessionKind` union (storage/task-events) — kept inline so
+ * the base runtime contract stays free of storage imports.
+ */
+export interface SessionHandle {
+  sessionKind: 'structure' | 'fill' | 'seal';
+  turnId: string;
+  signal: AbortSignal;
 }
 
 export interface AgentTurnResult {
