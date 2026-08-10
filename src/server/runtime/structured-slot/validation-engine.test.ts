@@ -221,6 +221,43 @@ describe('ValidationEngine — enforcement', () => {
     expect(result.verdict.summary).toEqual({ errors: 0, warnings: 1 });
   });
 
+  it('never fails open when a blocking validator rejects with no issue text', async () => {
+    // issues is optional per the ABI: `{pass:false}` must still fail the gate.
+    const v = makeValidator({ id: 'block-silent', path: 'slots/validators/block-silent.cjs', enforcement: 'blocking' });
+    const source = 'module.exports = { validate() { return { pass: false, issues: [] }; } };';
+    const { engine, contract, taskId } = makeEnv([v], { 'slots/validators/block-silent.cjs': source });
+    const result = await engine.runMergeGate({
+      taskId,
+      contract,
+      slots: baseSlots(),
+      changedSlotIds: ['s-a'],
+    });
+    expect(result.verdict.status).toBe('failed');
+    expect(result.verdict.issues).toHaveLength(1);
+    expect(result.verdict.issues[0]!.code).toBe('VALIDATOR_REJECTED');
+    expect(result.verdict.issues[0]!.severity).toBe('error');
+    expect(result.verdict.issues[0]!.details.validatorId).toBe('block-silent');
+    expect(result.verdict.summary).toEqual({ errors: 1, warnings: 0 });
+    expect(result.usage.issueCount).toBe(1);
+  });
+
+  it('keeps a silent advisory rejection as a warning, never a failure', async () => {
+    const v = makeValidator({ id: 'adv-silent', path: 'slots/validators/adv-silent.cjs', enforcement: 'advisory' });
+    const source = 'module.exports = { validate() { return { pass: false, issues: [] }; } };';
+    const { engine, contract, taskId } = makeEnv([v], { 'slots/validators/adv-silent.cjs': source });
+    const result = await engine.runMergeGate({
+      taskId,
+      contract,
+      slots: baseSlots(),
+      changedSlotIds: ['s-a'],
+    });
+    expect(result.verdict.status).toBe('passed');
+    expect(result.verdict.issues).toHaveLength(1);
+    expect(result.verdict.issues[0]!.code).toBe('VALIDATOR_ADVISORY');
+    expect(result.verdict.issues[0]!.severity).toBe('warning');
+    expect(result.verdict.summary).toEqual({ errors: 0, warnings: 1 });
+  });
+
   it('fails closed to incomplete when a blocking validator cannot execute', async () => {
     const v = makeValidator({ id: 'throw', path: 'slots/validators/throw.cjs', enforcement: 'blocking' });
     const { engine, contract, taskId } = makeEnv([v], { 'slots/validators/throw.cjs': THROW_SOURCE });

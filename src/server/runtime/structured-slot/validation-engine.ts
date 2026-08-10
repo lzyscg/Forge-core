@@ -388,20 +388,33 @@ export class ValidationEngine {
 
       usage.cpuMs += result.cpuMs;
       usage.outputBytes += result.outputBytes;
-      const code =
-        result.pass === false
-          ? pair.registration.enforcement === 'blocking'
-            ? 'VALIDATOR_REJECTED'
-            : 'VALIDATOR_ADVISORY'
-          : result.issues.length > 0
-            ? 'VALIDATOR_ADVISORY'
-            : null;
-      if (code !== null) {
-        for (const gateIssue of result.issues) {
+      if (result.pass === false) {
+        // A reliable rejection is a rejection even when the validator supplied
+        // no issue text (issues is optional per the ABI): never fail open on a
+        // missing issue list. Blocking → error (failed); advisory → warning.
+        const code =
+          pair.registration.enforcement === 'blocking' ? 'VALIDATOR_REJECTED' : 'VALIDATOR_ADVISORY';
+        const gateIssues = result.issues.length > 0 ? result.issues : [{}];
+        for (const gateIssue of gateIssues) {
           issues.push(
             this.adaptValidatorIssue(
               gate as 'merge' | 'seal_input',
               code,
+              pair.registration,
+              pair.target,
+              gateIssue,
+            ),
+          );
+          internalIssueCount += 1;
+        }
+      } else if (result.issues.length > 0) {
+        // A passing validator may still surface informational notes; these are
+        // non-blocking advisory warnings.
+        for (const gateIssue of result.issues) {
+          issues.push(
+            this.adaptValidatorIssue(
+              gate as 'merge' | 'seal_input',
+              'VALIDATOR_ADVISORY',
               pair.registration,
               pair.target,
               gateIssue,
