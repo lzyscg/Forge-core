@@ -2,7 +2,7 @@
 
 > 状态：**Living Design / 当前权威设计**
 > 首次冻结：2026-08-10
-> 维护规则：结构槽后续的设计结论、修订和开放问题统一更新在本文，不再新建平行设计文档。
+> 维护规则：结构槽后续的已接受结论统一更新在本文，不再新建平行权威设计文档；尚待评审的问题可以暂存于非权威评审队列，接受后必须回写本文。
 > 文档性质：系统设计，不是实施计划。进入开发前仍需基于本文编写独立 dev plan。
 > 历史来源：本文承接并取代 `docs/2026-08-08-structured-slots-three-role-design.md`；旧文档仅保留问题发现过程与历史背景。
 
@@ -1123,12 +1123,34 @@ interface SealRecord {
 模板加载、StructureProposal、Draft、Merge、Seal、validator 适配和 Assembler 校验对外统一投影为版本化 issue 信封，而不是各自返回互不兼容的对象：
 
 ```ts
+type IssuePhase =
+  | 'template_load'
+  | 'structure'
+  | 'draft'
+  | 'merge'
+  | 'seal_input'
+  | 'assemble'
+  | 'seal_output'
+  | 'publish';
+
+type IssueSource =
+  | 'template_loader'
+  | 'slot_schema'
+  | 'layout_grammar'
+  | 'access_control'
+  | 'resource_limits'
+  | 'lifecycle'
+  | 'validator'
+  | 'assembler'
+  | 'artifact_validator'
+  | 'publisher';
+
 interface StructuredIssueV1 {
   version: 1;
   code: string;
   severity: 'error' | 'warning';
-  phase: string;
-  source: string;
+  phase: IssuePhase;
+  source: IssueSource;
   message: string;
   primaryLocation: IssueLocation;
   relatedLocations: IssueLocation[];
@@ -1139,7 +1161,8 @@ interface StructuredIssueV1 {
 核心语义：
 
 - `code` 是稳定的机器契约；Agent、UI、测试和重试逻辑不得解析 `message` 做判断。`message` 只提供当前语言下的可读说明，可以在不改变语义的情况下改写。
-- `phase` 表示问题发生在哪个运行阶段，`source` 表示由哪个平台子系统或受信适配器产生；二者使用平台封闭枚举，模板和 Agent 不能自定义。
+- `phase` 使用八值封闭枚举表示问题发生在哪个运行检查点；`source` 使用十值封闭枚举表示由哪类平台规则、子系统或受信适配器发现。二者保持正交，模板和 Agent 不能自定义。
+- 同一 issue code 可以出现在 code registry 明确允许的多个 phase，例如 `CONTENT_SCHEMA_INVALID` 可出现在 `draft`、`merge` 和 `seal_input`，但其 source 始终是 `slot_schema`。具体 validatorId、routeId 或实现身份进入受控 details/location，不能扩展 source 字符串。
 - `primaryLocation` 指向首要修正对象；`relatedLocations` 表达冲突规则、关联槽或输出位置等辅助上下文，不用自然语言拼接第二位置。
 - `IssueLocation` 使用固定六类判别联合，分别定位规范化 contract、模板资源、Proposal 节点、正式槽、artifact 和无具体内容节点的平台操作；精确定义见 19.2。
 - `details` 是由 `code` 决定形状的判别数据，不是任意日志袋；必须是有界、可序列化、可按授权过滤的 JSON 对象。
@@ -1318,6 +1341,7 @@ type IssueLocation =
 - 模型工具 schema 不暴露工程字段；
 - validator / assembler 的沙箱限制有超时、内存、FS 和网络逃逸测试。
 - 模板加载、Structure、Merge 与 Seal 的公开 issue 都符合 `StructuredIssueV1`；消费端只依赖稳定 code，不依赖 message 文案；
+- 八种 phase 与十种 source 均做封闭枚举和合法 code 组合测试；模板 validator 不能自定义或覆盖二者；
 - 沙箱 validator 不能通过额外字段伪造平台 code、source、phase、location 或工程 ID，合法 `GateIssue` 经受信适配器投影；
 - primary/related location、details 和 message 均经过授权过滤，隐藏槽不会通过 issue 侧漏；
 - 六种 `IssueLocation` 能分别往返序列化；RFC 6901 转义、空根指针、0-based UTF-16 文本范围和逻辑相对路径拒绝规则有边界测试；
@@ -1371,13 +1395,15 @@ type IssueLocation =
 
 主流程已经冻结，以下属于进入 dev plan 前仍需在本文继续讨论并定稿的实现级系统契约：
 
+为避免逐题打断讨论，问题、推荐方案、备选方案和影响已经集中整理在 [`STRUCTURED-SLOT-ENGINE-REMAINING-DECISIONS.md`](./STRUCTURED-SLOT-ENGINE-REMAINING-DECISIONS.md)。该文件只是批量评审队列，不是第二份权威设计；接受的结论仍须合并回本文。
+
 1. `slots/contract.yaml` 各顶层分区的最终 YAML/TypeScript 字段 schema；权威入口、分区、声明/实现边界、固定路径和单 package 版本语义已经冻结。
 2. LayoutGrammar v1 的 issue code/details；统一 issue 信封、六类精确位置、FIRST/FOLLOW 静态无歧义、单遍无回溯匹配、可终止递归、强制循环拒绝、六种 AST kind、有限重复、显式叶子、nullable repeat 拒绝、结构化 Production AST 与路径化定位已经冻结。
 3. Slot Schema v1 各关键字数值参数和 safe pattern 约束；精确白名单、对象/数组开放性、纯验证语义、单一形态和 SlotTypeDefinition 外层契约已经冻结。
 4. 平台 hard ceiling 的绝对数值和兼容版本协议；模板 `limits` 的六组十六字段、单位、跨字段关系、三层限制模型与禁止静默裁剪已经冻结。
 5. 中性 slot selector DSL 与 access profile 解析规则。
 6. validator / Assembler 的注册、快照、沙箱和版本协议。
-7. `StructuredIssueV1` 的 phase/source 枚举、各阶段 code/details 集合与 verdict 包装；统一信封、六类 `IssueLocation` 精确联合和现有 `GateIssue` 的受信适配边界已经冻结。
+7. `StructuredIssueV1` 各阶段 code/details 集合与 verdict 包装；八种 phase、十种 source、统一信封、六类 `IssueLocation` 精确联合和现有 `GateIssue` 的受信适配边界已经冻结。
 8. 追加事件联合、私有 Draft Store、checkpoint 和磁盘目录布局。
 9. 结构槽 Action 与现有九动作/TurnContract 的精确适配方式。
 10. TaskWorkspace、API 和 UI 需要暴露的最小只读投影。
@@ -1426,6 +1452,7 @@ type IssueLocation =
 | 2026-08-10 | LayoutGrammar v1 必须通过 FIRST/FOLLOW 静态无歧义检查；Structure Gate 单遍左到右匹配，不回溯且不存在分支优先级 |
 | 2026-08-10 | 结构槽各阶段统一投影为版本化 StructuredIssueV1 信封和判别式位置；现有 GateIssue 仅作为沙箱 validator 输入并由平台受信适配 |
 | 2026-08-10 | IssueLocation v1 固定为 contract/template_resource/proposal/slot/artifact/operation 六类，统一使用安全逻辑路径与精确指针语义 |
+| 2026-08-10 | StructuredIssueV1 的 phase 固定为八个运行检查点，source 固定为十类平台检测来源；两者正交且模板不可扩展 |
 
 ---
 
