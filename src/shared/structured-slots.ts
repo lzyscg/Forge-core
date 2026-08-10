@@ -23,6 +23,23 @@ export type JsonValue = null | boolean | number | string | JsonValue[] | JsonObj
 export type JsonObject = { [key: string]: JsonValue };
 
 /**
+ * One committed slot instance of a scaffold generation (spec §4.1). `spec` is
+ * always an object; `content` may be any JSON value the schema allows. `unset`
+ * is distinct from a `set` value of `null`, empty string, empty array or empty
+ * object — presence is an explicit field.
+ */
+export interface SlotInstance {
+  slotId: string;
+  scaffoldId: string;
+  parentSlotId: string | null;
+  order: number;
+  typeId: string;
+  spec: JsonObject;
+  contentPresence: 'unset' | 'set';
+  content?: JsonValue;
+}
+
+/**
  * Eight-value closed phase enum (design §19.1): which runtime check point
  * discovered the problem. Both template and Agent are closed off from
  * extending it.

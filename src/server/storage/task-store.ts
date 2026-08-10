@@ -5,11 +5,12 @@
  * immutable `task.json` (identity + frozen input + full template version
  * hash), the exact template cache hash directory copied to `snapshot/`
  * through a temporary sibling and reopened through `loadTemplateDirectory`
- * for fail-loud revalidation, plus empty `events/` and `artifacts/`
- * directories. The staging directory is renamed into place only when every
- * step succeeded; any failure isolates the incomplete directory under a
- * dot-prefixed name so it can never be listed as usable (spec §8.3), and the
- * error stays public — no raw causes, no absolute paths (iron rule 6).
+ * for fail-loud revalidation, plus empty `events/`, `artifacts/` and
+ * `structured-slots/` directories (spec §7.1). The staging directory is
+ * renamed into place only when every step succeeded; any failure isolates the
+ * incomplete directory under a dot-prefixed name so it can never be listed as
+ * usable (spec §8.3), and the error stays public — no raw causes, no absolute
+ * paths (iron rule 6).
  *
  * Request validation mirrors the frozen Phase A Gateway contract: exactly the
  * template-declared input fields, required values present and non-empty.
@@ -447,6 +448,10 @@ export class TaskStore {
       }
       await mkdir(join(stageDir, 'events'), { recursive: true });
       await mkdir(join(stageDir, 'artifacts'), { recursive: true });
+      // The structured-slots subtree (spec §7.1) is published empty; the blob,
+      // private and custody stores populate it on demand and deleteTask removes
+      // the whole task root (and therefore this subtree) with it.
+      await mkdir(join(stageDir, 'structured-slots'), { recursive: true });
       await rename(stageDir, this.paths.taskRoot(taskId));
     } catch (error) {
       await this.isolate(stageDir, taskId);

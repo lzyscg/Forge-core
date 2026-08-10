@@ -138,3 +138,90 @@ describe('CorePaths', () => {
     expect(isSafeSegment('a\0b')).toBe(false);
   });
 });
+
+describe('CorePaths structured-slots layout', () => {
+  it('derives the structured-slots directory tree under the task root', () => {
+    const paths = CorePaths.create(ROOTS);
+    const root = resolve('D:/core-data/tasks/task-1/structured-slots');
+    expect(paths.taskStructuredSlotsRoot('task-1')).toBe(root);
+    expect(paths.taskStructuredBlobsRoot('task-1')).toBe(joinPaths(root, 'blobs'));
+    expect(paths.taskStructuredGenerationsRoot('task-1')).toBe(joinPaths(root, 'generations'));
+    expect(paths.taskStructuredContentRevisionsRoot('task-1')).toBe(
+      joinPaths(root, 'content-revisions'),
+    );
+    expect(paths.taskStructuredProposalsRoot('task-1')).toBe(joinPaths(root, 'proposals'));
+    expect(paths.taskStructuredDraftsRoot('task-1')).toBe(joinPaths(root, 'drafts'));
+    expect(paths.taskStructuredAttemptsRoot('task-1')).toBe(joinPaths(root, 'attempts'));
+    expect(paths.taskStructuredCustodyRoot('task-1')).toBe(joinPaths(root, 'custody'));
+  });
+
+  it('derives content-addressed blob, generation, revision and journal files', () => {
+    const paths = CorePaths.create(ROOTS);
+    const root = resolve('D:/core-data/tasks/task-1/structured-slots');
+    const digest = 'ab'.repeat(32);
+    expect(paths.taskStructuredBlobFile('task-1', digest)).toBe(
+      joinPaths(root, `blobs/ab/${digest}.json`),
+    );
+    expect(paths.taskStructuredContentRevisionFile('task-1', digest)).toBe(
+      joinPaths(root, 'content-revisions', `${digest}.json`),
+    );
+    const genRoot = joinPaths(root, 'generations/gen-1');
+    expect(paths.taskStructuredGenerationRoot('task-1', 'gen-1')).toBe(genRoot);
+    expect(paths.taskStructuredGenerationManifestFile('task-1', 'gen-1')).toBe(
+      joinPaths(genRoot, 'manifest.json'),
+    );
+    expect(paths.taskStructuredGenerationSlotsFile('task-1', 'gen-1')).toBe(
+      joinPaths(genRoot, 'slots.ndjson'),
+    );
+    expect(paths.taskStructuredGenerationIndexFile('task-1', 'gen-1')).toBe(
+      joinPaths(genRoot, 'index.json'),
+    );
+    const proposalRoot = joinPaths(root, 'proposals/prop-1');
+    expect(paths.taskStructuredProposalRoot('task-1', 'prop-1')).toBe(proposalRoot);
+    expect(paths.taskStructuredProposalJournalFile('task-1', 'prop-1')).toBe(
+      joinPaths(proposalRoot, 'journal.ndjson'),
+    );
+    expect(paths.taskStructuredProposalCheckpointFile('task-1', 'prop-1')).toBe(
+      joinPaths(proposalRoot, 'checkpoint.json'),
+    );
+    expect(paths.taskStructuredProposalLifecycleFile('task-1', 'prop-1')).toBe(
+      joinPaths(proposalRoot, 'lifecycle.json'),
+    );
+    const draftRoot = joinPaths(root, 'drafts/draft-1');
+    expect(paths.taskStructuredDraftRoot('task-1', 'draft-1')).toBe(draftRoot);
+    expect(paths.taskStructuredDraftJournalFile('task-1', 'draft-1')).toBe(
+      joinPaths(draftRoot, 'journal.ndjson'),
+    );
+    expect(paths.taskStructuredDraftCheckpointFile('task-1', 'draft-1')).toBe(
+      joinPaths(draftRoot, 'checkpoint.json'),
+    );
+    expect(paths.taskStructuredDraftLifecycleFile('task-1', 'draft-1')).toBe(
+      joinPaths(draftRoot, 'lifecycle.json'),
+    );
+    expect(paths.taskStructuredAttemptMeterFile('task-1', 'turn-1')).toBe(
+      joinPaths(root, 'attempts/turn-1/meter.json'),
+    );
+  });
+
+  it('rejects unsafe structured identifiers and malformed hashes', () => {
+    const paths = CorePaths.create(ROOTS);
+    const digest = 'ab'.repeat(32);
+    expect(() => paths.taskStructuredBlobFile('task-1', '../evil')).toThrow(/CORE_PATH_INVALID/);
+    expect(() => paths.taskStructuredBlobFile('task-1', 'xy')).toThrow(/CORE_PATH_INVALID/);
+    expect(() => paths.taskStructuredBlobFile('task-1', 'GG'.repeat(32))).toThrow(
+      /CORE_PATH_INVALID/,
+    );
+    expect(() => paths.taskStructuredGenerationRoot('task-1', '../gen')).toThrow(
+      /CORE_PATH_INVALID/,
+    );
+    expect(() => paths.taskStructuredProposalRoot('task-1', 'a/b')).toThrow(/CORE_PATH_INVALID/);
+    expect(() => paths.taskStructuredDraftRoot('task-1', '..')).toThrow(/CORE_PATH_INVALID/);
+    expect(() => paths.taskStructuredAttemptMeterFile('task-1', 'turn/1')).toThrow(
+      /CORE_PATH_INVALID/,
+    );
+  });
+});
+
+function joinPaths(root: string, ...rel: string[]): string {
+  return resolve(root, ...rel);
+}

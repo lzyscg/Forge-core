@@ -49,6 +49,9 @@ const EVENT_FILE_NAME = /^(\d{6})-([A-Za-z0-9][A-Za-z0-9._-]*)\.json$/;
 const BATCH_FILE_NAME =
   /^(\d{6})-(\d{6})-([A-Za-z0-9][A-Za-z0-9._-]*)\.batch\.json$/;
 
+/** Full lowercase hex SHA-256 digest used as a structured blob filename. */
+const STRUCTURED_SHA256 = /^[0-9a-f]{64}$/;
+
 function assertSafeSegment(field: string, value: string): void {
   if (!SAFE_SEGMENT.test(value)) {
     throw new CorePathError(field);
@@ -212,5 +215,121 @@ export class CorePaths {
   taskWorkspaceRoot(taskId: string, agentId: string): string {
     assertSafeSegment('agentId', agentId);
     return resolve(this.taskWorkspacesRoot(taskId), agentId);
+  }
+
+  /** structured-slots/ root under the task root (spec §7.1). */
+  taskStructuredSlotsRoot(taskId: string): string {
+    return resolve(this.taskRoot(taskId), 'structured-slots');
+  }
+
+  /** structured-slots/blobs/ — content-addressed immutable blobs. */
+  taskStructuredBlobsRoot(taskId: string): string {
+    return resolve(this.taskStructuredSlotsRoot(taskId), 'blobs');
+  }
+
+  /** blobs/<first2>/<sha256>.json — the full 64-hex digest is the filename. */
+  taskStructuredBlobFile(taskId: string, sha256: string): string {
+    if (!STRUCTURED_SHA256.test(sha256)) {
+      throw new CorePathError('sha256');
+    }
+    return resolve(this.taskStructuredBlobsRoot(taskId), sha256.slice(0, 2), `${sha256}.json`);
+  }
+
+  /** structured-slots/generations/ — one indexed generation per id. */
+  taskStructuredGenerationsRoot(taskId: string): string {
+    return resolve(this.taskStructuredSlotsRoot(taskId), 'generations');
+  }
+
+  /** generations/<generationId>/ — the id must be a single safe segment. */
+  taskStructuredGenerationRoot(taskId: string, generationId: string): string {
+    assertSafeSegment('generationId', generationId);
+    return resolve(this.taskStructuredGenerationsRoot(taskId), generationId);
+  }
+
+  taskStructuredGenerationManifestFile(taskId: string, generationId: string): string {
+    return resolve(this.taskStructuredGenerationRoot(taskId, generationId), 'manifest.json');
+  }
+
+  taskStructuredGenerationSlotsFile(taskId: string, generationId: string): string {
+    return resolve(this.taskStructuredGenerationRoot(taskId, generationId), 'slots.ndjson');
+  }
+
+  taskStructuredGenerationIndexFile(taskId: string, generationId: string): string {
+    return resolve(this.taskStructuredGenerationRoot(taskId, generationId), 'index.json');
+  }
+
+  /** structured-slots/content-revisions/ — content-addressed revision roots. */
+  taskStructuredContentRevisionsRoot(taskId: string): string {
+    return resolve(this.taskStructuredSlotsRoot(taskId), 'content-revisions');
+  }
+
+  /** content-revisions/<revisionDigest>.json — the digest is the filename. */
+  taskStructuredContentRevisionFile(taskId: string, revisionDigest: string): string {
+    if (!STRUCTURED_SHA256.test(revisionDigest)) {
+      throw new CorePathError('revisionDigest');
+    }
+    return resolve(this.taskStructuredContentRevisionsRoot(taskId), `${revisionDigest}.json`);
+  }
+
+  /** structured-slots/proposals/ — one private journal dir per proposal. */
+  taskStructuredProposalsRoot(taskId: string): string {
+    return resolve(this.taskStructuredSlotsRoot(taskId), 'proposals');
+  }
+
+  taskStructuredProposalRoot(taskId: string, proposalId: string): string {
+    assertSafeSegment('proposalId', proposalId);
+    return resolve(this.taskStructuredProposalsRoot(taskId), proposalId);
+  }
+
+  taskStructuredProposalJournalFile(taskId: string, proposalId: string): string {
+    return resolve(this.taskStructuredProposalRoot(taskId, proposalId), 'journal.ndjson');
+  }
+
+  taskStructuredProposalCheckpointFile(taskId: string, proposalId: string): string {
+    return resolve(this.taskStructuredProposalRoot(taskId, proposalId), 'checkpoint.json');
+  }
+
+  /** Optional post-batch lifecycle cache marker (design §18.3), never authority. */
+  taskStructuredProposalLifecycleFile(taskId: string, proposalId: string): string {
+    return resolve(this.taskStructuredProposalRoot(taskId, proposalId), 'lifecycle.json');
+  }
+
+  /** structured-slots/drafts/ — one private journal dir per draft. */
+  taskStructuredDraftsRoot(taskId: string): string {
+    return resolve(this.taskStructuredSlotsRoot(taskId), 'drafts');
+  }
+
+  taskStructuredDraftRoot(taskId: string, draftId: string): string {
+    assertSafeSegment('draftId', draftId);
+    return resolve(this.taskStructuredDraftsRoot(taskId), draftId);
+  }
+
+  taskStructuredDraftJournalFile(taskId: string, draftId: string): string {
+    return resolve(this.taskStructuredDraftRoot(taskId, draftId), 'journal.ndjson');
+  }
+
+  taskStructuredDraftCheckpointFile(taskId: string, draftId: string): string {
+    return resolve(this.taskStructuredDraftRoot(taskId, draftId), 'checkpoint.json');
+  }
+
+  /** Optional post-batch lifecycle cache marker (design §18.3), never authority. */
+  taskStructuredDraftLifecycleFile(taskId: string, draftId: string): string {
+    return resolve(this.taskStructuredDraftRoot(taskId, draftId), 'lifecycle.json');
+  }
+
+  /** structured-slots/attempts/ — one persistent meter snapshot per turn. */
+  taskStructuredAttemptsRoot(taskId: string): string {
+    return resolve(this.taskStructuredSlotsRoot(taskId), 'attempts');
+  }
+
+  /** attempts/<turnId>/meter.json — the turn id must be a single safe segment. */
+  taskStructuredAttemptMeterFile(taskId: string, turnId: string): string {
+    assertSafeSegment('turnId', turnId);
+    return resolve(this.taskStructuredAttemptsRoot(taskId), turnId, 'meter.json');
+  }
+
+  /** structured-slots/custody/ — sealed artifact custody namespace. */
+  taskStructuredCustodyRoot(taskId: string): string {
+    return resolve(this.taskStructuredSlotsRoot(taskId), 'custody');
   }
 }

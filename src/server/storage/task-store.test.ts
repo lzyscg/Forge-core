@@ -146,6 +146,11 @@ describe('TaskStore', () => {
     );
     expect(readdirSync(paths.taskEventsRoot(task.id))).toEqual([]);
     expect(readdirSync(paths.taskArtifactsRoot(task.id))).toEqual([]);
+    // The structured-slots subtree is published empty at creation (spec §7.1)
+    // and removed together with the whole task directory on deleteTask.
+    expect(readdirSync(paths.taskStructuredSlotsRoot(task.id))).toEqual([]);
+    await taskStore.deleteTask(task.id);
+    expect(() => readdirSync(paths.taskStructuredSlotsRoot(task.id))).toThrow();
     // No staging residue remains under the tasks root.
     expect(readdirSync(paths.tasksRoot).filter((name) => name.startsWith('.'))).toEqual([]);
     expect(taskDir).toBe(paths.taskRoot(task.id));
