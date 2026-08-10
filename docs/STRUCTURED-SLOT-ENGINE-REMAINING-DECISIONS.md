@@ -1,9 +1,10 @@
 # Forge Core 结构槽引擎：剩余问题与推荐方案
 
-> 状态：**Batch Review / 非权威评审队列**
+> 状态：**Batch Review / 部分已处理的非权威评审队列**
 > 整理日期：2026-08-10
 > 权威设计：[`STRUCTURED-SLOT-ENGINE-DESIGN.md`](./STRUCTURED-SLOT-ENGINE-DESIGN.md)
 > 用途：集中列出进入 dev plan 前尚未冻结的问题、推荐方案、备选方案与影响，供一次性评审。
+> 已处理：D03、G01、H01、H02、J01、J02 已于 2026-08-10 接受并回写权威设计；D03 按后续补充改为前文槽按槽渐进披露。
 
 本文不是第二份系统设计。已经接受的结论必须回写到权威设计文档；本文只记录尚待评审的选项和建议。若本文与权威设计冲突，以权威设计为准。
 
@@ -19,8 +20,8 @@
 
 ```text
 整体接受推荐方案。
-D03 改为允许“按父槽实例选择直接子树”；
-H02 需要再讨论；
+A01 顶层 schema 接受；
+F03 中两个 code 需要改名；
 C01 数值等基准测试后冻结。
 ```
 
@@ -31,16 +32,16 @@ C01 数值等基准测试后冻结。
 | A. Contract 与 Loader | v1 使用 exact schema、固定本包相对资源、确定性规范化与聚合诊断 | P1 |
 | B. Slot Schema | 采用安全、可移植、纯验证的有限 JSON Schema 方言 | P1 |
 | C. 限额与兼容性 | 显式 canonical JSON 协议；初始 hard ceiling 经基准测试后冻结 | P1 / D |
-| D. Capability 与 selector | capability 封闭；selector v1 保持静态、可判定、无运行时查询语言 | **P0** |
+| D. Capability 与 selector | 静态写目标；前文已填槽通过封闭只读关系按槽渐进披露 | **P0 已接受** |
 | E. Validator 与 Assembler | 固定 ABI、隔离执行、显式预算；v1 输出以文本文件为主 | P1 |
 | F. Issue 与 verdict | code registry 控制严重级别和详情形状；`incomplete` 必须 fail closed | P1 |
-| G. 持久化与事件 | 权威小事件 + 不可变大对象 blob + 私有 journal/checkpoint | **P0** |
-| H. Action 与 TurnContract | 保留九个 ForgeAction；新增独立 Slot Tool；structured turn 使用 v3 契约 | **P0** |
+| G. 持久化与事件 | 权威小事件 + 不可变大对象 blob + 私有 journal/checkpoint | **P0 已接受** |
+| H. Action 与 TurnContract | 保留九个 ForgeAction；新增独立 Slot Tool；structured turn 使用 v3 契约 | **P0 已接受** |
 | I. API、Workspace 与 UI | 首版只读、按需、授权投影；不建设块编辑器 | P1 |
-| J. Seal 与现有 artifact 链 | Seal 先形成 turn-bound 候选，再由现有 ActionCommitter 原子接管 | **P0** |
+| J. Seal 与现有 artifact 链 | Seal 先形成 turn-bound 候选，再由现有 ActionCommitter 原子接管 | **P0 已接受** |
 | K. 实施组织 | 模块边界、exact schema、测试矩阵和性能索引进入 dev plan | D |
 
-推荐优先关注 **D03、G01、H01/H02、J01/J02** 四组问题。其他条目若没有明确反对意见，可以整组采用推荐方案。
+四组 P0 已全部接受。后续评审只需处理尚未冻结的 P1 系统契约；D 类继续作为 dev plan 默认项。
 
 与权威设计第 25 节的覆盖关系如下，确保原有开放项没有在整理过程中丢失：
 
@@ -215,7 +216,7 @@ type SlotCapabilityV1 =
 
 **推荐方案**：Agent YAML 声明静态 capability 上限；structured TurnContract 为当前 Action 声明所需 capability，并在 fill/seal 会话中声明 access profile；structure 会话显式使用 `accessProfile: null`。平台验证所需集合是 Agent 上限的子集，再根据 active scaffold 解析 SlotGrant。模型不能传 profileId、capability 或原始 slotId 集合。角色名不参与授权计算。
 
-### D03｜Selector v1 的表达边界（P0｜需要重点确认）
+### D03｜Selector v1 的表达边界（P0｜已接受并回写）
 
 **问题**：selector 太弱会限制模板流程，太强则会变成一门能读取内容、推断隐藏节点并产生不稳定授权的查询语言。
 
@@ -223,10 +224,11 @@ type SlotCapabilityV1 =
 
 - `all` 或 `root`；
 - 按 `typeId` 选择所有匹配节点；
-- 以匹配 type 为根选择有限深度的 `self / ancestors / descendants / siblings` 上下文；
+- 以匹配 type 为根选择有限深度的 `self / ancestors / descendants / siblings` 只读上下文；
+- 可以启用平台封闭的 `precedingFilled` 只读关系，把工作槽之前已经 set 的槽加入前文读取范围；
 - read selector 与 write selector 分离；
 - 所有结果按树的确定性顺序去重；
-- 禁止基于 spec/content/status 的任意布尔谓词、正则查询、路径脚本、“第一个未填槽”、运行时 slotId 白名单和自定义代码。
+- 除 `precedingFilled` 这一项封闭只读关系外，禁止基于 spec/content/status 的任意布尔谓词、正则查询、路径脚本、“第一个未填槽”、运行时 slotId 白名单和自定义代码。
 
 推荐的声明骨架是：
 
@@ -249,16 +251,19 @@ interface AccessProfileV1 {
     };
   }>;
   writeContent: Array<{ targets: SlotTargetSelectorV1 }>;
+  continuity: { precedingFilled: boolean };
 }
 ```
 
-`typeIds` 必须非空、去重并全部引用已声明 type；上下文深度是非负整数且不超过模板 `maxTreeDepth`。多个规则做集合并集，deny-by-default；context 只扩大读取，绝不隐式扩大 `writeContent`。
+`typeIds` 必须非空、去重并全部引用已声明 type；上下文深度是非负整数且不超过模板 `maxTreeDepth`。多个规则做集合并集，deny-by-default；context 只扩大读取，绝不隐式扩大 `writeContent`。`precedingFilled` 按 active scaffold 的 depth-first pre-order 文档顺序解析，对全部 writable target 之前 `contentPresence: set` 的槽做并集，只授予读取。
+
+前文采用按槽渐进披露：会话初始只提供有序槽目录，不自动注入任何前文 content，也不生成摘要。Agent 根据目录主动调用 `read_slot` 读取需要衔接的单个槽；同一 Draft 中读取有效值时叠加自己的 content overlay。v1 不做槽内切片或静默截断，模板必须把单槽粒度控制在模型可安全读取的范围。
 
 一次 Action 可以因此覆盖一个槽、多个同类型槽或多个子树，但不能只挑选“某个具体章节实例”。若模板确实需要逐个处理同类型实例，首版应通过更细的业务 type、不同 Action，或一次覆盖全部匹配实例来表达。
 
 **备选方案**：增加平台签发的实例 anchor，让 Route/Action 绑定一个具体 slotId，再在 anchor 相对范围内选择。它能支持逐章循环，但事实上会引入动态 Slot Scheduler/迭代状态，与已冻结的“首版不建设 Slot Scheduler”冲突。因此建议后置。
 
-**需要确认的影响**：推荐方案刻意牺牲逐实例动态调度，换取模板加载期可审计、授权稳定和首版实现闭合。
+**已接受的影响**：首版刻意不做逐实例动态调度；用静态写目标保持可审计性，同时用 `precedingFilled + read_slot` 满足文学创作的前文衔接。
 
 ### D04｜可见树投影闭包（P1）
 
@@ -414,7 +419,7 @@ interface StructuredVerdictV1 {
 
 ## 9. G — 持久化、事件与恢复
 
-### G01｜事实存储形态（P0｜需要重点确认）
+### G01｜事实存储形态（P0｜已接受并回写）
 
 **问题**：完整 scaffold 和 content 可能达到几十 MiB；全部写入现有 TaskEvent 会让事件流膨胀，而只维护可变 JSON 又会削弱追加事实和崩溃恢复。
 
@@ -468,7 +473,7 @@ interface StructuredVerdictV1 {
 
 ## 10. H — Slot Tool、ForgeAction 与 TurnContract
 
-### H01｜保留九个 ForgeAction，并延迟权威提交（P0｜需要重点确认）
+### H01｜保留九个 ForgeAction，并延迟权威提交（P0｜已接受并回写）
 
 **问题**：结构槽操作是否应扩充平台现有封闭九动作 registry。
 
@@ -476,7 +481,7 @@ interface StructuredVerdictV1 {
 
 **影响**：不破坏现有 ActionCommitter 和基础模式契约，也避免把每个领域内操作都升级为全平台 ForgeAction。相比“工具成功就立即 merge”，它不会在 dispatch 失败时留下已变更 scaffold；代价是工具返回的是已通过 Gate 的候选 receipt，权威 revision 只在 turn commit 后可见。
 
-### H02｜Structured TurnContract v3（P0｜需要重点确认）
+### H02｜Structured TurnContract v3（P0｜已接受并回写）
 
 **问题**：现有 TurnContract v2 只表达 production/annotate/dispatch，无法冻结当前 turn 是否可以编排、填槽或 Seal，以及使用哪个 profile。
 
@@ -584,7 +589,7 @@ Loader 验证 kind、capabilities、profile 和 Agent 上限一致。basic 模�
 
 ## 12. J — Seal、artifact custody 与最终提交
 
-### J01｜Seal 与 turn commit 的原子边界（P0｜需要重点确认）
+### J01｜Seal 与 turn commit 的原子边界（P0｜已接受并回写）
 
 **问题**：若 `request_seal` 工具调用立即把正式 artifact 发布，而 turn 随后的 dispatch/commit 失败，就会出现结构槽已封存但现有执行图未前进的半提交状态。
 
@@ -592,7 +597,7 @@ Loader 验证 kind、capabilities、profile 和 Agent 上限一致。basic 模�
 
 **影响**：Seal 的业务原子性与现有 turn/action 原子性对齐，不会出现正式文件先于流程状态。代价是 Slot Tool 与 ActionCommitter 之间需要一个候选 receipt 协议。
 
-### J02｜`publish_artifact` / `submit_final_artifact` 映射（P0｜需要重点确认）
+### J02｜`publish_artifact` / `submit_final_artifact` 映射（P0｜已接受并回写）
 
 **问题**：现有 `publish_artifact` 只发布当前 turn 的 sealed production package，`submit_final_artifact` 只提交 inputVersion；结构槽 Seal 应落在哪条链上。
 
@@ -667,8 +672,8 @@ structured mode 以纯新增 schema 和事件版本上线；未声明 `productio
 
 推荐按以下三组一次性处理：
 
-1. **先确认四组 P0**：D03 selector 边界、G01 混合持久化、H01/H02 Slot Tool 与 TurnContract v3、J01/J02 Seal 与 artifact 链。
-2. **其余 P1 整组接受或按编号提出例外**：它们共同形成可实施的封闭契约。
+1. **四组 P0 已处理**：D03 selector、G01 混合持久化、H01/H02 Slot Tool 与 TurnContract v3、J01/J02 Seal 与 artifact 链均已回写权威设计。
+2. **其余 P1 可以整组接受或按编号提出例外**：它们共同形成可实施的封闭契约。
 3. **D 类直接授权进入 dev plan**：具体数值和性能参数以测试结果校准，但不得改变已接受的语义边界。
 
 评审完成后，应把接受结论合并回权威设计文档的对应章节，并把本清单标记为已处理；后续 dev plan 只引用权威设计，不把本文当作运行规范。
