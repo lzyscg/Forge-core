@@ -426,9 +426,23 @@ Loader 必须在模板加载期对 schema 本身执行 meta-validation。未知�
 
 content 的根值仍可由模板声明为任意合法 JSON 类型，基础引擎不把它限定为字符串、段落或文档。`contentPresence: unset` 是槽实例外层状态，与 content schema 允许的合法 `null` 不同。
 
-精确关键字白名单、每个关键字的参数限制和组合规则继续收敛；受限方言、加载期拒绝未知能力以及 spec/content 复用同一验证内核的方向不再开放。
+精确关键字白名单以及每个关键字的参数限制继续收敛；受限方言、加载期拒绝未知能力以及 spec/content 复用同一验证内核的方向不再开放。
 
-### 8.4 spec 固定为对象，content 保持任意 JSON
+### 8.4 一个 typeId 只对应一种 Schema 形态
+
+Slot Schema dialect v1 不支持联合或组合 schema。每个 `typeId` 的 `specSchema` 和 `contentSchema` 各自只描述一种确定的数据形态：
+
+- 每个 schema 节点的 `type` 必须是单个基础类型字符串，不能是类型数组；
+- 禁止 `oneOf`、`anyOf`、`allOf`、`not`；
+- `enum` 和 `const` 的所有值必须符合当前节点声明的单一 `type`；
+- object 与 array 可以通过 `properties` / `items` 嵌套，但每个嵌套 schema 节点仍必须是单一 type；
+- 语义上存在不同数据形态时，模板必须定义不同的 `typeId`，不能要求 Agent、validator 或 Assembler 根据运行值猜测分支。
+
+例如纯文本引用和带来源的结构化引用应分别定义为 `quote_text` 与 `quote_with_source`。这样 LayoutGrammar、access profile、validator 和 Assembler 都可以显式按 `typeId` 工作。
+
+未来若出现必须在单类型中表达 tagged union 的真实生产需求，应通过新的 dialect 版本单独设计分支互斥、错误合并和资源上限，不得改变 v1 snapshot 的解释。
+
+### 8.5 spec 固定为对象，content 保持任意 JSON
 
 每个 ProposalNode 和正式 SlotInstance 的 `spec` 始终存在，根值固定为 JSON object。没有实例级编排意图时，spec 的值为严格空对象 `{}`；不能省略，也不能使用字符串、数组、数值、布尔值或 `null`。
 
@@ -443,7 +457,7 @@ content 的根值仍可由模板声明为任意合法 JSON 类型，基础引擎
 
 这个约束只稳定编排意图的形状，不限制模板实际交付内容的粒度或类型。
 
-### 8.5 单根有序统一节点树
+### 8.6 单根有序统一节点树
 
 每个 scaffold 是一棵单根、有序树。所有布局节点统一为 `SlotInstance`，不另设 container node 与 leaf slot 两套实体。
 
@@ -456,7 +470,7 @@ content 的根值仍可由模板声明为任意合法 JSON 类型，基础引擎
 
 跨槽依赖不放进布局树。布局树只表达所有权、嵌套和渲染顺序；语义依赖、校验依赖和未来的失效传播使用独立关系模型。
 
-### 8.6 概念数据结构
+### 8.7 概念数据结构
 
 ```ts
 type JsonValue =
@@ -483,7 +497,7 @@ interface SlotInstance {
 
 具体持久化实现可以把 tree、spec 和 content 分表或分文件保存；概念契约不要求物理上嵌在同一个对象中。
 
-### 8.7 `spec` 与 `content` 严格分离
+### 8.8 `spec` 与 `content` 严格分离
 
 `spec` 由编排阶段产生，用于表达“这个槽应当完成什么”；`content` 由填充阶段产生，用于表达“实际写了什么”。
 
@@ -975,6 +989,7 @@ interface SealRecord {
 
 - 未声明结构槽的旧模板仍按基础模式运行；
 - structured template 的类型、grammar、profile、validator 和 assembler 引用 fail closed；
+- Slot Schema 拒绝数组 type、组合关键字、未知关键字以及与 type 不一致的 enum/const；
 - 同内容快照 hash 稳定；任一受控输入变化都会改变 hash；
 - 运行中修改模板源目录不影响既有 case；
 - snapshot 缺失或摘要不一致时不可恢复运行。
@@ -1032,7 +1047,7 @@ interface SealRecord {
 2. 结构槽模板保持单一 Template Package；固定 `slots/contract.yaml` 使用“声明内联、实现外置”的分文件契约。
 3. 扩展现有冻结模板快照以包含结构槽规则和所有引用资源摘要。
 4. 持久化 StructureProposal，整树校验后原子创建 scaffold。
-5. SlotTypeDefinition 使用无业务默认值的全显式契约，只定义节点内在属性；spec 固定为对象、content 保持任意 JSON，二者共用版本化的受限 JSON Schema 方言；LayoutGrammar 统一定义结构关系；SlotInstance 使用单根有序树并严格分离 spec/content。
+5. SlotTypeDefinition 使用无业务默认值的全显式契约，只定义节点内在属性；每个 typeId 使用单一 Schema 形态，spec 固定为对象、content 保持任意 JSON，二者共用版本化的受限 JSON Schema 方言；LayoutGrammar 统一定义结构关系；SlotInstance 使用单根有序树并严格分离 spec/content。
 6. 模板上限 + 运行期 SlotGrant 两层授权。
 7. Production Action/Route 调度，单 case 串行。
 8. 持久化 FillDraft、窄 Slot API、严格全局 baseRevision。
@@ -1069,7 +1084,7 @@ interface SealRecord {
 
 1. `slots/contract.yaml` 各顶层分区的最终 YAML/TypeScript 字段 schema；权威入口、分区、声明/实现边界、固定路径和单 package 版本语义已经冻结。
 2. LayoutGrammar 的声明语言、表达能力和错误定位格式。
-3. Slot Schema v1 精确关键字白名单、组合能力和参数限制；SlotTypeDefinition 外层字段、条件组合、无业务默认值、spec/content 根形状、受限方言和类型职责边界已经冻结。
+3. Slot Schema v1 精确关键字白名单、对象/数组开放性和参数限制；组合关键字与类型联合已排除，SlotTypeDefinition 外层字段、条件组合、无业务默认值、spec/content 根形状、受限方言和类型职责边界已经冻结。
 4. 中性 slot selector DSL 与 access profile 解析规则。
 5. validator / Assembler 的注册、快照、沙箱和版本协议。
 6. Structure / Merge / Seal issue 的统一 schema 与错误码集合。
@@ -1111,6 +1126,7 @@ interface SealRecord {
 | 2026-08-10 | specSchema 与 contentSchema 共用平台版本化的 JSON Schema 白名单子集，未知能力加载期拒绝 |
 | 2026-08-10 | spec 始终为对象且不可省略，content 保持模板定义的任意 JSON，unset 与 null 分离 |
 | 2026-08-10 | SlotTypeDefinition 核心字段全部显式；禁止 Loader 猜测 schema、presence 或内容类型 |
+| 2026-08-10 | Slot Schema v1 禁止组合关键字和类型联合；一个 typeId 只对应一种确定形态 |
 
 ---
 
