@@ -1118,6 +1118,38 @@ interface SealRecord {
 
 所有模型工具和平台提交必须返回稳定 code 与结构化 issues，不能只返回自然语言。
 
+### 19.1 平台统一使用 `StructuredIssueV1`
+
+模板加载、StructureProposal、Draft、Merge、Seal、validator 适配和 Assembler 校验对外统一投影为版本化 issue 信封，而不是各自返回互不兼容的对象：
+
+```ts
+interface StructuredIssueV1 {
+  version: 1;
+  code: string;
+  severity: 'error' | 'warning';
+  phase: string;
+  source: string;
+  message: string;
+  primaryLocation: IssueLocation;
+  relatedLocations: IssueLocation[];
+  details: JsonObject;
+}
+```
+
+核心语义：
+
+- `code` 是稳定的机器契约；Agent、UI、测试和重试逻辑不得解析 `message` 做判断。`message` 只提供当前语言下的可读说明，可以在不改变语义的情况下改写。
+- `phase` 表示问题发生在哪个运行阶段，`source` 表示由哪个平台子系统或受信适配器产生；二者使用平台封闭枚举，模板和 Agent 不能自定义。
+- `primaryLocation` 指向首要修正对象；`relatedLocations` 表达冲突规则、关联槽或输出位置等辅助上下文，不用自然语言拼接第二位置。
+- `IssueLocation` 使用判别联合，至少覆盖 contract JSON Pointer、Proposal 的 `clientKey + instancePath`、正式槽的 `slotId + valuePath`、artifact route/path 和无具体内容节点时的平台操作位置。精确 kind 与字段继续收敛。
+- `details` 是由 `code` 决定形状的判别数据，不是任意日志袋；必须是有界、可序列化、可按授权过滤的 JSON 对象。
+- operation 顶层结果 code 与 `StructuredIssueV1.code` 分工不同：前者说明调用整体为何失败，例如“校验未通过”；后者逐项说明具体可修正原因，例如“出现了不允许的 child type”。
+- issue 数量受 `limits.validation.maxIssuesPerRun` 限制；`truncated` 属于 verdict/result 包装层，不伪装成一条 issue，也不能被解释为通过。
+
+现有 `GateIssue { stage?, evidence?, scope? }` 保留为沙箱 validator 的窄返回边界。它不是平台全局 issue 类型：平台继续丢弃未知字段并规范化允许字段，再由受信适配器补充平台控制的 code、severity、phase、source 和 location，转换为 `StructuredIssueV1`。validator 不能直接声明平台错误码、工程 ID、授权范围或定位对象。
+
+所有 issue 在返回 Agent、UI 或外部 API 前必须经过与调用主体一致的授权投影。内部审计可以保存更完整的受信定位，但公开投影不能通过 primary/related location、details 或 message 泄露隐藏槽。
+
 已冻结的关键失败语义：
 
 - `DRAFT_STALE`：FillDraft 的全局 baseRevision 已过期；Draft 转为或被视为不可提交。
@@ -1227,6 +1259,10 @@ interface SealRecord {
 - 基础模式现有单测、集成测试和真实模板 acceptance 全部保持通过；
 - 模型工具 schema 不暴露工程字段；
 - validator / assembler 的沙箱限制有超时、内存、FS 和网络逃逸测试。
+- 模板加载、Structure、Merge 与 Seal 的公开 issue 都符合 `StructuredIssueV1`；消费端只依赖稳定 code，不依赖 message 文案；
+- 沙箱 validator 不能通过额外字段伪造平台 code、source、phase、location 或工程 ID，合法 `GateIssue` 经受信适配器投影；
+- primary/related location、details 和 message 均经过授权过滤，隐藏槽不会通过 issue 侧漏；
+- issues 超过 `maxIssuesPerRun` 时 verdict 明确 `truncated: true`，且结果保持失败。
 
 ---
 
@@ -1245,7 +1281,8 @@ interface SealRecord {
 9. 草稿自检、Merge Gate、Seal Gate 三层校验。
 10. 不可变 Scaffold Generation 的封存前整代替换。
 11. 确定性 Assembler、staging、SealRecord 与多文件原子发布。
-12. 基础模式零行为变化。
+12. 统一版本化 `StructuredIssueV1` 信封和判别式位置模型；现有 `GateIssue` 只作为沙箱 validator 边界输入并由平台适配。
+13. 基础模式零行为变化。
 
 ---
 
@@ -1274,12 +1311,12 @@ interface SealRecord {
 主流程已经冻结，以下属于进入 dev plan 前仍需在本文继续讨论并定稿的实现级系统契约：
 
 1. `slots/contract.yaml` 各顶层分区的最终 YAML/TypeScript 字段 schema；权威入口、分区、声明/实现边界、固定路径和单 package 版本语义已经冻结。
-2. LayoutGrammar v1 的 issue 精确字段；FIRST/FOLLOW 静态无歧义、单遍无回溯匹配、可终止递归、强制循环拒绝、六种 AST kind、有限重复、显式叶子、nullable repeat 拒绝、结构化 Production AST 与路径化定位已经冻结。
+2. LayoutGrammar v1 的 issue code/details 和精确位置字段；统一 issue 信封与判别式定位方向、FIRST/FOLLOW 静态无歧义、单遍无回溯匹配、可终止递归、强制循环拒绝、六种 AST kind、有限重复、显式叶子、nullable repeat 拒绝、结构化 Production AST 与路径化定位已经冻结。
 3. Slot Schema v1 各关键字数值参数和 safe pattern 约束；精确白名单、对象/数组开放性、纯验证语义、单一形态和 SlotTypeDefinition 外层契约已经冻结。
 4. 平台 hard ceiling 的绝对数值和兼容版本协议；模板 `limits` 的六组十六字段、单位、跨字段关系、三层限制模型与禁止静默裁剪已经冻结。
 5. 中性 slot selector DSL 与 access profile 解析规则。
 6. validator / Assembler 的注册、快照、沙箱和版本协议。
-7. Structure / Merge / Seal issue 的统一 schema 与错误码集合。
+7. `StructuredIssueV1` 的 phase/source 枚举、`IssueLocation` 精确联合、各阶段 code/details 集合与 verdict 包装；统一信封和现有 `GateIssue` 的受信适配边界已经冻结。
 8. 追加事件联合、私有 Draft Store、checkpoint 和磁盘目录布局。
 9. 结构槽 Action 与现有九动作/TurnContract 的精确适配方式。
 10. TaskWorkspace、API 和 UI 需要暴露的最小只读投影。
@@ -1326,6 +1363,7 @@ interface SealRecord {
 | 2026-08-10 | LayoutGrammar v1 固定 slot/sequence/choice/optional/repeat/empty 六种节点，重复必须有限且不得消费可空表达式 |
 | 2026-08-10 | LayoutGrammar v1 允许直接或互相递归，但 Loader 必须证明每个根可达 type 都存在完整有限子树；无出口的强制循环加载期拒绝 |
 | 2026-08-10 | LayoutGrammar v1 必须通过 FIRST/FOLLOW 静态无歧义检查；Structure Gate 单遍左到右匹配，不回溯且不存在分支优先级 |
+| 2026-08-10 | 结构槽各阶段统一投影为版本化 StructuredIssueV1 信封和判别式位置；现有 GateIssue 仅作为沙箱 validator 输入并由平台受信适配 |
 
 ---
 
