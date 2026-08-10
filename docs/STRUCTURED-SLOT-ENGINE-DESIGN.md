@@ -563,16 +563,33 @@ layoutGrammar:
 
 上例等价于 `title, subtitle?, (paragraph | quote){1,20}`，但该文本不是模板语言；AST 本身才是权威契约。
 
+作者可见的 AST 固定为六种判别节点：
+
+```ts
+type GrammarNode =
+  | { kind: 'slot'; type: string }
+  | { kind: 'sequence'; items: GrammarNode[] }
+  | { kind: 'choice'; items: GrammarNode[] }
+  | { kind: 'optional'; item: GrammarNode }
+  | { kind: 'repeat'; min: number; max: number; item: GrammarNode }
+  | { kind: 'empty' };
+```
+
 规则：
 
 - production 按父槽 typeId 定义其有序 children 语法；根节点自身由 `rootType` 唯一确定。
 - Grammar 只读取 typeId 和 children 顺序/基数，不读取 spec/content，不负责渲染、权限或 validator 执行。
 - root、production key 和 AST 中的 type 引用都必须指向当前 package 已声明的 SlotTypeDefinition。
-- Loader 对未知 kind、未知字段、未知 type、缺失 production、不可达规则或超出 grammar 资源上限 fail closed。
+- `sequence.items` 至少一个，`choice.items` 至少两个，`optional.item` 必须存在。
+- `repeat.item`、`min`、`max` 全部必填；`min` / `max` 为整数且 `0 <= min <= max`，`max` 必须有限并大于 0。
+- `repeat.item` 不得是可空表达式，避免零长度循环；每个 production 的最大消费数必须可静态求出并不超过 `limits.structure.maxChildrenPerSlot`。
+- `empty` 只能作为一个 production 的完整 children 表达式，不能嵌套；每个 SlotTypeDefinition 都必须有且只有一个 production，叶子显式使用 `empty`。
+- v1 不支持 wildcard、lookahead、捕获、基于 spec/content 的条件、回溯动作或可执行表达式。
+- Loader 编译每个节点的 nullable、最小/最大消费数和首个可能 type 集合；对未知 kind/字段/type、非法基数、nullable repeat、缺失/重复 production、不可达规则或超出 grammar hard ceiling fail closed。
 - Structure Gate 使用确定性左到右匹配；issue 同时定位规则 AST 路径和实际 slot/clientKey 路径。
 - `get_structure_contract` 给编排 Agent 返回同构的声明式投影，但不暴露平台内部编译状态。
 
-精确 AST kind 集合、递归/循环、歧义和空匹配策略继续收敛；结构化 AST、rootType + productions、纯结构职责和路径化错误定位不再开放。
+递归/循环、choice 与 sequence 的歧义限制和 issue 精确字段继续收敛；六种 AST kind、有限重复、显式叶子、nullable repeat 拒绝、rootType + productions、纯结构职责和路径化错误定位不再开放。
 
 ### 8.7 单根有序统一节点树
 
@@ -1119,6 +1136,7 @@ interface SealRecord {
 - 非法中间 Proposal 可以保存并获得 issues；
 - clientKey 重复、过深、过大或包含工程字段时拒绝写入；
 - LayoutGrammar 未知 type/kind、缺失或不可达 production 在模板加载期失败；实例不匹配时 issue 同时包含 rulePath 与 clientKey/instancePath；
+- 非法 repeat 基数、无界 max、嵌套 empty 或 nullable repeat 在模板加载期失败；
 - Structure Gate 失败零权威写入；
 - 成功提交只创建一个 generation，并生成唯一 slotId；
 - 重放 submit 返回同一结果。
@@ -1204,7 +1222,7 @@ interface SealRecord {
 主流程已经冻结，以下属于进入 dev plan 前仍需在本文继续讨论并定稿的实现级系统契约：
 
 1. `slots/contract.yaml` 各顶层分区的最终 YAML/TypeScript 字段 schema；权威入口、分区、声明/实现边界、固定路径和单 package 版本语义已经冻结。
-2. LayoutGrammar v1 的精确 AST kind 集合、递归/循环、歧义、空匹配与 issue 字段；结构化 Production AST、rootType + productions、纯结构职责和路径化定位已经冻结。
+2. LayoutGrammar v1 的递归/循环、choice/sequence 歧义和 issue 精确字段；六种 AST kind、有限重复、显式叶子、nullable repeat 拒绝、结构化 Production AST 与路径化定位已经冻结。
 3. Slot Schema v1 各关键字数值参数和 safe pattern 约束；精确白名单、对象/数组开放性、纯验证语义、单一形态和 SlotTypeDefinition 外层契约已经冻结。
 4. 平台 hard ceiling 的绝对数值和兼容版本协议；模板 `limits` 的六组十六字段、单位、跨字段关系、三层限制模型与禁止静默裁剪已经冻结。
 5. 中性 slot selector DSL 与 access profile 解析规则。
@@ -1253,6 +1271,7 @@ interface SealRecord {
 | 2026-08-10 | 资源限制采用局部语义约束、模板显式包络、平台 hard ceiling 三层模型；超限拒绝且不静默裁剪 |
 | 2026-08-10 | structured_slots v1 模板 limits 固定为六组十六个必填正整数字段，执行器预算另行声明 |
 | 2026-08-10 | LayoutGrammar v1 采用结构化 Production AST，以 rootType + productions 表达有序 children 语法 |
+| 2026-08-10 | LayoutGrammar v1 固定 slot/sequence/choice/optional/repeat/empty 六种节点，重复必须有限且不得消费可空表达式 |
 
 ---
 
