@@ -1,14 +1,14 @@
-# Forge Core 结构槽引擎：剩余问题与推荐方案
+# Forge Core 结构槽引擎：P1 决策记录（原剩余问题清单）
 
-> 状态：**Batch Review / 部分已处理的非权威评审队列**
+> 状态：**Accepted / 已关闭的非权威决策记录**
 > 整理日期：2026-08-10
 > 权威设计：[`STRUCTURED-SLOT-ENGINE-DESIGN.md`](./STRUCTURED-SLOT-ENGINE-DESIGN.md)
-> 用途：集中列出进入 dev plan 前尚未冻结的问题、推荐方案、备选方案与影响，供一次性评审。
-> 已处理：D03、G01、H01、H02、J01、J02 已于 2026-08-10 接受并回写权威设计；D03 按后续补充改为前文槽按槽渐进披露。
+> 用途：保留本轮问题背景、推荐方案、备选方案和稳定编号，供追溯；不再承载开放决策。
+> 已处理：D03、G01、H01、H02、J01、J02 以及全部剩余 P1 已于 2026-08-10 接受并回写权威设计；D 类按推荐作为 dev plan 默认项。
 
-本文不是第二份系统设计。已经接受的结论必须回写到权威设计文档；本文只记录尚待评审的选项和建议。若本文与权威设计冲突，以权威设计为准。
+本文不是第二份系统设计。全部接受结论已回写权威设计第 25、26 节；本文只保存评审过程。若本文与权威设计冲突，以权威设计为准。
 
-## 1. 如何评审这份清单
+## 1. 评审方式（已完成）
 
 每个问题都有稳定编号和建议等级：
 
@@ -16,7 +16,7 @@
 - **P1｜建议批量接受**：属于系统契约，但推荐方案已经比较明确；若无异议可整组接受。
 - **D｜实施默认项**：纯工程细节，不建议逐项占用产品讨论；默认带入 dev plan，并由测试与基准结果校准。
 
-评审时不必逐条回复长文，可以直接按编号批注，例如：
+评审时采用稳定编号批量确认，不要求逐条回复长文；当时约定的批注方式例如：
 
 ```text
 整体接受推荐方案。
@@ -29,23 +29,23 @@ C01 数值等基准测试后冻结。
 
 | 分组 | 核心结论 | 等级 |
 |---|---|---|
-| A. Contract 与 Loader | v1 使用 exact schema、固定本包相对资源、确定性规范化与聚合诊断 | P1 |
-| B. Slot Schema | 采用安全、可移植、纯验证的有限 JSON Schema 方言 | P1 |
-| C. 限额与兼容性 | 显式 canonical JSON 协议；初始 hard ceiling 经基准测试后冻结 | P1 / D |
+| A. Contract 与 Loader | v1 使用 exact schema、固定本包相对资源、确定性规范化与聚合诊断 | **P1 已接受** |
+| B. Slot Schema | 采用安全、可移植、纯验证的有限 JSON Schema 方言 | **P1 已接受** |
+| C. 限额与兼容性 | 显式 canonical JSON 协议；初始 hard ceiling 经基准测试后冻结 | **P1 已接受 / D** |
 | D. Capability 与 selector | 静态写目标；前文已填槽通过封闭只读关系按槽渐进披露 | **P0 已接受** |
-| E. Validator 与 Assembler | 固定 ABI、隔离执行、显式预算；v1 输出以文本文件为主 | P1 |
-| F. Issue 与 verdict | code registry 控制严重级别和详情形状；`incomplete` 必须 fail closed | P1 |
+| E. Validator 与 Assembler | 固定 ABI、隔离执行、显式预算；v1 输出以文本文件为主 | **P1 已接受** |
+| F. Issue 与 verdict | code registry 控制严重级别和详情形状；`incomplete` 必须 fail closed | **P1 已接受** |
 | G. 持久化与事件 | 权威小事件 + 不可变大对象 blob + 私有 journal/checkpoint | **P0 已接受** |
 | H. Action 与 TurnContract | 保留九个 ForgeAction；新增独立 Slot Tool；structured turn 使用 v3 契约 | **P0 已接受** |
-| I. API、Workspace 与 UI | 首版只读、按需、授权投影；不建设块编辑器 | P1 |
+| I. API、Workspace 与 UI | 首版只读、按需、授权投影；不建设块编辑器 | **P1 已接受** |
 | J. Seal 与现有 artifact 链 | Seal 先形成 turn-bound 候选，再由现有 ActionCommitter 原子接管 | **P0 已接受** |
 | K. 实施组织 | 模块边界、exact schema、测试矩阵和性能索引进入 dev plan | D |
 
-四组 P0 已全部接受。后续评审只需处理尚未冻结的 P1 系统契约；D 类继续作为 dev plan 默认项。
+四组 P0 与全部剩余 P1 已全部接受；D 类已授权作为 dev plan 默认项，并由测试与基准校准。本文没有仍待产品判断的条目。
 
 与权威设计第 25 节的覆盖关系如下，确保原有开放项没有在整理过程中丢失：
 
-| 权威设计开放项 | 本文对应章节 |
+| 权威设计原开放项 | 本文对应章节 |
 |---|---|
 | 1. contract exact schema | A |
 | 2. LayoutGrammar issue code/details | F02–F04 |
@@ -63,7 +63,7 @@ C01 数值等基准测试后冻结。
 
 ## 3. A — `contract.yaml` 与 Loader
 
-### A01｜顶层 exact schema（P1）
+### A01｜顶层 exact schema（P1｜已接受并回写）
 
 **问题**：`slots/contract.yaml` 的顶层分区已经确定，但必填、空集合和额外字段语义尚未冻结。
 
@@ -71,7 +71,7 @@ C01 数值等基准测试后冻结。
 
 **备选与影响**：允许可选分区或独立 dialect 版本会增加版本组合和 Loader 分支，首版收益有限。推荐拒绝隐式默认和部分配置。
 
-### A02｜资源引用与符号链接（P1）
+### A02｜资源引用与符号链接（P1｜已接受并回写）
 
 **问题**：实现文件如何被安全引用，尚缺少物理文件规则。
 
@@ -79,7 +79,7 @@ C01 数值等基准测试后冻结。
 
 **备选与影响**：允许未引用资源会产生“包内代码究竟是否属于快照”的歧义；允许符号链接会扩大越界和哈希不一致风险。
 
-### A03｜规范化与 `versionHash`（P1）
+### A03｜规范化与 `versionHash`（P1｜已接受并回写）
 
 **问题**：结构槽新增 YAML 和实现资源后，如何获得跨机器稳定 hash，同时不破坏历史 basic 模板 hash。
 
@@ -95,7 +95,7 @@ C01 数值等基准测试后冻结。
 
 **影响**：模板作者一次能修复更多问题，同时输出仍然确定、有界。
 
-### A05｜契约兼容协议（P1）
+### A05｜契约兼容协议（P1｜已接受并回写）
 
 **问题**：如何区分“模板版本”和“运行环境能否执行该模板”。
 
@@ -105,19 +105,19 @@ C01 数值等基准测试后冻结。
 
 ## 4. B — Slot Schema v1
 
-### B01｜数值关键字边界（P1）
+### B01｜数值关键字边界（P1｜已接受并回写）
 
 **问题**：`minLength`、`maxItems` 等数值参数缺少统一合法域。
 
 **推荐方案**：长度、数量和属性个数参数必须是 JavaScript safe integer 范围内的非负整数，并满足 `min <= max`。数值 schema 边界必须是有限 JSON number；`multipleOf` 必须为有限正数；`exclusiveMinimum` / `exclusiveMaximum` 采用数值形式，不接受旧版布尔形式。所有运行时 number 必须可表示为有限 IEEE-754 double；`integer` 还必须位于 safe integer 范围并满足数学整数语义。超出安全整数范围的精确整数应由模板建模为带 pattern 的字符串，平台不能在 JSON 解析时悄悄舍入。
 
-### B02｜字符串长度与字节限制分离（P1）
+### B02｜字符串长度与字节限制分离（P1｜已接受并回写）
 
 **问题**：字符串长度可能按 UTF-16、Unicode code point 或 UTF-8 字节计算。
 
 **推荐方案**：Schema 的 `minLength` / `maxLength` 按 Unicode code point 计数；所有 payload 大小限制单独按 canonical JSON 的 UTF-8 字节计数。v1 不做 Unicode normalization，避免平台替换用户内容。
 
-### B03｜Safe pattern 方言（P1）
+### B03｜Safe pattern 方言（P1｜已接受并回写）
 
 **问题**：直接执行模板提供的 ECMAScript 正则会带来 ReDoS、跨运行时差异和隐式 flags。
 
@@ -125,7 +125,7 @@ C01 数值等基准测试后冻结。
 
 **备选与影响**：使用原生 JavaScript RegExp 的实现成本较低，但安全性和可移植性不足，不推荐。
 
-### B04｜`enum` / `const` 的 v1 范围（P1）
+### B04｜`enum` / `const` 的 v1 范围（P1｜已接受并回写）
 
 **问题**：对象与数组常量需要稳定深比较、规范化和较高的 schema 资源成本。
 
@@ -133,7 +133,7 @@ C01 数值等基准测试后冻结。
 
 **影响**：减少实现和审计复杂度；模板仍可用对象 properties、required 和数组 items 表达绝大多数内容契约。
 
-### B05｜`uniqueItems` 相等语义（P1）
+### B05｜`uniqueItems` 相等语义（P1｜已接受并回写）
 
 **问题**：数组唯一性需要明确深相等规则。
 
@@ -166,13 +166,13 @@ C01 数值等基准测试后冻结。
 
 实施前用最坏 Grammar、Schema、10k 槽遍历、全量 Seal 和恢复测试验证 CPU、内存与响应大小，再冻结首个部署 profile。模板可以声明更小值，不能放宽这些上限。
 
-### C02｜Canonical JSON 协议（P1）
+### C02｜Canonical JSON 协议（P1｜已接受并回写）
 
 **问题**：hash、字节限额、`uniqueItems`、幂等和快照恢复都依赖同一种规范化语义。
 
 **推荐方案**：定义 `forge-canonical-json/v1`，以 RFC 8785 JSON Canonicalization Scheme 为规范化核心，并把输入限制在可无损表达的 JSON 数据：UTF-8、对象键按 JCS 的 UTF-16 code unit 规则排序、无多余空白、字符串不做 Unicode normalization、数字使用 JCS/ECMAScript 的稳定最短表示且 `-0` 规范为 `0`。在规范化前拒绝 NaN、Infinity、循环引用、undefined、bigint、孤立 surrogate 和非 JSON 对象。协议以跨实现测试向量冻结，不能直接把一次普通 `JSON.stringify` 调用当作完整协议。
 
-### C03｜运行能力描述（P1）
+### C03｜运行能力描述（P1｜已接受并回写）
 
 **问题**：仅凭代码版本无法判断某个历史 case 是否仍可安全运行。
 
@@ -188,7 +188,7 @@ C01 数值等基准测试后冻结。
 
 ## 6. D — Capability、access profile 与 selector
 
-### D01｜Capability 封闭枚举（P1）
+### D01｜Capability 封闭枚举（P1｜已接受并回写）
 
 **问题**：当前正文只列举了候选 capability，未冻结名称和最小集合。
 
@@ -208,9 +208,9 @@ type SlotCapabilityV1 =
   | 'request_seal';
 ```
 
-`audit_slots` 暂不加入，等语义审核 Agent、证据和裁决协议明确后再版本化扩展。工具的只读状态查询由已有会话权利隐含允许，不另造 capability。
+`audit_slots` 暂不加入，等语义审核 Agent、证据和裁决协议明确后再版本化扩展。Seal 前审核若要读取并修订槽内容，使用普通 fill/revision 流程；纯只读审核走 Seal 后现有 artifact Route。v1 不增加只读审核 slot session。工具的普通只读状态查询由已有会话权利隐含允许，不另造 capability。
 
-### D02｜能力上限与运行期绑定（P1）
+### D02｜能力上限与运行期绑定（P1｜已接受并回写）
 
 **问题**：Agent 声明的能力、Action 请求的能力和 profile 之间如何合并。
 
@@ -265,19 +265,19 @@ interface AccessProfileV1 {
 
 **已接受的影响**：首版刻意不做逐实例动态调度；用静态写目标保持可审计性，同时用 `precedingFilled + read_slot` 满足文学创作的前文衔接。
 
-### D04｜可见树投影闭包（P1）
+### D04｜可见树投影闭包（P1｜已接受并回写）
 
 **问题**：只暴露深层可见节点时，Agent 如何理解其树位置，同时不泄露隐藏内容。
 
 **推荐方案**：定义三档可见性：`outline`、`spec`、`content`。任何可见节点都自动补齐到 root 的祖先 outline shell，保留真实父子关系，但不补齐未获授权的 siblings。可写节点至少可见自身 type、spec 和有效 content；祖先 shell 只含公开 type/name 和当前投影内的层级关系，不含 spec/content、真实 child 数、隐藏 sibling、`hasHiddenChildren` 或其他存在性提示。投影内的 children 重新形成连续展示顺序，但不能伪装成权威 `SlotInstance.order`。
 
-### D05｜隐藏对象与不存在对象（P1）
+### D05｜隐藏对象与不存在对象（P1｜已接受并回写）
 
 **问题**：错误差异可能成为槽存在性 oracle。
 
 **推荐方案**：对 Agent 暴露的按 slot 操作，将“slot 不存在”和“slot 存在但不可见”统一映射为 `SLOT_NOT_VISIBLE`，位置为 `operation`，不返回 slotId 或关系。批量操作中的隐藏项使整批失败，不能通过部分成功枚举权限边界。
 
-### D06｜Grant 生命周期（P1）
+### D06｜Grant 生命周期（P1｜已接受并回写）
 
 **问题**：`expiresAt` 会引入墙钟、暂停恢复和长模型调用的不确定性。
 
@@ -293,43 +293,43 @@ interface AccessProfileV1 {
 
 ## 7. E — Validator 与 Assembler
 
-### E01｜Validator 注册形状（P1）
+### E01｜Validator 注册形状（P1｜已接受并回写）
 
 **问题**：scope/trigger 已有概念，缺少完整注册契约。
 
 **推荐方案**：每项显式声明 `id`、`scope`、`trigger`、适用 selector、实现 `{ abi, path }`、执行预算 `{ cpuMs, timeoutMs, memoryMiB }`。`scope` 固定为 `slot | subtree | scaffold`，`trigger` 固定为 `merge-and-seal | seal`，ABI 首版固定 `forge-validator/v1`。未知字段、重复 id、空 selector、越界预算和不兼容 ABI 均加载失败。
 
-### E02｜Validator 输入信封（P1）
+### E02｜Validator 输入信封（P1｜已接受并回写）
 
 **问题**：直接把内部 Scaffold、Grant 或存储对象传入沙箱会锁死实现并泄露控制面。
 
 **推荐方案**：固定、只读、canonical JSON 输入信封，只包含 validator 声明 scope 内的可验证 type/spec/content/tree 投影、必要的模板声明和稳定逻辑位置；不含绝对路径、Grant、Agent、事件、任务存储位置、secret 或任意平台服务句柄。
 
-### E03｜Validator 重跑策略（P1）
+### E03｜Validator 重跑策略（P1｜已接受并回写）
 
 **问题**：依赖分析与缓存能提高性能，但容易产生漏跑。
 
 **推荐方案**：v1 采用保守策略：Merge 对候选 overlay 运行所有可能受本次变更影响且 trigger 包含 merge 的 validator；无法可靠证明不受影响时就重跑。Seal 无条件运行全部强制 validator。缓存只可作为等价优化，不能成为正确性前提。
 
-### E04｜沙箱 ABI 与确定性（P1）
+### E04｜沙箱 ABI 与确定性（P1｜已接受并回写）
 
 **问题**：现有 JS Gate 是 CommonJS `validate(input)`，结构槽是否复用以及如何消除非确定输入。
 
 **推荐方案**：复用“单入口纯函数”的开发体验，但使用结构槽独立 ABI 和受限执行器；模板只能引用已声明本包文件，不能加载任意 npm 包、`require`、FS、网络或进程。禁用/固定 Date、随机数、locale、环境变量等非确定来源。快照冻结执行器 ABI 与实现摘要，不直接冻结宿主绝对路径。
 
-### E05｜执行预算与失败语义（P1）
+### E05｜执行预算与失败语义（P1｜已接受并回写）
 
 **问题**：validator/Assembler 的 CPU、内存和超时不在十六个通用 limits 中。
 
 **推荐方案**：每个注册项显式声明预算，且不得超过平台 hard ceiling；缺失不设默认。编译失败、异常、超时、内存越限、无效返回和 issue 超限均 fail closed，并映射为平台 code。模板实现不能自行决定把执行失败降为 warning。
 
-### E06｜Assembler 注册与输出路由（P1）
+### E06｜Assembler 注册与输出路由（P1｜已接受并回写）
 
 **问题**：Assembler 如何连接 artifactSchema，且不能自行发明路径。
 
 **推荐方案**：contract 只注册一个 Assembler，声明 `id`、`implementation { abi: 'forge-assembler/v1', path }`、预算和 `routes`。每个 route 使用稳定 `routeId` 精确映射 pipeline 中由当前 structured producer 负责、`phase: create` 的 `artifactSchema.files[].name`；annotate 阶段文件仍由后续现有 Agent 产生，不属于 Seal 输出。沙箱返回 `{ routeId, content }[]`，不能返回任意 path、producer、mediaType、required 或 phase；平台从冻结 pipeline 补齐这些控制字段，并验证 route 唯一、必填 create 文件精确覆盖、无额外输出。
 
-### E07｜首版输出类型（P1）
+### E07｜首版输出类型（P1｜已接受并回写）
 
 **问题**：二进制文件会引入编码、流式输出、内存与内容验证的新协议。
 
@@ -347,19 +347,19 @@ interface AccessProfileV1 {
 
 `phase` 八值枚举和 `source` 十值枚举已经接受，不在本轮重新讨论。
 
-### F01｜Severity 的控制权（P1）
+### F01｜Severity 的控制权（P1｜已接受并回写）
 
 **问题**：若模板 validator 可以自行决定 error/warning，就可能绕过强制门禁。
 
 **推荐方案**：平台 code registry 固定每个 code 的 severity；只有 `error` 阻塞，`warning` 仅提供建议。模板 validator 返回窄 `GateIssue`，由注册时的平台适配规则映射到固定 code/severity，不能在运行期自定义或降级。
 
-### F02｜Code registry（P1）
+### F02｜Code registry（P1｜已接受并回写）
 
 **问题**：只约定大写字符串不足以保证不同模块不会重复或漂移。
 
 **推荐方案**：建立封闭、版本化的注册表；每个 code 固定 `{ source, allowedPhases, severity, detailsSchema, allowedLocationKinds }`。code 使用 `UPPER_SNAKE_CASE`，一经公开不得换义；新增 code 可以向后兼容，删除或改变语义必须升级公开契约版本。
 
-### F03｜首批 code registry（P1）
+### F03｜首批 code registry（P1｜已接受并回写）
 
 **问题**：实施前需要一套不重复的失败分类，尤其要区分 Grammar 本身非法与某棵 Proposal 不匹配 Grammar。
 
@@ -385,13 +385,13 @@ Grammar 静态 issue 的 primary location 指向 contract AST 节点，冲突分
 
 异常、超时和内存越限可以共享 `*_UNAVAILABLE`，由 details 中封闭 reason 区分，不为每个执行器和 phase 复制近义 code。已冻结的 `DRAFT_STALE` 和 `TEMPLATE_RUNTIME_UNAVAILABLE` 保持原义；阶段差异由 `phase` 表达。
 
-### F04｜`details` 安全形状（P1）
+### F04｜`details` 安全形状（P1｜已接受并回写）
 
 **问题**：任意 JSON 日志袋难以授权过滤，也容易泄露 content 和工程信息。
 
 **推荐方案**：每个 code 使用 exact 判别 schema；只允许有界标量和短数组，例如 keyword、expectedType、actualType、limit、actualCount、validatorId、routeId。默认不回显用户 content、spec、完整 schema、堆栈、绝对路径或内部 ID；需要证据时只接受长度受限、平台规范化的说明。
 
-### F05｜Verdict 包装（P1）
+### F05｜Verdict 包装（P1｜已接受并回写）
 
 **问题**：单一 `pass: boolean` 无法区分“确实失败”和“强制检查没有完成”。
 
@@ -409,7 +409,7 @@ interface StructuredVerdictV1 {
 
 `incomplete` 表示 required evaluator 未运行完、执行环境不可用或结果无法可信判定，并与 `failed` 一样阻止权威提交。`passed` 要求无 error 且全部强制检查完成；warning 可以共存。
 
-### F06｜授权、排序与截断顺序（P1）
+### F06｜授权、排序与截断顺序（P1｜已接受并回写）
 
 **问题**：先截断再过滤可能导致授权主体看到空列表但无法判断失败，也可能暴露隐藏问题数量。
 
@@ -433,13 +433,13 @@ interface StructuredVerdictV1 {
 
 **备选与影响**：全事件 payload 实现概念简单但存储与重放成本过高；数据库式可变行更高效但需要另造事务事实源。推荐混合模型最贴合当前 append-only event 与 ArtifactStore 的 staged commit 思路。
 
-### G02｜权威事件最小集合（P1）
+### G02｜权威事件最小集合（P1｜已接受并回写）
 
 **问题**：每次草稿写入和建议性校验是否都应进入主事件联合。
 
 **推荐方案**：主 TaskEvent 只新增权威边界事件，例如 generation committed/activated/superseded、Draft opened/merged/terminal、scaffold sealed。Proposal 整树替换、Draft content 替换、建议性 validation 和 checkpoint 属于各自私有 store/journal，不进入全局业务事件流；提交事件携带它们的最终摘要和 blob 引用。
 
-### G03｜身份与幂等键（P1）
+### G03｜身份与幂等键（P1｜已接受并回写）
 
 **问题**：正文同时出现 ActionAttempt、turn、request ID 和提交身份，容易重复建模。
 
@@ -451,7 +451,7 @@ interface StructuredVerdictV1 {
 
 **推荐方案**：blob id 为 `forge-canonical-json/v1` 字节或原始 artifact 字节的 SHA-256；路径由平台安全派生，事件只保存 digest、byteLength、kind 和协议版本。blob store 归属于单个 task，任务删除时随 task 一并清理；不接受模型提供路径或 digest。
 
-### G05｜崩溃安全提交（P1）
+### G05｜崩溃安全提交（P1｜已接受并回写）
 
 **问题**：事件已写但 blob 未就绪，或 blob 已写但事件未提交，都会产生不完整状态。
 
@@ -463,7 +463,7 @@ interface StructuredVerdictV1 {
 
 **推荐方案**：达到固定操作数或累计字节阈值后写不可变 checkpoint，journal 从该点继续；checkpoint 也要 hash 校验。只压缩私有候选日志，不压缩或改写主 TaskEvent。阈值属于部署调优，不进入模板契约。
 
-### G07｜终态保留（P1）
+### G07｜终态保留（P1｜已接受并回写）
 
 **问题**：merged/stale/abandoned 草稿是否立即清理。
 
@@ -515,25 +515,25 @@ Loader 验证 kind、capabilities、profile 和 Agent 上限一致。basic 模�
 
 **备选方案**：把这些字段散落到 pipeline Action 或 Agent YAML。这样短期少一个 TurnContract 版本，但运行时需要跨文件猜测本 turn 的完成条件，也削弱现有“TurnContract 是模型工具与提交边界”的设计。推荐 v3。
 
-### H03｜ActionAttempt 复用 `turnId`（P1）
+### H03｜ActionAttempt 复用 `turnId`（P1｜已接受并回写）
 
 **问题**：主设计使用概念名 ActionAttempt，而当前实现的稳定执行身份是 turnId。
 
 **推荐方案**：实现和公共事件统一复用 `turnId`；设计文档可保留 ActionAttempt 作为语义名称，并明确二者一一对应。重试创建新 turnId，因此默认创建新 Proposal/Draft；旧私有对象进入 abandoned，符合现有设计。
 
-### H04｜工具幂等（P1）
+### H04｜工具幂等（P1｜已接受并回写）
 
 **问题**：正文称模型每次写入携带 request ID，但工程键不应由模型生成。
 
 **推荐方案**：由工具运行器提供稳定 `toolCallId`，Slot Tool 从执行上下文读取。相同 toolCallId + 相同规范化参数重放原结果；相同 key + 不同参数返回冲突 code。模型参数 schema 不出现 requestId、turnId、draftId、revision 或 Grant。
 
-### H05｜提交完成与 dispatch（P1）
+### H05｜提交完成与 dispatch（P1｜已接受并回写）
 
 **问题**：Proposal/Merge/Seal 成功后，现有“一 turn 恰好一次 dispatch”如何继续。
 
 **推荐方案**：Slot session 达到 TurnContract 的 completion 后禁止进一步写操作，平台向同一 turn 注入一个安全 receipt 摘要；模型随后只能执行允许的 dispatch 或请求人工输入。ActionCommitter 在 commit 时验证 completion receipt 与当前 revision/turn 一致，再原子落权威事件和 dispatch。turn 失败、取消或 receipt 失配时 candidate 转为 abandoned，staging 可恢复清理，权威状态不变。模型看不到 blob、Grant 或内部提交 ID。
 
-### H06｜不引入隐式工作队列（P1）
+### H06｜不引入隐式工作队列（P1｜已接受并回写）
 
 **问题**：为了逐槽填充，运行时可能自然演化出“自动拿下一个未填槽”。
 
@@ -543,13 +543,13 @@ Loader 验证 kind、capabilities、profile 和 Agent 上限一致。basic 模�
 
 ## 11. I — TaskWorkspace、API、Agent 投影与 UI
 
-### I01｜TaskWorkspace 最小扩展（P1）
+### I01｜TaskWorkspace 最小扩展（P1｜已接受并回写）
 
 **问题**：现有客户端需要知道结构槽进度，但不能下载整棵槽树才能显示列表。
 
 **推荐方案**：在现有 TaskWorkspace 响应中增加可选 `structuredSlots` 摘要；basic task 字段缺失且响应保持兼容。摘要只包含 mode、active generation 摘要、contentRevision、structure/seal status、可见槽计数、填充计数和 issue summary，不内嵌 content、完整树或私有 Draft。
 
-### I02｜只读结构槽 API（P1）
+### I02｜只读结构槽 API（P1｜已接受并回写）
 
 **问题**：模型工具、UI 和审计读取是否共用内部 store 接口。
 
@@ -561,13 +561,13 @@ Loader 验证 kind、capabilities、profile 和 Agent 上限一致。basic 模�
 
 **推荐方案**：outline 采用稳定 DFS 顺序和不透明 cursor；subtree 请求有 depth/page 限制；content 仅按单槽或小批量显式读取。cursor 绑定 scaffold generation、revision、授权投影和排序版本，变化后失效而不是返回混合快照。
 
-### I04｜UI v1 范围（P1）
+### I04｜UI v1 范围（P1｜已接受并回写）
 
 **问题**：是否同时建设类似 Notion 的块编辑器。
 
 **推荐方案**：首版 UI 只做树形大纲、类型/spec/content 只读查看、状态、issue 定位、Draft/merge 审计和 sealed outputs 链接。没有拖拽、块编辑、人工 Merge 或文件反向同步。
 
-### I05｜Agent 投影（P1）
+### I05｜Agent 投影（P1｜已接受并回写）
 
 **问题**：结构 Agent 和填充 Agent 需要的信息不同。
 
@@ -579,7 +579,7 @@ Loader 验证 kind、capabilities、profile 和 Agent 上限一致。basic 模�
 
 **推荐方案**：复用现有 task watch/polling 与事件投影机制；首版串行 case 不需要协同光标或实时 patch stream。UI 对 revision 变化刷新相关只读投影即可。
 
-### I07｜Prompt 中的数据与指令边界（P1）
+### I07｜Prompt 中的数据与指令边界（P1｜已接受并回写）
 
 **问题**：slot spec/content 可能包含类似系统指令的文本；若直接拼接进 prompt，隐藏控制面和工具授权可能被内容注入影响。
 
@@ -610,25 +610,25 @@ Loader 验证 kind、capabilities、profile 和 Agent 上限一致。basic 模�
 
 **备选方案**：Seal 一律先 publish 给下一个 final Agent，再由其 submit inputVersion。它完全复用现有 submit 语义，但会强迫所有结构槽 pipeline 多一个无业务价值的 Agent/turn。建议让 v3 显式支持当前 turn sealed candidate，同时保留转发/审核链。
 
-### J03｜SealRecord 连接 artifact version（P1）
+### J03｜SealRecord 连接 artifact version（P1｜已接受并回写）
 
 **问题**：当前概念 SealRecord 只有 outputs hash，无法直接定位 custody 中的正式版本。
 
 **推荐方案**：提交后 SealRecord 增加 `artifactId`、`artifactVersion` 或一个现有不可变 ArtifactVersionRef；继续保留每个 route/path 的 byteLength 与 SHA-256。SealRecord 不保存 staging 路径。
 
-### J04｜输出路径与现有 artifactSchema（P1）
+### J04｜输出路径与现有 artifactSchema（P1｜已接受并回写）
 
 **问题**：现有 `artifactSchema.files[].name` 是受控文件名，而概念 Assembler 支持 path。
 
 **推荐方案**：v1 route 必须一一映射当前 structured producer 负责、`phase: create` 的现有 artifactSchema file name，且只允许安全单段文件名；Assembler 只返回 routeId。annotate 文件不参与该映射。嵌套目录、多 route 写同一路径和动态 content 派生文件名全部后置。这样可直接复用现有 ArtifactStore 和文件契约。
 
-### J05｜格式与媒体类型（P1）
+### J05｜格式与媒体类型（P1｜已接受并回写）
 
 **问题**：SealRecord 的 `mediaType` 与 pipeline 当前 `markdown | text` 如何统一。
 
 **推荐方案**：平台按 artifactSchema/finalOutput 冻结映射：markdown 为 `text/markdown; charset=utf-8`，text 为 `text/plain; charset=utf-8`。Assembler 无权自行声明 mediaType。以后增加 JSON/binary 时同时升级 pipeline schema 与 Assembler ABI。
 
-### J06｜Seal 幂等身份（P1）
+### J06｜Seal 幂等身份（P1｜已接受并回写）
 
 **问题**：同 revision 重复请求和提交响应丢失需要稳定识别。
 
@@ -668,12 +668,12 @@ structured mode 以纯新增 schema 和事件版本上线；未声明 `productio
 
 ---
 
-## 14. 建议的批量决策方式
+## 14. 批量决策结果
 
-推荐按以下三组一次性处理：
+本轮已按以下三组一次性处理：
 
 1. **四组 P0 已处理**：D03 selector、G01 混合持久化、H01/H02 Slot Tool 与 TurnContract v3、J01/J02 Seal 与 artifact 链均已回写权威设计。
-2. **其余 P1 可以整组接受或按编号提出例外**：它们共同形成可实施的封闭契约。
-3. **D 类直接授权进入 dev plan**：具体数值和性能参数以测试结果校准，但不得改变已接受的语义边界。
+2. **其余 P1 已整组接受，无例外**：它们共同形成可实施的封闭契约，并已合入权威设计第 25 节。
+3. **D 类已直接授权进入 dev plan**：具体数值和性能参数以测试结果校准，但不得改变已接受的语义边界。
 
-评审完成后，应把接受结论合并回权威设计文档的对应章节，并把本清单标记为已处理；后续 dev plan 只引用权威设计，不把本文当作运行规范。
+后续 dev plan 只引用权威设计，不把本文当作运行规范。若未来推翻某项决定，必须在权威设计中记录 superseded 关系，而不是重新开启本文。

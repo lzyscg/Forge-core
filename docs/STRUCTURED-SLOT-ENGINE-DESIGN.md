@@ -2,6 +2,7 @@
 
 > 状态：**Living Design / 当前权威设计**
 > 首次冻结：2026-08-10
+> 最近批量收敛：2026-08-10（全部剩余 P1 按推荐方案接受）
 > 维护规则：结构槽后续的已接受结论统一更新在本文，不再新建平行权威设计文档；尚待评审的问题可以暂存于非权威评审队列，接受后必须回写本文。
 > 文档性质：系统设计，不是实施计划。进入开发前仍需基于本文编写独立 dev plan。
 > 历史来源：本文承接并取代 `docs/2026-08-08-structured-slots-three-role-design.md`；旧文档仅保留问题发现过程与历史背景。
@@ -21,7 +22,7 @@
 - 权限、恢复、版本、重编排和 Seal 如何保持确定性；
 - 首版明确不做哪些能力，未来如何扩展而不破坏当前契约。
 
-本文优先描述**稳定语义和边界**。示例接口与 TypeScript 形状是概念契约；未在“已接受设计”中冻结的具体字段名，可在实施计划中调整，但不得改变本文定义的权威关系和失败语义。
+本文优先描述**稳定语义和边界**。示例接口与 TypeScript 形状是概念契约；第 25 节已按稳定编号冻结 v1 的详细系统契约。只有明确标记为实施默认项、基准候选或内部物理布局的内容可在 dev plan 中校准，且不得改变本文定义的公开字段、权威关系和失败语义。
 
 ---
 
@@ -72,13 +73,15 @@ Slot Engine 不理解“章节、场景、标题、段落、知乎故事、报�
 
 平台使用 capability 和 SlotGrant 表达权力。同一个 Agent 可以组合多种能力；模板也可以让不同 Agent 分担能力。Slot Engine 不要求模板必须拆成三个 Agent。
 
+v1 不为“审核 Agent”增加专门的 slot session、capability、审核状态或证据模型。Seal 前若审核必须读取并修订槽内容，就把它建模为普通 fill/revision 流程并提交 Draft；纯只读审核沿用 Seal 后的现有 artifact Route。v1 不提供一个只读 Slot 审核 turn 来单独产出审核裁决。专门的审核裁决与证据协议待出现多人审核、合规留痕等明确需求后独立版本化。
+
 ### 2.5 术语与现有命名映射
 
 | 本文术语 | 含义及与当前仓库的关系 |
 |---|---|
 | production case | 一次独立的模板生产实例；在当前仓库中对应一个 Task / `taskId` |
 | TemplateRuntimeSnapshot | case 使用的完整冻结运行契约；应扩展现有 `FrozenTemplate` 与任务 `snapshot/`，不是第二套快照 |
-| ActionAttempt | 一次可恢复的生产动作尝试；其与当前 Turn、`turnId`、attempt count 的精确映射在实施契约中确定 |
+| ActionAttempt | 一次可恢复的生产动作尝试；v1 直接复用当前 Turn 的 `turnId` 作为稳定身份，不再创建平行 attempt ID |
 | StructureProposal | 编排 Agent 的私有候选槽树，不是权威 scaffold |
 | Scaffold Generation | 一代不可原地修改的结构与 spec；case 同时只有一个 active generation |
 | SlotInstance | scaffold 树中的统一节点，具有平台 ID、typeId、spec 和可选 content |
@@ -107,6 +110,8 @@ Slot Engine 不理解“章节、场景、标题、段落、知乎故事、报�
 - 同一 production case 内的并行填充或并行 merge；
 - 自动 rebase、三方合并或槽级冲突消解；
 - Notion 类块编辑器；
+- 人类直接写槽、拖拽结构、手工 Merge 或从导出文件反向同步槽树；
+- 专门的语义审核 slot session、审核裁决或审核证据模型；
 - Slot Engine 内部的任务领取队列或独立 scheduler；
 - StructureProposal 的增量 add/move/delete 模型工具；
 - 字符串 diff、JSON Patch、流式槽内容编辑或协同编辑；
@@ -114,7 +119,8 @@ Slot Engine 不理解“章节、场景、标题、段落、知乎故事、报�
 - 封存后的同 case 交付版本编辑；
 - 运行中的 case 热升级模板；
 - 从任意非结构化旧文件自动投影、反推并接管为权威槽树；
-- 把某个故事模板的槽粒度、槽类型或文学规则写入平台。
+- 把某个故事模板的槽粒度、槽类型或文学规则写入平台；
+- Assembler 输出图片、音视频等二进制文件，或动态文件名、嵌套目录和运行时新增文件。
 
 ### 3.3 必须保持的 Forge Core 铁律
 
@@ -287,7 +293,9 @@ assembler: {}
 limits: {}
 ```
 
-具体字段继续逐项收敛，但以下归属不再开放：
+v1 顶层 exact schema 已冻结：七个字段全部必填，禁止额外字段；`slotTypes` 与 `accessProfiles` 至少各一项，`validators` 可以为空，`assembler` 必须且只能注册一个最终 Assembler。`version: 1` 同时选择 Slot Schema、LayoutGrammar、selector、validator 与 Assembler 注册契约的整套 v1 方言，不允许自由拼装多个 dialect 版本。
+
+以下归属不再开放：
 
 - SlotTypeDefinition、LayoutGrammar、access profile、validator/Assembler 的注册与绑定、资源限制必须直接声明在 `contract.yaml`。
 - validator、Assembler 的受信实现文件或大型静态资源可以放在固定的 `slots/validators/*`、`slots/assembler/*` 下，由 contract 使用 package-local 安全相对路径引用。
@@ -310,7 +318,7 @@ productionMode: structured_slots
 - `structured_slots` 模式必须存在并完整校验固定路径 `slots/contract.yaml`。
 - `basic` 模式出现 `slots/contract.yaml` 或结构槽专用绑定时必须 fail closed，不能静默忽略死配置。
 - `slots/contract.yaml` 必须声明自己的契约版本，例如 `version: 1`。
-- exact field schema 后续继续收敛，但固定路径、模式归属和单 package 版本语义不再开放。
+- exact field schema、固定路径、模式归属和单 package 版本语义均按本文第 25 节冻结；未知版本和额外字段 fail closed。
 
 ### 7.4 控制面职责
 
@@ -774,18 +782,23 @@ Agent 不能提交原始 ACL、任意 slot ID 列表或自行扩大授权。
 
 ### 10.2 Capability，而不是固定角色
 
-通用 capability 可以包括：
+v1 capability 使用封闭枚举：
 
-- `propose_structure`
-- `read_slot_spec`
-- `read_slot_content`
-- `write_draft_content`
-- `validate_draft`
-- `request_merge`
-- `audit_slots`
-- `request_seal`
+```ts
+type SlotCapabilityV1 =
+  | 'read_structure_contract'
+  | 'write_structure_proposal'
+  | 'validate_structure_proposal'
+  | 'submit_structure_proposal'
+  | 'read_slot_spec'
+  | 'read_slot_content'
+  | 'write_draft_content'
+  | 'validate_draft'
+  | 'submit_draft'
+  | 'request_seal';
+```
 
-最终命名可以在 schema 设计时收敛，但能力必须可组合，不能强制映射为互斥角色。
+能力可以组合，不能强制映射为互斥角色。v1 不加入 `audit_slots`；普通只读状态查询由当前合法 slot session 隐含允许，不另造 capability。
 
 ### 10.3 SlotGrant
 
@@ -795,17 +808,18 @@ Agent 不能提交原始 ACL、任意 slot ID 列表或自行扩大授权。
 interface SlotGrant {
   grantId: string;
   caseId: string;
-  actionAttemptId: string;
+  turnId: string;
   scaffoldId: string;
   baseRevision: number;
   agentId: string;
-  capabilities: string[];
+  capabilities: SlotCapabilityV1[];
   readableSlotIds: string[];
   writableSlotIds: string[];
   draftId: string | null;
-  expiresAt: string | null;
 }
 ```
+
+v1 Grant 不使用墙钟过期时间。它在 `turnId` 终止、active generation 改变、`baseRevision` 失效或 Draft 进入终态时立即失效；时间型租约留到未来并行或远程执行协议。
 
 ### 10.4 授权不变量
 
@@ -813,7 +827,7 @@ interface SlotGrant {
 - Agent 只接收授权范围内的槽位投影；隐藏槽在其视角中不存在。
 - 写权限不自动等于整树读权限。
 - 祖先、依赖、邻接或前文上下文必须由 profile 显式授予只读访问。
-- Grant 绑定具体 case、ActionAttempt、scaffold、revision、Agent 和 draft，不能跨任务复用。
+- Grant 绑定具体 case、`turnId`、scaffold、revision、Agent 和 draft，不能跨任务复用。
 - Merge Gate 再次检查实际 changes 没有越过 writable scope。
 - validation issue 也要经过授权过滤，不能通过错误消息泄露隐藏槽内容或关系。
 - ACL 属于控制面，不能进入 slot spec 或 content。
@@ -940,7 +954,7 @@ type StructuredSlotSessionV3 =
     };
 ```
 
-一个 v3 turn 只能声明 `slotSession`，不能同时声明 v2 的 `production` 或 `annotate`。Loader 必须验证 kind、completion、capabilities、access profile、Agent capability 上限和 pipeline dispatch 之间的完整交叉引用。`SlotCapabilityV1` 的精确枚举仍需在 contract schema 收敛，但运行时不能接受模板自定义 capability 名称。
+一个 v3 turn 只能声明 `slotSession`，不能同时声明 v2 的 `production` 或 `annotate`。Loader 必须验证 kind、completion、capabilities、access profile、Agent capability 上限和 pipeline dispatch 之间的完整交叉引用。`SlotCapabilityV1` 使用 10.2 的封闭枚举，运行时不能接受模板自定义 capability 名称。
 
 历史 v1/v2 snapshot 保持其原始版本和既有可运行性判断；平台不把旧契约原地重写为 v3。structured template 缺失 v3 或包含互斥能力时 fail closed。
 
@@ -1007,12 +1021,12 @@ open ──────> merged
 恢复规则：
 
 - FillDraft 持久化，不依赖模型上下文或进程内存。
-- 同一 ActionAttempt 使用幂等 `getOrCreateDraft(actionAttemptId)` 语义找回同一草稿。
+- 同一 ActionAttempt 使用幂等 `getOrCreateDraft(turnId)` 语义找回同一草稿。
 - 恢复时重新校验 Agent、Grant、active scaffold、baseRevision 和模板快照。
 - 新 ActionAttempt 默认创建新草稿，不自动继承失败 Attempt 的 overlay。
 - v1 不提供跨 Attempt 自动续写或草稿克隆。
 - merge 必须幂等；如果提交成功但响应丢失，重放返回原提交结果，不再次提升 revision。
-- terminal Draft 保留为只读审计记录，但不参与 Assembler。
+- `merged`、`stale`、`abandoned` Draft 均随 task 保留为只读审计记录，直到 task 按平台数据治理规则被删除；运行投影默认只索引 `open` / active 对象，终态 Draft 默认隐藏且绝不参与 Assembler。模板不能自定义保留期。
 
 ---
 
@@ -1072,7 +1086,11 @@ type ValidatorScope = 'slot' | 'subtree' | 'scaffold';
 type ValidatorTrigger = 'merge-and-seal' | 'seal';
 ```
 
-validator 本身只返回规范化 `{ pass, issues }`。平台负责计算 `not_run`、`pending`、缓存与输入哈希失效。Seal 无条件重跑适用的全部强制校验。
+每个 validator 必须显式注册 `id`、scope、trigger、静态 selector、`implementation { abi: 'forge-validator/v1', path }` 和 `budget { cpuMs, timeoutMs, memoryMiB }`；缺失预算、未知字段、重复 id、空 selector、越过平台 hard ceiling 或不兼容 ABI 均使模板加载失败。
+
+validator 接收固定、只读的 canonical JSON 输入信封，只包含其 scope 内的 type/spec/content/tree 投影、必要模板声明和稳定逻辑位置，不包含宿主路径、Grant、Agent、事件、secret 或平台服务句柄。实现运行于禁止任意依赖加载、FS、网络、进程、墙钟、随机数、locale 和环境变量的受限执行器中。
+
+validator 本身只返回窄 `{ pass, issues }`。平台负责将其适配为固定 code/severity/location，计算 `not_run`、`pending`、缓存与输入哈希失效。编译失败、异常、超时、内存越限、无效返回和 issue 越限均 fail closed。Seal 无条件重跑适用的全部强制校验。
 
 v1 可以使用保守的受影响范围重跑策略；以后优化依赖图不能改变外部通过/失败语义。
 
@@ -1094,7 +1112,7 @@ v1 可以使用保守的受影响范围重跑策略；以后优化依赖图不�
 
 封存前若发现结构不适合继续生产：
 
-1. 具有 `propose_structure` 能力的 Action 创建新 StructureProposal；
+1. 具有 `write_structure_proposal` 能力的 Action 创建新 StructureProposal；
 2. 新 Proposal 完整通过 Structure Gate；
 3. 平台冻结 structure commit candidate；
 4. ActionCommitter 连同合法 dispatch 原子创建新的 Scaffold Generation 并切换 `activeScaffoldId`；
@@ -1131,6 +1149,10 @@ Assembler 必须：
 - 不从未校验 content 构造任意输出路径；
 - 在隔离 staging 中产生候选文件。
 
+v1 contract 只注册一个 `forge-assembler/v1` Assembler。它只能返回 `{ routeId, content }[]`，其中 content 是 UTF-8 文本；route 必须一一映射当前 structured producer 负责、`phase: create` 的冻结 `artifactSchema.files[].name`。平台补齐文件名、producer、media type、required 和 phase，Assembler 无权动态声明路径或媒体类型。
+
+v1 文件名必须是安全单段静态名称，输出媒体类型只允许 `markdown` 或 `text`：分别映射为 `text/markdown; charset=utf-8` 与 `text/plain; charset=utf-8`。JSON 可暂时作为 text 文件并由 artifact validator 校验；binary、base64、stream、动态文件名和嵌套目录必须通过未来新 ABI 扩展。
+
 需要模型创作的标题、过渡语或格式内容必须先进入槽，而不能由 Assembler 临时生成。
 
 ---
@@ -1166,7 +1188,12 @@ interface SealRecord {
   snapshotHash: string;
   assemblerId: string;
   assemblerVersion: string;
+  artifactVersionRef: {
+    artifactId: string;
+    version: number;
+  };
   outputs: Array<{
+    routeId: string;
     path: string;
     mediaType: string;
     byteLength: number;
@@ -1175,6 +1202,8 @@ interface SealRecord {
   sealedAt: string;
 }
 ```
+
+`artifactVersionRef` 指向 custody 中已经原子提交的不可变正式版本；SealRecord 不保存 staging 路径。v1 的 `outputs[].path` 必须等于 route 对应的安全单段 `artifactSchema.files[].name`，媒体类型由平台按冻结 artifactSchema 推导。
 
 ### 17.3 Seal 不变量
 
@@ -1220,7 +1249,7 @@ interface SealRecord {
 - 大对象提交遵循 staging 写入并校验 hash、追加权威提交、原子 claim/rename 的可恢复顺序；未被权威事件引用的 staging 永不视为成功。
 - 崩溃恢复不得猜测“可能已经成功”；应通过提交记录、digest 和 staging 状态完成 claim 或清理无主候选。
 
-具体事件联合名称、磁盘目录、私有 journal 格式和 checkpoint 阈值仍在实施契约中收敛，但不得改变三层事实边界。
+权威事件语义、幂等身份和崩溃提交顺序按第 25.6 节冻结。磁盘目录、私有 journal 编码和 checkpoint 阈值属于 dev plan 可校准的内部实现，不得改变三层事实边界。
 
 ---
 
@@ -1266,6 +1295,14 @@ interface StructuredIssueV1 {
   relatedLocations: IssueLocation[];
   details: JsonObject;
 }
+
+interface StructuredVerdictV1 {
+  version: 1;
+  status: 'passed' | 'failed' | 'incomplete';
+  issues: StructuredIssueV1[];
+  truncated: boolean;
+  summary: { errors: number; warnings: number };
+}
 ```
 
 核心语义：
@@ -1278,6 +1315,8 @@ interface StructuredIssueV1 {
 - `details` 是由 `code` 决定形状的判别数据，不是任意日志袋；必须是有界、可序列化、可按授权过滤的 JSON 对象。
 - operation 顶层结果 code 与 `StructuredIssueV1.code` 分工不同：前者说明调用整体为何失败，例如“校验未通过”；后者逐项说明具体可修正原因，例如“出现了不允许的 child type”。
 - issue 数量受 `limits.validation.maxIssuesPerRun` 限制；`truncated` 属于 verdict/result 包装层，不伪装成一条 issue，也不能被解释为通过。
+- code registry 在平台侧固定每个 code 的 source、允许 phase、severity、details schema 和 location kind；模板和 Agent 不能新增 code、改变含义或在运行中降低严重程度。
+- 只有 `error` 阻塞，`warning` 只提供建议；`incomplete` 表示任一强制 evaluator 未可靠完成，与 `failed` 一样阻止权威提交。`passed` 要求全部强制检查完成且没有 error，可以同时携带 warning。
 
 现有 `GateIssue { stage?, evidence?, scope? }` 保留为沙箱 validator 的窄返回边界。它不是平台全局 issue 类型：平台继续丢弃未知字段并规范化允许字段，再由受信适配器补充平台控制的 code、severity、phase、source 和 location，转换为 `StructuredIssueV1`。validator 不能直接声明平台错误码、工程 ID、授权范围或定位对象。
 
@@ -1335,7 +1374,7 @@ type IssueLocation =
 - `slotId` 是 scaffold generation 内的权威节点身份；Draft overlay 的 content issue 仍定位到对应 slot，不暴露 draftId。
 - `template_resource.resourcePath` 是 Template Package 内的规范化 POSIX 逻辑相对路径。`span` 为 `null` 表示整个资源或实现无法提供可靠文本范围；非空 span 的 line/column 都是非负整数，使用从 0 开始、end-exclusive 的行列坐标，column 按 UTF-16 code unit 计数，且 end 不得早于 start。
 - `artifactPath` 是发布 manifest 中的规范化 POSIX 逻辑相对路径；`valuePointer` 为空时定位整个 artifact，非空时定位其可结构化投影中的值。`routeId` 指向冻结 Assembler 声明中的 route。
-- `operation` 只用于没有更具体且有权暴露的内容位置，不携带 caseId、scaffoldId、draftId、grantId、actionAttemptId 或 revision。
+- `operation` 只用于没有更具体且有权暴露的内容位置，不携带 caseId、scaffoldId、draftId、grantId、turnId 或 revision。
 - `resourcePath` 与 `artifactPath` 禁止绝对路径、反斜杠、空段、`.` / `..` 段和 NUL；任何 location 都不得包含宿主机真实文件路径。
 - 六种 kind 的字段都是封闭的；未知 kind、缺失字段或额外字段不能进入公开 issue 投影。
 
@@ -1350,7 +1389,7 @@ type IssueLocation =
 - Merge、generation 切换和 Seal 的任何校验失败都必须保持权威状态零变化。
 - 已成功提交但响应丢失时，重放应返回原结果。
 
-其余错误码集合在实施计划前统一命名，避免不同模块为同一失败创造多个含义相近的 code。
+v1 code registry 的最小集合、details 安全形状和授权投影顺序按第 25.5 节冻结；实施不得为同一失败创造近义 code。
 
 ---
 
@@ -1488,6 +1527,10 @@ type IssueLocation =
 12. 权威小事件、task 内不可变 content-addressed blob、私有 Proposal/Draft journal + checkpoint 三层持久化。
 13. 统一版本化 `StructuredIssueV1` 信封；`IssueLocation` 固定为 contract、template_resource、proposal、slot、artifact、operation 六类；现有 `GateIssue` 只作为沙箱 validator 边界输入并由平台适配。
 14. 基础模式零行为变化。
+15. `contract.yaml`、Slot Schema、canonical JSON、capability、validator/Assembler ABI、issue/verdict、事件和 Seal 引用使用第 25 节冻结的 v1 契约。
+16. v1 Assembler 只输出模板预先声明的安全单段 UTF-8 Markdown/Text 文件；不支持 binary、动态文件名或嵌套目录。
+17. 人类 UI 只读查看槽树、content、状态、issues、Draft 审计与 sealed output；模型写入只能通过绑定 turn 的 Slot Tool，不提供人工编辑或手工 Merge。
+18. 终态 Draft 随 task 保留为默认隐藏的只读审计记录；warning 不阻塞，error 与 incomplete fail closed。
 
 ---
 
@@ -1511,25 +1554,133 @@ type IssueLocation =
 
 ---
 
-## 25. 尚待继续收敛的具体设计
+## 25. v1 已冻结的详细系统契约
 
-主流程已经冻结，以下属于进入 dev plan 前仍需在本文继续讨论并定稿的实现级系统契约：
+2026-08-10 已将 [`STRUCTURED-SLOT-ENGINE-REMAINING-DECISIONS.md`](./STRUCTURED-SLOT-ENGINE-REMAINING-DECISIONS.md) 中全部剩余 P1 按推荐方案整组接受。本节是这些结论的权威落点；原清单只保留问题背景、备选方案和编号追溯，不再是开放评审队列。
 
-为避免逐题打断讨论，问题、推荐方案、备选方案和影响已经集中整理在 [`STRUCTURED-SLOT-ENGINE-REMAINING-DECISIONS.md`](./STRUCTURED-SLOT-ENGINE-REMAINING-DECISIONS.md)。该文件只是批量评审队列，不是第二份权威设计；接受的结论仍须合并回本文。
+### 25.1 Contract 与 Loader（A01–A05）
 
-1. `slots/contract.yaml` 各顶层分区的最终 YAML/TypeScript 字段 schema；权威入口、分区、声明/实现边界、固定路径和单 package 版本语义已经冻结。
-2. LayoutGrammar v1 的 issue code/details；统一 issue 信封、六类精确位置、FIRST/FOLLOW 静态无歧义、单遍无回溯匹配、可终止递归、强制循环拒绝、六种 AST kind、有限重复、显式叶子、nullable repeat 拒绝、结构化 Production AST 与路径化定位已经冻结。
-3. Slot Schema v1 各关键字数值参数和 safe pattern 约束；精确白名单、对象/数组开放性、纯验证语义、单一形态和 SlotTypeDefinition 外层契约已经冻结。
-4. 平台 hard ceiling 的绝对数值和兼容版本协议；模板 `limits` 的六组十六字段、单位、跨字段关系、三层限制模型与禁止静默裁剪已经冻结。
-5. access profile 的 exact YAML/TypeScript 字段、投影分页和单次工具响应限制；静态 `all/root/types` 写目标、`precedingFilled` 封闭只读前文关系、depth-first pre-order 文档顺序以及按槽渐进披露已经冻结。
-6. validator / Assembler 的注册、快照、沙箱和版本协议。
-7. `StructuredIssueV1` 各阶段 code/details 集合与 verdict 包装；八种 phase、十种 source、统一信封、六类 `IssueLocation` 精确联合和现有 `GateIssue` 的受信适配边界已经冻结。
-8. 追加事件联合的 exact 名称、私有 Store/journal 格式、checkpoint 阈值和磁盘目录布局；权威小事件 + task 内不可变 blob + 私有 journal/checkpoint 三层事实边界已经冻结。
-9. Slot Tool 与 commit receipt 的 exact 输入输出 schema、ActionCommitter 事件细节和失败 code；九个 ForgeAction 不变、structured TurnContract v3、互斥 slotSession 与延迟权威提交已经冻结。
-10. TaskWorkspace、API 和 UI 需要暴露的最小只读投影。
-11. SealRecord 与现有 ArtifactVersion 的 exact 引用字段、route/file/media type 细节和 custody 恢复协议；sealed candidate 经 `publish_artifact` 进入后续 Route，或由合法 final submitter 直接 `submit_final_artifact`，且只有 `final_submission_accepted` 完成 Task 的映射已经冻结。
+- **A01｜exact 顶层**：`contract.yaml` 只允许且必须包含 `version`、`slotTypes`、`layoutGrammar`、`accessProfiles`、`validators`、`assembler`、`limits`；`additionalProperties: false`。`slotTypes`、`accessProfiles` 至少各一项，`validators` 可为空，最终 Assembler 恰好一个。`version: 1` 选择整套 v1 方言。
+- **A02｜资源边界**：contract 只能引用 `slots/validators/` 或 `slots/assembler/` 内规范化 POSIX 相对路径。绝对路径、反斜杠、空段、`.`、`..`、NUL、符号链接、非普通文件、越限文件以及目录内未被 contract 引用的文件全部使加载失败。Loader 按逻辑路径稳定排序 manifest 并记录内容摘要。
+- **A03｜规范化与 hash**：basic 模板保持原规范化路径，缺失 `productionMode` 时不注入默认字段。structured 模板的 hash 追加规范化 contract 语义、排序后的资源摘要和受信 ABI 身份；绝对路径、mtime、宿主元数据不参与。文本统一换行后摘要，非文本资源按原字节摘要。
+- **A05｜兼容性**：`contract.version` 是封闭整数；未知版本拒绝。TemplateRuntimeSnapshot 逐项冻结 canonical JSON、Schema、Grammar、validator/Assembler ABI、实现摘要、limits 与必要 hard-ceiling profile 身份。恢复按能力覆盖关系判断，不按应用 build 或宽泛 semver 猜测；历史 snapshot 永不原地升级或由新 Loader 重解释。
 
-这些不是对主流程语义的重新开放；它们只能在本文已冻结的边界内选取实现方案。
+### 25.2 Slot Schema 与 canonical JSON（B01–B05、C02–C03）
+
+- **B01｜数值边界**：长度、数量和属性个数关键字必须是 JavaScript safe integer 范围内的非负整数，且 `min <= max`。数值边界必须为有限 JSON number；`multipleOf` 为有限正数；exclusive 边界只接受数值形式。运行时 `integer` 还必须是 safe integer；更大精确整数由模板建模为字符串。
+- **B02｜长度口径**：`minLength` / `maxLength` 按 Unicode code point 计数；payload 限额单独按 canonical JSON 的 UTF-8 字节计数。v1 不做 Unicode normalization，也不改写用户内容。
+- **B03｜安全正则**：`pattern` 固定使用 `forge-safe-regex/v1` 的 RE2 兼容子集，禁止回溯引用、lookaround、内联 flags 和宿主扩展。Loader 加载期编译；运行期继续受输入长度与预算约束。默认是子串搜索，整串匹配必须显式写锚点。
+- **B04｜常量范围**：v1 的 `enum` / `const` 只接受 string、有限 number、boolean、null；对象和数组常量后置。枚举项按类型敏感的 canonical value 去重。
+- **B05｜数组唯一性**：`uniqueItems` 使用类型敏感的 canonical JSON 摘要比较；对象键顺序不影响相等、数组顺序影响、非有限数在验证前拒绝。检查受 `maxItems` 和 payload hard ceiling 保护。
+- **C02｜规范化协议**：`forge-canonical-json/v1` 以 RFC 8785 JCS 为核心；UTF-8、对象键按 JCS 的 UTF-16 code unit 规则排序、无额外空白、字符串不规范化、数字使用稳定最短形式且 `-0` 归一为 `0`。规范化前拒绝 NaN、Infinity、循环引用、undefined、bigint、孤立 surrogate 和非 JSON 对象；协议由跨实现测试向量冻结，不能把普通 `JSON.stringify` 当作完整实现。
+- **C03｜运行能力**：snapshot 冻结 contract、canonical JSON、Slot Schema、Grammar、validator ABI、Assembler ABI、实现摘要和模板 limits。缺少任何必要能力都返回 `TEMPLATE_RUNTIME_UNAVAILABLE`，不得用更小限额降级继续。
+
+### 25.3 Capability、授权投影与 Grant（D01–D06）
+
+- **D01｜封闭能力**：使用 10.2 的 `SlotCapabilityV1` 十项枚举；v1 不加入 `audit_slots`。Seal 前审核若要读取并修订槽内容，使用普通 fill/revision 流程；纯只读审核走 Seal 后的现有 artifact Route。Slot Engine 不增加审核 session、状态或证据模型。
+- **D02｜三层绑定**：Agent YAML 声明静态能力上限；TurnContract v3 声明本 turn 所需能力与 fill/seal access profile，structure 显式为 `accessProfile: null`；平台验证所需能力是 Agent 上限子集后再解析 SlotGrant。模型不能传 profileId、capability 或原始 slotId 集合，角色名不参与授权计算。
+- **D04｜可见树闭包**：投影分 `outline | spec | content`。任何可见深层节点自动补齐到 root 的 ancestor outline shell，但不补未授权 sibling；可写节点至少能看到自身 type、spec 和有效 content。shell 不含 spec/content、真实 child 数、隐藏 sibling 或任何隐藏存在性提示。投影 children 可连续展示，但不得伪装成权威 `order`。
+- **D05｜防存在性探测**：按 slot 操作对“对象不存在”和“存在但不可见”统一返回 `SLOT_NOT_VISIBLE`，位置为 `operation`，不回显 slotId 或关系。批量调用含隐藏对象时整批失败，不允许部分成功枚举边界。
+- **D06｜Grant 生命周期**：v1 不设时间租约。Grant 在 turn 终止、active generation 改变、baseRevision 失效或 Draft 终态时立即失效。
+
+### 25.4 Validator 与 Assembler（E01–E07）
+
+- **E01｜注册**：validator 显式声明 `id`、`scope`、`trigger`、静态 selector、`implementation { abi, path }` 与 `budget { cpuMs, timeoutMs, memoryMiB }`；scope 只允许 `slot | subtree | scaffold`，trigger 只允许 `merge-and-seal | seal`，ABI 为 `forge-validator/v1`。未知字段、重复 id、空 selector、越界预算和不兼容 ABI 都加载失败。
+- **E02｜输入**：沙箱只接收固定、只读的 canonical JSON 信封，内容限于声明 scope 内的可验证 type/spec/content/tree 投影、必要模板声明和稳定逻辑位置；不得包含宿主路径、Grant、Agent、事件、task 存储位置、secret 或服务句柄。
+- **E03｜重跑**：Merge 重跑所有可能受本次 overlay 影响且 trigger 包含 merge 的 validator；不能可靠证明无影响时就重跑。Seal 无条件运行全部强制 validator；缓存只能做语义等价优化。
+- **E04｜沙箱**：结构槽使用独立纯函数 ABI 和受限执行器；实现不能加载任意 npm 包、`require`、FS、网络或进程，Date、随机数、locale 和环境变量等非确定输入被禁用或固定。snapshot 冻结 ABI 与实现摘要，不冻结宿主绝对路径。
+- **E05｜预算与失败**：每个实现必须显式声明不超过平台 hard ceiling 的预算，不提供隐式默认。编译失败、异常、超时、内存越限、无效返回和 issue 越限均 fail closed；实现不能把执行失败降为 warning。
+- **E06｜输出路由**：contract 只注册一个 Assembler，声明 `id`、`implementation { abi: 'forge-assembler/v1', path }`、预算和 routes。每个 route 精确映射当前 structured producer 负责、`phase: create` 的一个冻结 artifact 文件；annotate 文件仍由后续现有 Agent 产生。沙箱只返回 `{ routeId, content }[]`，控制字段由平台补齐，并要求必填 create 文件精确覆盖且无额外输出。
+- **E07｜输出类型**：v1 Assembler 只输出 UTF-8 `markdown | text`；JSON 可作为 text 并额外验证。binary、base64 和 stream 需要未来新 ABI。
+
+### 25.5 Issue、severity 与 verdict（F01–F06）
+
+- **F01｜严重级别**：平台 code registry 固定 severity；只有 error 阻塞，warning 只建议。模板 validator 通过受信适配规则映射到固定 code/severity，运行中不能自定义或降级。
+- **F02｜注册表**：每个公开 code 固定 `{ source, allowedPhases, severity, detailsSchema, allowedLocationKinds }`，名称使用 `UPPER_SNAKE_CASE`。公开后不得换义；新增可向后兼容，删除或改变语义必须升级公开契约版本。
+- **F03｜首批 code**：v1 最小集合按责任域冻结如下：
+
+```text
+contract:       SLOTS_CONTRACT_INVALID, SLOTS_REFERENCE_UNKNOWN, SLOTS_RESOURCE_INVALID
+compatibility:  TEMPLATE_RUNTIME_UNAVAILABLE
+slot_schema:    SPEC_SCHEMA_INVALID, CONTENT_SCHEMA_INVALID, CONTENT_REQUIRED, CONTENT_FORBIDDEN
+grammar_ref:    LAYOUT_GRAMMAR_NODE_INVALID, LAYOUT_GRAMMAR_REFERENCE_UNKNOWN,
+                LAYOUT_GRAMMAR_PRODUCTION_UNREACHABLE
+grammar_term:   LAYOUT_GRAMMAR_NULLABLE_REPEAT, LAYOUT_GRAMMAR_NON_TERMINATING
+grammar_ambig:  LAYOUT_GRAMMAR_CHOICE_AMBIGUOUS, LAYOUT_GRAMMAR_OPTIONAL_FOLLOW_CONFLICT,
+                LAYOUT_GRAMMAR_REPEAT_FOLLOW_CONFLICT
+structure:      PROPOSAL_CLIENT_KEY_DUPLICATE, STRUCTURE_ROOT_TYPE_INVALID,
+                STRUCTURE_PRODUCTION_MISMATCH
+access:         SLOT_CAPABILITY_REQUIRED, SLOT_NOT_VISIBLE, SLOT_WRITE_FORBIDDEN
+lifecycle:      PROPOSAL_NOT_OPEN, DRAFT_NOT_OPEN, DRAFT_STALE, SCAFFOLD_NOT_ACTIVE,
+                COMMIT_CANDIDATE_STALE
+limits/idemp:   RESOURCE_LIMIT_EXCEEDED, IDEMPOTENCY_CONFLICT
+validator:      VALIDATOR_REJECTED, VALIDATOR_UNAVAILABLE, VALIDATOR_RESULT_INVALID
+assembler:      ASSEMBLER_FAILED, ASSEMBLER_UNAVAILABLE, ASSEMBLER_RESULT_INVALID
+artifact:       ARTIFACT_SCHEMA_MISMATCH, ARTIFACT_INTEGRITY_FAILED, PUBLISH_FAILED
+```
+
+  Grammar 静态问题定位 contract AST；实例不匹配使用 `STRUCTURE_PRODUCTION_MISMATCH` 定位 Proposal/slot children，并只返回有界 expected/actual 摘要。异常、超时和内存越限共享相应 `*_UNAVAILABLE`，由封闭 reason 细分。
+- **F04｜安全 details**：每个 code 使用 exact 判别 schema，只允许有界标量和短数组。默认不回显 content、spec、完整 schema、堆栈、绝对路径或内部 ID；证据只能是长度受限、平台规范化的说明。
+- **F05｜verdict**：统一使用 19.1 的 `StructuredVerdictV1`。`incomplete` 与 `failed` 一样 fail closed；`passed` 要求无 error 且全部强制检查完成，允许 warning 共存。
+- **F06｜过滤顺序**：平台先在内部形成完整 verdict，再按主体授权投影 issue、稳定排序，最后应用公开数量上限。不可见 related location 移除；隐藏 primary 对应 issue 必须抑制或重新生成不泄露数量与对象的通用 operation issue。公开 summary 只统计可见投影，但隐藏 error 仍可阻塞操作。
+
+### 25.6 权威事件、幂等与恢复（G02–G07）
+
+- **G02｜事件最小集合**：主 TaskEvent 只记录权威边界。v1 使用 `structured_scaffold_generation_committed`（创建并激活新 generation，可原子 supersede 旧 active）、`structured_fill_draft_opened`、`structured_fill_draft_terminal`（`merged | stale | abandoned`）和 `structured_scaffold_sealed`；事件只带稳定身份、状态、revision、摘要和 blob/artifact 引用。Proposal 替换、Draft content 替换、建议性校验和 checkpoint 只进私有 journal。
+- **G03｜身份**：`turnId` 就是 ActionAttempt 身份。Proposal/Draft 由平台按 turn 上下文 get-or-create；工具调用使用运行器提供的 `toolCallId` 做幂等键，模型不传 requestId。权威提交另生成稳定 receipt key 并保存原结果，以便响应丢失后重放。
+- **G05｜崩溃提交**：大对象先写 staging 并 fsync/校验 digest，再追加权威事件，最后原子 rename/claim 到内容寻址目录。事件决定可见性；恢复器依据事件和 hash 完成 claim 或清理无主 staging，不以目录存在性猜测提交成功。
+- **G07｜终态保留**：merged/stale/abandoned Draft 随 task 保留为只读审计记录直至 task 删除；普通运行投影只索引 open/active 对象，终态 Draft 默认隐藏、不能重新提交、不能进入 Assembler。独立保留期以后由平台数据治理决定，模板无权配置。
+
+### 25.7 Slot Tool、turn 与 dispatch（H03–H06）
+
+- **H03｜Attempt 身份**：实现和公共事件统一使用 `turnId`；“ActionAttempt”只保留为设计语义名。重试产生新 turnId，因此默认创建新 Proposal/Draft，旧对象转 abandoned。
+- **H04｜工具幂等**：Slot Tool 从执行上下文读取 `toolCallId`。同 key + 同规范化参数重放原结果；同 key + 不同参数返回 `IDEMPOTENCY_CONFLICT`。模型参数不得出现 requestId、turnId、draftId、revision 或 Grant。
+- **H05｜完成与提交**：达到 slotSession completion 后禁止继续写，模型只获得不含 blob、Grant 或内部提交 ID 的安全 receipt 摘要，随后只能 dispatch 或请求人工输入。ActionCommitter 校验 receipt、turn、revision 后，把权威事件与 dispatch 作为一个可恢复提交；失败、取消或失配只废弃 candidate，不改权威状态。
+- **H06｜无隐式队列**：v1 不实现“自动领取下一个未填槽”。profile 静态解析工作范围，一个 Draft 处理整个 writable set；后续 Route 仍由 pipeline 决定。逐实例领取、锁、游标和动态 anchor 属于未来 Slot Scheduler。
+
+### 25.8 TaskWorkspace、API、Agent 投影与 UI（I01–I07）
+
+- **I01｜Workspace 摘要**：现有 TaskWorkspace 增加可选 `structuredSlots` 摘要；basic task 字段缺失以保持兼容。摘要只含 mode、active generation 摘要、contentRevision、structure/seal status、可见/已填槽计数和 issue summary，不内嵌 content、完整树或私有 Draft。
+- **I02｜只读 API**：内部共享一个授权投影服务；外部只读 REST 提供 contract projection、tree outline/subtree、slot detail、visible issues 和 SealRecord。人类 UI v1 没有槽写 API；模型写入只能走绑定 turn 的 Slot Tool。
+- **I04｜人类界面**：v1 UI 只提供树形大纲、type/spec/content 只读查看、状态、issue 定位、Draft/merge 审计和 sealed output 链接。可以触发平台允许的重试、终止等流程动作，但没有拖拽、块编辑、人工 Merge 或文件反向同步。
+- **I05｜Agent 最小投影**：structure session 只获得可创作 type、specSchema、Grammar、limits 和安全说明；fill session 只获得 Grant 授权的树投影、spec、有效 content 与 issue。两者都不获得实现路径、validator/Assembler 源码、ACL、宿主路径、事件 ID、Grant ID 或隐藏节点统计。
+- **I07｜数据/指令隔离**：slot spec/content 作为带类型、来源和 slot reference 的结构化数据区块注入，不拼进 system prompt、工具说明或模板控制指令。content 中出现工具名、角色名或“忽略规则”等文本不改变 capability；授权始终由服务端 Grant 执行，trace 和 issue 继续按权限与长度脱敏。
+
+### 25.9 Seal、artifact custody 与输出边界（J03–J06）
+
+- **J03｜正式版本引用**：SealRecord 必须保存 `{ artifactId, version }` 的不可变 ArtifactVersion 引用，并继续记录每个 route/path 的 byteLength 与 SHA-256；不得保存 staging 路径。
+- **J04｜静态平面文件**：route 一一映射当前 structured producer 负责、`phase: create` 的 `artifactSchema.files[].name`，文件名必须是安全单段名称，Assembler 只返回 routeId。annotate 文件不参与；嵌套目录、多 route 同名和由 content 派生动态文件名全部后置。
+- **J05｜媒体类型**：平台冻结 `markdown -> text/markdown; charset=utf-8`、`text -> text/plain; charset=utf-8` 的映射，Assembler 无权声明 mediaType。JSON/binary 需要同时升级 pipeline schema 与 Assembler ABI。
+- **J06｜Seal 幂等**：内容身份由 task、scaffoldId、revision、snapshotHash、Assembler 实现摘要和规范化输入 hash 派生；attempt receipt 另绑定 `turnId + toolCallId`。同 Attempt 重放返回同 candidate，已提交同内容身份返回原 SealRecord。新 Attempt 可以复用已校验的内容寻址字节，但必须重签 receipt、复核 active revision 并重新经过 ActionCommitter；revision 变化 fail closed。
+
+### 25.10 直接进入 dev plan 的实施默认项
+
+以下 D/K 项不再作为产品问题重新评审，但仍必须由代码审查、测试和基准验证：
+
+- Loader 对单文件语法/重复键立即失败，对可继续解析的 schema、引用、Grammar、资源和兼容问题聚合后稳定排序；不静默修复。
+- Schema issue 按 schema pointer、instance pointer、keyword、code 排序，details 不回显完整 content；截断不改变内部失败结论。
+- 使用统一、版本化 budget evaluator 覆盖 Loader、Proposal、Draft、validator、Assembler staging 和 artifact commit，任何边界都不 silent clamp。
+- selector 的授权集合可覆盖完整合法范围，但目录/API 必须分页；cursor 绑定 generation、revision、授权投影和排序版本，变化后失效。
+- validator/Assembler 提供 ABI conformance fixtures；CI 对相同输入双运行比较 manifest/hash，生产记录输入 hash、实现摘要和输出 hash。
+- task 内 blob id 使用 canonical bytes 的 SHA-256；私有 journal 达到操作数或字节阈值后写不可变、可校验 checkpoint；task 删除时一并清理其 blob 和终态 Draft。
+- UI 复用现有 task watch/polling，不新增协同光标或实时 patch stream；custody 复用 stage → event/commit → atomic claim，并把全部文件、manifest 与 SealRecord 当作一个恢复单元。
+- 保持现有 Loader、scheduler、ActionCommitter、ArtifactStore 和 task projection 为唯一入口；所有磁盘、事件、API 与模型工具边界使用运行时 exact schema，未知字段 fail closed。
+- 测试矩阵覆盖规范化 golden、Schema/Grammar 属性、selector 防泄漏、Draft 幂等和恢复、沙箱逃逸与预算、Seal 原子性、历史 basic hash/snapshot 以及 API/UI 授权投影。
+- 为 active scaffold/revision、slot parent-order-type、Draft changed slots、事件序号和 blob digest 建立直接索引；不得为读取单槽反序列化整个最大 scaffold。
+- structured mode 只以新增版本上线；basic task、TurnContract v2、现有 ArtifactVersion 与前端响应保持兼容，不提供 basic task 原地迁移或历史重写。
+
+首个部署 profile 以以下值作为基准候选，而不是未经测试的永久兼容承诺：
+
+| 范围 | 候选 hard ceiling |
+|---|---:|
+| schema 深度 / 总节点 / 单 enum / pattern 长度 | 16 / 4096 / 256 / 512 code points |
+| scaffold 槽数 / 树深 / 单节点 children | 10,000 / 32 / 1,000 |
+| 单槽 spec / 单槽 content / scaffold payload | 64 KiB / 1 MiB / 64 MiB |
+| 单 Draft 变更槽数 / payload | 2,000 / 16 MiB |
+| 单次公开 issues | 500 |
+| artifact 文件数 / 单文件 / 总量 | 64 / 16 MiB / 64 MiB |
+
+dev plan 必须先对最坏 Grammar/Schema、10k 槽遍历、最大 Draft、500 issues、全量 Seal 和崩溃恢复做 CPU、内存、响应与磁盘基准，再冻结实际部署 profile；模板只能声明更小值。
 
 ---
 
@@ -1578,6 +1729,14 @@ type IssueLocation =
 | 2026-08-10 | 结构槽持久化采用权威小事件、task 内不可变 content-addressed blob、私有 Proposal/Draft journal + checkpoint 三层模型 |
 | 2026-08-10 | 现有九个 ForgeAction 保持不变；结构槽使用独立 Slot Tool 和 TurnContract v3，Structure/Merge/Seal 先形成 turn-bound candidate，再由 ActionCommitter 与 dispatch 一起提交 |
 | 2026-08-10 | Seal candidate 通过 publish_artifact 进入后续 Route，或由合法 final submitter 直接提交；Seal 冻结内容生产，但只有 final_submission_accepted 完成 Task |
+| 2026-08-10 | 剩余 P1 按推荐方案整组接受；contract/Loader、Slot Schema、canonical JSON、运行能力与安全资源规则形成封闭 v1 契约 |
+| 2026-08-10 | v1 capability 使用十项封闭枚举，不内置 audit_slots；语义审核保留在模板工作流层，专门审核证据协议后置 |
+| 2026-08-10 | validator/Assembler 使用独立受限 ABI、显式预算和 fail-closed 执行；Assembler v1 只输出静态、安全单段 UTF-8 Markdown/Text 文件 |
+| 2026-08-10 | 平台 code registry 控制 issue severity；warning 不阻塞，error 和 incomplete 阻止权威提交 |
+| 2026-08-10 | merged/stale/abandoned Draft 随 task 保留为默认隐藏的只读审计记录，直至 task 删除 |
+| 2026-08-10 | 人类 UI v1 只读查看和审计，不提供槽编辑、拖拽、人工 Merge 或文件反向同步；模型写入只能通过 turn-bound Slot Tool |
+| 2026-08-10 | TaskEvent 只记录结构 generation、Draft lifecycle 与 Seal 等权威边界；turnId/toolCallId 分别承担 Attempt 与工具幂等身份 |
+| 2026-08-10 | SealRecord 必须引用正式 ArtifactVersion；route、文件名和媒体类型由冻结 artifactSchema 控制，Assembler 不能动态发明 |
 
 ---
 
@@ -1588,6 +1747,6 @@ type IssueLocation =
 1. 修改相关正文，使当前规则只有一种解释；
 2. 在“已接受决策记录”追加或修订对应条目；
 3. 若推翻旧决定，明确写出 superseded 关系及迁移影响，不能只覆盖文字；
-4. 更新“首版范围摘要”和“尚待继续收敛的具体设计”；
+4. 更新“首版范围摘要”和“v1 已冻结的详细系统契约”；若产生新的开放项，先进入独立非权威评审队列；
 5. 检查与 `README.md`、`docs/ARCHITECTURE.md` 及当前代码行为是否存在冲突；
 6. 在进入实施前另写 dev plan，不把实现任务清单混入本文。
