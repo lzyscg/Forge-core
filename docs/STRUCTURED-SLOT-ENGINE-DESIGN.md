@@ -336,6 +336,30 @@ productionMode: structured_slots
 - 历史模板缺失 `productionMode` 时，canonicalization 必须保持原有 hash 稳定；不能因为新增默认字段而把已冻结 task 判为损坏。
 - 任务创建时仍把整个已验证 package 复制到现有 `snapshot/`，运行期只读取该快照。
 
+### 7.6 三层资源限制模型
+
+结构槽资源限制分为三层：
+
+```text
+Slot Schema / LayoutGrammar 局部语义约束
+                    <= slots/contract.yaml.limits 模板运行包络
+                    <= 平台不可由模板放宽的 hard ceiling
+```
+
+规则：
+
+- structured_slots contract v1 必须显式声明规定的 `limits` 字段。
+- Loader 同时验证局部约束不超过模板包络、模板包络不超过当前平台兼容上限。
+- 超限必须拒绝模板，不能静默 clamp、套用平台默认值或只发 warning 后继续。
+- 规范化的模板 limits、资源契约版本和必要的运行兼容身份进入 `versionHash` 与 TemplateRuntimeSnapshot。
+- case 运行期间只使用 snapshot 冻结的模板 limits，不能因源模板或平台配置变化而悄悄收紧或放宽。
+- 恢复环境无法满足 snapshot 声明的运行包络时返回 `TEMPLATE_RUNTIME_UNAVAILABLE` 并 fail closed，不能以较小额度继续，也不能回退当前模板。
+- StructureProposal、FillDraft、validator、Assembler 和 Seal 必须在各自入口或提交门禁执行相关限额；越界失败不得留下部分权威写入或正式 artifact。
+
+平台 hard ceiling 是部署安全边界，不属于模板可配置能力。平台收紧 hard ceiling 可以阻止新模板和新 case；既有 case 只有在环境仍满足其冻结包络时才能继续运行，不能被隐式降级。
+
+具体 limits 字段分组和绝对数值继续收敛。绝对平台数值可以在实施基准测试后确定，但字段语义、比较规则和“不静默裁剪”已经冻结。
+
 ---
 
 ## 8. 槽树与身份模型
@@ -995,9 +1019,10 @@ interface SealRecord {
 - structured template 的类型、grammar、profile、validator 和 assembler 引用 fail closed；
 - Slot Schema 拒绝数组 type、组合关键字、未知关键字以及与 type 不一致的 enum/const；
 - Slot Schema 校验不会填充 default、转换类型、移除字段或改写输入；
+- 局部约束超过模板 limits、模板 limits 超过平台 hard ceiling 时拒绝加载，且不静默裁剪；
 - 同内容快照 hash 稳定；任一受控输入变化都会改变 hash；
 - 运行中修改模板源目录不影响既有 case；
-- snapshot 缺失或摘要不一致时不可恢复运行。
+- snapshot 缺失、摘要不一致或恢复环境无法满足冻结资源包络时不可恢复运行。
 
 ### 22.2 StructureProposal
 
@@ -1050,7 +1075,7 @@ interface SealRecord {
 
 1. 模板可选择 `basic` 或 `structured_slots`。
 2. 结构槽模板保持单一 Template Package；固定 `slots/contract.yaml` 使用“声明内联、实现外置”的分文件契约。
-3. 扩展现有冻结模板快照以包含结构槽规则和所有引用资源摘要。
+3. 扩展现有冻结模板快照以包含结构槽规则、显式模板运行包络、运行兼容身份和所有引用资源摘要。
 4. 持久化 StructureProposal，整树校验后原子创建 scaffold。
 5. SlotTypeDefinition 使用无业务默认值的全显式契约，只定义节点内在属性；每个 typeId 使用单一 Schema 形态，spec 固定为对象、content 保持任意 JSON，二者共用有精确关键字白名单且只验证不改写数据的版本化 Schema 方言；LayoutGrammar 统一定义结构关系；SlotInstance 使用单根有序树并严格分离 spec/content。
 6. 模板上限 + 运行期 SlotGrant 两层授权。
@@ -1089,14 +1114,15 @@ interface SealRecord {
 
 1. `slots/contract.yaml` 各顶层分区的最终 YAML/TypeScript 字段 schema；权威入口、分区、声明/实现边界、固定路径和单 package 版本语义已经冻结。
 2. LayoutGrammar 的声明语言、表达能力和错误定位格式。
-3. Slot Schema v1 各关键字数值参数、safe pattern 约束、模板 limits 与平台 hard ceiling；精确白名单、对象/数组开放性、纯验证语义、单一形态和 SlotTypeDefinition 外层契约已经冻结。
-4. 中性 slot selector DSL 与 access profile 解析规则。
-5. validator / Assembler 的注册、快照、沙箱和版本协议。
-6. Structure / Merge / Seal issue 的统一 schema 与错误码集合。
-7. 追加事件联合、私有 Draft Store、checkpoint 和磁盘目录布局。
-8. 结构槽 Action 与现有九动作/TurnContract 的精确适配方式。
-9. TaskWorkspace、API 和 UI 需要暴露的最小只读投影。
-10. 现有 artifact publish / final submission 与 Seal 的精确映射。
+3. Slot Schema v1 各关键字数值参数和 safe pattern 约束；精确白名单、对象/数组开放性、纯验证语义、单一形态和 SlotTypeDefinition 外层契约已经冻结。
+4. 模板 `limits` 的精确字段分组、跨字段关系和平台 hard ceiling 的兼容版本协议；三层限制模型与禁止静默裁剪已经冻结。
+5. 中性 slot selector DSL 与 access profile 解析规则。
+6. validator / Assembler 的注册、快照、沙箱和版本协议。
+7. Structure / Merge / Seal issue 的统一 schema 与错误码集合。
+8. 追加事件联合、私有 Draft Store、checkpoint 和磁盘目录布局。
+9. 结构槽 Action 与现有九动作/TurnContract 的精确适配方式。
+10. TaskWorkspace、API 和 UI 需要暴露的最小只读投影。
+11. 现有 artifact publish / final submission 与 Seal 的精确映射。
 
 这些不是对主流程语义的重新开放；它们只能在本文已冻结的边界内选取实现方案。
 
@@ -1133,6 +1159,7 @@ interface SealRecord {
 | 2026-08-10 | SlotTypeDefinition 核心字段全部显式；禁止 Loader 猜测 schema、presence 或内容类型 |
 | 2026-08-10 | Slot Schema v1 禁止组合关键字和类型联合；一个 typeId 只对应一种确定形态 |
 | 2026-08-10 | Slot Schema v1 使用有界实用关键字白名单，只验证、不转换或改写数据 |
+| 2026-08-10 | 资源限制采用局部语义约束、模板显式包络、平台 hard ceiling 三层模型；超限拒绝且不静默裁剪 |
 
 ---
 
