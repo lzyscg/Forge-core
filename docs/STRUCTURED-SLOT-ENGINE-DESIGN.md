@@ -3,6 +3,7 @@
 > 状态：**Living Design / 当前权威设计**
 > 首次冻结：2026-08-10
 > 最近批量收敛：2026-08-10（全部剩余 P1、接缝审计 L01–L05、对抗审查 Round 1 的 M01–M07、Round 2 的 N01–N03 与 Round 3 的 N04 均已回写；同一独立 reviewer 于 Round 5 给出 `APPROVED`）
+> 实施可落地性复审：2026-08-10 由同一独立 reviewer 连续复核 5 轮，Round 5 最终 `APPROVED`；O01–O09 与任务责任接缝均已闭合。审查记录见 [`STRUCTURED-SLOT-ENGINE-IMPLEMENTATION-REVIEW.md`](./STRUCTURED-SLOT-ENGINE-IMPLEMENTATION-REVIEW.md)。
 > 维护规则：结构槽后续的已接受结论统一更新在本文，不再新建平行权威设计文档；尚待评审的问题可以暂存于非权威评审队列，接受后必须回写本文。
 > 文档性质：系统设计，不是实施计划。进入开发前仍需基于本文编写独立 dev plan。
 > 历史来源：本文承接并取代 `docs/2026-08-08-structured-slots-three-role-design.md`；旧文档仅保留问题发现过程与历史背景。
@@ -438,7 +439,7 @@ interface StructuredSlotLimitsV1 {
 - `maxChangedSlots` 统计一个 FillDraft overlay 中不同的槽位数；`maxDraftBytes` 统计该 overlay 的规范化变更 payload。
 - `maxChangedSlots <= maxSlots`；单槽 spec/content 上限分别不得超过 `maxScaffoldPayloadBytes`。
 - `maxArtifactBytesPerFile <= maxTotalArtifactBytes`；artifactSchema 声明文件数不得超过 `maxArtifactFiles`。
-- `maxSlotToolCallsPerAttempt` 统计一次 structured Attempt 中到达平台的 Slot Tool 调用签名 `(toolCallId, canonicalArgsHash)`；只有同 key、同参数且可直接重放已缓存结果的真正幂等重放不重复计数。同 key 换参数的每个新冲突签名、参数无效、权限失败和业务失败调用都先占用一次额度，meter 达限后不再解析新的调用签名。`maxValidationRunsPerAttempt` 统计其中首次执行或尝试执行 `validate_structure_proposal`、`submit_structure_proposal`、`validate_draft`、`submit_draft` 或 `request_seal` 的调用签名，必须小于等于 Slot Tool 总调用上限。
+- `maxSlotToolCallsPerAttempt` 统计一次 structured Attempt 中到达平台的 Slot Tool 调用签名 `(toolCallId, canonicalArgsHash)`；只有同 key、同参数且可直接重放已缓存结果的真正幂等重放不重复计数。同 key 换参数的每个新冲突签名、参数无效、权限失败和业务失败调用都先占用一次额度，meter 达限后不再解析新的调用签名。锁定的 Pi 0.82 会在 Tool `execute` 前执行 TypeBox 校验，因此计量入口必须是它在校验前、可等待的原始 `tool_execution_start` 事件，而不能只放在 Tool callback；平台先持久化预收费，再允许 SDK 校验或执行，合法 execute 复用该收费，schema-invalid、未授权但命中封闭 Slot Tool 名称和截断调用也不能绕过。`maxValidationRunsPerAttempt` 统计其中首次执行或尝试执行 `validate_structure_proposal`、`submit_structure_proposal`、`validate_draft`、`submit_draft` 或 `request_seal` 的调用签名，必须小于等于 Slot Tool 总调用上限。
 - `maxValidatorInvocationsPerAttempt`、`maxAggregateValidatorCpuMsPerAttempt`、`maxAggregateValidatorWallClockMsPerAttempt` 与 `maxValidatorOutputBytesPerAttempt` 分别累计该 Attempt 内所有 validation run 的 validator target 调用、实际 CPU、validator phase elapsed wall-clock 与 result stream 原始字节。它们必须分别大于等于对应的每 Gate 上限，防止一个合法 Gate 本身无法运行。
 - `maxAttemptWallClockMs` 从 `structured_slot_attempt_started` batch 可见时开始，以平台单调时钟覆盖 provider、Slot Tool、validator、Assembler 与 dispatch，直到 terminal batch 提交；它必须大于等于 `maxAggregateValidatorWallClockMsPerAttempt`。模型上下文压缩、provider session 续接或工具重放都不能重置任一 Attempt 计数器。
 - `maxValidators` 限制 contract 注册项总数；`maxValidatorInvocationsPerGate` 独立限制一次 Merge/Seal Gate 中实际的 `(validatorId, logical target)` 执行数。二者不建立简单大小关系，因为 trigger/selector 可以使已注册 validator 在某个 Gate 没有适用 target。
@@ -1109,6 +1110,8 @@ interface StructuredSlotAttemptTerminalV1 {
 
 `attemptEpoch` 对同一 inputNodeId 从 1 开始严格单调递增，`turnId` 由平台以 `inputNodeId + attemptEpoch` 确定性派生。started 事件是 epoch 分配的权威事实；创建 Proposal/Draft、签发 Grant 和 Slot Tool 幂等都只能引用该 turnId。
 
+start 提交边界按 session kind 冻结：structure/seal 的 start batch 只含 `structured_slot_attempt_started`；fill 在同一互斥区内先由 `turnId` 确定性派生 `draftId`，其 start batch 必须一次写入 `structured_slot_attempt_started + structured_fill_draft_opened`，后者同时绑定 active scaffold、generation 与 `baseRevision`。只有该 batch 可见后，平台才幂等物化私有 Draft journal/checkpoint 并签发 Grant；若在 batch 后、私有文件创建前崩溃，恢复器必须依据 opened 事件重建同一空 Draft。因而不存在 terminal-without-opened，也不存在模型已经获得 fill 工具但 Draft open 尚未成为权威事实的窗口。StructureProposal 没有单独的公开 opened 事件，其 `proposalId` 由 turnId 派生并可在 active started Attempt 下幂等重建。
+
 每个 started attempt 最终必须由恰好一个 terminal 事件关闭；`inputNodeId + attemptEpoch + turnId` 必须与 started 事件完全匹配。合法 status/reason 只允许 `committed/completion_dispatch`、`committed/rework_dispatch`、`failed/runtime_failure`、`abandoned/task_stop`、`abandoned/crash_recovery`、`waiting_human/human_request` 六种组合。terminal 与该终止路径实际产生的 Agent result、dispatch/lifecycle、Draft terminal 或其他权威事实处于同一 TaskEvent batch；未产生的事件不伪造占位。状态机固定为：
 
 ```text
@@ -1223,6 +1226,8 @@ open ──────> merged
 - `merged`：提交已被 ActionCommitter 原子接受，永久只读；`changeCount: 0` 时不代表 content revision 发生变化。
 - `stale`：baseRevision 不再匹配，永久禁止提交。
 - `abandoned`：ActionAttempt 取消、确定失败或 active generation 被替换，永久只读。
+
+Draft lifecycle 的权威来源只有 TaskEvent：`structured_fill_draft_opened` 且尚无 terminal 表示 open，`structured_fill_draft_terminal` 决定 merged/stale/abandoned。私有 journal/checkpoint 不得在权威 batch 前写入不可逆 terminal；如实现为了加速在 batch 后写 terminal cache，该 cache 只是可删除、可重建的派生数据，读取时必须以事件为准并自动修复。Proposal 同理：引用 `proposalId` 的 generation commit 与对应 Attempt terminal 共同证明 committed，非 committed terminal 证明 abandoned；私有 Proposal 文件不能成为第二套终态事实源。
 
 业务校验失败不是生命周期状态。校验失败时 Draft 保持 `open`，只更新 validation issues；Agent 可以继续修正，也可以选择原子 abandon + `request_human_input`，但不能把 open Draft 带到回答后的新 Attempt。
 
@@ -1462,7 +1467,7 @@ interface SealRecord {
 
 1. **TaskEvent / 权威提交记录**：只追加 structured Attempt 起止、generation、merge、seal、dispatch 等权威状态转换及其不可变对象摘要；一个提交边界内的多个逻辑事件通过原子 batch 一次可见，不把几十 MiB 的完整 scaffold/content 反复嵌入事件。
 2. **task 内 content-addressed blob**：保存规范化 scaffold generation、content revision snapshot、Seal 输入和其他大对象。事件以 digest、kind、byteLength 和协议版本引用 blob；blob 永不原地改写。
-3. **私有 Proposal/Draft store**：使用可恢复 journal 与不可变 checkpoint 保存尚未提交的整树替换、content overlay 和提交锁定状态。它们不是权威 content，不能被主投影器误认为已经 merge。
+3. **私有 Proposal/Draft store**：使用可恢复 journal 与不可变 checkpoint 保存尚未提交的整树替换、content overlay 和提交锁定状态。它们不是权威 content 或 lifecycle 终态；任何 post-batch terminal cache 都只是由 TaskEvent 重建的加速数据，不能被主投影器误认为已经 merge/commit。
 
 首版 blob 只在单个 task 内寻址和复用，不做跨 task 全局去重，避免把权限、保留期和任务删除耦合到全局引用计数。物理目录可以按职责分开，但不能产生第二套事实源。
 
@@ -1470,10 +1475,10 @@ interface SealRecord {
 
 - 当前 active scaffold、content revision、Draft lifecycle 和 seal status 由权威事件加可验证 blob 投影；checkpoint 只是加速，不能覆盖或压缩主 TaskEvent 历史。
 - 私有草稿写入必须可恢复，但只有 ActionCommitter 的成功提交事件才能让 candidate 进入权威状态。
-- 每次 structured v3 Attempt 在模型调用前以独立原子 start batch 分配 epoch/turnId；其 terminal 事件必须与对应的成功提交、runtime failure、stop/crash recovery 或 human request 事实处于同一原子 batch。不存在没有 started 事件的私有对象，也不存在 terminal 后仍有效的 Grant。
+- 每次 structured v3 Attempt 在模型调用前以独立原子 start batch 分配 epoch/turnId；fill 的同一 start batch 还必须写入确定性 `draftId` 的 `structured_fill_draft_opened`。其 terminal 事件必须与对应的成功提交、runtime failure、stop/crash recovery 或 human request 事实处于同一原子 batch。不存在没有 started 事件的私有对象，也不存在 fill terminal 没有 opened 或 terminal 后仍有效的 Grant。
 - structured Agent request 的 `human_answered + fresh agent_input` 也是一个不可拆分的 answer batch；pending request ID 是回答提交的稳定幂等身份，响应丢失后相同 answer 重放原结果。
 - generation 切换、merge 和 Seal 必须有稳定、幂等的提交身份。
-- 当前 turn 的结构权威转换、Draft 终态、artifact/Seal、Agent result、Route 和 final submission 等逻辑事件必须由同一个 ActionCommitter batch 全有或全无；不能通过依次调用单事件 append 模拟原子性。
+- 当前 turn 的结构权威转换、Draft 终态、artifact/Seal、Agent result、Route 和 final submission 等逻辑事件必须由同一个 ActionCommitter batch 全有或全无；不能通过依次调用单事件 append 模拟原子性。这里的“私有对象转终态”指 batch 所证明的生命周期事实，不要求也不允许把另一个目录中的 journal 写入伪装成同一文件系统事务；batch 后的私有 cache 标记只能幂等追赶并由恢复器修复。
 
 存储层为此提供 `EventStore.appendBatch` 或语义等价的唯一原子 primitive。概念存储信封为：
 
@@ -1493,6 +1498,7 @@ interface TaskEventBatchEnvelopeV1 {
 - EventStore 在 task 级互斥区内为成员分配连续的**逻辑事件序号**，然后只写一个新的不可变 batch 文件。该文件的原子创建是整个提交的唯一可见性点；reader 验证信封、digest、成员和序号后，将其平铺成既有 `CommittedEvent[]`，因此 projector 不感知物理分组。
 - 历史“一事件一文件”继续可读，每个旧文件被视为跨度为 1 的 batch；新旧文件共同扫描时必须形成从 1 开始、无重复无空洞的逻辑序列。TaskEvent 判别联合本身不因存储信封而改变。
 - `commitId` 是 batch 幂等身份：同一 ID 加完全相同的 canonical payload 重放原 batch 结果；同一 ID 加不同 payload，或成员事件 ID 与既有历史冲突，必须 fail closed 并返回稳定的存储冲突错误。
+- structured completion/rework/human/terminal 的调用方还必须定义稳定的 **completion signature**，至少覆盖 task、turn、结果类别、candidate/receipt digest 与规范化 dispatch，并由该 signature 派生 commitId。调用方在重新校验当前状态或生成新的事件 ID/时间戳之前，必须先按 commitId 查询既有 batch；存在时核对其已提交稳定字段与 completion signature，匹配则返回原 mapping，不匹配则幂等冲突。不存在时才构造新 batch；CAS/创建竞态失败后再次查询 winner 并做同样核对。这样响应丢失后的重放不依赖重新生成完全相同的随机 ID 或墙钟时间，同时保留 EventStore 对直接“同 commitId、不同 canonical payload”的 fail-closed 规则。
 
 大对象与事件 batch 使用“先备货、后显形”的顺序：
 
@@ -1574,7 +1580,7 @@ interface StructuredVerdictV1 {
 
 现有 `GateIssue { stage?, evidence?, scope? }` 保留为沙箱 validator 的窄返回边界。它不是平台全局 issue 类型：平台继续丢弃未知字段并规范化允许字段，再由受信适配器结合注册项的 `enforcement` 补充平台控制的 code、severity、phase、source 和 location，转换为 `StructuredIssueV1`。validator 不能直接声明平台错误码、严重级别、工程 ID、授权范围或定位对象。
 
-所有 issue 在返回 Agent、UI 或外部 API 前必须经过与调用主体一致的授权投影。内部审计可以保存更完整的受信定位，但公开投影不能通过 primary/related location、details 或 message 泄露隐藏槽。
+所有 issue 在返回 Agent、UI 或外部 API 前必须经过显式调用主体的授权投影。Agent 主体只能使用当前 Grant 绑定的冻结 AccessProfile；Forge Core v1 的 UI/API 主体固定为本地单用户 `task_owner`，使用平台内建的完整只读审计视图，可以读取该 task 的正式槽、spec/content、可公开 issue 与 SealRecord，但仍不能读取私有 Proposal/Draft、Grant、实现源码、secret 或宿主路径。`task_owner` 不是模板 AccessProfile，也不通过合并多个 profile 推导；未来一旦引入远程或多用户部署，必须先版本化 principal/auth 映射，不能沿用本地 owner 假设。内部审计可以保存更完整的受信定位，但任何投影都不能通过 primary/related location、details 或 message 泄露其主体无权查看的数据。
 
 ### 19.2 `IssueLocation` v1 固定为六类
 
@@ -1923,7 +1929,7 @@ artifact:       ARTIFACT_SCHEMA_MISMATCH, ARTIFACT_INTEGRITY_FAILED, PUBLISH_FAI
 ### 25.8 TaskWorkspace、API、Agent 投影与 UI（I01–I07）
 
 - **I01｜Workspace 摘要**：现有 TaskWorkspace 增加可选 `structuredSlots` 摘要；basic task 字段缺失以保持兼容。摘要只含 mode、active generation 摘要、contentRevision、structure/seal status、可见/已填槽计数和 issue summary，不内嵌 content、完整树或私有 Draft。
-- **I02｜只读 API**：内部共享一个授权投影服务；外部只读 REST 提供 contract projection、tree outline/subtree、slot detail、visible issues 和 SealRecord。人类 UI v1 没有槽写 API；模型写入只能走绑定 turn 的 Slot Tool。
+- **I02｜只读 API**：内部共享一个以调用主体为判别输入的授权投影服务；Agent 分支只认当前 Grant/AccessProfile，本地 UI/API 分支只认平台内建 `task_owner` 完整只读审计视图。外部只读 REST 提供 contract projection、tree outline/subtree、slot detail、visible issues 和 SealRecord。v1 不假装存在尚未实现的用户 principal，也不把任意模板 profile 当成人类权限；人类 UI 没有槽写 API，模型写入只能走绑定 turn 的 Slot Tool。
 - **I04｜人类界面**：v1 UI 只提供树形大纲、type/spec/content 只读查看、状态、issue 定位、Draft/merge 审计和 sealed output 链接。可以触发平台允许的重试、终止等流程动作，但没有拖拽、块编辑、人工 Merge 或文件反向同步。
 - **I05｜Agent 最小投影**：structure session 只获得可创作 type、specSchema、Grammar、limits 和安全说明；fill session 只获得 Grant 授权的树投影、spec、有效 content 与 issue。两者都不获得实现路径、validator/Assembler 源码、ACL、宿主路径、事件 ID、Grant ID 或隐藏节点统计。
 - **I07｜数据/指令隔离**：slot spec/content 作为带类型、来源和 slot reference 的结构化数据区块注入，不拼进 system prompt、工具说明或模板控制指令。content 中出现工具名、角色名或“忽略规则”等文本不改变 capability；授权始终由服务端 Grant 执行，trace 和 issue 继续按权限与长度脱敏。
@@ -1975,6 +1981,18 @@ artifact:       ARTIFACT_SCHEMA_MISMATCH, ARTIFACT_INTEGRITY_FAILED, PUBLISH_FAI
 - 测试矩阵覆盖规范化 golden、Schema/Grammar 属性、selector 防泄漏、Draft 幂等和恢复、沙箱逃逸与预算、Seal 原子性、历史 basic hash/snapshot 以及 API/UI 授权投影。
 - 为 active scaffold/revision、slot parent-order-type、Draft changed slots、事件序号和 blob digest 建立直接索引；不得为读取单槽反序列化整个最大 scaffold。
 - structured mode 只以新增版本上线；basic task、TurnContract v2、现有 ArtifactVersion 与前端响应保持兼容，不提供 basic task 原地迁移或历史重写。
+
+### 25.14 实施可落地性审查 Round 1–5 收敛（O01–O09）
+
+- **O01｜Fill start 原子边界**：fill 的 `attempt_started + draft_opened` 使用同一个 start batch；draftId 由 turnId 确定性派生，batch 后才物化私有 Draft，崩溃时由事件重建，禁止 terminal-without-opened。
+- **O02｜私有终态不是第二事实源**：Proposal/Draft journal 只保存未提交 overlay、工具幂等与 submission lock。committed/merged/stale/abandoned 由权威事件投影；post-batch terminal cache 可以存在，但必须可删除、可修复，不能参与与 EventStore 的伪跨目录事务。
+- **O03｜completion signature 重放**：structured 权威提交先以稳定 completion signature 派生并查询 commitId，再校验状态或生成易变事件字段；命中时核对已提交稳定字段并返回原结果，竞态 loser 读取 winner。EventStore 自身仍对同 commitId 的不同 canonical payload fail closed。
+- **O04｜独立运行就绪门禁**：TurnContract/Schema 版本兼容不等于 structured runtime 已获准上线。生产 Loader、Catalog/Task 创建与 Scheduler start/resume/retry/answer 必须共同检查版本化 runtime capability manifest 与匹配 profile；该 manifest 默认 disabled，只有完整链路 integrated profile 基准、恢复、安全与 basic 全回归证据完成后才由最终验收任务显式启用。测试只能通过依赖注入使用匹配的 enabled environment，不能靠环境变量或隐式 fallback 绕过。
+- **O05｜单一 runtime environment 贯穿复验链**：capability 与对应 platform profile 组成同一个不可变 runtime environment，必须由同一依赖贯穿 Loader、TemplateCatalog、cache copy reopen、TaskStore task snapshot reopen 和 Scheduler。Catalog 对已知但不可运行的 structured source 保留内部 `TEMPLATE_RUNTIME_UNAVAILABLE` 诊断；TaskStore 不能把它降格成 `TEMPLATE_NOT_FOUND`。历史 snapshot 可读取，运行入口仍逐次 fail closed。
+- **O06｜Pi 原始调用预收费**：Pi 0.82 的 TypeBox 校验发生在 Tool callback 前。structured runtime 必须订阅 SDK 可等待的 pre-validation `tool_execution_start`，对封闭 Slot Tool 名称按 raw JSON 参数预收费并持久化；execute 只能消费已经存在的 precharge。真实 SDK characterization 必须覆盖 schema-invalid、同 ID 改参、截断调用、合法缓存重放与额度关闭，且 Slot Tool 强制 sequential。
+- **O07｜本地 owner 投影**：v1 是本地单用户产品；UI/API 调用主体固定为平台内建 `task_owner` 完整只读审计视图，Agent 继续受 Grant/AccessProfile 限制。owner policy 不写入模板，不与 Agent profile 混用；远程/多用户开放前必须新增版本化认证与 principal 映射。
+- **O08｜profile 只能在完整链路后冻结**：早期任务只建设 benchmark harness 与 provisional candidate，供 disabled runtime 和测试使用。最终 profile 必须在 Grant projection、真实 Seal/Assembler、artifact custody、batch recovery 和 issue projection 全部实现后，于指定 reference runner 从干净源码基线运行 integrated benchmark 生成；最终 promotion 必须绑定并复核该证据。
+- **O09｜可复现的两阶段启用**：最终任务先在 manifest disabled、profile provisional 的状态提交全部 harness、测试、脚本和文档；随后从 clean tree 生成 final profile/release evidence，只允许生成 profile JSON、两份 evidence 与 capability manifest。生成顺序固定为 `source/runner -> profile evidence -> final profile -> release evidence -> capability manifest`，禁止上游文件引用下游 digest 或形成自引用。现有会改写 tracked UI evidence 或依赖 gitignored 历史报告的 verifier 不得作为此离线门禁；锁定 Pi 的 deterministic boundary test 与完整 unit/e2e 结果直接进入 release evidence。promotion 后再以 production default 重跑全套，最终提交只包含上述生成物。
 
 首个部署 profile 以以下值作为基准候选，而不是未经测试的永久兼容承诺：
 
@@ -2058,6 +2076,11 @@ artifact:       ARTIFACT_SCHEMA_MISMATCH, ARTIFACT_INTEGRITY_FAILED, PUBLISH_FAI
 | 2026-08-10 | N02：structured pipeline 使用 no_scaffold/active_unsealed/sealed typestate；首节点必须 structure，Loader 与运行时共同保证 structure/Seal 对后续阶段的支配关系 |
 | 2026-08-10 | N03：Seal Gate 可靠 failed 通过 turn-bound rework receipt 原子 send 回 v3 fill/structure 并保持 active_unsealed；incomplete 不得伪装成内容返工 |
 | 2026-08-10 | N04：每 Attempt 冻结 Slot Tool/validation 次数、累计 validator CPU/wall/output/invocation 和总 wall-clock；超限自动失败并关闭全部工具/dispatch/人工出口 |
+| 2026-08-10 | O01/O02：fill start 原子提交 attempt_started + draft_opened；Proposal/Draft 私有 journal 终态只是事件派生 cache，不参与伪跨目录事务 |
+| 2026-08-10 | O03/O04：structured completion 先按稳定 signature 查询 commitId 并重放；独立 runtime capability manifest 在最终证据齐备前保持 disabled |
+| 2026-08-10 | O05/O06：同一 runtime environment 贯穿 Catalog/cache/TaskStore/Scheduler；Slot Tool 在 Pi schema 校验前按 raw 调用持久化预收费 |
+| 2026-08-10 | O07：本地 UI/API 使用内建 task_owner 完整只读审计投影，Agent 仍只使用 Grant/AccessProfile |
+| 2026-08-10 | O08/O09：profile 只在完整 Seal/custody/projection 后冻结；production enable 使用 clean-tree 两阶段证据协议，不消费可变 tracked/ignored 历史报告 |
 
 ---
 

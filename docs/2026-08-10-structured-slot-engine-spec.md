@@ -1,8 +1,9 @@
 # 结构槽引擎 v1 — 实施规格（Spec）
 
-> 状态：**定稿（Final）**。
+> 状态：**已批准（Approved）**；实施可落地性对抗审查由同一独立 reviewer 连续复核 5 轮，最终 `APPROVED`。
 > 上游设计：[`STRUCTURED-SLOT-ENGINE-DESIGN.md`](./STRUCTURED-SLOT-ENGINE-DESIGN.md)。
 > 对抗审查：[`STRUCTURED-SLOT-ENGINE-ADVERSARIAL-REVIEW.md`](./STRUCTURED-SLOT-ENGINE-ADVERSARIAL-REVIEW.md)，最终 `APPROVED`。
+> 实施审查：[`STRUCTURED-SLOT-ENGINE-IMPLEMENTATION-REVIEW.md`](./STRUCTURED-SLOT-ENGINE-IMPLEMENTATION-REVIEW.md)，最终 `APPROVED`。
 > 本文把已批准的系统设计收敛为实现契约；若本文与上游设计冲突，以上游设计第 25、26 节为准。
 
 ---
@@ -45,17 +46,20 @@ productionMode: structured_slots
 
 结构槽不是第十个 ForgeAction，也不是旁路运行器。九动作 registry 保持不变，Slot Tool 是当前 v3 turn 内的领域工具；现有 dispatch 仍负责 Route 和最终提交。
 
-实现增加一个无存储依赖的纯领域层，并保持单向依赖：
+实现增加一个无存储依赖的纯领域层。依赖约束按**模块职责**而不是现有目录名机械判断：
 
 ```text
 src/shared
-  ← src/server/structured-slots        # canonical JSON、Schema、Grammar、issue 纯逻辑
-  ← src/server/storage                 # batch、blob、Proposal/Draft/scaffold 持久化
-  ← src/server/template                # contract 解析、交叉引用、pipeline typestate
-  ← src/server/runtime                 # Attempt、Grant、Slot Tool、Gate、Assembler、Committer
+  ← src/server/structured-slots        # canonical JSON、Schema、Grammar、issue 等纯领域逻辑
+  ← storage primitives                 # CorePaths、atomic-file、EventStore、结构槽 stores
+  ← template compiler                  # contract、资源、hash、pipeline typestate
+  ← application adapters              # 现有 TaskStore/TemplateCatalog 等组装层
+  ← runtime                            # Attempt、Grant、Slot Tool、Gate、Assembler、Committer
   ← src/server/api
   ← src/client
 ```
+
+现有 `src/server/storage/task-store.ts` 已依赖 Template Loader/Catalog，因此它属于 application adapter，不是上述低层 storage primitive。新增 `structured-slot-store`、`EventStore` 和 blob/custody primitive 不得反向依赖 template/runtime；template compiler 只能依赖 shared、纯领域层和路径安全/摘要 primitive。开发计划与架构文档必须使用这条真实边界，不能再宣称整个 `src/server/storage` 目录都低于 template。
 
 唯一入口保持不变：
 
@@ -226,7 +230,7 @@ interface SlotTypeDefinitionV1 {
 
 Slot Schema v1 只允许上游设计 8.3 的关键字白名单。每个节点必须有单一 `type`；拒绝 boolean schema、type union、引用、组合、条件、default、format、`multipleOf` 和未知关键字。object 必须显式 `additionalProperties: false | SlotSchemaV1`；array 必须有单一 items。Schema 只验证，不填默认、不转换、不删除、不 trim。
 
-字符串长度按 Unicode code point；payload 按 canonical JSON UTF-8 字节。pattern 使用 `forge-safe-regex/v1` 的 RE2 兼容子集。canonical JSON 使用 `forge-canonical-json/v1`（RFC 8785 JCS 核心），并在规范化前拒绝非 JSON 值、循环、孤立 surrogate、NaN/Infinity 和 bigint。
+字符串长度按 Unicode code point；payload 按 canonical JSON UTF-8 字节。pattern 使用 `forge-safe-regex/v1` 的 [RE2 syntax](https://github.com/google/re2/wiki/syntax) 子集，Node v1 实现固定通过精确锁定的 `re2-wasm@1.0.2` 执行，直接以 raw pattern + mandatory `u` flag 构造，不能退化为 JavaScript `RegExp` 或只靠语法扫描判断“安全”。Schema pattern 保持 substring 语义；lookaround、backreference 和 RE2 不支持的扩展在 Loader 阶段拒绝。wrapper 必须独立为 `safe-regex.ts`，并用 nested quantifier、ambiguous alternation、Unicode、非法扩展和大输入复杂度测试锁定行为。canonical JSON 使用 `forge-canonical-json/v1`（RFC 8785 JCS 核心），并在规范化前拒绝非 JSON 值、循环、孤立 surrogate、NaN/Infinity 和 bigint。
 
 ### 4.3 LayoutGrammar
 
@@ -302,9 +306,42 @@ interface StructuredSlotLimitsV1 {
 
 Loader 同时验证局部语义、跨字段关系、模板 limits 和平台 hard ceiling。所有值必须是大于 0 的 JavaScript safe integer；Attempt 对应 validator 上限必须不小于每 Gate 上限，validation runs 不大于 Slot Tool calls，Attempt wall 不小于 Attempt validator wall，changed slots 不大于 max slots，单 artifact 文件不大于总 artifact 上限。
 
-平台 profile 以独立版本身份 `forge-structured-runtime/v1` 暴露。实施期先使用设计 25.13 的候选值运行基准；结构槽 production runnable gate 只有在基准报告通过并把该 profile 固化后才打开。模板只能声明小于等于 profile 的值。
+平台 profile 以独立版本身份 `forge-structured-runtime/v1` 暴露。实施期先使用设计 25.13 的候选值运行基准；模板只能声明小于等于 profile 的值。
 
-Attempt meter 的调用单位是 `(toolCallId, canonicalArgsHash)`。只有同 key、同参数并直接重放缓存结果时不重复计数；同 key 换参数、参数错误、越权和业务失败均占额度。恰好达到上限合法；下一次将超过、运行中实际消耗超过或总 wall deadline 到期时终止 Attempt。
+基准证据必须可复核。checked-in exact `StructuredReferenceRunnerV1` descriptor 固定 version、稳定 runner id、Node/V8、OS/arch、CPU model/logical count 与总 RAM；qualification 必须逐项匹配并记录 descriptor digest。证据还至少记录：schema version、clean git commit/source digest、dependency lock digest、isolated-vm、safe-regex 与 Pi 实现版本、每个 case 的 warmup/样本数、原始样本摘要、p50/p95/max、peak RSS、磁盘字节、候选缩放轴和最终选择理由。首个 profile 只能由该 reference runner 的通过证据冻结；在不同运行环境重新测得的偶然数值不能静默覆盖 checked-in profile。
+
+profile 通过 exact、checked-in 文件承载；provisional 只供 disabled build 与测试开发，不能被生产 capability 接受：
+
+```ts
+interface StructuredPlatformProfileFileV1 {
+  version: 1;
+  status: 'provisional' | 'final';
+  identity: 'forge-structured-runtime/v1';
+  limits: StructuredSlotLimitsV1;
+  evidenceDigest: string | null;
+}
+```
+
+`status: provisional` 必须使用 null evidenceDigest；`status: final` 必须引用 integrated reference benchmark evidence 的 canonical SHA-256。capability 的 profileDigest 是整个 exact profile 文件的 canonical SHA-256。profile identity 与“当前 build 可运行 structured”是两个概念。生产使用 exact、checked-in `StructuredRuntimeCapabilityV1`：
+
+```ts
+interface StructuredRuntimeCapabilityV1 {
+  version: 1;
+  status: 'disabled' | 'enabled';
+  profileIdentity: 'forge-structured-runtime/v1' | null;
+  profileDigest: string | null;
+  evidenceDigest: string | null;
+  requiredAbis: readonly string[];
+}
+```
+
+qualification 生成物使用固定的单向摘要链：`clean source/reference runner -> integrated profile evidence -> final profile -> release evidence -> capability manifest`。profile evidence 必须先生成，记录测量值和所选 limits，但不得包含 final profile、release evidence 或 capability manifest 的 digest；final profile 的 `evidenceDigest` 再引用该 evidence。release evidence 可以引用 profile 与 profile evidence 的 digest，但不得引用 capability manifest；最后 capability 的 `profileDigest` 引用 final profile，`evidenceDigest` 引用 release evidence。任何上游文件引用下游 digest 或通过迭代寻求“自洽哈希”都必须拒绝。
+
+manifest 默认 disabled；测试只能通过显式依赖注入使用匹配的 enabled environment。生产 Loader/TemplateCatalog、task 创建以及 Scheduler 的 start/resume/retry/answer 都要检查同一 capability/profile，历史 snapshot 可以读取但不能运行。只有完整链路 integrated profile benchmark、结构化恢复/安全 acceptance 和完整 basic 回归先在注入 environment 下通过，最终验收任务才写入证据 digest 并显式把 production manifest 改为 enabled；启用后必须再次用 production default 跑完整验证。未知版本、缺证据、digest 不符、ABI/profile 不满足或 disabled 一律 `TEMPLATE_RUNTIME_UNAVAILABLE`，不得用环境变量或 fallback 绕过。
+
+capability 不能作为各模块各自读取的松散布尔值。平台构造一个不可变 `StructuredRuntimeEnvironmentV1 = { capability, profile }`：TemplateCatalog 持有唯一实例，cache reopen 显式接收它，TaskStore 只能从所属 Catalog 取得它，CoreService 再把同一引用交给 Scheduler，任何组件都不得自行重读第二个 default。TaskStore 创建时的快照复验因此必然使用与 Catalog 相同的 environment；已知 structured source 因 readiness 被拒绝时，Catalog 保留内部 availability diagnostic，TaskStore 返回 `TEMPLATE_RUNTIME_UNAVAILABLE`，不能伪装成模板不存在。测试注入必须同时提供相互匹配的 enabled capability 与 profile；Task 9 之前的 production default 为 disabled + no final profile，basic 不受影响。
+
+Attempt meter 的调用单位是 `(toolCallId, canonicalArgsHash)`。只有同 key、同参数并直接重放缓存结果时不重复计数；同 key 换参数、参数错误、越权和业务失败均占额度。锁定的 Pi 0.82 在 Tool `execute` 前做 TypeBox 校验，所以 structured adapter 必须订阅底层 Agent 可等待的 pre-validation `tool_execution_start`，对封闭 Slot Tool 名称及 raw JSON 参数先持久化 precharge；Tool callback 只能消费已有 precharge，不能再次收费。schema-invalid、当前 session 未暴露但命中封闭名称的调用、截断 tool call 和同 key 改参都必须到达该入口。所有 Slot Tool 标记为 sequential；SDK characterization 测试锁定事件先于校验/执行的顺序。恰好达到上限合法；下一次将超过、运行中实际消耗超过或总 wall deadline 到期时终止 Attempt。
 
 总 wall deadline 从 `structured_slot_attempt_started` batch 可见开始，使用平台 monotonic timer，覆盖 provider、Slot Tool、validator、Assembler 和 dispatch。compaction、provider session 续接、纠正 prompt 或重放不得重置 meter。
 
@@ -356,7 +393,7 @@ tasks/<taskId>/
 
 generation `slots.ndjson` 每行一个 canonical slot record；`index.json` 保存 slotId byte offset/length、parent/order/type 和文档顺序/type 索引。读取单槽只能读取索引与对应行，不能反序列化完整最大 scaffold。
 
-content revision 是 canonical 映射 `slotId -> unset | contentBlobDigest`；content 值单独 content-addressed，merge 复用未变化 blob。Proposal/Draft journal 达到实现计划冻结的操作数或字节阈值后写不可变 checkpoint；journal/checkpoint 是私有候选，不进入主 projector。
+content revision 是 canonical 映射 `slotId -> unset | contentBlobDigest`；content 值单独 content-addressed，merge 复用未变化 blob。Proposal/Draft journal 达到实现计划冻结的操作数或字节阈值后写不可变 checkpoint；journal/checkpoint 是私有候选，不进入主 projector，也不拥有 lifecycle 终态。Proposal/Draft 的 committed/merged/stale/abandoned 由权威事件投影；如实现写 post-batch terminal cache，它必须可删除、可重建并由事件自动修复。
 
 ### 7.2 BlobRef
 
@@ -396,11 +433,16 @@ appendBatch(
   events: readonly TaskEvent[],
   options: AppendBatchOptions,
 ): Promise<CommittedEvent[]>;
+
+readBatchByCommitId(
+  taskId: string,
+  commitId: string,
+): Promise<CommittedEvent[] | null>;
 ```
 
 物理文件名：`<first>-<last>-<commitId>.batch.json`。legacy `<sequence>-<eventId>.json` 继续可读，basic `append()` 行为保持不变。
 
-在 task mutex 内，appendBatch 先查 commitId：同 canonical payload 返回原结果，不同 payload 返回 `IDEMPOTENCY_CONFLICT`；新提交再校验 expectedLastSequence、全部事件、事件 ID、batch size 和连续逻辑序号，最后只原子创建一个 envelope 文件。reader 同时扫描 legacy 与 batch，平铺为无空洞、无重复的 `CommittedEvent[]`。
+在 task mutex 内，appendBatch 先查 commitId：同 canonical payload 返回原结果，不同 payload 返回 `IDEMPOTENCY_CONFLICT`；新提交再校验 expectedLastSequence、全部事件、事件 ID、batch size 和连续逻辑序号，最后只原子创建一个 envelope 文件。`readBatchByCommitId` 读取并完整验证既有 envelope，不把 legacy event 伪装成 named batch。reader 同时扫描 legacy 与 batch，平铺为无空洞、无重复的 `CommittedEvent[]`。
 
 ### 7.4 structured 事件
 
@@ -486,7 +528,7 @@ type StructuredTaskEvent =
 
 `turnId` 就是 structured ActionAttempt ID。对同一 inputNodeId，`attemptEpoch` 从 1 严格递增，turnId 由平台确定性派生；不再从 `agent_attempt_failed` 数量推测。
 
-start batch 在调用模型前提交；每个 started Attempt 最终恰好一个 terminal。合法 status/reason 组合只有：
+start batch 在调用模型前提交；structure/seal 只写 attempt started，fill 则用 turnId 派生稳定 draftId，并在同一个 start batch 写 `attempt_started + draft_opened`，其中 opened 绑定 active scaffold/generation/baseRevision。batch 后才幂等创建私有 Draft；若崩溃，依据 opened 事件重建同一空 Draft。每个 started Attempt 最终恰好一个 terminal。合法 status/reason 组合只有：
 
 ```text
 committed / completion_dispatch
@@ -554,7 +596,7 @@ Proposal 是 `ProposalNode { clientKey, typeId, spec, children[] }` 的整树替
 
 ### 9.2 fill
 
-started 后平台按 turnId 幂等创建 open FillDraft。模型工具：
+`attempt_started + draft_opened` batch 可见后，平台按 turnId/draftId 幂等物化 open FillDraft，再签发 Grant。模型工具：
 
 ```text
 list_slots
@@ -568,7 +610,7 @@ get_draft_status
 
 写入只作用于私有 overlay，批量全有或全无，完整替换 JSON value，不支持 patch。submit 运行 Merge Gate并冻结 candidate。no-op Draft 合法：成功后 Draft merged、revision 不变、不创建 content revision blob。
 
-Draft 生命周期为 open -> merged | stale | abandoned。校验失败保持 open；candidate 锁定后不可再写。终态只读保留到 task 删除，默认不进入公开投影或 Assembler。
+Draft 生命周期为 open -> merged | stale | abandoned。校验失败保持 open；candidate 锁定后不可再写。`draft_opened`/`draft_terminal` TaskEvent 是 lifecycle 权威；私有 journal 只保存 overlay、工具幂等和 submission lock。终态只读记录保留到 task 删除，默认不进入公开投影或 Assembler。
 
 ### 9.3 seal
 
@@ -612,14 +654,16 @@ ActionCommitter 根据 `productionMode` 分流：basic v2 走现有路径；stru
 
 提交边界：
 
-- structure：generation/content blob promote + proposal committed + Agent result + terminal + message Route/input，一个 batch；
-- fill：非空 content root promote + Draft merged + Agent result + terminal + message Route/input，一个 batch；no-op 不写 content blob；
+- structure：generation/content blob promote + 引用 proposalId 的 generation event + Agent result + terminal + message Route/input，一个 batch；该 batch 投影 Proposal committed；
+- fill：非空 content root promote + Draft terminal(merged) + Agent result + terminal + message Route/input，一个 batch；no-op 不写 content blob；
 - seal success：artifact custody prepare/promote + SealRecord blob + artifact_published + scaffold sealed + Agent result + terminal + publish Route 或 final submission，一个 batch；
 - seal rework：Gate failure result + Agent result + terminal(rework_dispatch) + message Route/input，一个 batch，不改 scaffold；
-- human：私有对象/candidate/staging abandoned + Agent result + terminal(waiting_human) + human_requested，一个 batch；
-- runtime failure/stop/crash：私有对象终态 + terminal + 对应现有 failure/lifecycle 事件，一个 batch。
+- human：证明私有对象/candidate/staging abandoned 的权威 terminal + Agent result + terminal(waiting_human) + human_requested，一个 batch；
+- runtime failure/stop/crash：Draft/Attempt 权威 terminal + 对应现有 failure/lifecycle 事件，一个 batch。
 
-所有大对象先 stage/verify，再 promote 到未被事件引用的最终地址，batch 是唯一可见性点。CAS loser 读取已存在 terminal，丢弃 stale result，不得写第二终态。响应丢失时存在相同 commitId 就返回原结果；不存在则新 Attempt 从最后权威状态重做。
+私有 journal 文件不参加 EventStore 的跨目录事务：batch 前不得写不可逆 terminal，batch 后可选 terminal cache 只做幂等追赶，恢复时始终以 TaskEvent 覆盖/修复。
+
+每次 structured 权威提交先计算 canonical completion signature：`task + turn + terminal/result kind + candidate/receipt digest + normalized dispatch`，再由其派生 commitId。ActionCommitter 在校验当前 phase/revision 或生成新事件 ID/时间戳前先调用 `readBatchByCommitId`；命中时比较已提交事件中的稳定身份/Route/blob 引用与 signature，匹配则返回原 mapping，不匹配则幂等冲突。未命中才 stage/verify/promote 并构造 batch；CAS 或同 commitId 竞态 loser 再读 winner 并做同一比较。所有大对象先 promote 到未被事件引用的最终地址，batch 是唯一可见性点。不存在相同 commit 时，旧 candidate 随旧 Attempt abandoned，由新 Attempt 从最后权威状态重做。
 
 ---
 
@@ -650,8 +694,8 @@ Seal 不是 task completed；只有既有 `final_submission_accepted` 完成 tas
 
 TaskRunner 在 structured input 上：
 
-1. CAS 分配 Attempt epoch 并提交 started batch；
-2. 创建 Proposal/Draft、meter 和 Grant；
+1. CAS 分配 Attempt epoch；structure/seal 提交 started batch，fill 原子提交 started + draft_opened batch；
+2. 幂等物化 Proposal/Draft 和 meter，再签发 Grant；
 3. 用 composite AbortSignal 启动 runtime 与 monotonic deadline；
 4. Slot Tool 操作私有 store，ForgeAction 只负责最终 dispatch；
 5. ActionCommitter 提交 terminal batch；
@@ -702,7 +746,15 @@ GET /api/tasks/:taskId/structured-slots/seal
 
 所有响应使用 TypeBox exact schema；cursor 绑定 task、generation、revision、projection identity 和排序版本，状态变化返回 cursor invalid。UI 新增只读“结构”抽屉：树形大纲、type/spec/content、状态、issue 定位、merge/Seal 审计和 sealed artifact 链接。UI 不提供任何写 API。
 
-Agent 与 UI 复用同一个授权投影服务；内部审计可以更完整，但公开位置/details/message 不能泄露隐藏槽。
+Agent 与 UI 复用同一个以调用主体为判别输入的授权投影服务：
+
+```ts
+type ProjectionSubjectV1 =
+  | { kind: 'agent'; grant: SlotSessionGrantV1 }
+  | { kind: 'task_owner' };
+```
+
+Agent subject 只使用当前 Grant 绑定的 AccessProfile；v1 本地单用户 UI/API subject 固定为平台内建 `task_owner`，拥有正式 scaffold、spec/content、可公开 issue 与 SealRecord 的完整只读审计视图，但看不到私有 Proposal/Draft、Grant、实现源码、secret 或宿主路径。`task_owner` 不是 contract 中的 AccessProfile，也不通过合并 profile 推导。远程或多用户部署不在 v1 范围；在开放前必须增加版本化 principal/auth 映射。任何主体的公开位置/details/message 都不能泄露其权限外数据。
 
 ---
 
@@ -712,9 +764,11 @@ Agent 与 UI 复用同一个授权投影服务；内部审计可以更完整，�
 - structured 必须 contract v1 + TurnContract v3；未知版本 fail closed。
 - 历史 snapshot 原样可读，不升级；structured v1 未发布前没有数据迁移。
 - ForgeAction 九项 registry、basic v2 template、ArtifactVersion、现有 API 字段保持兼容。
-- 模型参数拒绝 task/case/scaffold/draft/grant/agent/revision/path 等工程键。
+- structured Slot Tool 的模型参数拒绝 task/case/scaffold/draft/grant/revision/path/requestId 等工程键；既有 ForgeAction `send_message(targetAgentId, ...)` 的冻结路由参数保持兼容，不在此禁令内。
 - raw provider thinking、secret、绝对路径和 sandbox cause 不进入事件、trace、issue 或 API。
-- structured mode 在平台 profile 基准、全量恢复测试和 basic 回归通过前保持不可运行；Loader 可以在测试中使用注入 profile。
+- structured runtime capability 独立于 TurnContract 版本兼容，默认 disabled；同一个 runtime environment 在 Loader/Catalog、cache、task snapshot 创建和 Scheduler 全部复核。测试只能注入匹配的 enabled capability + profile，最终验收任务拥有唯一 production enable 步骤。
+- Task 9 只建立 provisional profile 与 benchmark harness；最终 hard ceiling 必须在 Grant projection、Seal/Assembler、custody、batch recovery 与 issue projection 全部完成后通过 integrated reference benchmark 冻结。
+- production enable 使用两阶段 clean-tree 协议：先提交 disabled 状态下的全部实现/测试/脚本/文档，再从该 commit 生成 final profile/release evidence 与 manifest。会改写 tracked evidence 或依赖 gitignored 旧报告的命令不能充当 release proof；锁定 Pi SDK 的 deterministic pre-validation/meter boundary test 必须进入 release evidence。
 
 ---
 
@@ -723,16 +777,16 @@ Agent 与 UI 复用同一个授权投影服务；内部审计可以更完整，�
 实现完成至少满足：
 
 1. basic 模板 hash golden、现有 unit/integration/e2e 全部不变；
-2. contract exact schema、资源 containment、Slot Schema、Grammar、selector、typestate property/golden 测试通过；
-3. 10k slot / 64 MiB scaffold、最大 Draft、validator fanout、500 issues、Seal 和恢复基准满足 profile；
-4. Proposal/Draft 工具幂等、同 key 冲突、批量原子、隐藏对象防探测通过；
+2. contract exact schema、资源 containment、Slot Schema、RE2-wasm 安全/复杂度、Grammar、selector、typestate property/golden 测试通过；
+3. 10k slot / 64 MiB scaffold、最大 Draft、validator fanout、500 issues、真实 Seal/Assembler/custody 和恢复的 integrated benchmark 满足 final profile，证据来自 clean source baseline 并包含冻结环境、runner identity、源码/lock digest 与样本协议；
+4. Proposal/Draft 工具幂等、同 key 冲突、批量原子、隐藏对象防探测通过；真实 Pi 0.82 characterization 证明 schema-invalid/未授权/截断 Slot 调用在 SDK 校验前持久化计费，合法缓存重放不重复计费；
 5. Attempt stop/crash/retry/human、deadline、compaction 不重置、terminal CAS 竞态通过；
-6. EventStore legacy + batch 混读、batch 崩溃点、commitId replay/conflict、逻辑序号无空洞通过；
-7. structure、fill、no-op、seal success、seal rework、incomplete、human 的每个 terminal batch 全有或全无；
+6. EventStore legacy + batch 混读、batch 崩溃点、commitId pre-read/replay/conflict、推进时钟/随机源后的响应丢失、逻辑序号无空洞通过；
+7. structure、fill start、no-op、seal success、seal rework、incomplete、human 的每个 start/terminal batch 全有或全无；fill 不出现 terminal-without-opened，journal 两侧崩溃可由事件修复；
 8. validator/Assembler sandbox 逃逸、timeout/memory/output/aggregate/Attempt limits fail closed；
 9. custody 在 batch 前/后崩溃、orphan 复用/清理、hash 损坏检测通过；
-10. 只读 API exact schema、cursor 失效、授权过滤和 UI basic/structured 双模式通过；
-11. `npm run check`、`npm test`、`npm run build`、`npm run e2e` 与新增 structured acceptance 全绿。
+10. 只读 API exact schema、cursor 失效、Agent Grant 与本地 `task_owner` 两种授权投影、HTTP/Mock/stub Gateway 完整契约和 UI basic/structured 双模式通过；
+11. production capability 在前置 acceptance 时仍 disabled；从 clean committed source 只生成 final profile JSON、profile/release evidence 与 manifest，证据完成后由唯一步骤启用，再以 production default 跑 `npm run check`、`npm test`、`npm run build`、`npm run e2e` 与 structured acceptance 全绿。
 
 ---
 
