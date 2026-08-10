@@ -589,7 +589,40 @@ type GrammarNode =
 - Structure Gate 使用确定性左到右匹配；issue 同时定位规则 AST 路径和实际 slot/clientKey 路径。
 - `get_structure_contract` 给编排 Agent 返回同构的声明式投影，但不暴露平台内部编译状态。
 
-递归/循环、choice 与 sequence 的歧义限制和 issue 精确字段继续收敛；六种 AST kind、有限重复、显式叶子、nullable repeat 拒绝、rootType + productions、纯结构职责和路径化错误定位不再开放。
+#### 8.6.1 递归只允许可终止形式
+
+LayoutGrammar v1 允许类型 production 直接递归或互相递归，但 Loader 必须在模板加载期证明递归是可终止的，不能只依赖运行期深度限制兜底。例如：
+
+```yaml
+section:
+  children:
+    kind: sequence
+    items:
+      - { kind: slot, type: heading }
+      - kind: repeat
+        min: 0
+        max: 20
+        item:
+          kind: choice
+          items:
+            - { kind: slot, type: paragraph }
+            - { kind: slot, type: section }
+```
+
+Loader 将 production 的 type 引用编译为依赖图，并按最小不动点计算每个 type 是否“可生成”，即是否至少存在一棵完整、有限的合法子树：
+
+- 完整 production 为 `empty` 时可生成；
+- `slot(T)` 在类型 `T` 可生成时可生成；
+- `sequence` 在所有 item 都可生成时可生成；
+- `choice` 在至少一个分支可生成时可生成；
+- `optional` 总有“不出现”的有限路径，因此可生成；
+- `repeat(min: 0, ...)` 总有零次的有限路径；`min > 0` 时只有 item 可生成才可生成。
+
+所有从 `rootType` 可达的 type 都必须可生成。这样直接或互相递归只要存在有限出口就可以加载；`A -> A`、`A -> B -> A` 等只有强制循环而没有有限出口的规则必须 fail closed。不可达 production 仍按前述规则拒绝，而不是借此隐藏不可生成类型。
+
+递归语法不会让引擎自动展开节点。编排 Agent 必须提交一棵完整、有限的实例树；Structure Gate 仍使用 `limits.structure.maxTreeDepth` 与 `maxSlots` 约束实际实例。类型规则引用图可以成环，但实例所有权树始终必须单根、单父、有序且无环。v1 不增加按递归边或 type 单独计数的深度语法。
+
+choice 与 sequence 的歧义限制和 issue 精确字段继续收敛；六种 AST kind、有限重复、显式叶子、nullable repeat 拒绝、可终止递归、强制循环拒绝、rootType + productions、纯结构职责和路径化错误定位不再开放。
 
 ### 8.7 单根有序统一节点树
 
@@ -1137,6 +1170,8 @@ interface SealRecord {
 - clientKey 重复、过深、过大或包含工程字段时拒绝写入；
 - LayoutGrammar 未知 type/kind、缺失或不可达 production 在模板加载期失败；实例不匹配时 issue 同时包含 rulePath 与 clientKey/instancePath；
 - 非法 repeat 基数、无界 max、嵌套 empty 或 nullable repeat 在模板加载期失败；
+- 存在有限出口的直接递归和互相递归在模板加载期通过，只有强制循环而无有限出口的可达 type 在加载期失败；
+- 递归实例树超过 `maxTreeDepth` 或 `maxSlots` 时 Structure Gate 失败，Grammar 不自动展开实例节点；
 - Structure Gate 失败零权威写入；
 - 成功提交只创建一个 generation，并生成唯一 slotId；
 - 重放 submit 返回同一结果。
@@ -1186,7 +1221,7 @@ interface SealRecord {
 2. 结构槽模板保持单一 Template Package；固定 `slots/contract.yaml` 使用“声明内联、实现外置”的分文件契约。
 3. 扩展现有冻结模板快照以包含结构槽规则、显式模板运行包络、运行兼容身份和所有引用资源摘要。
 4. 持久化 StructureProposal，整树校验后原子创建 scaffold。
-5. SlotTypeDefinition 使用无业务默认值的全显式契约，只定义节点内在属性；每个 typeId 使用单一 Schema 形态，spec 固定为对象、content 保持任意 JSON，二者共用有精确关键字白名单且只验证不改写数据的版本化 Schema 方言；LayoutGrammar 使用结构化 Production AST 统一定义结构关系；SlotInstance 使用单根有序树并严格分离 spec/content。
+5. SlotTypeDefinition 使用无业务默认值的全显式契约，只定义节点内在属性；每个 typeId 使用单一 Schema 形态，spec 固定为对象、content 保持任意 JSON，二者共用有精确关键字白名单且只验证不改写数据的版本化 Schema 方言；LayoutGrammar 使用结构化 Production AST 统一定义结构关系，只允许 Loader 可证明存在有限出口的递归；SlotInstance 使用单根有序树并严格分离 spec/content。
 6. 模板上限 + 运行期 SlotGrant 两层授权。
 7. Production Action/Route 调度，单 case 串行。
 8. 持久化 FillDraft、窄 Slot API、严格全局 baseRevision。
@@ -1222,7 +1257,7 @@ interface SealRecord {
 主流程已经冻结，以下属于进入 dev plan 前仍需在本文继续讨论并定稿的实现级系统契约：
 
 1. `slots/contract.yaml` 各顶层分区的最终 YAML/TypeScript 字段 schema；权威入口、分区、声明/实现边界、固定路径和单 package 版本语义已经冻结。
-2. LayoutGrammar v1 的递归/循环、choice/sequence 歧义和 issue 精确字段；六种 AST kind、有限重复、显式叶子、nullable repeat 拒绝、结构化 Production AST 与路径化定位已经冻结。
+2. LayoutGrammar v1 的 choice/sequence 歧义和 issue 精确字段；可终止递归、强制循环拒绝、六种 AST kind、有限重复、显式叶子、nullable repeat 拒绝、结构化 Production AST 与路径化定位已经冻结。
 3. Slot Schema v1 各关键字数值参数和 safe pattern 约束；精确白名单、对象/数组开放性、纯验证语义、单一形态和 SlotTypeDefinition 外层契约已经冻结。
 4. 平台 hard ceiling 的绝对数值和兼容版本协议；模板 `limits` 的六组十六字段、单位、跨字段关系、三层限制模型与禁止静默裁剪已经冻结。
 5. 中性 slot selector DSL 与 access profile 解析规则。
@@ -1272,6 +1307,7 @@ interface SealRecord {
 | 2026-08-10 | structured_slots v1 模板 limits 固定为六组十六个必填正整数字段，执行器预算另行声明 |
 | 2026-08-10 | LayoutGrammar v1 采用结构化 Production AST，以 rootType + productions 表达有序 children 语法 |
 | 2026-08-10 | LayoutGrammar v1 固定 slot/sequence/choice/optional/repeat/empty 六种节点，重复必须有限且不得消费可空表达式 |
+| 2026-08-10 | LayoutGrammar v1 允许直接或互相递归，但 Loader 必须证明每个根可达 type 都存在完整有限子树；无出口的强制循环加载期拒绝 |
 
 ---
 
