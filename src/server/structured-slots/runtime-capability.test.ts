@@ -17,6 +17,7 @@ import {
   CANDIDATE_PROFILE_LIMITS_V1,
   createProductionRuntimeEnvironment,
   createRuntimeEnvironment,
+  validateProductionProfile,
   validateRuntimeCapability,
   validatePlatformProfile,
 } from './runtime-capability';
@@ -128,5 +129,44 @@ describe('runtime-capability — validation and injection', () => {
   it('keeps a disabled capability with a null profile as a valid environment', () => {
     const env = createProductionRuntimeEnvironment();
     expect(() => createRuntimeEnvironment(env.capability, null)).not.toThrow();
+  });
+});
+
+describe('runtime-capability — production capability validator rejects provisional (Task 9)', () => {
+  /** Smaller final-shaped profile the unit tests may inject (spec §5 allows any legal limits). */
+  const finalProfile = () => ({
+    version: 1 as const,
+    status: 'final' as const,
+    identity: 'forge-structured-runtime/v1' as const,
+    limits: {
+      ...CANDIDATE_PROFILE_LIMITS_V1,
+      structure: { ...CANDIDATE_PROFILE_LIMITS_V1.structure, maxSlots: 500 },
+      draft: { ...CANDIDATE_PROFILE_LIMITS_V1.draft, maxChangedSlots: 100 },
+    },
+    evidenceDigest: 'd'.repeat(64),
+  });
+
+  const provisionalProfile = () => ({
+    version: 1 as const,
+    status: 'provisional' as const,
+    identity: 'forge-structured-runtime/v1' as const,
+    limits: CANDIDATE_PROFILE_LIMITS_V1,
+    evidenceDigest: null,
+  });
+
+  it('rejects a provisional profile as production readiness', () => {
+    expect(() => validateProductionProfile(provisionalProfile())).toThrow();
+  });
+
+  it('accepts a final-shaped profile with a 64-hex evidence digest', () => {
+    const profile = validateProductionProfile(finalProfile());
+    expect(profile.status).toBe('final');
+    expect(profile.evidenceDigest).toBe('d'.repeat(64));
+  });
+
+  it('still rejects an invalid final profile (missing evidence)', () => {
+    expect(() =>
+      validateProductionProfile({ ...finalProfile(), evidenceDigest: null }),
+    ).toThrow();
   });
 });

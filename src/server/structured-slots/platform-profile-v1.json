@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "status": "provisional",
+  "identity": "forge-structured-runtime/v1",
+  "limits": {
+    "schema": {
+      "maxSchemaDepth": 16,
+      "maxSchemaNodes": 4096,
+      "maxEnumItems": 256,
+      "maxPatternLength": 512
+    },
+    "structure": {
+      "maxSlots": 10000,
+      "maxTreeDepth": 32,
+      "maxChildrenPerSlot": 1000
+    },
+    "payload": {
+      "maxSpecBytesPerSlot": 65536,
+      "maxContentBytesPerSlot": 1048576,
+      "maxScaffoldPayloadBytes": 67108864
+    },
+    "draft": {
+      "maxChangedSlots": 2000,
+      "maxDraftBytes": 16777216
+    },
+    "attempt": {
+      "maxSlotToolCallsPerAttempt": 512,
+      "maxValidationRunsPerAttempt": 16,
+      "maxValidatorInvocationsPerAttempt": 40000,
+      "maxAggregateValidatorCpuMsPerAttempt": 240000,
+      "maxAggregateValidatorWallClockMsPerAttempt": 480000,
+      "maxValidatorOutputBytesPerAttempt": 16777216,
+      "maxAttemptWallClockMs": 600000
+    },
+    "validation": {
+      "maxValidators": 64,
+      "maxValidatorInvocationsPerGate": 10000,
+      "maxAggregateValidatorCpuMsPerGate": 60000,
+      "maxAggregateValidatorWallClockMsPerGate": 120000,
+      "maxValidatorOutputBytesPerGate": 4194304,
+      "maxIssuesPerRun": 500
+    },
+    "output": {
+      "maxArtifactFiles": 64,
+      "maxArtifactBytesPerFile": 16777216,
+      "maxTotalArtifactBytes": 67108864
+    }
+  },
+  "evidenceDigest": null
+}

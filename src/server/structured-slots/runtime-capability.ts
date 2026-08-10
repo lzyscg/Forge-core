@@ -21,7 +21,14 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { StructuredSlotLimitsV1 } from '../../shared/structured-slots';
+import {
+  PROFILE_IDENTITY,
+  STRUCTURED_SLOT_PROFILE_CANDIDATE,
+  loadStructuredPlatformProfile,
+  profileCanonicalDigest,
+  validateStructuredPlatformProfileFile,
+} from './platform-profile';
+import type { StructuredPlatformProfileFileV1 } from './platform-profile';
 
 /** Versioned runtime capability manifest (spec §5). */
 export interface StructuredRuntimeCapabilityV1 {
@@ -33,48 +40,17 @@ export interface StructuredRuntimeCapabilityV1 {
   requiredAbis: readonly string[];
 }
 
-/** Exact checked-in platform profile file (spec §5). */
-export interface StructuredPlatformProfileV1 {
-  version: 1;
-  status: 'provisional' | 'final';
-  identity: 'forge-structured-runtime/v1';
-  limits: StructuredSlotLimitsV1;
-  evidenceDigest: string | null;
-}
+/** Exact checked-in platform profile file (spec §5), canonical home in platform-profile.ts. */
+export type { StructuredPlatformProfileFileV1 as StructuredPlatformProfileV1 } from './platform-profile';
 
 /** The one immutable environment threaded through Catalog/cache/TaskStore. */
 export interface StructuredRuntimeEnvironmentV1 {
   capability: StructuredRuntimeCapabilityV1;
-  profile: StructuredPlatformProfileV1 | null;
+  profile: StructuredPlatformProfileFileV1 | null;
 }
 
 /** Design §25.13 candidate hard ceiling — provisional, disabled-build only. */
-export const CANDIDATE_PROFILE_LIMITS_V1: StructuredSlotLimitsV1 = {
-  schema: { maxSchemaDepth: 16, maxSchemaNodes: 4096, maxEnumItems: 256, maxPatternLength: 512 },
-  structure: { maxSlots: 10_000, maxTreeDepth: 32, maxChildrenPerSlot: 1_000 },
-  payload: { maxSpecBytesPerSlot: 65_536, maxContentBytesPerSlot: 1_048_576, maxScaffoldPayloadBytes: 67_108_864 },
-  draft: { maxChangedSlots: 2_000, maxDraftBytes: 16_777_216 },
-  attempt: {
-    maxSlotToolCallsPerAttempt: 512,
-    maxValidationRunsPerAttempt: 16,
-    maxValidatorInvocationsPerAttempt: 40_000,
-    maxAggregateValidatorCpuMsPerAttempt: 240_000,
-    maxAggregateValidatorWallClockMsPerAttempt: 480_000,
-    maxValidatorOutputBytesPerAttempt: 16_777_216,
-    maxAttemptWallClockMs: 600_000,
-  },
-  validation: {
-    maxValidators: 64,
-    maxValidatorInvocationsPerGate: 10_000,
-    maxAggregateValidatorCpuMsPerGate: 60_000,
-    maxAggregateValidatorWallClockMsPerGate: 120_000,
-    maxValidatorOutputBytesPerGate: 4_194_304,
-    maxIssuesPerRun: 500,
-  },
-  output: { maxArtifactFiles: 64, maxArtifactBytesPerFile: 16_777_216, maxTotalArtifactBytes: 67_108_864 },
-};
-
-const PROFILE_IDENTITY = 'forge-structured-runtime/v1';
+export { STRUCTURED_SLOT_PROFILE_CANDIDATE as CANDIDATE_PROFILE_LIMITS_V1 } from './platform-profile';
 
 const REQUIRED_ABIS = ['forge-validator/v1', 'forge-assembler/v1'] as const;
 
@@ -109,25 +85,6 @@ function optionalDigest(value: unknown, where: string): string | null {
   return value;
 }
 
-function assertPositiveLimitsShape(value: unknown): void {
-  if (!isPlainObject(value)) invalid('profile.limits must be a plain object');
-  const flat = (value as unknown) as Record<string, Record<string, unknown>>;
-  const groupNames = Object.keys(flat);
-  if (groupNames.length === 0) invalid('profile.limits must declare limit groups');
-  for (const group of groupNames) {
-    if (!isPlainObject(flat[group])) invalid(`profile.limits.${group} must be a plain object`);
-    for (const [field, numberValue] of Object.entries(flat[group])) {
-      if (
-        typeof numberValue !== 'number' ||
-        !Number.isSafeInteger(numberValue) ||
-        numberValue <= 0
-      ) {
-        invalid(`profile.limits.${group}.${field} must be a positive safe integer`);
-      }
-    }
-  }
-}
-
 /** Exact shape validation of the capability manifest (spec §5). */
 export function validateRuntimeCapability(value: unknown): StructuredRuntimeCapabilityV1 {
   if (!isPlainObject(value)) invalid('capability must be a plain object');
@@ -151,32 +108,28 @@ export function validateRuntimeCapability(value: unknown): StructuredRuntimeCapa
   });
 }
 
-/** Exact shape validation of one platform profile (spec §5). */
-export function validatePlatformProfile(value: unknown): StructuredPlatformProfileV1 {
-  if (!isPlainObject(value)) invalid('profile must be a plain object');
-  if (value['version'] !== 1) invalid('profile.version must be 1');
-  const status = value['status'];
-  if (status !== 'provisional' && status !== 'final') invalid('profile.status must be provisional|final');
-  if (value['identity'] !== PROFILE_IDENTITY) invalid(`profile.identity must be '${PROFILE_IDENTITY}'`);
-  assertPositiveLimitsShape(value['limits']);
-  const evidenceDigest = value['evidenceDigest'];
-  if (evidenceDigest !== null && (typeof evidenceDigest !== 'string' || !/^[0-9a-f]{64}$/.test(evidenceDigest))) {
-    invalid('profile.evidenceDigest must be null or a 64-hex digest');
+/**
+ * Exact shape validation of one platform profile (spec §5). Delegates to the
+ * canonical validator in platform-profile.ts so the profile file shape and
+ * its cross-field relations are owned by exactly one module.
+ */
+export function validatePlatformProfile(value: unknown): StructuredPlatformProfileFileV1 {
+  return validateStructuredPlatformProfileFile(value);
+}
+
+/**
+ * PRODUCTION capability validator (spec §5, Task 9 Step 6): a provisional
+ * profile can never satisfy production readiness. Only an exact `final`
+ * profile produced by the integrated reference benchmark (Task 19) qualifies.
+ * Non-production paths (tests) may still build environments from provisional
+ * profiles via `createRuntimeEnvironment`.
+ */
+export function validateProductionProfile(value: unknown): StructuredPlatformProfileFileV1 {
+  const profile = validateStructuredPlatformProfileFile(value);
+  if (profile.status !== 'final') {
+    invalid('production readiness requires a final profile; a provisional profile cannot satisfy it');
   }
-  // provisional must carry a null evidence digest (spec §5).
-  if (status === 'provisional' && evidenceDigest !== null) {
-    invalid('provisional profile must use a null evidenceDigest');
-  }
-  if (status === 'final' && evidenceDigest === null) {
-    invalid('final profile must reference integrated benchmark evidence');
-  }
-  return Object.freeze({
-    version: 1,
-    status,
-    identity: PROFILE_IDENTITY,
-    limits: Object.freeze(value['limits'] as StructuredSlotLimitsV1),
-    evidenceDigest,
-  });
+  return profile;
 }
 
 /**
@@ -188,7 +141,7 @@ export function validatePlatformProfile(value: unknown): StructuredPlatformProfi
  */
 export function createRuntimeEnvironment(
   capability: StructuredRuntimeCapabilityV1,
-  profile: StructuredPlatformProfileV1 | null,
+  profile: StructuredPlatformProfileFileV1 | null,
 ): StructuredRuntimeEnvironmentV1 {
   const validatedCapability = validateRuntimeCapability(capability);
   const validatedProfile = profile === null ? null : validatePlatformProfile(profile);
@@ -222,17 +175,35 @@ function productionManifestPath(): string {
  * The production default environment: reads and validates the exact checked-in
  * manifest, which must start `disabled` with no final profile. Reads a file —
  * never an environment variable — so there is no fallback to bypass.
+ *
+ * Task 9 keeps the checked-in manifest disabled and returns a null profile. If
+ * a future manifest is enabled (Task 19), the production capability validator
+ * REQUIRES an exact final profile file — a provisional profile can never
+ * satisfy production readiness — and cross-checks the capability's declared
+ * profileDigest against the canonical digest of that file.
  */
-export function createProductionRuntimeEnvironment(): StructuredRuntimeEnvironmentV1 {
+export function createProductionRuntimeEnvironment(
+  profileFile?: string | URL,
+): StructuredRuntimeEnvironmentV1 {
   const raw = JSON.parse(readFileSync(productionManifestPath(), 'utf8')) as unknown;
   const capability = validateRuntimeCapability(raw);
-  if (capability.status !== 'disabled') {
-    invalid('the checked-in production manifest must start disabled');
+  if (capability.status === 'disabled') {
+    if (capability.profileIdentity !== null || capability.profileDigest !== null || capability.evidenceDigest !== null) {
+      invalid('the checked-in production manifest must carry no final profile while disabled');
+    }
+    return Object.freeze({ capability, profile: null });
   }
-  if (capability.profileIdentity !== null || capability.profileDigest !== null || capability.evidenceDigest !== null) {
-    invalid('the checked-in production manifest must carry no final profile');
+  if (capability.profileIdentity !== PROFILE_IDENTITY) {
+    invalid('an enabled production manifest must reference the structured runtime profile');
   }
-  return Object.freeze({ capability, profile: null });
+  if (profileFile === undefined) {
+    invalid('an enabled production manifest requires its exact final profile file');
+  }
+  const profile = validateProductionProfile(loadStructuredPlatformProfile(profileFile));
+  if (capability.profileDigest !== null && capability.profileDigest !== profileCanonicalDigest(profile)) {
+    invalid('capability.profileDigest does not match the checked-in profile file');
+  }
+  return Object.freeze({ capability, profile });
 }
 
 /**
@@ -253,7 +224,7 @@ export function createTestRuntimeEnvironment(): StructuredRuntimeEnvironmentV1 {
     version: 1,
     status: 'provisional',
     identity: PROFILE_IDENTITY,
-    limits: CANDIDATE_PROFILE_LIMITS_V1,
+    limits: STRUCTURED_SLOT_PROFILE_CANDIDATE,
     evidenceDigest: null,
   });
   return createRuntimeEnvironment(capability, profile);
