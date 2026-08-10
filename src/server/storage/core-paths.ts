@@ -40,6 +40,15 @@ export function isSafeSegment(value: string): boolean {
 /** Committed event files: `<six-digit-sequence>-<event-id>.json`. */
 const EVENT_FILE_NAME = /^(\d{6})-([A-Za-z0-9][A-Za-z0-9._-]*)\.json$/;
 
+/**
+ * Atomic batch envelope files: `<first>-<last>-<commitId>.batch.json` (spec
+ * §7.3). Deliberately a superset-shaped name so it also satisfies
+ * `EVENT_FILE_NAME`; every parse site must check the batch pattern first (see
+ * `parseEventFileName` and `taskEventFile`).
+ */
+const BATCH_FILE_NAME =
+  /^(\d{6})-(\d{6})-([A-Za-z0-9][A-Za-z0-9._-]*)\.batch\.json$/;
+
 function assertSafeSegment(field: string, value: string): void {
   if (!SAFE_SEGMENT.test(value)) {
     throw new CorePathError(field);
@@ -57,11 +66,42 @@ export function formatEventFileName(sequence: number, eventId: string): string {
 export function parseEventFileName(
   fileName: string,
 ): { sequence: number; eventId: string } | null {
+  if (BATCH_FILE_NAME.test(fileName)) {
+    // A genuine batch envelope is never a legacy single-event file (spec
+    // §7.3); the batch pattern wins on the ambiguous overlap.
+    return null;
+  }
   const match = EVENT_FILE_NAME.exec(fileName);
   if (match === null) {
     return null;
   }
   return { sequence: Number(match[1]), eventId: match[2] };
+}
+
+/** `<first>-<last>-<commitId>.batch.json` (spec §7.3). */
+export function formatBatchFileName(
+  firstSequence: number,
+  lastSequence: number,
+  commitId: string,
+): string {
+  if (!Number.isInteger(firstSequence) || firstSequence < 1 || firstSequence > 999_999) {
+    throw new CorePathError('firstSequence');
+  }
+  if (!Number.isInteger(lastSequence) || lastSequence < firstSequence || lastSequence > 999_999) {
+    throw new CorePathError('lastSequence');
+  }
+  assertSafeSegment('commitId', commitId);
+  return `${String(firstSequence).padStart(6, '0')}-${String(lastSequence).padStart(6, '0')}-${commitId}.batch.json`;
+}
+
+export function parseBatchFileName(
+  fileName: string,
+): { firstSequence: number; lastSequence: number; commitId: string } | null {
+  const match = BATCH_FILE_NAME.exec(fileName);
+  if (match === null) {
+    return null;
+  }
+  return { firstSequence: Number(match[1]), lastSequence: Number(match[2]), commitId: match[3] };
 }
 
 export class CorePaths {
@@ -125,7 +165,15 @@ export class CorePaths {
   }
 
   taskEventFile(taskId: string, fileName: string): string {
-    if (!EVENT_FILE_NAME.test(fileName)) {
+    if (!EVENT_FILE_NAME.test(fileName) || BATCH_FILE_NAME.test(fileName)) {
+      throw new CorePathError('fileName');
+    }
+    return resolve(this.taskEventsRoot(taskId), fileName);
+  }
+
+  /** Batch envelope file: `<first>-<last>-<commitId>.batch.json` (spec §7.3). */
+  taskBatchEventFile(taskId: string, fileName: string): string {
+    if (!BATCH_FILE_NAME.test(fileName)) {
       throw new CorePathError('fileName');
     }
     return resolve(this.taskEventsRoot(taskId), fileName);

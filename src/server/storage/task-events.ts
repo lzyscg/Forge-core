@@ -71,6 +71,62 @@ const INCOMPATIBLE_REASONS: readonly string[] = [
   'SCHEMA_V2_REQUIRED',
 ];
 
+/**
+ * Structured slot engine lifecycle (spec §7.4/§8.1). Closed value sets: event
+ * validation checks each field against its enum; the legal status/reason
+ * pairings (e.g. committed/completion_dispatch) are a projection concern.
+ */
+export type StructuredAttemptStatus = 'committed' | 'failed' | 'abandoned' | 'waiting_human';
+
+export type StructuredAttemptReason =
+  | 'completion_dispatch'
+  | 'rework_dispatch'
+  | 'runtime_failure'
+  | 'task_stop'
+  | 'crash_recovery'
+  | 'human_request';
+
+export type StructuredSessionKind = 'structure' | 'fill' | 'seal';
+
+export type StructuredDraftTerminalStatus = 'merged' | 'stale' | 'abandoned';
+
+export type StructuredBlobKind = 'generation' | 'content_revision' | 'seal_record' | 'validation';
+
+/** Task-local immutable content reference (spec §7.2). */
+export interface StructuredBlobRefV1 {
+  version: 1;
+  kind: StructuredBlobKind;
+  sha256: string;
+  byteLength: number;
+}
+
+const STRUCTURED_ATTEMPT_STATUSES: readonly string[] = [
+  'committed',
+  'failed',
+  'abandoned',
+  'waiting_human',
+];
+
+const STRUCTURED_ATTEMPT_REASONS: readonly string[] = [
+  'completion_dispatch',
+  'rework_dispatch',
+  'runtime_failure',
+  'task_stop',
+  'crash_recovery',
+  'human_request',
+];
+
+const STRUCTURED_SESSION_KINDS: readonly string[] = ['structure', 'fill', 'seal'];
+
+const STRUCTURED_DRAFT_TERMINAL_STATUSES: readonly string[] = ['merged', 'stale', 'abandoned'];
+
+const STRUCTURED_BLOB_KINDS: readonly string[] = [
+  'generation',
+  'content_revision',
+  'seal_record',
+  'validation',
+];
+
 export interface EventNode {
   sequence: number;
   agentId: string;
@@ -201,7 +257,65 @@ export type TaskEvent =
       decision?: 'continue' | 'accept';
     })
   | (EventBase & { type: 'final_submission_accepted'; artifactId: string; version: number })
-  | (EventBase & { type: 'skill_loaded'; skillId: string });
+  | (EventBase & { type: 'skill_loaded'; skillId: string })
+  | (EventBase & {
+      type: 'structured_slot_attempt_started';
+      inputNodeId: string;
+      agentId: string;
+      attemptEpoch: number;
+      turnId: string;
+      sessionKind: StructuredSessionKind;
+    })
+  | (EventBase & {
+      type: 'structured_slot_attempt_terminal';
+      inputNodeId: string;
+      attemptEpoch: number;
+      turnId: string;
+      status: StructuredAttemptStatus;
+      reason: StructuredAttemptReason;
+    })
+  | (EventBase & {
+      type: 'structured_scaffold_generation_committed';
+      scaffoldId: string;
+      generationId: string;
+      supersedesGenerationId: string | null;
+      rootSlotId: string;
+      slotCount: number;
+      maxDepth: number;
+      structure: StructuredBlobRefV1;
+      content: StructuredBlobRefV1;
+      /** Generation content revisions are frozen at 0 at commit time. */
+      contentRevision: 0;
+      proposalId: string;
+    })
+  | (EventBase & {
+      type: 'structured_fill_draft_opened';
+      draftId: string;
+      turnId: string;
+      scaffoldId: string;
+      generationId: string;
+      baseRevision: number;
+    })
+  | (EventBase & {
+      type: 'structured_fill_draft_terminal';
+      draftId: string;
+      turnId: string;
+      status: StructuredDraftTerminalStatus;
+      baseRevision: number;
+      resultRevision: number;
+      changeCount: number;
+      content: StructuredBlobRefV1 | null;
+    })
+  | (EventBase & {
+      type: 'structured_scaffold_sealed';
+      sealId: string;
+      scaffoldId: string;
+      generationId: string;
+      scaffoldRevision: number;
+      sealRecord: StructuredBlobRefV1;
+      artifactId: string;
+      artifactVersion: number;
+    });
 
 function invalidEvent(message: string): StorageError {
   return new StorageError(STORAGE_ERROR_CODES.EVENT_INVALID, message, null, '修正事件内容后重试。');
@@ -239,6 +353,14 @@ function assertNonEmptyString(value: unknown, where: string): string {
 function assertPositiveInteger(value: unknown, where: string): number {
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
     throw invalidEvent(`${where} 必须是不小于 1 的整数。`);
+  }
+  return value;
+}
+
+/** Integer >= 0 (revision/count fields that can legitimately be zero). */
+function assertNonNegativeInteger(value: unknown, where: string): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw invalidEvent(`${where} 必须是不小于 0 的整数。`);
   }
   return value;
 }
@@ -372,6 +494,28 @@ function baseAnd(...fields: string[]): ReadonlySet<string> {
   return new Set([...BASE_KEYS, ...fields]);
 }
 
+const BLOB_REF_KEYS = new Set(['version', 'kind', 'sha256', 'byteLength']);
+
+function validateStructuredBlobRef(value: unknown, where: string): StructuredBlobRefV1 {
+  if (!isPlainObject(value)) {
+    throw invalidEvent(`${where} 必须是对象。`);
+  }
+  assertExactKeys(value, BLOB_REF_KEYS, where);
+  if (value.version !== 1) {
+    throw invalidEvent(`${where}.version 必须是 1。`);
+  }
+  const sha256 = assertNonEmptyString(value.sha256, `${where}.sha256`);
+  if (!CONTENT_HASH_PATTERN.test(sha256)) {
+    throw invalidEvent(`${where}.sha256 必须是 64 位十六进制 SHA-256。`);
+  }
+  return {
+    version: 1,
+    kind: assertOneOf(value.kind, STRUCTURED_BLOB_KINDS, `${where}.kind`) as StructuredBlobKind,
+    sha256,
+    byteLength: assertPositiveInteger(value.byteLength, `${where}.byteLength`),
+  };
+}
+
 const MEMBER_KEYS: Record<string, ReadonlySet<string>> = {
   task_started: baseAnd(),
   task_stopped: baseAnd(),
@@ -391,6 +535,45 @@ const MEMBER_KEYS: Record<string, ReadonlySet<string>> = {
   human_answered: baseAnd('node', 'answer', 'decision'),
   final_submission_accepted: baseAnd('artifactId', 'version'),
   skill_loaded: baseAnd('skillId'),
+  structured_slot_attempt_started: baseAnd(
+    'inputNodeId',
+    'agentId',
+    'attemptEpoch',
+    'turnId',
+    'sessionKind',
+  ),
+  structured_slot_attempt_terminal: baseAnd('inputNodeId', 'attemptEpoch', 'turnId', 'status', 'reason'),
+  structured_scaffold_generation_committed: baseAnd(
+    'scaffoldId',
+    'generationId',
+    'supersedesGenerationId',
+    'rootSlotId',
+    'slotCount',
+    'maxDepth',
+    'structure',
+    'content',
+    'contentRevision',
+    'proposalId',
+  ),
+  structured_fill_draft_opened: baseAnd('draftId', 'turnId', 'scaffoldId', 'generationId', 'baseRevision'),
+  structured_fill_draft_terminal: baseAnd(
+    'draftId',
+    'turnId',
+    'status',
+    'baseRevision',
+    'resultRevision',
+    'changeCount',
+    'content',
+  ),
+  structured_scaffold_sealed: baseAnd(
+    'sealId',
+    'scaffoldId',
+    'generationId',
+    'scaffoldRevision',
+    'sealRecord',
+    'artifactId',
+    'artifactVersion',
+  ),
 };
 
 function validateStringArray(value: unknown, where: string): string[] {
@@ -574,6 +757,112 @@ export function validateTaskEvent(candidate: unknown): TaskEvent {
       };
     case 'skill_loaded':
       return { id, at, type, skillId: assertNonEmptyString(candidate.skillId, '事件 skillId') };
+    case 'structured_slot_attempt_started':
+      return {
+        id,
+        at,
+        type,
+        inputNodeId: assertNonEmptyString(candidate.inputNodeId, '事件 inputNodeId'),
+        agentId: assertNonEmptyString(candidate.agentId, '事件 agentId'),
+        attemptEpoch: assertPositiveInteger(candidate.attemptEpoch, '事件 attemptEpoch'),
+        turnId: assertNonEmptyString(candidate.turnId, '事件 turnId'),
+        sessionKind: assertOneOf(
+          candidate.sessionKind,
+          STRUCTURED_SESSION_KINDS,
+          '事件 sessionKind',
+        ) as StructuredSessionKind,
+      };
+    case 'structured_slot_attempt_terminal':
+      return {
+        id,
+        at,
+        type,
+        inputNodeId: assertNonEmptyString(candidate.inputNodeId, '事件 inputNodeId'),
+        attemptEpoch: assertPositiveInteger(candidate.attemptEpoch, '事件 attemptEpoch'),
+        turnId: assertNonEmptyString(candidate.turnId, '事件 turnId'),
+        status: assertOneOf(
+          candidate.status,
+          STRUCTURED_ATTEMPT_STATUSES,
+          '事件 status',
+        ) as StructuredAttemptStatus,
+        reason: assertOneOf(
+          candidate.reason,
+          STRUCTURED_ATTEMPT_REASONS,
+          '事件 reason',
+        ) as StructuredAttemptReason,
+      };
+    case 'structured_scaffold_generation_committed': {
+      if (candidate.contentRevision !== 0) {
+        throw invalidEvent('事件 contentRevision 必须是 0。');
+      }
+      return {
+        id,
+        at,
+        type,
+        scaffoldId: assertNonEmptyString(candidate.scaffoldId, '事件 scaffoldId'),
+        generationId: assertNonEmptyString(candidate.generationId, '事件 generationId'),
+        supersedesGenerationId: nullableString(
+          candidate.supersedesGenerationId,
+          '事件 supersedesGenerationId',
+        ),
+        rootSlotId: assertNonEmptyString(candidate.rootSlotId, '事件 rootSlotId'),
+        slotCount: assertPositiveInteger(candidate.slotCount, '事件 slotCount'),
+        maxDepth: assertNonNegativeInteger(candidate.maxDepth, '事件 maxDepth'),
+        structure: validateStructuredBlobRef(candidate.structure, '事件 structure'),
+        content: validateStructuredBlobRef(candidate.content, '事件 content'),
+        contentRevision: 0,
+        proposalId: assertNonEmptyString(candidate.proposalId, '事件 proposalId'),
+      };
+    }
+    case 'structured_fill_draft_opened':
+      return {
+        id,
+        at,
+        type,
+        draftId: assertNonEmptyString(candidate.draftId, '事件 draftId'),
+        turnId: assertNonEmptyString(candidate.turnId, '事件 turnId'),
+        scaffoldId: assertNonEmptyString(candidate.scaffoldId, '事件 scaffoldId'),
+        generationId: assertNonEmptyString(candidate.generationId, '事件 generationId'),
+        baseRevision: assertNonNegativeInteger(candidate.baseRevision, '事件 baseRevision'),
+      };
+    case 'structured_fill_draft_terminal': {
+      const content =
+        candidate.content === null || candidate.content === undefined
+          ? null
+          : validateStructuredBlobRef(candidate.content, '事件 content');
+      return {
+        id,
+        at,
+        type,
+        draftId: assertNonEmptyString(candidate.draftId, '事件 draftId'),
+        turnId: assertNonEmptyString(candidate.turnId, '事件 turnId'),
+        status: assertOneOf(
+          candidate.status,
+          STRUCTURED_DRAFT_TERMINAL_STATUSES,
+          '事件 status',
+        ) as StructuredDraftTerminalStatus,
+        baseRevision: assertNonNegativeInteger(candidate.baseRevision, '事件 baseRevision'),
+        resultRevision: assertNonNegativeInteger(candidate.resultRevision, '事件 resultRevision'),
+        changeCount: assertNonNegativeInteger(candidate.changeCount, '事件 changeCount'),
+        content,
+      };
+    }
+    case 'structured_scaffold_sealed':
+      return {
+        id,
+        at,
+        type,
+        sealId: assertNonEmptyString(candidate.sealId, '事件 sealId'),
+        scaffoldId: assertNonEmptyString(candidate.scaffoldId, '事件 scaffoldId'),
+        generationId: assertNonEmptyString(candidate.generationId, '事件 generationId'),
+        scaffoldRevision: assertNonNegativeInteger(
+          candidate.scaffoldRevision,
+          '事件 scaffoldRevision',
+        ),
+        sealRecord: validateStructuredBlobRef(candidate.sealRecord, '事件 sealRecord'),
+        artifactId: assertNonEmptyString(candidate.artifactId, '事件 artifactId'),
+        artifactVersion: assertPositiveInteger(candidate.artifactVersion, '事件 artifactVersion'),
+      };
     default:
       throw invalidEvent(`未知事件类型 ${type}。`);
   }

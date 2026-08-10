@@ -25,7 +25,7 @@ import {
   makeTempCorePaths,
 } from '../test-support';
 import type { CorePaths } from './core-paths';
-import { formatEventFileName } from './core-paths';
+import { formatBatchFileName, formatEventFileName } from './core-paths';
 import { EventStore } from './event-store';
 import type { TaskEvent } from './task-events';
 
@@ -269,5 +269,277 @@ describe('EventStore', () => {
     const { paths } = makeTempCorePaths();
     const store = new EventStore(paths);
     expect(await store.read('no-such-task')).toEqual([]);
+  });
+});
+
+describe('EventStore.appendBatch', () => {
+  it('commits a batch as one atomic envelope file with contiguous sequences', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    const legacy = await store.append(taskId, started());
+    const events = [input(), result(), started()];
+
+    const committed = await store.appendBatch(taskId, 'commit-a', events, {
+      expectedLastSequence: 1,
+    });
+
+    expect(committed.map((entry) => entry.sequence)).toEqual([2, 3, 4]);
+    expect(committed.map((entry) => entry.fileName)).toEqual([
+      committed[0].fileName,
+      committed[0].fileName,
+      committed[0].fileName,
+    ]);
+    expect(committed[0].fileName).toBe(formatBatchFileName(2, 4, 'commit-a'));
+    expect(committed[0].size).toBeGreaterThan(0);
+    // Exactly one batch envelope file exists alongside the legacy file.
+    const names = (await readdir(paths.taskEventsRoot(taskId))).filter(
+      (name) => !name.startsWith('.tmp-'),
+    );
+    expect(names.sort()).toEqual([legacy.fileName, formatBatchFileName(2, 4, 'commit-a')].sort());
+    // The batch reads back flattened, no envelope visible to the projector.
+    const all = await store.read(taskId);
+    expect(all.map((entry) => entry.sequence)).toEqual([1, 2, 3, 4]);
+    expect(all.map((entry) => entry.event)).toEqual([legacy.event, ...events]);
+  });
+
+  it('rejects a batch with zero events before writing anything', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    await expect(
+      store.appendBatch(taskId, 'commit-a', [], { expectedLastSequence: 0 }),
+    ).rejects.toMatchObject({ code: 'EVENT_INVALID' });
+    await expect(readdir(paths.taskEventsRoot(taskId))).rejects.toThrow();
+  });
+
+  it('rejects an unsafe commitId before writing anything', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    await expect(
+      store.appendBatch(taskId, '../escape', [started()], { expectedLastSequence: 0 }),
+    ).rejects.toMatchObject({ code: 'EVENT_INVALID' });
+    await expect(readdir(paths.taskEventsRoot(taskId))).rejects.toThrow();
+  });
+
+  it('replays an identical commitId with identical payload as the original result', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    const events = [started(), input()];
+
+    const firstResult = await store.appendBatch(taskId, 'commit-a', events, {
+      expectedLastSequence: 0,
+    });
+    expect(firstResult).toHaveLength(events.length);
+
+    const replay = await store.appendBatch(taskId, 'commit-a', events, {
+      expectedLastSequence: 0,
+    });
+    expect(replay).toEqual(firstResult);
+    // Idempotent replay never duplicates the envelope on disk.
+    expect((await committedFileNames(paths, taskId)).length).toBe(1);
+  });
+
+  it('rejects a different payload under the same commitId as IDEMPOTENCY_CONFLICT', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    const events = [started(), input()];
+    const changed = [started(), result()];
+
+    await store.appendBatch(taskId, 'commit-a', events, { expectedLastSequence: 0 });
+    await expect(
+      store.appendBatch(taskId, 'commit-a', changed, { expectedLastSequence: 0 }),
+    ).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+    // The conflicting attempt wrote nothing new.
+    expect((await committedFileNames(paths, taskId)).length).toBe(1);
+    const all = await store.read(taskId);
+    expect(all.map((entry) => entry.event)).toEqual(events);
+  });
+
+  it('rejects an expectedLastSequence mismatch as a CAS conflict', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    await store.append(taskId, started());
+
+    await expect(
+      store.appendBatch(taskId, 'commit-a', [input()], { expectedLastSequence: 0 }),
+    ).rejects.toMatchObject({ code: 'EXPECTED_SEQUENCE_MISMATCH' });
+    // Nothing was written by the failed CAS.
+    expect((await committedFileNames(paths, taskId)).length).toBe(1);
+  });
+
+  it('rejects a batch event id that already exists in the history', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    const existing = await store.append(taskId, started());
+
+    await expect(
+      store.appendBatch(taskId, 'commit-a', [existing.event], { expectedLastSequence: 1 }),
+    ).rejects.toMatchObject({ code: 'EVENT_ID_CONFLICT' });
+    expect((await committedFileNames(paths, taskId)).length).toBe(1);
+  });
+
+  it('rejects an invalid member before any file is written (all-or-nothing)', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    const invalid = [
+      {
+        id: randomUUID(),
+        at: new Date().toISOString(),
+        type: 'structured_slot_attempt_started',
+        inputNodeId: 'input-1',
+        agentId: 'agent-1',
+        attemptEpoch: 0,
+        turnId: 'turn-1',
+        sessionKind: 'structure',
+      },
+      {
+        id: randomUUID(),
+        at: new Date().toISOString(),
+        type: 'structured_slot_attempt_terminal',
+        inputNodeId: 'input-1',
+        attemptEpoch: 1,
+        turnId: 'turn-1',
+        status: 'teleported',
+        reason: 'completion_dispatch',
+      },
+      {
+        id: randomUUID(),
+        at: new Date().toISOString(),
+        type: 'structured_scaffold_generation_committed',
+        scaffoldId: 's',
+        generationId: 'g',
+        supersedesGenerationId: null,
+        rootSlotId: 'r',
+        slotCount: 1,
+        maxDepth: 1,
+        structure: { version: 1, kind: 'generation', sha256: 'a'.repeat(64), byteLength: 1 },
+        content: { version: 1, kind: 'content_revision', sha256: 'b'.repeat(64), byteLength: 2 },
+        contentRevision: 0,
+        proposalId: 'p',
+        bogus: 1,
+      },
+    ];
+    for (const candidate of invalid) {
+      await expect(
+        store.appendBatch(taskId, 'commit-a', [candidate as TaskEvent], {
+          expectedLastSequence: 0,
+        }),
+      ).rejects.toMatchObject({ code: 'EVENT_INVALID' });
+    }
+    await expect(readdir(paths.taskEventsRoot(taskId))).rejects.toThrow();
+  });
+});
+
+describe('EventStore.readBatchByCommitId and crash windows', () => {
+  it('returns the fully validated flattened batch for a known commitId', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    const events = [started(), input()];
+    const committed = await store.appendBatch(taskId, 'commit-a', events, {
+      expectedLastSequence: 0,
+    });
+
+    const read = await store.readBatchByCommitId(taskId, 'commit-a');
+    expect(read).toEqual(committed);
+  });
+
+  it('returns null for an unknown commitId', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    await store.append(taskId, started());
+    await store.appendBatch(taskId, 'commit-a', [input()], { expectedLastSequence: 1 });
+
+    expect(await store.readBatchByCommitId(taskId, 'no-such-commit')).toBeNull();
+  });
+
+  it('rejects a corrupt batch envelope as TASK_CORRUPTED', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    const eventsRoot = paths.taskEventsRoot(taskId);
+    await mkdir(eventsRoot, { recursive: true });
+    const commitId = 'commit-a';
+    const envelope = {
+      version: 1,
+      commitId,
+      taskId,
+      firstSequence: 1,
+      eventCount: 1,
+      events: [started()],
+      canonicalPayloadSha256: '0'.repeat(64), // tampered digest
+    };
+    await writeFile(
+      `${eventsRoot}/${formatBatchFileName(1, 1, commitId)}`,
+      JSON.stringify(envelope),
+      'utf8',
+    );
+
+    await expect(store.readBatchByCommitId(taskId, commitId)).rejects.toMatchObject({
+      code: 'TASK_CORRUPTED',
+    });
+    await expect(store.read(taskId)).rejects.toMatchObject({ code: 'TASK_CORRUPTED' });
+  });
+
+  it('never treats a legacy single-event file as a named batch', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    const event = await store.append(taskId, started());
+
+    expect(await store.readBatchByCommitId(taskId, 'anything')).toBeNull();
+    expect(await store.readBatchByCommitId(taskId, event.event.id)).toBeNull();
+  });
+
+  it('survives a crash before the atomic rename by ignoring temp residue', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    const eventsRoot = paths.taskEventsRoot(taskId);
+    await mkdir(eventsRoot, { recursive: true });
+    // writeNewAtomic stages a same-directory `.tmp-*` file before renaming; a
+    // crash before the rename leaves only that residue, which must not be
+    // readable and must not advance the logical tail.
+    await writeFile(
+      `${eventsRoot}/.tmp-${formatBatchFileName(1, 2, 'commit-a')}-${randomUUID()}`,
+      'partial envelope',
+      'utf8',
+    );
+    expect(await store.read(taskId)).toEqual([]);
+
+    const result = await store.appendBatch(taskId, 'commit-a', [started(), input()], {
+      expectedLastSequence: 0,
+    });
+    expect(result.map((entry) => entry.sequence)).toEqual([1, 2]);
+    const all = await store.read(taskId);
+    expect(all.map((entry) => entry.sequence)).toEqual([1, 2]);
+  });
+
+  it('reads every member of a batch after the envelope rename', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    const events = [started(), input(), result()];
+
+    const committed = await store.appendBatch(taskId, 'commit-a', events, {
+      expectedLastSequence: 0,
+    });
+
+    const all = await store.read(taskId);
+    expect(all.map((entry) => entry.sequence)).toEqual([1, 2, 3]);
+    expect(all.map((entry) => entry.event)).toEqual(events);
+    expect(all.map((entry) => entry.fileName)).toEqual([
+      committed[0].fileName,
+      committed[0].fileName,
+      committed[0].fileName,
+    ]);
   });
 });

@@ -373,6 +373,302 @@ describe('validateTaskEvent — v7 incompatible + human source', () => {
   });
 });
 
+describe('validateTaskEvent — structured slot events', () => {
+  function blobRef(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      version: 1,
+      kind: 'generation',
+      sha256: HASH64,
+      byteLength: 1024,
+      ...overrides,
+    };
+  }
+
+  const STRUCTURED_MEMBERS = [
+    {
+      name: 'structured_slot_attempt_started',
+      valid: {
+        inputNodeId: 'input-1',
+        agentId: 'agent-1',
+        attemptEpoch: 1,
+        turnId: 'turn-1',
+        sessionKind: 'structure',
+      },
+      missing: 'attemptEpoch',
+    },
+    {
+      name: 'structured_slot_attempt_terminal',
+      valid: {
+        inputNodeId: 'input-1',
+        attemptEpoch: 1,
+        turnId: 'turn-1',
+        status: 'committed',
+        reason: 'completion_dispatch',
+      },
+      missing: 'status',
+    },
+    {
+      name: 'structured_scaffold_generation_committed',
+      valid: {
+        scaffoldId: 'scaffold-1',
+        generationId: 'generation-1',
+        supersedesGenerationId: null,
+        rootSlotId: 'slot-1',
+        slotCount: 4,
+        maxDepth: 3,
+        structure: blobRef({ kind: 'generation' }),
+        content: blobRef({ kind: 'content_revision' }),
+        contentRevision: 0,
+        proposalId: 'proposal-1',
+      },
+      missing: 'generationId',
+    },
+    {
+      name: 'structured_fill_draft_opened',
+      valid: {
+        draftId: 'draft-1',
+        turnId: 'turn-1',
+        scaffoldId: 'scaffold-1',
+        generationId: 'generation-1',
+        baseRevision: 2,
+      },
+      missing: 'baseRevision',
+    },
+    {
+      name: 'structured_fill_draft_terminal',
+      valid: {
+        draftId: 'draft-1',
+        turnId: 'turn-1',
+        status: 'merged',
+        baseRevision: 2,
+        resultRevision: 3,
+        changeCount: 4,
+        content: blobRef({ kind: 'content_revision' }),
+      },
+      missing: 'resultRevision',
+    },
+    {
+      name: 'structured_scaffold_sealed',
+      valid: {
+        sealId: 'seal-1',
+        scaffoldId: 'scaffold-1',
+        generationId: 'generation-1',
+        scaffoldRevision: 1,
+        sealRecord: blobRef({ kind: 'seal_record' }),
+        artifactId: 'artifact-1',
+        artifactVersion: 2,
+      },
+      missing: 'sealRecord',
+    },
+  ] as const;
+
+  for (const member of STRUCTURED_MEMBERS) {
+    it(`accepts a well-formed ${member.name}`, () => {
+      const { id, at } = base();
+      const event = validateTaskEvent({ id, at, type: member.name, ...member.valid });
+      expect(event).toMatchObject({ id, at, type: member.name, ...member.valid });
+    });
+
+    it(`rejects ${member.name} missing required field ${member.missing}`, () => {
+      const { id, at } = base();
+      const rest: Record<string, unknown> = { ...member.valid };
+      delete rest[member.missing];
+      expectInvalid(() => validateTaskEvent({ id, at, type: member.name, ...rest }));
+    });
+
+    it(`rejects ${member.name} with an unknown extra field`, () => {
+      const { id, at } = base();
+      expectInvalid(() =>
+        validateTaskEvent({ id, at, type: member.name, ...member.valid, bogusField: 1 }),
+      );
+    });
+  }
+
+  it('rejects an unknown sessionKind', () => {
+    const { id, at } = base();
+    expectInvalid(() =>
+      validateTaskEvent({
+        id,
+        at,
+        type: 'structured_slot_attempt_started',
+        inputNodeId: 'input-1',
+        agentId: 'agent-1',
+        attemptEpoch: 1,
+        turnId: 'turn-1',
+        sessionKind: 'banana',
+      }),
+    );
+  });
+
+  it('rejects a zero attemptEpoch', () => {
+    const { id, at } = base();
+    expectInvalid(() =>
+      validateTaskEvent({
+        id,
+        at,
+        type: 'structured_slot_attempt_started',
+        inputNodeId: 'input-1',
+        agentId: 'agent-1',
+        attemptEpoch: 0,
+        turnId: 'turn-1',
+        sessionKind: 'structure',
+      }),
+    );
+  });
+
+  it('rejects an unknown structured attempt status', () => {
+    const { id, at } = base();
+    expectInvalid(() =>
+      validateTaskEvent({
+        id,
+        at,
+        type: 'structured_slot_attempt_terminal',
+        inputNodeId: 'input-1',
+        attemptEpoch: 1,
+        turnId: 'turn-1',
+        status: 'teleported',
+        reason: 'completion_dispatch',
+      }),
+    );
+  });
+
+  it('rejects an unknown structured attempt reason', () => {
+    const { id, at } = base();
+    expectInvalid(() =>
+      validateTaskEvent({
+        id,
+        at,
+        type: 'structured_slot_attempt_terminal',
+        inputNodeId: 'input-1',
+        attemptEpoch: 1,
+        turnId: 'turn-1',
+        status: 'failed',
+        reason: 'banana',
+      }),
+    );
+  });
+
+  it('rejects a non-zero contentRevision on a generation commit', () => {
+    const { id, at } = base();
+    expectInvalid(() =>
+      validateTaskEvent({
+        id,
+        at,
+        type: 'structured_scaffold_generation_committed',
+        scaffoldId: 'scaffold-1',
+        generationId: 'generation-1',
+        supersedesGenerationId: null,
+        rootSlotId: 'slot-1',
+        slotCount: 4,
+        maxDepth: 3,
+        structure: blobRef(),
+        content: blobRef({ kind: 'content_revision' }),
+        contentRevision: 1,
+        proposalId: 'proposal-1',
+      }),
+    );
+  });
+
+  it('rejects a malformed blob ref sha256', () => {
+    const { id, at } = base();
+    expectInvalid(() =>
+      validateTaskEvent({
+        id,
+        at,
+        type: 'structured_scaffold_generation_committed',
+        scaffoldId: 'scaffold-1',
+        generationId: 'generation-1',
+        supersedesGenerationId: null,
+        rootSlotId: 'slot-1',
+        slotCount: 4,
+        maxDepth: 3,
+        structure: blobRef({ sha256: 'zz' }),
+        content: blobRef({ kind: 'content_revision' }),
+        contentRevision: 0,
+        proposalId: 'proposal-1',
+      }),
+    );
+  });
+
+  it('rejects a non-positive blob byteLength', () => {
+    const { id, at } = base();
+    expectInvalid(() =>
+      validateTaskEvent({
+        id,
+        at,
+        type: 'structured_scaffold_generation_committed',
+        scaffoldId: 'scaffold-1',
+        generationId: 'generation-1',
+        supersedesGenerationId: null,
+        rootSlotId: 'slot-1',
+        slotCount: 4,
+        maxDepth: 3,
+        structure: blobRef({ byteLength: 0 }),
+        content: blobRef({ kind: 'content_revision' }),
+        contentRevision: 0,
+        proposalId: 'proposal-1',
+      }),
+    );
+  });
+
+  it('rejects an unknown blob ref kind', () => {
+    const { id, at } = base();
+    expectInvalid(() =>
+      validateTaskEvent({
+        id,
+        at,
+        type: 'structured_scaffold_generation_committed',
+        scaffoldId: 'scaffold-1',
+        generationId: 'generation-1',
+        supersedesGenerationId: null,
+        rootSlotId: 'slot-1',
+        slotCount: 4,
+        maxDepth: 3,
+        structure: blobRef({ kind: 'banana' }),
+        content: blobRef({ kind: 'content_revision' }),
+        contentRevision: 0,
+        proposalId: 'proposal-1',
+      }),
+    );
+  });
+
+  it('accepts a null content on a draft terminal', () => {
+    const { id, at } = base();
+    const event = validateTaskEvent({
+      id,
+      at,
+      type: 'structured_fill_draft_terminal',
+      draftId: 'draft-1',
+      turnId: 'turn-1',
+      status: 'abandoned',
+      baseRevision: 2,
+      resultRevision: 0,
+      changeCount: 0,
+      content: null,
+    });
+    if (event.type !== 'structured_fill_draft_terminal') throw new Error('unreachable');
+    expect(event.content).toBeNull();
+  });
+
+  it('rejects an unknown draft terminal status', () => {
+    const { id, at } = base();
+    expectInvalid(() =>
+      validateTaskEvent({
+        id,
+        at,
+        type: 'structured_fill_draft_terminal',
+        draftId: 'draft-1',
+        turnId: 'turn-1',
+        status: 'merged-into-main',
+        baseRevision: 2,
+        resultRevision: 3,
+        changeCount: 4,
+        content: blobRef({ kind: 'content_revision' }),
+      }),
+    );
+  });
+});
+
 describe('normalizeLegacyEvent', () => {
   it('renames artifactVersion to inputVersion on a v1 input node', () => {
     const legacy = {

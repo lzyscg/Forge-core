@@ -1,7 +1,14 @@
 // @vitest-environment node
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { CorePaths, formatEventFileName, isSafeSegment, parseEventFileName } from './core-paths';
+import {
+  CorePaths,
+  formatBatchFileName,
+  formatEventFileName,
+  isSafeSegment,
+  parseBatchFileName,
+  parseEventFileName,
+} from './core-paths';
 
 const ROOTS = { dataRoot: 'D:/core-data', templateRoot: 'D:/templates' };
 
@@ -44,6 +51,45 @@ describe('CorePaths', () => {
     expect(parseEventFileName('1-evt.json')).toBeNull();
     expect(parseEventFileName('.tmp-000001-evt-1.json')).toBeNull();
     expect(parseEventFileName('000001-evt-1.json.tmp')).toBeNull();
+  });
+
+  it('formats and parses batch envelope file names', () => {
+    expect(formatBatchFileName(4, 6, 'commit-a')).toBe('000004-000006-commit-a.batch.json');
+    expect(parseBatchFileName('000004-000006-commit-a.batch.json')).toEqual({
+      firstSequence: 4,
+      lastSequence: 6,
+      commitId: 'commit-a',
+    });
+    expect(parseBatchFileName('1-6-commit-a.batch.json')).toBeNull();
+    expect(parseBatchFileName('000004-000006-commit-a.json')).toBeNull();
+    expect(parseBatchFileName('.tmp-000004-000006-commit-a.batch.json')).toBeNull();
+  });
+
+  it('never parses a batch file as a legacy event and vice versa', () => {
+    // A batch name ends `.batch.json`, so it must never match the legacy regex.
+    expect(parseEventFileName('000004-000006-commit-a.batch.json')).toBeNull();
+    expect(parseBatchFileName('000004-evt-1.json')).toBeNull();
+  });
+
+  it('routes batch and legacy event files through separate validators', () => {
+    const paths = CorePaths.create(ROOTS);
+    expect(paths.taskEventFile('task-1', '000001-evt-1.json')).toBe(
+      resolve('D:/core-data/tasks/task-1/events/000001-evt-1.json'),
+    );
+    expect(paths.taskBatchEventFile('task-1', '000001-000003-commit-a.batch.json')).toBe(
+      resolve('D:/core-data/tasks/task-1/events/000001-000003-commit-a.batch.json'),
+    );
+    // A batch file must never slip through the legacy validator (its name also
+    // satisfies the legacy six-digit pattern) and vice versa.
+    expect(() => paths.taskEventFile('task-1', '000001-000003-commit-a.batch.json')).toThrow(
+      /CORE_PATH_INVALID/,
+    );
+    expect(() => paths.taskBatchEventFile('task-1', '000001-evt-1.json')).toThrow(
+      /CORE_PATH_INVALID/,
+    );
+    expect(() => paths.taskBatchEventFile('task-1', '000001-000003-../x.batch.json')).toThrow(
+      /CORE_PATH_INVALID/,
+    );
   });
 
   it('rejects identifiers that could escape their root', () => {
