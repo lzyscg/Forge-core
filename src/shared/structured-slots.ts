@@ -11,6 +11,10 @@
  * - StructuredBlobRefV1     spec §7.2
  * - SealRecord              design §17.2
  * - StructuredSlotsSummaryV1 spec §14
+ * - SlotCapabilityV1        spec §3.2 / design §10.2
+ * - SlotSessionGrantV1      design §10.3 / spec §8.2
+ * - ProjectionSubjectV1     spec §14
+ * - StructuredSlotTreeCursorV1 spec §14 / design §25.13
  *
  * Where the plan and spec conflict, the plan's Global Constraints and the
  * upstream design §25-26 win; these types reproduce the spec/design verbatim.
@@ -259,4 +263,94 @@ export interface StructuredSlotsSummaryV1 {
   visibleSlotCount: number;
   filledSlotCount: number;
   issueSummary: { errors: number; warnings: number };
+}
+
+/**
+ * Closed ten-value slot capability enum v1 (spec §3.2 / design §10.2 D01).
+ * The runtime never accepts template-custom capability names. Reproduced here
+ * (shared, type-only) so Grants carry a stable, versioned capability type.
+ */
+export type SlotCapabilityV1 =
+  | 'read_structure_contract'
+  | 'write_structure_proposal'
+  | 'validate_structure_proposal'
+  | 'submit_structure_proposal'
+  | 'read_slot_spec'
+  | 'read_slot_content'
+  | 'write_draft_content'
+  | 'validate_draft'
+  | 'submit_draft'
+  | 'request_seal';
+
+/** Base of every slot session grant (design §10.3). */
+export interface SlotSessionGrantBaseV1 {
+  grantId: string;
+  kind: 'structure' | 'fill' | 'seal';
+  /** Production case identity; in Forge Core this is the Task id (design §2.5). */
+  caseId: string;
+  turnId: string;
+  agentId: string;
+  snapshotHash: string;
+  capabilities: SlotCapabilityV1[];
+}
+
+/** Structure grant binds only the frozen snapshot + its private Proposal. */
+export interface StructureSessionGrantV1 extends SlotSessionGrantBaseV1 {
+  kind: 'structure';
+  proposalId: string;
+}
+
+/** Fill grant binds the active scaffold/revision + resolved slot scope + Draft. */
+export interface FillSessionGrantV1 extends SlotSessionGrantBaseV1 {
+  kind: 'fill';
+  accessProfileId: string;
+  scaffoldId: string;
+  baseRevision: number;
+  readableSlotIds: string[];
+  writableSlotIds: string[];
+  draftId: string;
+}
+
+/** Seal grant binds the scaffold/revision; writes are always empty. */
+export interface SealSessionGrantV1 extends SlotSessionGrantBaseV1 {
+  kind: 'seal';
+  accessProfileId: string;
+  scaffoldId: string;
+  baseRevision: number;
+  readableSlotIds: string[];
+  writableSlotIds: [];
+  draftId: null;
+}
+
+/** Discriminated slot session grant (design §10.3 / spec §8.2). */
+export type SlotSessionGrantV1 =
+  | StructureSessionGrantV1
+  | FillSessionGrantV1
+  | SealSessionGrantV1;
+
+/**
+ * Authorized projection subject (spec §14). The Agent branch carries its own
+ * Grant; the local single-user UI/API branch is the built-in `task_owner` full
+ * read-only audit view. `task_owner` is not a template AccessProfile and is
+ * never inferred by unioning Agent profiles.
+ */
+export type ProjectionSubjectV1 =
+  | { kind: 'agent'; grant: SlotSessionGrantV1 }
+  | { kind: 'task_owner' };
+
+/**
+ * Signed, bound pagination cursor for the slot tree outline (spec §14 /
+ * design §25.13). The payload binds the scaffold generation, content revision,
+ * the authorized projection identity and the last emitted document-order key.
+ * `signature` is an HMAC over the canonical payload using a task-local,
+ * in-memory secret that is never written to a snapshot or event.
+ */
+export interface StructuredSlotTreeCursorV1 {
+  version: 1;
+  generationId: string;
+  revision: number;
+  projectionHash: string;
+  lastDocumentKey: string | null;
+  orderingVersion: number;
+  signature: string;
 }
