@@ -80,6 +80,28 @@ export interface DraftContext {
   baseRevision: number;
 }
 
+/**
+ * Turn-bound merge commit candidate (design §14.3 / spec §9.2). Formed by the
+ * Merge Gate and stored in PRIVATE state only — it is never written to a
+ * TaskEvent (Task 15's committer creates the terminal + promotes the content
+ * root). A no-op merge (changeCount 0) carries `contentRevisionDigest: null`
+ * and keeps `resultRevision === baseRevision`; a nonempty merge stages the new
+ * content-root blob (`contentRevisionDigest` = its digest) WITHOUT promoting
+ * authority. The candidate is private state, never a second fact source.
+ */
+export interface MergeCommitCandidate {
+  taskId: string;
+  turnId: string;
+  draftId: string;
+  scaffoldId: string;
+  baseRevision: number;
+  resultRevision: number;
+  changeCount: number;
+  normalizedChanges: Array<{ slotId: string; presence: 'set' | 'unset'; content: JsonValue | null }>;
+  /** Staged content-root digest for a nonempty merge; null for a no-op. */
+  contentRevisionDigest: string | null;
+}
+
 /** One journaled tool signature/result (Task 7 Step 5; meter logic in Task 11). */
 export interface ToolRecord {
   toolCallId: string;
@@ -114,6 +136,8 @@ export interface DraftView {
   locked: boolean;
   opCount: number;
   overlay: Map<string, DraftOverlayEntry>;
+  /** Turn-bound merge candidate frozen by a successful Merge Gate (private). */
+  candidate: MergeCommitCandidate | null;
   toolRecords: ToolRecord[];
 }
 
@@ -138,7 +162,7 @@ interface JournalOp {
   at: string;
   turnId?: string;
   tree?: ProposalNode | null;
-  candidate?: StructureCommitCandidate | null;
+  candidate?: StructureCommitCandidate | MergeCommitCandidate | null;
   slotId?: string;
   value?: JsonValue;
   toolCallId?: string;
@@ -170,6 +194,7 @@ interface DraftPrivateState {
   generationId: string;
   baseRevision: number;
   overlay: Map<string, DraftOverlayEntry>;
+  candidate: MergeCommitCandidate | null;
   toolRecords: ToolRecord[];
 }
 
@@ -182,7 +207,7 @@ interface PrivateCheckpointV1 {
   locked: boolean;
   turnId: string;
   tree?: ProposalNode | null;
-  candidate?: StructureCommitCandidate | null;
+  candidate?: StructureCommitCandidate | MergeCommitCandidate | null;
   overlay?: Record<string, DraftOverlayEntry>;
   scaffoldId?: string;
   generationId?: string;
@@ -311,6 +336,7 @@ function emptyState(kind: ObjectKind, id: string): PrivateState {
     generationId: '',
     baseRevision: 0,
     overlay: new Map(),
+    candidate: null,
     toolRecords: [],
   };
 }
@@ -326,7 +352,7 @@ function applyOp(state: PrivateState, op: JournalOp): void {
           state.tree = op.tree ?? null;
           break;
         case 'candidate':
-          state.candidate = op.candidate ?? null;
+          state.candidate = (op.candidate as StructureCommitCandidate | null) ?? null;
           break;
         case 'lock':
           state.locked = true;
@@ -355,6 +381,9 @@ function applyOp(state: PrivateState, op: JournalOp): void {
           break;
         case 'unset_content':
           state.overlay.set(op.slotId as string, { presence: 'unset', content: null });
+          break;
+        case 'candidate':
+          state.candidate = (op.candidate as MergeCommitCandidate | null) ?? null;
           break;
         case 'lock':
           state.locked = true;
@@ -396,6 +425,7 @@ function toCheckpoint(state: PrivateState): PrivateCheckpointV1 {
     generationId: state.generationId,
     baseRevision: state.baseRevision,
     overlay: Object.fromEntries([...state.overlay.entries()]),
+    candidate: state.candidate,
     toolRecords: state.toolRecords,
   };
 }
@@ -409,7 +439,7 @@ function stateFromCheckpoint(cp: PrivateCheckpointV1, id: string): PrivateState 
       locked: cp.locked,
       turnId: cp.turnId,
       tree: cp.tree ?? null,
-      candidate: cp.candidate ?? null,
+      candidate: (cp.candidate as StructureCommitCandidate | null) ?? null,
       toolRecords: cp.toolRecords,
     };
   }
@@ -423,6 +453,7 @@ function stateFromCheckpoint(cp: PrivateCheckpointV1, id: string): PrivateState 
     generationId: cp.generationId ?? '',
     baseRevision: cp.baseRevision ?? 0,
     overlay: new Map(Object.entries(cp.overlay ?? {})),
+    candidate: cp.candidate !== undefined ? (cp.candidate as MergeCommitCandidate | null) : null,
     toolRecords: cp.toolRecords,
   };
 }
@@ -559,6 +590,21 @@ export class StructuredSlotPrivateStore {
     await this.append('draft', draftId, { op: 'lock', at: now() });
   }
 
+  /**
+   * Freezes the turn-bound merge candidate into the private journal
+   * (design §14.3 / spec §9.2). The candidate is PRIVATE state — never a
+   * TaskEvent; Task 15's committer promotes the staged content root and writes
+   * the terminal. Written before the lock so the lock op can still follow.
+   * Rejected once locked.
+   */
+  async storeDraftCandidate(draftId: string, candidate: MergeCommitCandidate): Promise<void> {
+    assertNonEmptyString(draftId, 'draftId');
+    if (!isPlainObject(candidate)) {
+      throw invalidInput('Draft candidate 必须是对象。');
+    }
+    await this.append('draft', draftId, { op: 'candidate', at: now(), candidate });
+  }
+
   /** Journals a tool signature/result against an open Draft. */
   async recordDraftTool(
     draftId: string,
@@ -592,6 +638,7 @@ export class StructuredSlotPrivateStore {
       locked: draft.locked,
       opCount: draft.opCount,
       overlay: draft.overlay,
+      candidate: draft.candidate,
       toolRecords: draft.toolRecords,
     };
   }

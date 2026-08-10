@@ -21,10 +21,19 @@ import { mkdirSync } from 'node:fs';
 import { afterEach, describe, expect, it } from 'vitest';
 import { disposeAllTestRoots, makeTaskEvent, makeTempCorePaths } from '../../test-support';
 import type { FrozenStructuredSlotContractV1, FrozenSlotTypeV1 } from '../../template/structured-slot-contract';
-import type { StructureSessionGrantV1, StructuredSlotLimitsV1, JsonObject } from '../../../shared/structured-slots';
+import type {
+  FillSessionGrantV1,
+  StructureSessionGrantV1,
+  StructuredSlotLimitsV1,
+  JsonObject,
+} from '../../../shared/structured-slots';
 import { compileLayoutGrammarV1 } from '../../structured-slots/layout-grammar';
 import { compileSlotSchemaV1 } from '../../structured-slots/slot-schema';
-import { StructuredSlotPrivateStore, type ProposalNode } from '../../storage/structured-slot-private-store';
+import {
+  StructuredSlotPrivateStore,
+  type MergeCommitCandidate,
+  type ProposalNode,
+} from '../../storage/structured-slot-private-store';
 import { StructuredSlotBlobStore } from '../../storage/structured-slot-blob-store';
 import type { TaskEvent } from '../../storage/task-events';
 import type { ForgeAction } from '../forge-actions';
@@ -34,6 +43,7 @@ import {
   StructuredSlotSessionService,
   assertStructuredForgeAction,
   createStructuredSlotDataSource,
+  type FillSessionState,
   type StructureSessionState,
 } from './session-service';
 
@@ -500,5 +510,195 @@ describe('StructuredSlotDataSource seam (Task 10) adapted to the Task 7 store', 
     expect(slot?.content).toBe('Hello');
     expect(await source.getContentPresence('gen-1', 0)).toEqual({ r: 'unset', t1: 'set' });
     expect(await source.getContentPresence('gen-1', 1)).toEqual({});
+  });
+});
+
+describe('fill session state + dispatch guard (Task 13, design §11.3/§12.2)', () => {
+  const FILL_TURN = 'fill-turn-1';
+  const FILL_DRAFT = 'fill-draft-1';
+  const FILL_SC = 'scaffold-1';
+  const FILL_GEN = 'gen-1';
+
+  const fillGrant: FillSessionGrantV1 = {
+    grantId: 'grant-fill',
+    kind: 'fill',
+    caseId: TASK,
+    turnId: FILL_TURN,
+    agentId: AGENT,
+    snapshotHash: SNAPSHOT,
+    capabilities: ['read_slot_spec', 'read_slot_content', 'write_draft_content', 'submit_draft'],
+    accessProfileId: 'fill-profile',
+    scaffoldId: FILL_SC,
+    baseRevision: 0,
+    readableSlotIds: ['t1', 'b1'],
+    writableSlotIds: ['t1', 'b1'],
+    draftId: FILL_DRAFT,
+  };
+
+  const fillCandidate: MergeCommitCandidate = {
+    taskId: TASK,
+    turnId: FILL_TURN,
+    draftId: FILL_DRAFT,
+    scaffoldId: FILL_SC,
+    baseRevision: 0,
+    resultRevision: 1,
+    changeCount: 1,
+    normalizedChanges: [{ slotId: 'b1', presence: 'set', content: 'x' }],
+    contentRevisionDigest: null,
+  };
+
+  async function fillSetup(): Promise<{ sessions: StructuredSlotSessionService; store: StructuredSlotPrivateStore; events: TaskEvent[] }> {
+    const { paths } = makeTempCorePaths('forge-core-session-fill-');
+    mkdirSync(paths.taskRoot(TASK), { recursive: true });
+    const store = new StructuredSlotPrivateStore(paths, TASK);
+    const events: TaskEvent[] = [
+      makeTaskEvent({
+        type: 'structured_slot_attempt_started',
+        inputNodeId: 'in-1',
+        agentId: AGENT,
+        attemptEpoch: 1,
+        turnId: FILL_TURN,
+        sessionKind: 'fill',
+      }),
+      makeTaskEvent({
+        type: 'structured_fill_draft_opened',
+        draftId: FILL_DRAFT,
+        turnId: FILL_TURN,
+        scaffoldId: FILL_SC,
+        generationId: FILL_GEN,
+        baseRevision: 0,
+      }),
+    ];
+    await store.materializeDraft(FILL_TURN, FILL_DRAFT, { scaffoldId: FILL_SC, generationId: FILL_GEN, baseRevision: 0 });
+    const sessions = new StructuredSlotSessionService({ taskId: TASK, snapshotHash: SNAPSHOT, store, events: async () => events });
+    return { sessions, store, events };
+  }
+
+  it('openFillSession builds an open state and a stored candidate is surfaced as locked + completion', async () => {
+    const { sessions, store } = await fillSetup();
+    const open = await sessions.openFillSession(fillGrant);
+    expect(open.ok).toBe(true);
+    if (!open.ok) return;
+    expect(open.state.version).toBe(1);
+    expect(open.state.sessionKind).toBe('fill');
+    expect(open.state.draftId).toBe(FILL_DRAFT);
+    expect(open.state.draftLifecycle).toBe('open');
+    expect(open.state.candidate).toBeNull();
+    expect(open.state.completion).toBeNull();
+    expect(open.state.receipt).toBeNull();
+    expect(open.state.locked).toBe(false);
+
+    await store.storeDraftCandidate(FILL_DRAFT, fillCandidate);
+    await store.lockDraft(FILL_DRAFT);
+    const after = await sessions.openFillSession(fillGrant);
+    expect(after.ok).toBe(true);
+    if (!after.ok) return;
+    expect(after.state.candidate).toEqual(fillCandidate);
+    expect(after.state.completion).toBe('merge_candidate_created');
+    expect(after.state.locked).toBe(true);
+    expect(after.state.receipt).toEqual({
+      kind: 'fill',
+      status: 'candidate_created',
+      changeCount: 1,
+      issueSummary: { errors: 0, warnings: 0 },
+    });
+  });
+
+  it('getFillStatus reconciles open -> merged -> abandoned over the journal + events', async () => {
+    const { sessions, events } = await fillSetup();
+    let status = await sessions.getFillStatus(fillGrant);
+    expect(status.ok).toBe(true);
+    if (!status.ok) return;
+    expect(status.status).toBe('open');
+    expect(status.receipt).toEqual({ kind: 'fill', status: 'open', changeCount: 0, issueSummary: { errors: 0, warnings: 0 } });
+
+    events.push(
+      makeTaskEvent({
+        type: 'structured_fill_draft_terminal',
+        draftId: FILL_DRAFT,
+        turnId: FILL_TURN,
+        status: 'merged',
+        baseRevision: 0,
+        resultRevision: 0,
+        changeCount: 0,
+        content: null,
+      }),
+    );
+    status = await sessions.getFillStatus(fillGrant);
+    expect(status.ok).toBe(true);
+    if (!status.ok) return;
+    expect(status.status).toBe('merged');
+
+    events.push(
+      makeTaskEvent({
+        type: 'structured_fill_draft_terminal',
+        draftId: FILL_DRAFT,
+        turnId: FILL_TURN,
+        status: 'abandoned',
+        baseRevision: 0,
+        resultRevision: 0,
+        changeCount: 0,
+        content: null,
+      }),
+    );
+    status = await sessions.getFillStatus(fillGrant);
+    expect(status.ok).toBe(true);
+    if (!status.ok) return;
+    expect(status.status).toBe('abandoned');
+  });
+
+  it('rejects a fill grant bound to a different task, snapshot or draft', async () => {
+    const { sessions } = await fillSetup();
+    const wrongTask = await sessions.getFillStatus({ ...fillGrant, caseId: 'other' });
+    expect(wrongTask.ok).toBe(false);
+    if (!wrongTask.ok) expect(wrongTask.code).toBe('GRANT_INVALID');
+    const wrongSnapshot = await sessions.getFillStatus({ ...fillGrant, snapshotHash: 'other' });
+    expect(wrongSnapshot.ok).toBe(false);
+    if (!wrongSnapshot.ok) expect(wrongSnapshot.code).toBe('GRANT_INVALID');
+    const wrongDraft = await sessions.getFillStatus({ ...fillGrant, draftId: 'draft-missing' });
+    expect(wrongDraft.ok).toBe(false);
+    if (!wrongDraft.ok) expect(wrongDraft.code).toBe('GRANT_INVALID');
+  });
+
+  it('fill dispatch guard: only send_message after merge_candidate_created; request_human_input exclusive; forward/annotate never end a fill turn', () => {
+    const send: ForgeAction = { type: 'send_message', targetAgentId: 'next', summary: 'done' };
+    const human: ForgeAction = { type: 'request_human_input', question: 'please review' };
+    const forward: ForgeAction = { type: 'forward_input_version', targetAgentId: 'x' };
+    const annotate: ForgeAction = { type: 'annotate_artifact', file: 'a.md', content: 'note' };
+    const publish: ForgeAction = { type: 'publish_artifact' };
+
+    const openFill: FillSessionState = {
+      version: 1,
+      sessionKind: 'fill',
+      turnId: FILL_TURN,
+      grant: null,
+      draftId: FILL_DRAFT,
+      draftLifecycle: 'open',
+      candidate: null,
+      completion: null,
+      receipt: null,
+      locked: false,
+    };
+    expect(assertStructuredForgeAction(openFill, send).ok).toBe(false);
+    expect(assertStructuredForgeAction(openFill, human).ok).toBe(true);
+    expect(assertStructuredForgeAction(openFill, forward).ok).toBe(false);
+
+    const candidateFill: FillSessionState = {
+      version: 1,
+      sessionKind: 'fill',
+      turnId: FILL_TURN,
+      grant: null,
+      draftId: FILL_DRAFT,
+      draftLifecycle: 'open',
+      candidate: fillCandidate,
+      completion: 'merge_candidate_created',
+      receipt: { kind: 'fill', status: 'candidate_created', changeCount: 1, issueSummary: { errors: 0, warnings: 0 } },
+      locked: true,
+    };
+    expect(assertStructuredForgeAction(candidateFill, send).ok).toBe(true);
+    expect(assertStructuredForgeAction(candidateFill, human).ok).toBe(true);
+    expect(assertStructuredForgeAction(candidateFill, forward).ok).toBe(false);
+    expect(assertStructuredForgeAction(candidateFill, annotate).ok).toBe(false);
+    expect(assertStructuredForgeAction(candidateFill, publish).ok).toBe(false);
   });
 });
