@@ -3,6 +3,7 @@
  * 平台契约不含任何业务角色/产物/场景条件分支（铁律 1）；
  * 具体业务语义只允许出现在 Mock fixture 数据中。
  */
+import type { StructuredSlotsSummaryV1 } from './structured-slots';
 
 export type TaskStatus =
   | 'draft'
@@ -274,6 +275,12 @@ export interface TaskWorkspace {
    * flight; null/absent otherwise (plan C realtime streaming).
    */
   activeTurn?: LiveTurn | null;
+  /**
+   * Optional structured-slots summary (spec §14 / design I01). Absent for
+   * basic tasks; never embeds content, the full tree, Grants or private
+   * Drafts. Populated by the structured-slot engine.
+   */
+  structuredSlots?: StructuredSlotsSummaryV1;
 }
 
 export type CapabilityStage =
