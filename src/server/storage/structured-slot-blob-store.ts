@@ -239,20 +239,17 @@ export class StructuredSlotBlobStore {
    * Writes the indexed generation layout and returns its manifest. The whole
    * scaffold is also content-addressed so the commit event's `structure` ref
    * resolves to a real blob. The manifest is written last: its presence is the
-   * commit point for the indexed layout.
+   * commit point for the indexed layout. Structural validation (root + parent
+   * walk) runs BEFORE any bytes hit disk so malformed input fails closed with a
+   * stable INVALID_INPUT and leaves no orphan residue.
    */
   async putGeneration(generation: StructuredGenerationInputV1): Promise<GenerationManifestV1> {
     assertSlotRecords(generation.slots);
     const { generationId, scaffoldId, slots } = generation;
-    const structure = await this.putJsonBlob(slots, 'generation');
 
-    // NDJSON: one canonical slot record per line, newline-terminated.
+    // Pure in-memory index derivation first: offsets, parent/type/order and
+    // document-order indexes all follow from the canonical records.
     const lines = slots.map((slot) => canonicalJson(slot));
-    const slotsNdjson = `${lines.join('\n')}\n`;
-    const slotsNdjsonBytes = Buffer.from(slotsNdjson, 'utf8');
-    await writeNewAtomic(this.paths.taskStructuredGenerationSlotsFile(this.taskId, generationId), slotsNdjsonBytes);
-
-    // Byte offsets accumulate line by line in document order.
     const entries: GenerationIndexV1['slots'] = {};
     const byParent: Record<string, string[]> = {};
     const byType: Record<string, string[]> = {};
@@ -276,6 +273,12 @@ export class StructuredSlotBlobStore {
       throw invalidInput('generation 必须恰好包含一个根槽。');
     }
     const maxDepth = this.computeMaxDepth(parentBySlot);
+
+    // Only now do any bytes reach disk: blob, NDJSON, index, manifest last.
+    const structure = await this.putJsonBlob(slots, 'generation');
+    const slotsNdjson = `${lines.join('\n')}\n`;
+    const slotsNdjsonBytes = Buffer.from(slotsNdjson, 'utf8');
+    await writeNewAtomic(this.paths.taskStructuredGenerationSlotsFile(this.taskId, generationId), slotsNdjsonBytes);
 
     const index: GenerationIndexV1 = {
       version: 1,
@@ -456,22 +459,38 @@ export class StructuredSlotBlobStore {
     return index;
   }
 
-  /** Tree depth in edges (root = 0) via memoized parent walks. */
+  /**
+   * Tree depth in edges (root = 0) via an ITERATIVE parent walk with an
+   * explicit visited path. A parent cycle (parentSlotId is its own ancestor,
+   * e.g. a self-cycle) or a dangling parent (references a slot not in the
+   * generation) fails closed with a stable INVALID_INPUT instead of recursing
+   * forever into a raw RangeError (fail-closed quality bar).
+   */
   private computeMaxDepth(parentBySlot: Record<string, string | null>): number {
     const depth = new Map<string, number>();
-    const depthOf = (slotId: string): number => {
-      const cached = depth.get(slotId);
-      if (cached !== undefined) {
-        return cached;
-      }
-      const parent = parentBySlot[slotId];
-      const value = parent === null ? 0 : depthOf(parent) + 1;
-      depth.set(slotId, value);
-      return value;
-    };
     let max = 0;
     for (const slotId of Object.keys(parentBySlot)) {
-      max = Math.max(max, depthOf(slotId));
+      const path: string[] = [];
+      let current: string | null = slotId;
+      // Walk up to an already-resolved slot, a root, or a contradiction.
+      while (current !== null && !depth.has(current)) {
+        if (path.includes(current)) {
+          throw invalidInput('generation 存在父槽环引用。');
+        }
+        path.push(current);
+        const parent: string | null | undefined = parentBySlot[current];
+        if (parent === undefined) {
+          throw invalidInput('generation 存在悬空父槽引用。');
+        }
+        current = parent;
+      }
+      // `current` is a resolved slot (depth known) or null (root).
+      let resolved = current === null ? -1 : (depth.get(current) as number);
+      for (let i = path.length - 1; i >= 0; i--) {
+        resolved += 1;
+        depth.set(path[i], resolved);
+      }
+      max = Math.max(max, resolved);
     }
     return max;
   }

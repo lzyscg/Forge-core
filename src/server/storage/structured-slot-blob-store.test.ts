@@ -196,6 +196,43 @@ describe('StructuredSlotBlobStore indexed generations', () => {
     writeFileSync(ndjsonPath, Buffer.from('{', 'utf8'));
     await expect(store.readSlot('gen-1', 'slot-1')).rejects.toMatchObject({ code: 'TASK_CORRUPTED' });
   });
+
+  it('fails closed on a self-cycle parent instead of overflowing the stack', async () => {
+    const { store } = makeStore();
+    const selfCycle: SlotInstance[] = [
+      { slotId: 'a', scaffoldId: 's', parentSlotId: 'a', order: 0, typeId: 'text', spec: {}, contentPresence: 'unset' },
+    ];
+    await expect(
+      store.putGeneration({ generationId: 'gen-cycle', scaffoldId: 's', slots: selfCycle }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
+  it('fails closed on a dangling parent instead of overflowing the stack', async () => {
+    const { store } = makeStore();
+    const dangling: SlotInstance[] = [
+      { slotId: 'a', scaffoldId: 's', parentSlotId: 'ghost', order: 0, typeId: 'text', spec: {}, contentPresence: 'unset' },
+      { slotId: 'b', scaffoldId: 's', parentSlotId: 'a', order: 1, typeId: 'text', spec: {}, contentPresence: 'unset' },
+    ];
+    await expect(
+      store.putGeneration({ generationId: 'gen-dangling', scaffoldId: 's', slots: dangling }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
+  it('computes maxDepth for a valid deep tree without overflowing', async () => {
+    const { store } = makeStore();
+    const deep = makeSlotChain(5000);
+    const manifest = await store.putGeneration({
+      generationId: 'gen-deep',
+      scaffoldId: 'scaffold-1',
+      slots: deep,
+    });
+    expect(manifest.slotCount).toBe(5000);
+    expect(manifest.maxDepth).toBe(4999);
+    expect(manifest.rootSlotId).toBe('slot-0');
+    // The depth computation is memoized/iterative, so a repeated deep read is
+    // cheap and the tail slot still resolves through one byte-range read.
+    expect((await store.readSlot('gen-deep', 'slot-4999'))?.content).toBe('content-4999');
+  });
 });
 
 describe('StructuredSlotBlobStore content revisions', () => {
