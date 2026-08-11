@@ -18,6 +18,7 @@
  */
 import { createHash } from 'node:crypto';
 import { cpSync } from 'node:fs';
+import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -1499,5 +1500,29 @@ describe('turnPlanCompleted forward terminal id (spec §8.2)', () => {
     expect(turnPlanCompleted([eventWithId('t1-message-input-0')], 't1', 0)).toBe(true); // send
     expect(turnPlanCompleted([eventWithId('t1-final')], 't1', 0)).toBe(true); // submit
     expect(turnPlanCompleted([eventWithId('t1-human-requested')], 't1', 0)).toBe(true); // human
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 15 Step 1: basic runNext never touches the structured authority stores
+// ---------------------------------------------------------------------------
+
+describe('TaskRunner basic-path non-regression (Task 15 Step 1)', () => {
+  it('commits a basic message turn without structured events or batch envelopes', async () => {
+    const harness = await runnerHarness({
+      reviewer: [reviewerMessageTurn],
+    });
+    await seedInput(harness, { id: 'ev-input-reviewer', agentId: 'reviewer', sequence: 1, body: '审读' });
+    const result = await harness.runner.runNext(harness.taskId, harness.controller.signal);
+    expect(result.committed).toBe(true);
+
+    const committed = await harness.events.read(harness.taskId);
+    expect(
+      committed.some((entry) => (entry.event as { type: string }).type.startsWith('structured_')),
+    ).toBe(false);
+    // The structured v3 authority commits through appendBatch envelopes; the
+    // basic runNext path keeps writing legacy single-event files only.
+    const names = await readdir(harness.paths.taskEventsRoot(harness.taskId));
+    expect(names.some((name) => name.endsWith('.batch.json'))).toBe(false);
   });
 });

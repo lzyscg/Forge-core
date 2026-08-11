@@ -23,6 +23,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, writeFileSync } from 'node:fs';
+import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { CoreService } from '../core-service';
 import type { CorePaths } from '../storage/core-paths';
@@ -1549,5 +1550,51 @@ describe('ActionCommitter artifact gate (plan 2026-08-07 Phase 2, spec §4.5)', 
     ).rejects.toMatchObject({ code: COMMIT_ERROR_CODES.GATE_REJECTED });
     expect(await events.read(taskId)).toEqual(before);
     gateRunner.disposeAll();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 15 Step 1: basic-path non-regression (spec §11 authority boundary)
+// ---------------------------------------------------------------------------
+
+describe('ActionCommitter basic-path non-regression (Task 15 Step 1)', () => {
+  it('snapshots the basic commit event order/results for a send_message turn', async () => {
+    const result = await committer.validateAndCommit(contextFor('reviewer'), [
+      { type: 'send_message', targetAgentId: 'writer', summary: '请修改第二段。' },
+    ]);
+    expect(result.committedEvents.map((entry) => entry.type)).toEqual([
+      'agent_result',
+      'route_executed',
+      'agent_input',
+    ]);
+    expect(result).toMatchObject({
+      taskCompleted: false,
+      waitingHuman: false,
+      publishedVersions: [],
+      nextAgentIds: ['writer'],
+      phase: { state: 'dispatched', dispatchAction: 'send_message', target: 'writer' },
+    });
+    const committed = await events.read(taskId);
+    const resultEvent = committed.find((entry) => entry.event.type === 'agent_result');
+    expect(resultEvent?.event).toMatchObject({
+      id: 'turn-1-result',
+      type: 'agent_result',
+      dispatchKind: 'send',
+    });
+  });
+
+  it('does NOT invoke the structured stores or appendBatch for a basic v2 commit', async () => {
+    await committer.validateAndCommit(contextFor('reviewer'), [
+      { type: 'send_message', targetAgentId: 'writer', summary: '请修改第二段。' },
+    ]);
+    const committed = await events.read(taskId);
+    // No structured authority events on the basic path.
+    expect(
+      committed.some((entry) => (entry.event as { type: string }).type.startsWith('structured_')),
+    ).toBe(false);
+    // The structured path commits through appendBatch envelopes; the basic
+    // path writes legacy single-event files only.
+    const names = await readdir(paths.taskEventsRoot(taskId));
+    expect(names.some((name) => name.endsWith('.batch.json'))).toBe(false);
   });
 });

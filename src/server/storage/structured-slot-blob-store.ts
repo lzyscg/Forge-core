@@ -190,6 +190,21 @@ function parseVersioned<T extends { version: number }>(
   return parsed as unknown as T;
 }
 
+/**
+ * Content-addressed idempotent write: an existing identical target file is a
+ * committed reuse, never an error (concurrent committers promoting the same
+ * immutable object must not fail on the second writer).
+ */
+async function writeNewAtomicIdempotent(path: string, bytes: Buffer): Promise<void> {
+  try {
+    await writeNewAtomic(path, bytes);
+  } catch (error) {
+    if ((error as StorageError).code !== STORAGE_ERROR_CODES.FILE_EXISTS) {
+      throw error;
+    }
+  }
+}
+
 export class StructuredSlotBlobStore {
   private readonly paths: CorePaths;
 
@@ -276,9 +291,25 @@ export class StructuredSlotBlobStore {
 
     // Only now do any bytes reach disk: blob, NDJSON, index, manifest last.
     const structure = await this.putJsonBlob(slots, 'generation');
+
+    // Idempotent promotion (design §18.3/G05): a manifest already committed for
+    // this generationId is the SAME content-addressed generation — concurrent
+    // committers promoting the identical generation reuse it instead of
+    // failing on the second write. A differing digest is corruption.
+    const manifestPath = this.paths.taskStructuredGenerationManifestFile(this.taskId, generationId);
+    try {
+      const existingRaw = await readFile(manifestPath, 'utf8');
+      const existing = parseVersioned<GenerationManifestV1>(existingRaw, 'generation manifest');
+      if (existing.structure.sha256 === structure.sha256) {
+        return existing;
+      }
+    } catch {
+      // No manifest yet (or torn residue): fall through and promote.
+    }
+
     const slotsNdjson = `${lines.join('\n')}\n`;
     const slotsNdjsonBytes = Buffer.from(slotsNdjson, 'utf8');
-    await writeNewAtomic(this.paths.taskStructuredGenerationSlotsFile(this.taskId, generationId), slotsNdjsonBytes);
+    await writeNewAtomicIdempotent(this.paths.taskStructuredGenerationSlotsFile(this.taskId, generationId), slotsNdjsonBytes);
 
     const index: GenerationIndexV1 = {
       version: 1,
@@ -290,7 +321,7 @@ export class StructuredSlotBlobStore {
       documentOrder,
     };
     const indexBytes = canonicalJsonBytes(index);
-    await writeNewAtomic(this.paths.taskStructuredGenerationIndexFile(this.taskId, generationId), indexBytes);
+    await writeNewAtomicIdempotent(this.paths.taskStructuredGenerationIndexFile(this.taskId, generationId), indexBytes);
 
     const manifest: GenerationManifestV1 = {
       version: 1,
@@ -307,10 +338,19 @@ export class StructuredSlotBlobStore {
       indexSha256: canonicalJsonSha256(index),
       indexByteLength: indexBytes.length,
     };
-    await writeNewAtomic(
-      this.paths.taskStructuredGenerationManifestFile(this.taskId, generationId),
-      canonicalJsonBytes(manifest),
-    );
+    try {
+      await writeNewAtomic(manifestPath, canonicalJsonBytes(manifest));
+    } catch (error) {
+      if ((error as StorageError).code !== STORAGE_ERROR_CODES.FILE_EXISTS) {
+        throw error;
+      }
+      // A concurrent committer won the manifest write with the SAME content;
+      // return its committed manifest.
+      return parseVersioned<GenerationManifestV1>(
+        await readFile(manifestPath, 'utf8'),
+        'generation manifest',
+      );
+    }
     return manifest;
   }
 
@@ -403,6 +443,26 @@ export class StructuredSlotBlobStore {
         throw error;
       }
       // Identical revision already committed: reuse the digest.
+    }
+    return { version: 1, kind: 'content_revision', sha256, byteLength: bytes.length };
+  }
+
+  /**
+   * Reads an existing content-revision root by digest and returns its reference
+   * (with byteLength). The candidate stores only the staged digest, so the
+   * committer rehydrates the full reference at promote time; a missing or
+   * digest-mismatched root is TASK_CORRUPTED (fail closed).
+   */
+  async readContentRevisionRef(sha256: string): Promise<StructuredBlobRefV1> {
+    let bytes: Buffer;
+    try {
+      bytes = await readFile(this.paths.taskStructuredContentRevisionFile(this.taskId, sha256));
+    } catch {
+      throw corrupt('引用的 content revision 缺失。');
+    }
+    const actual = createHash('sha256').update(bytes).digest('hex');
+    if (actual !== sha256) {
+      throw corrupt('content revision 内容与路径摘要不一致。');
     }
     return { version: 1, kind: 'content_revision', sha256, byteLength: bytes.length };
   }

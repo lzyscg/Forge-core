@@ -291,8 +291,11 @@ export function resolveDraftLifecycle(draftId: string, events: readonly TaskEven
 
 /**
  * Proposal lifecycle from committed TaskEvents: a committed generation wins
- * over a later abandoned/failed attempt on the proposal's turn; without either
- * the proposal stays open.
+ * over a later abandoned/failed attempt on the proposal's turn; a
+ * `waiting_human` terminal ALSO abandons the proposal (spec §11 human: the
+ * Proposal/Draft/candidate/staging is atomically abandoned in the same batch,
+ * so the old proposal can never be committed after a human request); without
+ * either the proposal stays open.
  */
 export function resolveProposalLifecycle(
   proposalId: string,
@@ -308,7 +311,7 @@ export function resolveProposalLifecycle(
     if (
       event.type === 'structured_slot_attempt_terminal' &&
       event.turnId === turnId &&
-      (event.status === 'abandoned' || event.status === 'failed')
+      (event.status === 'abandoned' || event.status === 'failed' || event.status === 'waiting_human')
     ) {
       abandoned = true;
     }

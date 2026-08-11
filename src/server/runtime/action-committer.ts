@@ -76,6 +76,10 @@ import {
 } from './forge-actions';
 import type { SkillService } from './skill-service';
 import type { GateRunner, GateVerdict } from './gate-runner';
+import {
+  prepareStructuredCommit,
+  type StructuredCommitContext,
+} from './structured-slot/structured-committer';
 
 /** Stable committer error codes owned by this module. */
 export const COMMIT_ERROR_CODES = {
@@ -167,6 +171,12 @@ export interface CommitContext {
   turnContract: TurnContract | null;
   /** Received input artifact identity, or null when the input carries none. */
   currentInputArtifact: CurrentInputArtifact | null;
+  /**
+   * Structured v3 commit wiring (Task 15): when present, `validateAndCommit`
+   * delegates the whole turn to the atomic structured committer (spec §11).
+   * Basic v2 contexts never carry it.
+   */
+  structured?: StructuredCommitContext;
 }
 
 /** Metadata of one event the commit produced or replayed. */
@@ -256,6 +266,35 @@ function isDispatchAction(action: ForgeAction): action is ValidatedActionSet['di
 }
 
 /**
+ * Extracts the single structured v3 dispatch action from the buffered action
+ * set (Task 15): structure/fill/rework turns end in `send_message`, the
+ * exclusive abandon exit is `request_human_input`. At most one dispatch is
+ * legal; the atomic structured committer validates the dispatch type itself.
+ */
+function extractStructuredDispatchAction(
+  actions: ReadonlyArray<unknown>,
+): Extract<ForgeAction, { type: 'send_message' } | { type: 'request_human_input' }> | null {
+  let dispatch: Extract<ForgeAction, { type: 'send_message' } | { type: 'request_human_input' }> | null = null;
+  for (const raw of actions) {
+    if (typeof raw !== 'object' || raw === null) {
+      continue;
+    }
+    const type = (raw as { type?: unknown }).type;
+    if (type !== 'send_message' && type !== 'request_human_input') {
+      continue;
+    }
+    if (dispatch !== null) {
+      throw new CommitFailure(
+        COMMIT_ERROR_CODES.AGENT_DISPATCH_CARDINALITY_INVALID,
+        '一个结构化回合只能执行一个发送动作。',
+      );
+    }
+    dispatch = raw as Extract<ForgeAction, { type: 'send_message' } | { type: 'request_human_input' }>;
+  }
+  return dispatch;
+}
+
+/**
  * Parses one raw action at the commit boundary: strict model shapes go
  * through `validateForgeAction`; the one platform-resolved shape — a
  * `finish_production` whose workspace file the runner already resolved —
@@ -301,14 +340,51 @@ export class ActionCommitter {
 
   /**
    * Validates the complete action set first, then commits it in the
-   * deterministic order. Any validation failure writes nothing.
+   * deterministic order. Any validation failure writes nothing. Structured v3
+   * contexts delegate the whole turn to the atomic structured committer (Task
+   * 15, spec §11) — the basic v2 path and its per-event partial replay are
+   * unchanged and never touch the structured stores.
    */
   async validateAndCommit(
     context: CommitContext,
     actions: ReadonlyArray<unknown>,
   ): Promise<CommitResult> {
+    if (context.structured !== undefined) {
+      return this.commitStructured(context, actions);
+    }
     const validated = await this.validateActionSet(context, actions);
     return this.commitValidated(context, validated);
+  }
+
+  /**
+   * Structured v3 authority path (Task 15, spec §11): the single dispatch
+   * action is handed to `prepareStructuredCommit`, which validates the
+   * candidate/receipt against the session, promotes immutable objects and
+   * commits the whole terminal batch atomically — or pre-reads and replays the
+   * existing batch on a response-loss retry. There is NO per-event partial
+   * replay here (unlike the basic path): a failure writes nothing, and no
+   * private committed/merged/abandoned terminal is written before the batch.
+   */
+  private async commitStructured(
+    context: CommitContext,
+    actions: ReadonlyArray<unknown>,
+  ): Promise<CommitResult> {
+    const structured = context.structured!;
+    const action = extractStructuredDispatchAction(actions);
+    const prepared = await prepareStructuredCommit(structured, action);
+    return {
+      committedEvents: prepared.committed.map((entry) => ({
+        id: entry.event.id,
+        type: entry.event.type,
+        sequence: entry.sequence,
+        replayed: prepared.replayed,
+      })),
+      publishedVersions: prepared.publishedVersions,
+      taskCompleted: prepared.taskCompleted,
+      waitingHuman: prepared.waitingHuman,
+      nextAgentIds: prepared.nextAgentIds,
+      phase: prepared.phase,
+    };
   }
 
   // ------------------------------------------------------------------

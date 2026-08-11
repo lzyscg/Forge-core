@@ -55,6 +55,7 @@ import type { ForgeAction } from './forge-actions';
 import type { SkillService } from './skill-service';
 import type { WorkspaceStore } from './workspace-store';
 import { classifyRuntimeError } from './retry-policy';
+import type { StructuredCommitContext } from './structured-slot/structured-committer';
 
 /** Outcome the scheduler loop consumes to decide the next step. */
 export interface RunNextResult {
@@ -938,7 +939,9 @@ ${checklist}`;
    * The provisional publication table is derived from the sealed package at
    * commit time; the runner only assembles identity: the frozen contract of
    * the executing agent and the received input artifact identity (frozen
-   * decisions 3/5).
+   * decisions 3/5). A structured v3 turn (Task 15/17) additionally carries the
+   * atomic structured commit wiring; basic v2 turns never pass one, so the
+   * basic runNext path is byte-for-byte unchanged.
    */
   private buildCommitContext(
     taskId: string,
@@ -949,6 +952,7 @@ ${checklist}`;
     attemptCount: number,
     publicText: string,
     currentInputArtifact: CurrentInputArtifact | null,
+    structured?: StructuredCommitContext,
   ): CommitContext {
     return {
       taskId,
@@ -962,6 +966,7 @@ ${checklist}`;
       finalOutput: frozen.finalOutput,
       turnContract: agent.turnContract,
       currentInputArtifact,
+      structured,
     };
   }
 
