@@ -22,7 +22,11 @@ import {
   makeTempCorePaths,
   validTaskRequest,
 } from '../test-support';
-import { createTestRuntimeEnvironment } from '../structured-slots/runtime-capability';
+import {
+  createDisabledRuntimeEnvironment,
+  createTestRuntimeEnvironment,
+  isStructuredRuntimeEnabled,
+} from '../structured-slots/runtime-capability';
 import { loadTemplateDirectory } from '../template/template-loader';
 import { TemplateCatalog } from '../template/template-catalog';
 import type { CorePaths } from './core-paths';
@@ -354,7 +358,7 @@ describe('TaskStore structured mode (Task 5, spec §5 / O05)', () => {
     new URL('../template/__fixtures__/structured-valid', import.meta.url),
   );
 
-  /** A catalog over the structured-valid fixture with an enabled runtime. */
+  /** A catalog over the structured-valid fixture under the given environment. */
   async function catalogWithStructured(
     options: { runtimeEnvironment?: ReturnType<typeof createTestRuntimeEnvironment> } = {},
   ): Promise<{ paths: CorePaths; catalog: TemplateCatalog; templateId: string }> {
@@ -364,7 +368,13 @@ describe('TaskStore structured mode (Task 5, spec §5 / O05)', () => {
       runtimeEnvironment: options.runtimeEnvironment,
     });
     await catalog.initialize();
-    if (options.runtimeEnvironment !== undefined) {
+    // Sanity: an ENABLED environment must load the structured fixture as valid.
+    // A DISABLED environment is expected to gate it (that is the point of the
+    // disabled fixtures below), so no validity requirement applies there.
+    if (
+      options.runtimeEnvironment !== undefined &&
+      isStructuredRuntimeEnabled(options.runtimeEnvironment)
+    ) {
       const detail = catalog.get('structured-test');
       if (!detail || detail.status !== 'valid') {
         throw new Error('task-store test-support: structured fixture did not initialize as valid');
@@ -405,7 +415,12 @@ describe('TaskStore structured mode (Task 5, spec §5 / O05)', () => {
   });
 
   it('maps a gated structured template to TEMPLATE_RUNTIME_UNAVAILABLE, never TEMPLATE_NOT_FOUND', async () => {
-    const { paths, catalog, templateId } = await catalogWithStructured();
+    // Explicit DISABLED fixture (Task 19): the catalog is initialized under the
+    // disabled environment so the structured template is gated — phase-independent,
+    // never reads the checked-in manifest.
+    const { paths, catalog, templateId } = await catalogWithStructured({
+      runtimeEnvironment: createDisabledRuntimeEnvironment(),
+    });
     const taskStore = new TaskStore(paths, catalog);
     await expect(taskStore.create(structuredRequest(templateId))).rejects.toMatchObject({
       code: 'TEMPLATE_RUNTIME_UNAVAILABLE',
@@ -422,17 +437,20 @@ describe('TaskStore structured mode (Task 5, spec §5 / O05)', () => {
   });
 
   it('propagates TEMPLATE_RUNTIME_UNAVAILABLE when reopening a structured snapshot under a disabled runtime', async () => {
-    // Freeze a structured task under an ENABLED runtime, then reopen the SAME
-    // roots with the checked-in DISABLED default — the historical snapshot's
-    // readFrozenTemplate must surface TEMPLATE_RUNTIME_UNAVAILABLE (design
-    // O05), never TASK_CORRUPTED.
+    // Freeze a structured task under an ENABLED fixture, then reopen the SAME
+    // roots with an EXPLICIT disabled fixture (Task 19): the historical
+    // snapshot's readFrozenTemplate must surface TEMPLATE_RUNTIME_UNAVAILABLE
+    // (design O05), never TASK_CORRUPTED. Phase-independent — the disabled
+    // reopen never reads the checked-in manifest.
     const { paths, catalog, templateId } = await catalogWithStructured({
       runtimeEnvironment: createTestRuntimeEnvironment(),
     });
     const enabledStore = new TaskStore(paths, catalog);
     const task = await enabledStore.create(structuredRequest(templateId));
 
-    const disabledCatalog = new TemplateCatalog(paths);
+    const disabledCatalog = new TemplateCatalog(paths, {
+      runtimeEnvironment: createDisabledRuntimeEnvironment(),
+    });
     await disabledCatalog.initialize();
     const disabledStore = new TaskStore(paths, disabledCatalog);
     await expect(disabledStore.readFrozenTemplate(task.id)).rejects.toMatchObject({

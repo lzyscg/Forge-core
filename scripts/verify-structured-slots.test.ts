@@ -534,6 +534,16 @@ describe('runPromoteCapability (P1-3 fail-closed promotion)', () => {
     const ws = createWorkspace();
     const release = validReleaseEvidence(ws);
     const path = writeRelease(ws, release);
+    // Phase-independent (Task 19): the promote is fully self-contained in the
+    // temp workspace (manifest path + requiredAbis are injected via
+    // promotePaths(ws)); it must NEVER touch the checked-in production manifest,
+    // whatever phase it is in. Capture the real manifest before the promote and
+    // assert it is byte-identical afterwards.
+    const realManifestPath = resolve(
+      REPO_ROOT,
+      'src/server/structured-slots/runtime-capability-v1.json',
+    );
+    const realManifestBefore = readFileSync(realManifestPath, 'utf8');
     const result = runPromoteCapability(path, promotePaths(ws), { porcelain: () => [] });
     expect(result).toBe(0);
     const manifest = JSON.parse(readFileSync(ws.manifestPath, 'utf8')) as {
@@ -551,11 +561,9 @@ describe('runPromoteCapability (P1-3 fail-closed promotion)', () => {
     expect(manifest.evidenceDigest).toBe(canonicalJsonSha256(release));
     expect(manifest.requiredAbis).toEqual(['forge-validator/v1', 'forge-assembler/v1']);
 
-    // The checked-in production manifest must be untouched and still disabled.
-    const realManifest = JSON.parse(
-      readFileSync(resolve(REPO_ROOT, 'src/server/structured-slots/runtime-capability-v1.json'), 'utf8'),
-    ) as { status: string };
-    expect(realManifest.status).toBe('disabled');
+    // The checked-in production manifest is untouched: promote wrote only the
+    // temp workspace manifest.
+    expect(readFileSync(realManifestPath, 'utf8')).toBe(realManifestBefore);
   });
 
   it('rejects a release evidence whose requiredAbis do not match the current manifest', () => {

@@ -21,7 +21,10 @@ import { FakeAgentRuntime } from '../runtime/fake-agent-runtime';
 import { createForgeCoreServer } from '../http-server';
 import { CorePaths } from '../storage/core-paths';
 import { StructuredSlotBlobStore } from '../storage/structured-slot-blob-store';
-import { createTestRuntimeEnvironment } from '../structured-slots/runtime-capability';
+import {
+  createDisabledRuntimeEnvironment,
+  createTestRuntimeEnvironment,
+} from '../structured-slots/runtime-capability';
 import { makeTaskEvent, installValidFixtureTemplate, ONE_TEMPLATE_ID, testServerOptions } from '../test-support';
 import type { ApiTestClient } from '../test-support';
 
@@ -503,9 +506,10 @@ describe('structured-slot read-only routes (spec §14, task_owner subject)', () 
   });
 
   it('surfaces a stable TEMPLATE_RUNTIME_UNAVAILABLE for a disabled runtime', async () => {
-    // Freeze a structured task under an enabled env, then reopen the SAME
-    // roots with the production-default (disabled) environment: the read-only
-    // routes fail closed with the stable runtime-unavailable envelope.
+    // Freeze a structured task under an ENABLED fixture, then reopen the SAME
+    // roots with an EXPLICIT disabled fixture (Task 19): the read-only routes
+    // fail closed with the stable runtime-unavailable envelope. Phase-independent
+    // — never reads the checked-in manifest.
     const { dataRoot, templateRoot } = testServerOptions();
     installValidFixtureTemplate(templateRoot);
     cpSync(structuredFixtureDir(), join(templateRoot, 'structured-valid'), { recursive: true });
@@ -520,7 +524,13 @@ describe('structured-slot read-only routes (spec §14, task_owner subject)', () 
       input: { 'source-text': 'x' },
     });
 
-    const disabledService = new CoreService(CorePaths.create({ dataRoot, templateRoot }));
+    // Explicit DISABLED fixture (Task 19): inject the disabled environment so
+    // the test stays phase-independent — it never reads the checked-in manifest
+    // (which is enabled after the production promotion), yet still exercises the
+    // exact DISABLED runtime path this test name asserts.
+    const disabledService = new CoreService(CorePaths.create({ dataRoot, templateRoot }), {
+      runtimeEnvironment: createDisabledRuntimeEnvironment(),
+    });
     await disabledService.initialize();
     const server = await createForgeCoreServer({
       mode: 'test',
