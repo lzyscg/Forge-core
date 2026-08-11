@@ -1047,3 +1047,12 @@ HEAD 复核：5cfbfe0（当前 HEAD 与已知一致），工作树仅未跟踪�
 - Spec reviewer a4baacf0d9b02fea6: **SPEC-OK** — bounds/REQUIRED ids unchanged; 250ms gates PURE projection (warmup3/samples10); outline diagnostics bound-free but emission-required; scales 100/75/50/25 + total child RSS authoritative (no per-case isolation); evidence additive under schemaVersion 1 with pos/neg tests + unchanged digest chain; docs additive no frozen-value change; implementer honestly refrained from integrated-qualify (profile still provisional; evidence on disk is old format).
 - Task D minors (deferred): stale pre-Task-D failure evidence will be overwritten by Task E (hygiene); 25% margin ~45MiB thin (re-verify on clean tree); cosmetic §16.3 comment refs.
 
+
+## Pre-existing flaky test found at the Task E gate
+
+- `src/server/api/api.integration.test.ts` "Phase C Task 5: startup interruption recovery > restores active tasks as interrupted before serving any request" (basic-v2 path; NOT touched by Tasks A-D) intermittently fails under full-suite parallel load: after a detached POST /resume (202), the immediate GET /workspace races the background loop and can observe `retryable_failure` (a transient resume-turn failure parks it for manual retry), which the test's allowed set ['running','interrupted'] misses. Passes in isolation (2/2); full-suite ~50% flaky. Pre-existing timing/load flake (noted earlier in Task 7's fix round).
+- Owner: harness. Fix must make the test deterministic WITHOUT weakening its intent (recovery+resume leaves the task in a valid NON-TERMINAL resumable state) and WITHOUT changing scheduler/runner semantics.
+
+
+- Flaky-test fix dispatched: implementer ad865ed0575d457f7 (opus-tier) — make the api.integration recovery test deterministic (await/poll the detached resume to a settled legitimate non-terminal state; complete the allowed set running|interrupted|retryable_failure; NOT terminal/corrupt; no scheduler/runner/production change; no skip/.only).
+

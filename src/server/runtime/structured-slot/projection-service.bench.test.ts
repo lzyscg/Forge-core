@@ -130,128 +130,137 @@ describe('projection cost separation (Task 19 remediation Task A)', () => {
     expect(p95Ms).toBeLessThan(30);
   });
 
-  it('a warm task_owner outline is strictly cheaper than the cold first projection', async () => {
-    const tempRoot = mkdtempSync(join(tmpdir(), 'forge-projection-bench-'));
-    try {
-      const paths = CorePaths.create({ dataRoot: tempRoot, templateRoot: join(tempRoot, 'templates') });
-      const taskId = 'projection-bench-task';
-      const blobStore = new StructuredSlotBlobStore(paths, taskId);
-      const events = new EventStore(paths);
+  // Generous wall-clock bound (not a measurement): this test fsyncs ~600 blob
+  // files (300 × 16 KiB content values + the generation manifest + revision
+  // root) and the vitest default 5 s budget can be exceeded under full-suite
+  // parallel load. The load-bearing assertion (hot < cold) is timing-based but
+  // noise-absorbing (MIN over 5 hot samples) and untouched by this timeout.
+  it(
+    'a warm task_owner outline is strictly cheaper than the cold first projection',
+    async () => {
+      const tempRoot = mkdtempSync(join(tmpdir(), 'forge-projection-bench-'));
+      try {
+        const paths = CorePaths.create({ dataRoot: tempRoot, templateRoot: join(tempRoot, 'templates') });
+        const taskId = 'projection-bench-task';
+        const blobStore = new StructuredSlotBlobStore(paths, taskId);
+        const events = new EventStore(paths);
 
-      // Root + SLOT_COUNT filled children (mirrors the integrated bench scaffold:
-      // the generation records stay `unset`, the content lives in content blobs).
-      const slots: Array<{
-        slotId: string;
-        parentSlotId: string | null;
-        order: number;
-        typeId: string;
-        spec: JsonObject;
-        contentPresence: 'unset' | 'set';
-        content?: string;
-      }> = [{ slotId: 'root', parentSlotId: null, order: 0, typeId: 'document', spec: {}, contentPresence: 'unset' }];
-      for (let i = 0; i < SLOT_COUNT; i += 1) {
-        slots.push({
-          slotId: `n${i}`,
-          parentSlotId: 'root',
-          order: i + 1,
-          typeId: 'node',
-          spec: {},
-          contentPresence: 'set',
-          content: `c${i}:` + 'x'.repeat(CONTENT_BYTES_PER_SLOT),
-        });
-      }
-      const generationManifest = await blobStore.putGeneration({
-        generationId: 'gen-1',
-        scaffoldId: 'scaffold-1',
-        slots: slots.map((slot) => ({
-          slotId: slot.slotId,
-          scaffoldId: 'scaffold-1',
-          parentSlotId: slot.parentSlotId,
-          order: slot.order,
-          typeId: slot.typeId,
-          spec: slot.spec,
-          contentPresence: 'unset',
-        })),
-      });
-      const mappings: Record<string, 'unset' | string> = {};
-      for (const slot of slots) {
-        if (slot.contentPresence === 'set') {
-          const blob = await blobStore.putContentValue(slot.content);
-          mappings[slot.slotId] = blob.sha256;
-        } else {
-          mappings[slot.slotId] = 'unset';
+        // Root + SLOT_COUNT filled children (mirrors the integrated bench scaffold:
+        // the generation records stay `unset`, the content lives in content blobs).
+        const slots: Array<{
+          slotId: string;
+          parentSlotId: string | null;
+          order: number;
+          typeId: string;
+          spec: JsonObject;
+          contentPresence: 'unset' | 'set';
+          content?: string;
+        }> = [{ slotId: 'root', parentSlotId: null, order: 0, typeId: 'document', spec: {}, contentPresence: 'unset' }];
+        for (let i = 0; i < SLOT_COUNT; i += 1) {
+          slots.push({
+            slotId: `n${i}`,
+            parentSlotId: 'root',
+            order: i + 1,
+            typeId: 'node',
+            spec: {},
+            contentPresence: 'set',
+            content: `c${i}:` + 'x'.repeat(CONTENT_BYTES_PER_SLOT),
+          });
         }
+        const generationManifest = await blobStore.putGeneration({
+          generationId: 'gen-1',
+          scaffoldId: 'scaffold-1',
+          slots: slots.map((slot) => ({
+            slotId: slot.slotId,
+            scaffoldId: 'scaffold-1',
+            parentSlotId: slot.parentSlotId,
+            order: slot.order,
+            typeId: slot.typeId,
+            spec: slot.spec,
+            contentPresence: 'unset',
+          })),
+        });
+        const mappings: Record<string, 'unset' | string> = {};
+        for (const slot of slots) {
+          if (slot.contentPresence === 'set') {
+            const blob = await blobStore.putContentValue(slot.content);
+            mappings[slot.slotId] = blob.sha256;
+          } else {
+            mappings[slot.slotId] = 'unset';
+          }
+        }
+        const contentRef = await blobStore.putContentRevision(mappings);
+        await events.append(taskId, {
+          id: 'gen-committed',
+          at: new Date().toISOString(),
+          type: 'structured_scaffold_generation_committed',
+          scaffoldId: 'scaffold-1',
+          generationId: 'gen-1',
+          supersedesGenerationId: null,
+          rootSlotId: 'root',
+          slotCount: slots.length,
+          maxDepth: 1,
+          structure: generationManifest.structure,
+          content: contentRef,
+          contentRevision: 0,
+          proposalId: 'p-1',
+        });
+
+        const committed: readonly CommittedEvent[] = await events.read(taskId);
+
+        // Warm the NDJSON file pages before any measurement so the cold-vs-hot
+        // delta isolates the ONE-TIME projection costs (event-state projection,
+        // presence-root read, projection-path JIT compile) instead of page-cache
+        // eviction noise on the 301 NDJSON opens. This also populates the blob
+        // store's generation-index cache, exactly as a prior read would.
+        await blobStore.readGenerationSlots('gen-1');
+
+        const source = createStructuredSlotDataSource({
+          blobStore,
+          events: async () => committed.map((entry) => entry.event),
+        });
+        const projection = new StructuredSlotProjectionService({
+          contract: minimalContract(),
+          source,
+          signer: createTaskLocalCursorSigner(taskId),
+        });
+        const subject = { kind: 'task_owner' } as const;
+
+        // COLD: the first outline read performs the one-time reads the data
+        // source caches (event-state projection, content-revision presence root)
+        // plus the projection-path JIT compile. The outline itself never hydrates
+        // content blobs (Task C N+1 fix).
+        const startedCold = performance.now();
+        const cold = await projection.listSlots(subject, null, OWNER_LIMIT);
+        const coldMs = performance.now() - startedCold;
+        expect(cold.ok).toBe(true);
+        if (cold.ok) {
+          expect(cold.entries).toHaveLength(SLOT_COUNT + 1);
+          expect(cold.entries.every((entry) => !entry.shell)).toBe(true);
+        }
+
+        // HOT: subsequent reads reuse the cached state/index/presence; take the
+        // MIN over several samples so GC/monitor noise cannot hide the caching
+        // lever (more samples also absorb page-cache eviction windows under load).
+        const hotSamples: number[] = [];
+        for (let i = 0; i < 5; i += 1) {
+          const started = performance.now();
+          const hot = await projection.listSlots(subject, null, OWNER_LIMIT);
+          expect(hot.ok).toBe(true);
+          if (hot.ok) expect(hot.entries).toHaveLength(SLOT_COUNT + 1);
+          hotSamples.push(performance.now() - started);
+        }
+        const hotMs = Math.min(...hotSamples);
+        probe('cold', coldMs);
+        probe('hot', hotMs);
+        // The warm call must be strictly cheaper than the cold call: the only
+        // difference is the one-time cold costs the cache removes. This locks
+        // the separation without gating on absolute values.
+        expect(hotMs).toBeLessThan(coldMs);
+      } finally {
+        rmSync(tempRoot, { recursive: true, force: true });
       }
-      const contentRef = await blobStore.putContentRevision(mappings);
-      await events.append(taskId, {
-        id: 'gen-committed',
-        at: new Date().toISOString(),
-        type: 'structured_scaffold_generation_committed',
-        scaffoldId: 'scaffold-1',
-        generationId: 'gen-1',
-        supersedesGenerationId: null,
-        rootSlotId: 'root',
-        slotCount: slots.length,
-        maxDepth: 1,
-        structure: generationManifest.structure,
-        content: contentRef,
-        contentRevision: 0,
-        proposalId: 'p-1',
-      });
-
-      const committed: readonly CommittedEvent[] = await events.read(taskId);
-
-      // Warm the NDJSON file pages before any measurement so the cold-vs-hot
-      // delta isolates the ONE-TIME projection costs (event-state projection,
-      // presence-root read, projection-path JIT compile) instead of page-cache
-      // eviction noise on the 301 NDJSON opens. This also populates the blob
-      // store's generation-index cache, exactly as a prior read would.
-      await blobStore.readGenerationSlots('gen-1');
-
-      const source = createStructuredSlotDataSource({
-        blobStore,
-        events: async () => committed.map((entry) => entry.event),
-      });
-      const projection = new StructuredSlotProjectionService({
-        contract: minimalContract(),
-        source,
-        signer: createTaskLocalCursorSigner(taskId),
-      });
-      const subject = { kind: 'task_owner' } as const;
-
-      // COLD: the first outline read performs the one-time reads the data
-      // source caches (event-state projection, content-revision presence root)
-      // plus the projection-path JIT compile. The outline itself never hydrates
-      // content blobs (Task C N+1 fix).
-      const startedCold = performance.now();
-      const cold = await projection.listSlots(subject, null, OWNER_LIMIT);
-      const coldMs = performance.now() - startedCold;
-      expect(cold.ok).toBe(true);
-      if (cold.ok) {
-        expect(cold.entries).toHaveLength(SLOT_COUNT + 1);
-        expect(cold.entries.every((entry) => !entry.shell)).toBe(true);
-      }
-
-      // HOT: subsequent reads reuse the cached state/index/presence; take the
-      // MIN over several samples so GC/monitor noise cannot hide the caching
-      // lever (more samples also absorb page-cache eviction windows under load).
-      const hotSamples: number[] = [];
-      for (let i = 0; i < 5; i += 1) {
-        const started = performance.now();
-        const hot = await projection.listSlots(subject, null, OWNER_LIMIT);
-        expect(hot.ok).toBe(true);
-        if (hot.ok) expect(hot.entries).toHaveLength(SLOT_COUNT + 1);
-        hotSamples.push(performance.now() - started);
-      }
-      const hotMs = Math.min(...hotSamples);
-      probe('cold', coldMs);
-      probe('hot', hotMs);
-      // The warm call must be strictly cheaper than the cold call: the only
-      // difference is the one-time cold costs the cache removes. This locks
-      // the separation without gating on absolute values.
-      expect(hotMs).toBeLessThan(coldMs);
-    } finally {
-      rmSync(tempRoot, { recursive: true, force: true });
-    }
-  });
+    },
+    20_000,
+  );
 });
