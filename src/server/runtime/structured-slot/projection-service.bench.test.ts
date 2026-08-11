@@ -142,7 +142,15 @@ describe('projection cost separation (Task 19 remediation Task A)', () => {
       try {
         const paths = CorePaths.create({ dataRoot: tempRoot, templateRoot: join(tempRoot, 'templates') });
         const taskId = 'projection-bench-task';
-        const blobStore = new StructuredSlotBlobStore(paths, taskId);
+        // Instrument the blob store so the cold-vs-hot separation is asserted
+        // DETERMINISTICALLY (content-root-read delta), not by a wall-time
+        // comparison that is flaky under full-suite parallel load.
+        let contentRootReads = 0;
+        const blobStore = new StructuredSlotBlobStore(paths, taskId, {
+          onContentRootRead: () => {
+            contentRootReads += 1;
+          },
+        });
         const events = new EventStore(paths);
 
         // Root + SLOT_COUNT filled children (mirrors the integrated bench scaffold:
@@ -238,6 +246,13 @@ describe('projection cost separation (Task 19 remediation Task A)', () => {
           expect(cold.entries).toHaveLength(SLOT_COUNT + 1);
           expect(cold.entries.every((entry) => !entry.shell)).toBe(true);
         }
+        // The cold call performs the one-time reads the data source caches:
+        // at least one content-revision root read (the presence map is then
+        // cached per content-root digest across operations). The event-state
+        // projection is re-run once per operation by design (the stale-revision
+        // guard), so it is NOT the cold-vs-hot lever.
+        const coldContentRootReads = contentRootReads;
+        expect(coldContentRootReads).toBeGreaterThanOrEqual(1);
 
         // HOT: subsequent reads reuse the cached state/index/presence; take the
         // MIN over several samples so GC/monitor noise cannot hide the caching
@@ -253,10 +268,18 @@ describe('projection cost separation (Task 19 remediation Task A)', () => {
         const hotMs = Math.min(...hotSamples);
         probe('cold', coldMs);
         probe('hot', hotMs);
-        // The warm call must be strictly cheaper than the cold call: the only
-        // difference is the one-time cold costs the cache removes. This locks
-        // the separation without gating on absolute values.
-        expect(hotMs).toBeLessThan(coldMs);
+        // The LOAD-BEARING separation is deterministic I/O: the warm calls must
+        // add NO content-revision root read beyond the cold call (the presence
+        // map is cached per content-root digest across operations). This is the
+        // caching-lever invariant, asserted by a counter, not wall time.
+        expect(contentRootReads).toBe(coldContentRootReads);
+        // The wall-time check is a noise-tolerant diagnostic: under full-suite
+        // parallel load a warm call can occasionally be slower than the cold
+        // call due to GC/monitor contention, so we assert hot is not
+        // CATASTROPHICALLY worse (within 30 ms of cold) rather than strictly
+        // cheaper. The deterministic counter above is the real regression lock
+        // (a dropped presence cache would bump contentRootReads on hot).
+        expect(hotMs).toBeLessThan(Math.max(coldMs, 4) + 30);
       } finally {
         rmSync(tempRoot, { recursive: true, force: true });
       }
