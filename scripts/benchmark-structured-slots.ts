@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * Structured slot benchmark harness (Task 9, spec §5 / design §25.13 O08).
  *
@@ -10,17 +9,27 @@
  *                               Draft journal, 10k validator fanout through
  *                               the Task 8 engine). Produces NO release
  *                               evidence and cannot change candidate values.
- *   --mode integrated-qualify   Reserved for Task 19: the ONLY mode that may
+ *   --mode integrated-scale     HIDDEN child-worker mode (Task 19). Runs ONE
+ *                               scale's full measurement in a FRESH process and
+ *                               prints a single machine-readable
+ *                               `integrated-scale-result` JSON line, then exits
+ *                               0. Each scale measures in its own process so the
+ *                               peak RSS of one scale can never leak into
+ *                               another scale's verdict (no V8 retained heap
+ *                               from a prior scale). Requires --scale <N> and
+ *                               --adapter <path>.
+ *   --mode integrated-qualify   Task 19 orchestrator: the ONLY mode that may
  *                               run the integrated reference benchmark, write
  *                               evidence and rewrite the provisional profile
- *                               to final. Task 9 implements only the
+ *                               to final. The parent keeps the
  *                               reproducible-evidence discipline (runner
  *                               identity preflight, clean-source-tree guard,
- *                               evidence facts) and then FAILS with
- *                               INTEGRATED_BENCHMARK_NOT_READY until an
- *                               `IntegratedBenchmarkCasesV1` adapter is wired
- *                               in (Task 19). No future Task 10/16 module is
- *                               statically imported here.
+ *                               evidence facts) and spawns one fresh child per
+ *                               scale via `--mode integrated-scale`. No future
+ *                               Task 10/16 module is statically imported here.
+ *   --mode alloc-probe          HIDDEN helper for the isolation regression test
+ *                               (spawns a fresh process, optionally allocates a
+ *                               transient buffer, prints its own peak RSS).
  *
  * Evidence discipline (brief Step 3): a run on another environment may
  * compare results but can never produce a final profile; qualification
@@ -29,8 +38,8 @@
  * measured case plus a `summary` record carrying peak RSS and disk bytes.
  */
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { cpus, tmpdir, totalmem } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -57,6 +66,7 @@ import type {
   FrozenSlotTypeV1,
   ValidatorRegistrationV1,
 } from '../src/server/template/structured-slot-contract';
+import { validateProfileEvidence, validateProfileEvidenceFailure } from './structured-evidence-schema';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REFERENCE_RUNNER_PATH = resolve(
@@ -75,6 +85,8 @@ const BENCHMARK_USAGE = 'BENCHMARK_USAGE';
 const BENCHMARK_INTEGRATED_PROFILE = 'BENCHMARK_INTEGRATED_PROFILE';
 const BENCHMARK_INTEGRATED_BOUNDS = 'BENCHMARK_INTEGRATED_BOUNDS';
 const BENCHMARK_INTEGRATED_FROZEN = 'BENCHMARK_INTEGRATED_FROZEN';
+const BENCHMARK_CHILD_FAILED = 'BENCHMARK_CHILD_FAILED';
+const BENCHMARK_EVIDENCE_INVALID = 'BENCHMARK_EVIDENCE_INVALID';
 
 class BenchmarkError extends Error {
   readonly code: string;
@@ -98,10 +110,12 @@ const GENERATED_OUTPUT_ALLOWLIST = new Set([
 ]);
 
 interface CliArgs {
-  mode: 'primitive-smoke' | 'integrated-qualify';
+  mode: 'primitive-smoke' | 'integrated-qualify' | 'integrated-scale' | 'alloc-probe';
   profile?: string;
   evidence?: string;
   adapter?: string;
+  scale?: number;
+  allocBytes?: number;
 }
 
 function parseArgs(argv: readonly string[]): CliArgs {
@@ -119,7 +133,12 @@ function parseArgs(argv: readonly string[]): CliArgs {
     };
     if (flag === '--mode') {
       const mode = next();
-      if (mode !== 'primitive-smoke' && mode !== 'integrated-qualify') {
+      if (
+        mode !== 'primitive-smoke' &&
+        mode !== 'integrated-qualify' &&
+        mode !== 'integrated-scale' &&
+        mode !== 'alloc-probe'
+      ) {
         throw new BenchmarkError(BENCHMARK_USAGE, `unknown mode '${mode}'`, 2);
       }
       args.mode = mode;
@@ -130,6 +149,20 @@ function parseArgs(argv: readonly string[]): CliArgs {
       args.evidence = next();
     } else if (flag === '--adapter') {
       args.adapter = next();
+    } else if (flag === '--scale') {
+      const raw = next();
+      const parsed = Number(raw);
+      if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+        throw new BenchmarkError(BENCHMARK_USAGE, `--scale requires a positive integer, got '${raw}'`, 2);
+      }
+      args.scale = parsed;
+    } else if (flag === '--alloc-bytes') {
+      const raw = next();
+      const parsed = Number(raw);
+      if (!Number.isSafeInteger(parsed) || parsed < 0) {
+        throw new BenchmarkError(BENCHMARK_USAGE, `--alloc-bytes requires a non-negative integer, got '${raw}'`, 2);
+      }
+      args.allocBytes = parsed;
     } else {
       throw new BenchmarkError(BENCHMARK_USAGE, `unknown flag '${flag}'`, 2);
     }
@@ -141,6 +174,13 @@ function parseArgs(argv: readonly string[]): CliArgs {
     throw new BenchmarkError(
       BENCHMARK_USAGE,
       'integrated-qualify requires --profile <profile json> and --evidence <evidence json>',
+      2,
+    );
+  }
+  if (args.mode === 'integrated-scale' && (args.scale === undefined || args.adapter === undefined)) {
+    throw new BenchmarkError(
+      BENCHMARK_USAGE,
+      'integrated-scale requires --scale <N> and --adapter <path>',
       2,
     );
   }
@@ -237,6 +277,134 @@ function printCaseRecord(result: CaseResult, peakRssBytes: number): void {
 
 function round(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+/** -------------------------------------------------------------------- */
+/** Per-scale isolation measurement primitives (Task 19)                 */
+/** -------------------------------------------------------------------- */
+
+/**
+ * Recursively sums the on-disk byte length of every regular file under a
+ * directory. Missing roots sum to 0 (best-effort walk). This is the REAL disk
+ * footprint of one scale's temp task root + snapshot + primitive fanout root.
+ */
+export function sumDirectoryBytes(root: string): number {
+  let total = 0;
+  const walk = (dir: string): void => {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+      } else if (entry.isFile()) {
+        try {
+          total += statSync(full).size;
+        } catch {
+          // race with concurrent temp cleanup: ignore
+        }
+      }
+    }
+  };
+  walk(root);
+  return total;
+}
+
+/**
+ * OS high-water mark of this process's resident set size, in BYTES. The raw
+ * `process.resourceUsage().maxRSS` unit is platform-inconsistent: on Linux
+ * `ru_maxrss` is kilobytes, and the Node/macOS build running this harness
+ * (Node 22, macOS arm64) ALSO reports kilobytes. The OS high-water mark can
+ * never be below the current RSS, so the raw value is self-calibrating:
+ * `raw < currentRss` proves the value is kilobytes (it is ~currentRss/1024)
+ * and it is multiplied by 1024; otherwise it is already bytes. This captures
+ * DURING-operation peaks that per-unit `process.memoryUsage().rss` sampling
+ * after each unit can miss (e.g. the 40x transient canonicalJson+sha256
+ * allocation of the 64 MiB content-root case).
+ */
+export function osMaxRssBytes(): number {
+  const raw = process.resourceUsage().maxRSS;
+  const currentRss = process.memoryUsage().rss;
+  if (raw > 0 && raw < currentRss) {
+    return raw * 1024;
+  }
+  return raw;
+}
+
+/** The Task 19 acceptance bounds (spec §16.3), frozen — never changed here. */
+export interface ScaleBounds {
+  indexedSlotP95Ms: number;
+  treeMatch10kMaxMs: number;
+  contentRootMaxMs: number;
+  draftMaxMs: number;
+  issueProjectionMaxMs: number;
+  sealMaxMs: number;
+  peakRssBytes: number;
+}
+
+/** One child process's full measurement of a single scale. */
+export interface IntegratedScaleReport {
+  event: 'integrated-scale-result';
+  scale: number;
+  results: CaseResult[];
+  peakRssBytes: number;
+  diskBytes: number;
+}
+
+/**
+ * Pure per-scale verdict: judges ONE scale report against the frozen bounds
+ * using ONLY that report's own peak RSS and case timings. A prior scale's
+ * higher peak can never influence this verdict (P1-1 regression target).
+ */
+export function evaluateScaleReport(
+  report: IntegratedScaleReport,
+  bounds: ScaleBounds,
+): { violations: string[]; passed: boolean } {
+  const byId = new Map(report.results.map((result) => [result.id, result]));
+  const p95 = (id: string): number => byId.get(id)?.p95Ms ?? 0;
+  const max = (id: string): number => byId.get(id)?.maxMs ?? 0;
+  const violations: string[] = [];
+  if (p95('indexed-slot-read') > bounds.indexedSlotP95Ms) violations.push('indexed-slot-read p95');
+  if (max('tree-match-10k') > bounds.treeMatch10kMaxMs) violations.push('tree-match-10k');
+  if (max('content-root-64mib') > bounds.contentRootMaxMs) violations.push('content-root-64mib');
+  if (max('draft-journal-2k') > bounds.draftMaxMs) violations.push('draft-journal-2k');
+  if (max('seal-assembler-custody') > bounds.sealMaxMs) violations.push('seal-assembler-custody');
+  if (p95('authorized-projection-500-issues') > bounds.issueProjectionMaxMs) {
+    violations.push('authorized-projection-500-issues');
+  }
+  if (report.peakRssBytes > bounds.peakRssBytes) {
+    violations.push(`peak RSS ${report.peakRssBytes} > ${bounds.peakRssBytes}`);
+  }
+  return { violations, passed: violations.length === 0 };
+}
+
+/**
+ * Builds a scaled limits object (every candidate axis scaled uniformly by the
+ * same factor). The adapter consumes these ALREADY-SCALED limits verbatim —
+ * this is the ONLY scaling boundary (P1-2 regression target).
+ */
+export function scaledLimits(percentage: number): StructuredSlotLimitsV1 {
+  const factor = percentage / 100;
+  const scaleGroup = (group: Record<string, number>): Record<string, number> => {
+    const out: Record<string, number> = {};
+    for (const [key, value] of Object.entries(group)) {
+      out[key] = Math.max(1, Math.floor(value * factor));
+    }
+    return out;
+  };
+  return {
+    schema: scaleGroup(STRUCTURED_SLOT_PROFILE_CANDIDATE.schema),
+    structure: scaleGroup(STRUCTURED_SLOT_PROFILE_CANDIDATE.structure),
+    payload: scaleGroup(STRUCTURED_SLOT_PROFILE_CANDIDATE.payload),
+    draft: scaleGroup(STRUCTURED_SLOT_PROFILE_CANDIDATE.draft),
+    attempt: scaleGroup(STRUCTURED_SLOT_PROFILE_CANDIDATE.attempt),
+    validation: scaleGroup(STRUCTURED_SLOT_PROFILE_CANDIDATE.validation),
+    output: scaleGroup(STRUCTURED_SLOT_PROFILE_CANDIDATE.output),
+  } as StructuredSlotLimitsV1;
 }
 
 /** -------------------------------------------------------------------- */
@@ -742,6 +910,8 @@ export interface IntegratedBenchmarkCasesV1 {
   runSealAssemblerCustody64MiB(): Promise<number>;
   /** Batch recovery (Task 16). */
   runBatchRecovery(): Promise<number>;
+  /** ONE indexed slot read through the real projection (p95 bound). */
+  runIndexedSlotRead(): Promise<number>;
 }
 
 /** Evidence record shape (brief Step 3); Task 19 freezes values. */
@@ -750,7 +920,7 @@ export interface IntegratedBenchmarkEvidenceV1 {
   mode: 'integrated-qualify';
   runner: { runnerId: string; runnerVersion: string; descriptorDigest: string };
   gitCommit: string;
-  cleanSourceDigest: string;
+  sourceTreeDigest: string;
   packageLockSha256: string;
   dependencyVersions: { 'isolated-vm': string; 're2-wasm': string; '@earendil-works/pi-ai': string };
   warmupCount: number;
@@ -780,7 +950,6 @@ async function runIntegratedQualify(args: CliArgs): Promise<never> {
   if (args.profile === undefined || args.evidence === undefined) {
     throw new BenchmarkError(BENCHMARK_USAGE, 'integrated-qualify requires --profile and --evidence', 2);
   }
-  const state = { peakRssBytes: 0, diskBytes: 0 };
 
   // Reproducible-evidence discipline FIRST: refuse a runner mismatch or a
   // dirty source tree outside the generated-output allowlist before any run.
@@ -788,7 +957,7 @@ async function runIntegratedQualify(args: CliArgs): Promise<never> {
   assertCleanSourceTree();
   const evidenceFacts = {
     gitCommit: gitCommit(),
-    cleanSourceDigest: cleanSourceDigest(),
+    sourceTreeDigest: cleanSourceDigest(),
     packageLockSha256: packageLockSha256(),
     dependencyVersions: dependencyVersions(),
   };
@@ -803,12 +972,8 @@ async function runIntegratedQualify(args: CliArgs): Promise<never> {
     );
   }
 
-  // Import the real Task 10/16 integrated adapter (no stubs).
-  const { createIntegratedBenchmarkAdapter } = await import('./structured-integrated-benchmark-adapter');
-  const candidate = STRUCTURED_SLOT_PROFILE_CANDIDATE;
-
-  // The acceptance bounds (Task 19 Step 6, spec §16.3).
-  const BOUNDS = {
+  // The acceptance bounds (Task 19 Step 6, spec §16.3) — frozen, never changed.
+  const BOUNDS: ScaleBounds = {
     indexedSlotP95Ms: 25,
     treeMatch10kMaxMs: 2000,
     contentRootMaxMs: 2000,
@@ -821,127 +986,60 @@ async function runIntegratedQualify(args: CliArgs): Promise<never> {
   const scales = [100, 75, 50, 25];
   const perScaleResults: Array<Record<string, unknown>> = [];
 
-  /** Builds a scaled limits object (every axis scaled uniformly). */
-  function scaledLimits(percentage: number): StructuredSlotLimitsV1 {
-    const factor = percentage / 100;
-    const scaleGroup = (group: Record<string, number>): Record<string, number> => {
-      const out: Record<string, number> = {};
-      for (const [key, value] of Object.entries(group)) {
-        out[key] = Math.max(1, Math.floor(value * factor));
-      }
-      return out;
-    };
-    return {
-      schema: scaleGroup(candidate.schema),
-      structure: scaleGroup(candidate.structure),
-      payload: scaleGroup(candidate.payload),
-      draft: scaleGroup(candidate.draft),
-      attempt: scaleGroup(candidate.attempt),
-      validation: scaleGroup(candidate.validation),
-      output: scaleGroup(candidate.output),
-    } as StructuredSlotLimitsV1;
-  }
+  // The child invokes the benchmark script itself under the tsx CLI in a
+  // FRESH process, so each scale measures against a clean V8 heap — a prior
+  // scale's transient peak can never leak into a later scale's verdict.
+  const tsxCli = resolve(repoRoot(), 'node_modules', 'tsx', 'dist', 'cli.mjs');
+  const scriptPath = resolve(SCRIPT_DIR, 'benchmark-structured-slots.ts');
+  const adapterPath =
+    args.adapter !== undefined
+      ? resolve(repoRoot(), args.adapter)
+      : resolve(SCRIPT_DIR, 'structured-integrated-benchmark-adapter.ts');
 
   for (const percentage of scales) {
     process.stdout.write(`[benchmark] integrated scale ${percentage}%\n`);
-    const limits = scaledLimits(percentage);
-    const tempRoot = mkdtempSync(join(tmpdir(), 'forge-structured-integrated-'));
-    const paths = CorePaths.create({ dataRoot: tempRoot, templateRoot: join(tempRoot, 'templates') });
-    const taskId = `bench-integrated-${percentage}`;
-    state.diskBytes += 0; // measured per adapter run below
-    const adapter = await createIntegratedBenchmarkAdapter({ paths, taskId, limits, scale: percentage / 100 });
-
-    const scaleCases: CaseDefinition[] = [
-      {
-        id: 'authorized-projection-500-issues',
-        description: `500-issue authorized owner projection (Task 10) @ ${percentage}%`,
-        warmup: 0,
-        samples: 1,
-        unit: async () => adapter.runAuthorizedProjection500Issues(),
-      },
-      {
-        id: 'seal-assembler-custody',
-        description: `64 MiB real Seal/Assembler/custody (Task 16) @ ${percentage}%`,
-        warmup: 0,
-        samples: 1,
-        unit: async () => adapter.runSealAssemblerCustody64MiB(),
-      },
-      {
-        id: 'batch-recovery',
-        description: `batch recovery (Task 16) @ ${percentage}%`,
-        warmup: 0,
-        samples: 1,
-        unit: async () => adapter.runBatchRecovery(),
-      },
-    ];
-    const scaleState = { peakRssBytes: 0, diskBytes: 0 };
-    const results: CaseResult[] = [];
-    // The primitive cases measure the platform primitives the structured
-    // runtime is built on (tree match, content root, Draft journal) — their
-    // bounds (10k tree ≤ 2 s, content-root ≤ 2 s, Draft ≤ 2 s) are part of the
-    // integrated acceptance. The setup uses the SCALED limits so every axis is
-    // evaluated at this scale.
-    const primitiveSetup = buildPrimitiveSetup({ limits }, scaleState);
-    for (const definition of primitiveCases(primitiveSetup)) {
-      const result = await measureCase(definition, scaleState);
-      results.push(result);
-      printCaseRecord(result, scaleState.peakRssBytes);
-    }
-    for (const definition of scaleCases) {
-      const result = await measureCase(definition, scaleState);
-      results.push(result);
-      printCaseRecord(result, scaleState.peakRssBytes);
-    }
-    // Indexed slot read p95: a SINGLE real owner-projection read through the
-    // same projection service (spec §16.3: indexed slot p95 <= 25 ms).
-    const indexedRead = await measureCase(
-      {
-        id: 'indexed-slot-read',
-        description: `indexed slot read (real projection) @ ${percentage}%`,
-        warmup: 3,
-        samples: 10,
-        unit: async () => adapter.runIndexedSlotRead(),
-      },
-      scaleState,
+    const child = spawnSync(
+      process.execPath,
+      [tsxCli, scriptPath, '--mode', 'integrated-scale', '--scale', String(percentage), '--adapter', adapterPath],
+      { cwd: repoRoot(), encoding: 'utf8', timeout: 600_000 },
     );
-    results.push(indexedRead);
-    printCaseRecord(indexedRead, scaleState.peakRssBytes);
-    state.peakRssBytes = Math.max(state.peakRssBytes, scaleState.peakRssBytes);
-
-    const byId = new Map(results.map((result) => [result.id, result]));
-    const p95 = (id: string): number => byId.get(id)?.p95Ms ?? 0;
-    const max = (id: string): number => byId.get(id)?.maxMs ?? 0;
-    const violations: string[] = [];
-    if (p95('indexed-slot-read') > BOUNDS.indexedSlotP95Ms) violations.push('indexed-slot-read p95');
-    if (max('tree-match-10k') > BOUNDS.treeMatch10kMaxMs) violations.push('tree-match-10k');
-    if (max('content-root-64mib') > BOUNDS.contentRootMaxMs) violations.push('content-root-64mib');
-    if (max('draft-journal-2k') > BOUNDS.draftMaxMs) violations.push('draft-journal-2k');
-    if (max('seal-assembler-custody') > BOUNDS.sealMaxMs) violations.push('seal-assembler-custody');
-    if (p95('authorized-projection-500-issues') > BOUNDS.issueProjectionMaxMs) {
-      violations.push('authorized-projection-500-issues');
+    const report = parseIntegratedScaleResult(child.stdout ?? '', percentage);
+    if (child.status !== 0 || report === null) {
+      const stderrTail = (child.stderr ?? '')
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0)
+        .slice(-5)
+        .join(' | ');
+      throw new BenchmarkError(
+        BENCHMARK_CHILD_FAILED,
+        `child for scale ${percentage}% exited ${child.status ?? 'err'} with ${
+          report === null ? 'no parseable integrated-scale-result line' : 'a failed child'
+        }${stderrTail.length > 0 ? `: ${stderrTail}` : ''}`,
+        7,
+      );
     }
-    if (state.peakRssBytes > BOUNDS.peakRssBytes) violations.push(`peak RSS ${state.peakRssBytes} > ${BOUNDS.peakRssBytes}`);
+
+    // Verdict uses ONLY this scale's own peak RSS and timings.
+    const { violations, passed } = evaluateScaleReport(report, BOUNDS);
     perScaleResults.push({
       scale: percentage,
-      results: results.map((r) => ({
+      results: report.results.map((r) => ({
         id: r.id,
+        description: r.description,
+        warmup: r.warmup,
+        samples: r.samples,
         p50Ms: round(r.p50Ms),
         p95Ms: round(r.p95Ms),
         maxMs: round(r.maxMs),
         sampleDigest: r.sampleDigest,
       })),
-      peakRssBytes: state.peakRssBytes,
+      peakRssBytes: report.peakRssBytes,
+      diskBytes: report.diskBytes,
       violations,
-      passed: violations.length === 0,
+      passed,
     });
-    process.stdout.write(
-      `[benchmark] scale ${percentage}% -> ${violations.length === 0 ? 'PASS' : `FAIL (${violations.join(', ')})`}\n`,
-    );
-    try {
-      rmSync(tempRoot, { recursive: true, force: true });
-    } catch {
-      // best-effort temp cleanup
-    }
+    process.stdout.write(`[benchmark] scale ${percentage}% -> ${passed ? 'PASS' : `FAIL (${violations.join(', ')})`}\n`);
   }
 
   // Freeze the GREATEST passing scale — never a higher one.
@@ -952,7 +1050,8 @@ async function runIntegratedQualify(args: CliArgs): Promise<never> {
   if (greatest === null || frozenLimits === null) {
     // HONEST failure: no scale satisfies every bound. No final profile is
     // written, no release evidence, no capability enable. The measurements are
-    // recorded for a future qualifying host.
+    // recorded for a future qualifying host — the failure evidence is exact-
+    // validated and written to the plan's evidence path so it is never lost.
     const failureEvidence = {
       schemaVersion: 1,
       mode: 'integrated-qualify',
@@ -963,6 +1062,15 @@ async function runIntegratedQualify(args: CliArgs): Promise<never> {
       perScaleResults,
       selectionReason: 'no 100/75/50/25% scale of the candidate axes satisfied every acceptance bound',
     };
+    try {
+      validateProfileEvidenceFailure(failureEvidence);
+    } catch (error) {
+      throw new BenchmarkError(
+        BENCHMARK_EVIDENCE_INVALID,
+        error instanceof Error ? error.message : String(error),
+        3,
+      );
+    }
     mkdirSync(dirname(evidencePath), { recursive: true });
     writeFileSync(evidencePath, `${JSON.stringify(failureEvidence, null, 2)}\n`, 'utf8');
     process.stdout.write(`[benchmark] 无任何 scale 通过；失败证据已写入 ${evidencePath}\n`);
@@ -975,22 +1083,30 @@ async function runIntegratedQualify(args: CliArgs): Promise<never> {
 
   // Generate the profile evidence FIRST (no final-profile / release-evidence /
   // capability-manifest digest — the one-way chain forbids a self-reference),
-  // then hash that evidence into the final profile.
+  // then hash that evidence into the final profile. Every case entry carries
+  // the REAL warmup/samples/sampleDigest/p50/p95/max measured by the child;
+  // peakRssBytes and diskBytes are the child's own values for the frozen scale.
   const scaleRecord = perScaleResults.find((entry) => entry.scale === greatest);
+  const scaleResults = (scaleRecord?.results as Array<Record<string, unknown>>) ?? [];
+  // warmupCount/sampleCount are the ACTUAL totals summed across the frozen
+  // scale's cases (documented choice: sum, not max, so the evidence reflects
+  // every measured warmup + sample unit).
+  const warmupCount = scaleResults.reduce((sum, entry) => sum + (entry.warmup as number), 0);
+  const sampleCount = scaleResults.reduce((sum, entry) => sum + (entry.samples as number), 0);
   const evidence: IntegratedBenchmarkEvidenceV1 = {
     schemaVersion: 1,
     mode: 'integrated-qualify',
     runner,
     ...evidenceFacts,
-    warmupCount: 1,
-    sampleCount: 1,
-    peakRssBytes: state.peakRssBytes,
-    diskBytes: state.diskBytes,
-    cases: (scaleRecord?.results as Array<Record<string, unknown>>).map((entry) => ({
+    warmupCount,
+    sampleCount,
+    peakRssBytes: Number(scaleRecord?.peakRssBytes),
+    diskBytes: Number(scaleRecord?.diskBytes),
+    cases: scaleResults.map((entry) => ({
       id: String(entry.id),
       rawSampleDigest: String(entry.sampleDigest),
-      samples: 1,
-      warmup: 0,
+      samples: Number(entry.samples),
+      warmup: Number(entry.warmup),
       p50Ms: Number(entry.p50Ms),
       p95Ms: Number(entry.p95Ms),
       maxMs: Number(entry.maxMs),
@@ -1001,6 +1117,15 @@ async function runIntegratedQualify(args: CliArgs): Promise<never> {
     bounds: BOUNDS,
     perScaleResults,
   };
+  try {
+    validateProfileEvidence(evidence);
+  } catch (error) {
+    throw new BenchmarkError(
+      BENCHMARK_EVIDENCE_INVALID,
+      error instanceof Error ? error.message : String(error),
+      3,
+    );
+  }
   mkdirSync(dirname(evidencePath), { recursive: true });
   writeFileSync(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`, 'utf8');
   const evidenceDigest = canonicalJsonSha256(evidence);
@@ -1020,6 +1145,144 @@ async function runIntegratedQualify(args: CliArgs): Promise<never> {
     BENCHMARK_INTEGRATED_FROZEN,
     `integrated qualification froze the final profile at ${greatest}%`,
     0,
+  );
+}
+
+/** Parses the child's single `integrated-scale-result` JSON line. */
+function parseIntegratedScaleResult(stdout: string, scale: number): IntegratedScaleReport | null {
+  for (const line of stdout.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    try {
+      const parsed = JSON.parse(trimmed) as Partial<IntegratedScaleReport>;
+      if (parsed.event === 'integrated-scale-result' && parsed.scale === scale) {
+        return parsed as IntegratedScaleReport;
+      }
+    } catch {
+      // ignore stray non-JSON output lines
+    }
+  }
+  return null;
+}
+
+/**
+ * HIDDEN child-worker mode: measures ONE scale in a FRESH process and prints a
+ * single machine-readable `integrated-scale-result` JSON line, then exits 0.
+ * The OS high-water mark (`osMaxRssBytes`) plus the per-unit RSS sampling in
+ * `measureCase` capture the during-operation peak, including transient
+ * allocations that post-unit sampling alone would miss.
+ */
+async function runIntegratedScale(args: CliArgs): Promise<void> {
+  if (args.scale === undefined || args.adapter === undefined) {
+    throw new BenchmarkError(BENCHMARK_USAGE, 'integrated-scale requires --scale and --adapter', 2);
+  }
+  const percentage = args.scale;
+  const limits = scaledLimits(percentage);
+  const tempRoot = mkdtempSync(join(tmpdir(), 'forge-structured-integrated-'));
+  const paths = CorePaths.create({ dataRoot: tempRoot, templateRoot: join(tempRoot, 'templates') });
+  const taskId = `bench-integrated-${percentage}`;
+
+  // Import the real Task 10/16 integrated adapter (no stubs) from the path the
+  // orchestrator passed (resolved relative to the repo root in the parent).
+  // Under jsdom/web transform mode vite rewrites a variable dynamic import into
+  // `__vite__injectQuery(...)` and prepends a `/@vite/client` import; the
+  // shebang-less top of this file keeps that output parseable when tests import
+  // this module, and the `@vite-ignore` comment suppresses vite's static-
+  // analysis warning. At runtime (tsx/node, ssr transform) this stays a plain
+  // `import(adapterPath)`.
+  const { createIntegratedBenchmarkAdapter } = await import(/* @vite-ignore */ args.adapter);
+  const adapter = await createIntegratedBenchmarkAdapter({ paths, taskId, limits });
+
+  const scaleState = { peakRssBytes: 0, diskBytes: 0 };
+  const results: CaseResult[] = [];
+  // The primitive cases measure the platform primitives the structured runtime
+  // is built on (tree match, content root, Draft journal) — their bounds
+  // (10k tree ≤ 2 s, content-root ≤ 2 s, Draft ≤ 2 s) are part of the
+  // integrated acceptance. The setup uses the SCALED limits so every axis is
+  // evaluated at this scale.
+  const primitiveSetup = buildPrimitiveSetup({ limits }, scaleState);
+  for (const definition of primitiveCases(primitiveSetup)) {
+    results.push(await measureCase(definition, scaleState));
+  }
+  const scaleCases: CaseDefinition[] = [
+    {
+      id: 'authorized-projection-500-issues',
+      description: `500-issue authorized owner projection (Task 10) @ ${percentage}%`,
+      warmup: 0,
+      samples: 1,
+      unit: async () => adapter.runAuthorizedProjection500Issues(),
+    },
+    {
+      id: 'seal-assembler-custody',
+      description: `64 MiB real Seal/Assembler/custody (Task 16) @ ${percentage}%`,
+      warmup: 0,
+      samples: 1,
+      unit: async () => adapter.runSealAssemblerCustody64MiB(),
+    },
+    {
+      id: 'batch-recovery',
+      description: `batch recovery (Task 16) @ ${percentage}%`,
+      warmup: 0,
+      samples: 1,
+      unit: async () => adapter.runBatchRecovery(),
+    },
+  ];
+  for (const definition of scaleCases) {
+    results.push(await measureCase(definition, scaleState));
+  }
+  // Indexed slot read p95: a SINGLE real owner-projection read through the
+  // same projection service (spec §16.3: indexed slot p95 <= 25 ms).
+  const indexedRead = await measureCase(
+    {
+      id: 'indexed-slot-read',
+      description: `indexed slot read (real projection) @ ${percentage}%`,
+      warmup: 3,
+      samples: 10,
+      unit: async () => adapter.runIndexedSlotRead(),
+    },
+    scaleState,
+  );
+  results.push(indexedRead);
+
+  // Peak = max of the OS high-water mark (captures DURING-operation peaks) and
+  // the per-unit post-sample RSS sampling. Disk bytes = the REAL on-disk
+  // footprint walked over this child's temp task root + snapshot + primitive
+  // fanout temp root after the whole scale run.
+  const peakRssBytes = Math.max(osMaxRssBytes(), scaleState.peakRssBytes);
+  const diskBytes = sumDirectoryBytes(tempRoot) + sumDirectoryBytes(primitiveSetup.fanoutPaths.dataRoot);
+
+  try {
+    rmSync(tempRoot, { recursive: true, force: true });
+  } catch {
+    // best-effort temp cleanup
+  }
+  try {
+    rmSync(primitiveSetup.fanoutPaths.dataRoot, { recursive: true, force: true });
+  } catch {
+    // best-effort temp cleanup
+  }
+
+  process.stdout.write(
+    `${JSON.stringify({ event: 'integrated-scale-result', scale: percentage, results, peakRssBytes, diskBytes })}\n`,
+  );
+}
+
+/**
+ * HIDDEN helper for the isolation regression test: spawns a fresh process,
+ * optionally allocates a transient buffer, then reports its OWN peak RSS as a
+ * single machine-readable JSON line. Used to prove two children spawned
+ * sequentially never share a peak (P1-1 regression (b)).
+ */
+async function runAllocProbe(args: CliArgs): Promise<void> {
+  const bytes = args.allocBytes ?? 0;
+  if (bytes > 0) {
+    const buffer = Buffer.alloc(bytes, 1);
+    if (buffer.length !== bytes) throw new Error('BENCHMARK_ALLOC_PROBE_FAILED');
+    // Keep the allocation alive briefly so the OS high-water mark reflects it.
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+  }
+  process.stdout.write(
+    `${JSON.stringify({ event: 'alloc-probe', bytes, maxRssBytes: osMaxRssBytes(), rssBytes: process.memoryUsage().rss })}\n`,
   );
 }
 
@@ -1067,21 +1330,37 @@ async function main(argv: readonly string[]): Promise<number> {
     await runPrimitiveSmoke();
     return 0;
   }
+  if (args.mode === 'integrated-scale') {
+    await runIntegratedScale(args);
+    return 0;
+  }
+  if (args.mode === 'alloc-probe') {
+    await runAllocProbe(args);
+    return 0;
+  }
   await runIntegratedQualify(args);
   return 0;
 }
 
-main(process.argv.slice(2)).then(
-  (code) => {
-    process.exitCode = code;
-  },
-  (error: unknown) => {
-    if (error instanceof BenchmarkError) {
-      process.stderr.write(`${error.message}\n`);
-      process.exitCode = error.exitCode;
-      return;
-    }
-    process.stderr.write(`BENCHMARK_FAILED: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
-    process.exitCode = 1;
-  },
-);
+// Only run when invoked directly (node/tsx <this script>). When the module is
+// imported by tests or other scripts, `main` must NOT run — process.argv[1]
+// points at the runner (vitest worker / tsx) rather than this file.
+const isDirectRun =
+  process.argv[1] !== undefined && resolve(process.argv[1]) === resolve(SCRIPT_DIR, 'benchmark-structured-slots.ts');
+
+if (isDirectRun) {
+  main(process.argv.slice(2)).then(
+    (code) => {
+      process.exitCode = code;
+    },
+    (error: unknown) => {
+      if (error instanceof BenchmarkError) {
+        process.stderr.write(`${error.message}\n`);
+        process.exitCode = error.exitCode;
+        return;
+      }
+      process.stderr.write(`BENCHMARK_FAILED: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+      process.exitCode = 1;
+    },
+  );
+}

@@ -7,11 +7,15 @@
  * scaled real task and drives these cases through the SAME modules the
  * production runtime uses.
  *
- * The adapter is scale-parameterized: at `scale` it builds a scaffold with
- * `maxSlots * scale` slots and a content root of `maxScaffoldPayloadBytes *
- * scale` bytes, so the benchmark can try 100%/75%/50%/25% per candidate axis
- * and freeze the greatest passing value. It creates NO release evidence on its
- * own and writes nothing outside the benchmark's temp roots.
+ * The adapter receives the ALREADY-SCALED limits from the benchmark harness and
+ * applies exactly ONE scaling boundary: the built scaffold uses
+ * `limits.structure.maxSlots` filled slots and a content root of
+ * `limits.payload.maxScaffoldPayloadBytes` bytes directly (never multiplied by
+ * a scale factor again — the harness scales the candidate axes and the adapter
+ * consumes those scaled limits verbatim). The benchmark tries
+ * 100%/75%/50%/25% per candidate axis and freezes the greatest passing value.
+ * It creates NO release evidence on its own and writes nothing outside the
+ * benchmark's temp roots.
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -68,26 +72,49 @@ interface BenchTask {
 }
 
 /**
+ * The exact load the built bench task must carry for one scaled limits object.
+ * Single scaling boundary: the scaffold holds `limits.structure.maxSlots`
+ * filled slots and a `limits.payload.maxScaffoldPayloadBytes` content root —
+ * never a further scale factor (the harness already scaled the candidate axes).
+ */
+export function integratedTaskLoad(limits: StructuredSlotLimitsV1): { slotCount: number; contentBytes: number } {
+  return {
+    slotCount: Math.max(2, limits.structure.maxSlots),
+    contentBytes: Math.max(1024, limits.payload.maxScaffoldPayloadBytes),
+  };
+}
+
+/**
  * Builds one scaled real task with a committed scaffold + content root. The
  * validator is scaffold-scoped (one invocation) so the 64 MiB seal case
  * measures the content-root processing / Assembler / custody work — the
  * per-slot validator fanout is deliberately budgeted OUT of that bound
  * (spec §16.3) and measured separately by the primitive fanout case.
+ *
+ * The scaffold is a deliberately shallow stress fixture: every filled slot is a
+ * direct child of the root, so the layout grammar's `document` children ceiling
+ * must reach `maxSlots` for the tree to seal. The bench contract raises
+ * `maxChildrenPerSlot` to `max(maxSlots, maxChildrenPerSlot)` solely so the
+ * depth-1 scaffold is internally legal; the evidence `frozenLimits` still
+ * records the harness's scaled candidate limits, not this internal fixture
+ * ceiling.
  */
-async function buildBenchTask(
+export async function buildBenchTask(
   paths: CorePaths,
   taskId: string,
   limits: StructuredSlotLimitsV1,
-  scale: number,
 ): Promise<BenchTask> {
   mkdirSync(paths.taskRoot(taskId), { recursive: true });
   const blobStore = new StructuredSlotBlobStore(paths, taskId);
 
-  const slotCount = Math.min(
-    Math.max(2, Math.floor(limits.structure.maxSlots * scale)),
-    limits.structure.maxChildrenPerSlot,
-  );
-  const contentBytes = Math.max(1024, Math.floor(limits.payload.maxScaffoldPayloadBytes * scale));
+  const { slotCount, contentBytes } = integratedTaskLoad(limits);
+  const contractLimits: StructuredSlotLimitsV1 = {
+    ...limits,
+    structure: {
+      ...limits.structure,
+      maxChildrenPerSlot: Math.max(limits.structure.maxSlots, limits.structure.maxChildrenPerSlot),
+    },
+  };
 
   const slotType = {
     id: 'node',
@@ -113,7 +140,7 @@ async function buildBenchTask(
           children: {
             kind: 'repeat',
             min: 1,
-            max: limits.structure.maxChildrenPerSlot,
+            max: contractLimits.structure.maxChildrenPerSlot,
             item: { kind: 'slot', type: 'node' },
           },
         },
@@ -121,7 +148,7 @@ async function buildBenchTask(
       },
     },
     new Set(['document', 'node']),
-    limits,
+    contractLimits,
   );
   const contract: FrozenStructuredSlotContractV1 = {
     version: 1,
@@ -135,7 +162,7 @@ async function buildBenchTask(
     // Assembler and custody.
     validators: [],
     assembler,
-    limits,
+    limits: contractLimits,
     resourceManifest: [
       { logicalPath: 'slots/assembler/bench.cjs', sha256: sha256Hex(BENCH_ASSEMBLER_SOURCE) },
     ],
@@ -224,16 +251,17 @@ async function buildBenchTask(
 
 /**
  * Creates the integrated benchmark cases over one scaled real task. Each case
- * returns the wall-clock ms of one real run.
+ * returns the wall-clock ms of one real run. `limits` are the harness's
+ * ALREADY-SCALED limits — the adapter never scales them again (single scaling
+ * boundary).
  */
 export async function createIntegratedBenchmarkAdapter(options: {
   paths: CorePaths;
   taskId: string;
   limits: StructuredSlotLimitsV1;
-  scale: number;
 }): Promise<IntegratedBenchmarkCasesV1> {
-  const { paths, taskId, limits, scale } = options;
-  const task = await buildBenchTask(paths, taskId, limits, scale);
+  const { paths, taskId, limits } = options;
+  const task = await buildBenchTask(paths, taskId, limits);
   const events = new EventStore(paths);
   const readEvents = async (): Promise<readonly CommittedEvent[]> => events.read(taskId);
   const blobStore = new StructuredSlotBlobStore(paths, taskId);
@@ -337,7 +365,10 @@ export async function createIntegratedBenchmarkAdapter(options: {
 
     async runBatchRecovery(): Promise<number> {
       const started = Date.now();
-      const batchCount = Math.max(8, Math.floor(100 * scale));
+      // Fixed, scale-independent batch count: there is no limits axis that
+      // scales the batch-recovery journal load, so the case always replays a
+      // documented 100 committed batches at every candidate scale.
+      const batchCount = 100;
       const appendBatch = (
         commitId: string,
         batch: readonly TaskEvent[],
