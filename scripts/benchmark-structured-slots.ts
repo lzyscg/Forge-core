@@ -44,7 +44,7 @@ import { cpus, tmpdir, totalmem } from 'node:os';
 import { join, resolve, dirname, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
-import { canonicalJson, canonicalJsonSha256 } from '../src/server/structured-slots/canonical-json';
+import { canonicalJsonSha256, canonicalJsonBytesAndSha256 } from '../src/server/structured-slots/canonical-json';
 import { compileSlotSchemaV1 } from '../src/server/structured-slots/slot-schema';
 import {
   compileLayoutGrammarV1,
@@ -323,8 +323,8 @@ export function sumDirectoryBytes(root: string): number {
  * `raw < currentRss` proves the value is kilobytes (it is ~currentRss/1024)
  * and it is multiplied by 1024; otherwise it is already bytes. This captures
  * DURING-operation peaks that per-unit `process.memoryUsage().rss` sampling
- * after each unit can miss (e.g. the 40x transient canonicalJson+sha256
- * allocation of the 64 MiB content-root case).
+ * after each unit can miss (e.g. the one-pass canonical-json encode + Buffer +
+ * sha256 allocation of the large content-root case).
  */
 export function osMaxRssBytes(): number {
   const raw = process.resourceUsage().maxRSS;
@@ -674,6 +674,28 @@ function buildPrimitiveSetup(
   };
 }
 
+export interface ContentRootMeasurementV1 {
+  digest: string;
+  byteLength: number;
+}
+
+/**
+ * ONE-pass content-root measurement: canonicalize the root to bytes and hash
+ * those bytes in a single serialization/encode/hash (never the old pair of
+ * `canonicalJsonSha256` + `canonicalJson` on the same value, which encoded the
+ * payload twice). The returned byteLength is the exact canonical byte length.
+ */
+export function measureContentRootOnePass(
+  contentRoot: Record<string, unknown>,
+  minByteLength: number,
+): ContentRootMeasurementV1 {
+  const { bytes, sha256 } = canonicalJsonBytesAndSha256(contentRoot);
+  if (sha256.length !== 64 || bytes.length < minByteLength) {
+    throw new Error('BENCHMARK_CONTENT_ROOT_FAILED');
+  }
+  return { digest: sha256, byteLength: bytes.length };
+}
+
 function primitiveCases(setup: PrimitiveSetup): CaseDefinition[] {
   const containerLocation = {
     kind: 'slot' as const,
@@ -748,8 +770,9 @@ function primitiveCases(setup: PrimitiveSetup): CaseDefinition[] {
       samples: 3,
       unit: () => {
         const started = performance.now();
-        const digest = canonicalJsonSha256(setup.contentRoot); // write
-        const byteLength = Buffer.byteLength(canonicalJson(setup.contentRoot), 'utf8'); // read
+        // ONE canonicalization: encode + digest in a single pass (the read-back
+        // byte length comes from the same bytes, never a second canonicalJson).
+        const { digest, byteLength } = measureContentRootOnePass(setup.contentRoot, setup.contentRootBytes);
         if (digest.length !== 64 || byteLength < setup.contentRootBytes) {
           throw new Error('BENCHMARK_CONTENT_ROOT_FAILED');
         }

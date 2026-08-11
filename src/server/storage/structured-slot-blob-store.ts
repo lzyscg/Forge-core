@@ -37,7 +37,7 @@ import { createHash } from 'node:crypto';
 import { open, readFile } from 'node:fs/promises';
 import type { CorePaths } from './core-paths';
 import { STORAGE_ERROR_CODES, StorageError, writeNewAtomic } from './atomic-file';
-import { canonicalJson, canonicalJsonBytes, canonicalJsonSha256 } from '../structured-slots/canonical-json';
+import { canonicalJson, canonicalJsonBytes, canonicalJsonBytesAndSha256 } from '../structured-slots/canonical-json';
 import type { JsonValue, SlotInstance, StructuredBlobRefV1 } from '../../shared/structured-slots';
 import type { StructuredBlobKind } from './task-events';
 
@@ -221,16 +221,16 @@ export class StructuredSlotBlobStore {
    * and does not affect the digest (spec §7.2).
    */
   async putJsonBlob(value: unknown, kind: StructuredBlobKind): Promise<StructuredBlobRefV1> {
-    const bytes = canonicalJsonBytes(value);
-    const sha256 = canonicalJsonSha256(value);
+    // One serialization + one UTF-8 encode + one hash (never canonicalize
+    // the same payload twice).
+    const { bytes, sha256 } = canonicalJsonBytesAndSha256(value);
     await this.writeBlobBytes(bytes, sha256);
     return { version: 1, kind, sha256, byteLength: bytes.length };
   }
 
   /** Content value blob referenced by digest inside a revision root. */
   async putContentValue(value: unknown): Promise<{ sha256: string; byteLength: number }> {
-    const bytes = canonicalJsonBytes(value);
-    const sha256 = canonicalJsonSha256(value);
+    const { bytes, sha256 } = canonicalJsonBytesAndSha256(value);
     await this.writeBlobBytes(bytes, sha256);
     return { sha256, byteLength: bytes.length };
   }
@@ -326,7 +326,8 @@ export class StructuredSlotBlobStore {
       byType,
       documentOrder,
     };
-    const indexBytes = canonicalJsonBytes(index);
+    // One serialization + one encode + one hash for the index bytes and digest.
+    const { bytes: indexBytes, sha256: indexSha256 } = canonicalJsonBytesAndSha256(index);
     await writeNewAtomicIdempotent(this.paths.taskStructuredGenerationIndexFile(this.taskId, generationId), indexBytes);
 
     const manifest: GenerationManifestV1 = {
@@ -341,7 +342,7 @@ export class StructuredSlotBlobStore {
       slotsNdjsonSha256: createHash('sha256').update(slotsNdjsonBytes).digest('hex'),
       slotsNdjsonByteLength: slotsNdjsonBytes.length,
       indexFile: 'index.json',
-      indexSha256: canonicalJsonSha256(index),
+      indexSha256,
       indexByteLength: indexBytes.length,
     };
     try {
@@ -444,8 +445,7 @@ export class StructuredSlotBlobStore {
       assertMapping(value);
     }
     const root: ContentRootV1 = { version: 1, mappings };
-    const bytes = canonicalJsonBytes(root);
-    const sha256 = canonicalJsonSha256(root);
+    const { bytes, sha256 } = canonicalJsonBytesAndSha256(root);
     const destination = this.paths.taskStructuredContentRevisionFile(this.taskId, sha256);
     try {
       await writeNewAtomic(destination, bytes);

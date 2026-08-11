@@ -5,10 +5,12 @@
  */
 import { describe, it, expect } from 'vitest';
 import { createHash } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import {
   canonicalJson,
   canonicalJsonBytes,
   canonicalJsonSha256,
+  canonicalJsonBytesAndSha256,
 } from './canonical-json';
 
 describe('canonicalJson — JCS core', () => {
@@ -219,5 +221,60 @@ describe('canonicalJsonBytes / canonicalJsonSha256', () => {
     const long = 'x'.repeat(100_000);
     expect(canonicalJsonBytes(long).toString('utf8')).toBe(canonicalJson(long));
     expect(canonicalJsonSha256(long)).toBe(createHash('sha256').update(canonicalJsonBytes(long)).digest('hex'));
+  });
+});
+
+describe('canonicalJsonBytesAndSha256 — one-pass interface (Task B)', () => {
+  it('bytes and sha256 equal the individual functions for a diverse value set', () => {
+    const values: unknown[] = [
+      { nested: { list: [1, 'a', 5e-324], 'é': '😀' }, z: -0 },
+      ['line1\nline2', ' ', 'a"b\\c', '😀'],
+      { control: ' ', quote: 'a"b', slash: 'a\\b' },
+      { keys: { 'é': 1, '😀': 2, z: -0 } },
+      null,
+      true,
+      false,
+      -0,
+      0,
+      1e21,
+      5e-324,
+      'plain',
+      'x'.repeat(100_000),
+    ];
+    for (const value of values) {
+      const one = canonicalJsonBytesAndSha256(value);
+      expect(one.bytes.equals(canonicalJsonBytes(value))).toBe(true);
+      expect(one.sha256).toBe(canonicalJsonSha256(value));
+      expect(one.bytes.toString('utf8')).toBe(canonicalJson(value));
+    }
+  });
+
+  it('is deterministic', () => {
+    const value = { a: [1, { b: 'é😀\n' }], c: -0 };
+    const first = canonicalJsonBytesAndSha256(value);
+    const second = canonicalJsonBytesAndSha256(value);
+    expect(first.bytes.equals(second.bytes)).toBe(true);
+    expect(first.sha256).toBe(second.sha256);
+    expect(first).toEqual(second);
+  });
+
+  it('a 4 MiB plain string round-trips byte-identically and fast (fast-path precondition)', () => {
+    const long = 'x'.repeat(4 * 1024 * 1024);
+    const started = performance.now();
+    const one = canonicalJsonBytesAndSha256(long);
+    const wallMs = performance.now() - started;
+    expect(one.bytes.toString('utf8')).toBe(`"${long}"`);
+    expect(one.sha256).toBe(canonicalJsonSha256(long));
+    // Generous fast-path guard: a per-character `out +=` rope build of 4 MiB
+    // takes hundreds of ms and hundreds of MB; the single-concat fast path is
+    // a few ms. The subprocess regression is the tight RSS lock; this only
+    // guards against re-introducing a pathological serialization in-process.
+    expect(wallMs).toBeLessThan(5_000);
+  });
+
+  it('rejects the same invalid values the canonical string serializer rejects', () => {
+    expect(() => canonicalJsonBytesAndSha256('\ud800')).toThrow('CANONICAL_JSON_INVALID');
+    expect(() => canonicalJsonBytesAndSha256('x\udfff')).toThrow('CANONICAL_JSON_INVALID');
+    expect(() => canonicalJsonBytesAndSha256(Number.NaN)).toThrow('CANONICAL_JSON_INVALID');
   });
 });

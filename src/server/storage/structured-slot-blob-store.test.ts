@@ -100,6 +100,32 @@ describe('StructuredSlotBlobStore content addressing', () => {
       store.readBlob('f'.repeat(64)),
     ).rejects.toMatchObject({ code: 'TASK_CORRUPTED' });
   });
+
+  it('pins the putJsonBlob / putContentValue / putContentRevision digests (no one-pass drift)', async () => {
+    const { store } = makeStore();
+
+    // Golden digests computed from the pre-Task-B canonical serializer: the
+    // one-pass encode+hash must produce byte-identical canonical bytes, so the
+    // content-addressed digests/byteLengths never drift.
+    const blobRef = await store.putJsonBlob({ title: '相同的规范载荷', nested: { a: [1, 2, 3] } }, 'validation');
+    expect(blobRef.sha256).toBe('48435ecee11593599d9670afa09ca4851d70838b8af5f0525c84921a7e5bc8c9');
+    expect(blobRef.byteLength).toBe(56);
+
+    const changed = await store.putJsonBlob({ title: '不同' }, 'validation');
+    expect(changed.sha256).toBe('130f91a214b941f95be0e93a9f47998bb1846deb7dde36b22abba25fb935284e');
+    expect(changed.byteLength).toBe(18);
+
+    const content = await store.putContentValue({ title: '正文内容', tags: ['a', 'b'] });
+    expect(content.sha256).toBe('b2583db8bcca81ec68068c03ce43ffbf6c5051e74512c9840488cda6cd8ea1bd');
+    expect(content.byteLength).toBe(41);
+
+    const revision = await store.putContentRevision({
+      'slot-a': 'a'.repeat(64),
+      'slot-b': 'unset',
+    });
+    expect(revision.sha256).toBe('98fa1b7a39403c7c9b179b177f74c45b35d5b40b674d24f4a00bd399d88b4d0e');
+    expect(revision.byteLength).toBe(119);
+  });
 });
 
 describe('StructuredSlotBlobStore indexed generations', () => {
