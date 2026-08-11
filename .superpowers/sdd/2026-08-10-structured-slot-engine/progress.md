@@ -871,3 +871,179 @@ Codex 独立验收结论：Tasks 1-18 健康，但 Task 19 的 benchmark/evidenc
 - Production structured runtime capability: DISABLED (manifest disabled, profile provisional, qualify/promote correctly refuse).
 - Accurate failure evidence preserved at docs/evidence/structured-slot-platform-profile-v1.json (real, exact-validated).
 
+
+## Task 19 qualification performance remediation (2026-08-11, new round)
+
+### 权威顺序（已由 harness 重新核对）
+
+1. DESIGN §25-26；2. Spec；3. Plan；4. ledger；5. 当前实现与测试。
+HEAD 复核：5cfbfe0（当前 HEAD 与已知一致），工作树仅未跟踪失败证据（允许清单内，benchmark 可重写，不手工删除）。
+
+### 独立诊断确认的根因
+
+1. primitive smoke：schema/grammar/tree 后 RSS ~98MB；64MiB content-root canonicalization 后 RSS ~3.06GB；10k validator fanout 未再推高 → 内存根因是大字符串 canonical JSON 路径，非 isolated-vm fanout。
+2. canonical-json.ts serializeString 逐字符 `out +=` → 大字符串巨量中间表示（O(n²)）。
+3. blob-store 多处先 canonicalJsonBytes(value) 再 canonicalJsonSha256(value) → 同一载荷完整规范化两次。
+4. 同一机器 64MiB 用原生单次 JSON 编码 + Buffer + SHA-256 仅 ~173ms / RSS ~380MB → 512MiB 门槛可达。
+5. 500 issue 纯 projectStructuredVerdict p95 ~0.22ms；integrated case 25% 档 ~316ms；同 adapter 连续执行 245/60/57ms → 冷启动、generation index 重复读取、槽读取、内容全量 hydration 混入 projection。
+
+### 绝对禁止（本轮）
+
+- 不得提高/删除 512MiB、2s、250ms、30s 冻结门槛。
+- 不得删除真实 case、减少固定 10k tree/fanout 负载、伪造 evidence。
+- 不得手工把 capability 改为 enabled；不得加环境变量/后门/绕过 Loader。
+- 不得削弱 sandbox 隔离、安全校验、原子性、幂等、权限投影。
+- 不得 reset/clean/push/merge/改 main；不得覆盖无关改动。
+- 不得仅凭测试绿色宣称 production-ready。
+
+### 任务拆分（每 Task：独立实现 Agent → 独立 Spec Reviewer → 独立 Code Quality Reviewer → 修复回环 → 双审通过 → proof → 提交 → ledger）
+
+- Task A：锁定失败回归（大载荷 canonical JSON 子进程性能/RSS 回归 + 锁定现有 digest/JCS 语义 + projection 冷/热/纯测量分离）。
+- Task B：修复 canonical JSON（O(n) 字符串序列化，保留 JCS 遍历/键序/数字/非法校验，不得整体替换 JSON.stringify）+ 一次规范化同时得 bytes+sha256 + blob-store 各路径只编码一次；旧 digest/vector 完全一致。
+- Task C：修复投影/Seal N+1 I/O（GenerationIndex 按 generationId 缓存；presence/digest 映射与 content hydration 分离；listSlots 只读元数据；readSlot 只加载目标；Seal 批量/流式 generation 读取；有上限并发）。
+- Task D：校准 benchmark 真实边界（500 issue ≤250ms 精确测授权 verdict projection；冷/热 outline 作独立诊断；合理 warmup+多样本；总 child peak RSS 仍为 512MiB 权威门禁；逐 case RSS/耗时诊断；scales=100/75/50/25 冻结最大真实通过档；保持 required case + failure evidence fail-closed；澄清回写 Design/Spec/Plan/报告但不改冻结数值）。
+- Task E：主 Agent 亲自执行完整 proof + integrated-qualify；任一模通过 → qualify → promote-capability → production acceptance → 全量 proof → 校验 digest/回归/fail-closed/diff-check → final whole-branch reviewer（APPROVED 或带精确文件的 REVISE）；无档通过 → 诚实 disabled + 精确失败证据 + 下一步建议。
+
+
+## Task A — lock failure regressions (test-only, RED first)
+
+- Implementer: TBD (opus-tier)
+- Scope: (1) subprocess canonical-json perf/RSS regression (large payload, old O(n²)/rope-blowup must FAIL); (2) lock existing JCS digest vectors (string/number/key-sort/-0/lone-surrogate) — must stay green; (3) projection cold/hot/pure 500-issue separation measurement.
+- Owner: harness; must run RED against current code BEFORE any production change.
+
+
+## Task A (cont.)
+
+- Implementer agent: a7f54525444f6b914 (opus-tier)
+- Dispatch notes: subprocess canonical-json perf/RSS regression (large payload RED against current rope-blowup), lock JCS semantic vectors (must stay green), projection cold/hot/pure 500-issue separation (must pass current code with cold>hot margin).
+
+
+## Task A (cont.)
+
+- HEAD: 01aeafe "test: lock canonical-json perf/rss and projection separation regressions" (4 files +492, test-only)
+- Harness re-verify: RED subprocess regression FAILS current code (32MiB child peak ~1.25-1.36GiB > 1GiB guard); canonical-json semantic 25/25 PASS; projection separation 2/2 PASS (pure 0.41ms<30ms; cold 106ms > hot 55ms)
+- Dual review dispatched: Spec reviewer a4380791d844bb02d + Quality reviewer ac86c17126221b69d (parallel, read-only)
+
+
+## Task A dual review (quality)
+
+- Quality reviewer ac86c17126221b69d: **QUALITY-OK** — RED genuine (1.26GiB>1GiB, 3 runs), probe wall excludes bootstrap, self-calibrating maxRSS, 8 semantic vectors trap the JSON.stringify fast-path hazards, projection separation real (cold ~2x hot, pure ~66x under bound), no temp residue.
+- Task A minors (deferred, non-blocking): (1) RED margin ~1.25x — consider 512MiB guard for 2.6x margin; (2) no explicit it-timeout (add 30_000); (3) p95 at n=10 is max (cosmetic); (4) fixture verdict summary errors:250/warnings:250 factually wrong per registry (recomputed; cosmetic); (5) sha256(self) tautology (harmless, beside independent createHash cross-check).
+
+
+## Task A dual review (spec)
+
+- Spec reviewer a4380791d844bb02d: **SPEC-OK** — RED genuine + bound-appropriate (1GiB diagnostic ≠ 512MiB acceptance); 8 JCS vectors trap JSON.stringify fast-path hazards; projection separation isolates pure verdict (0.41ms) from cold/hot N+1; commit strictly test-only, no bound weakened, no case removed, no capability touched.
+- Task A complete (commit 01aeafe, dual-approved, 9 deferred minors).
+
+## Task B — canonical JSON O(n) + single-pass encoding — in progress
+
+- Implementer: TBD (opus-tier)
+- Scope: canonical-json.ts serializeString O(n) (linear surrogate validation + fast path for no-escape strings + chunked escape path, no per-char concat); add canonicalJsonBytesAndSha256(value) one-pass; keep canonicalJson/Bytes/Sha256 backward-compatible; blob-store putJsonBlob/putContentValue/putContentRevision + putGeneration index encode ONCE; content-root-64mib benchmark case uses one-pass (no double serialize); all old digest vectors identical; measure child peak after fix (32MiB well under 1GiB; 64MiB ideally <~500MiB).
+
+
+## Task B (cont.)
+
+- Implementer agent: a9771d0e636bfb48b (opus-tier)
+- Dispatch notes: serializeString O(n) (linear surrogate validation + no-escape fast path `"${s}"` + chunked escape path, no per-char concat); add canonicalJsonBytesAndSha256 one-pass; blob-store putJsonBlob/putContentValue/putContentRevision + putGeneration index encode once; content-root-64mib benchmark one-pass; old digest vectors identical; 32MiB child must drop below 1GiB; measure 64MiB child peak (<~512MiB target).
+
+
+## Task B (cont.)
+
+- HEAD: 9048a0d "perf: linear-time canonical JSON strings and single-pass bytes+sha256" (7 files +279/-69)
+- Harness re-verify: Task A RED now GREEN (2/2); canonical-json 29/29; blob-store 13/13; npm run check clean
+- Key numbers: 32MiB child 204MiB/142ms (was 1.26GiB/1.73s); 64MiB fresh-child 383MiB/193ms; integrated-scale child retaining setup string peaks ~495MiB (<512MiB, thin ~18-41MiB margin — Task E concern)
+- Dual review dispatched: Spec a34d94f4039d9b4db + Quality ae68ed7a670f8e8ea (parallel)
+
+
+## Task B dual review (quality)
+
+- Quality reviewer ae68ed7a670f8e8ea: **QUALITY-OK** — O(n) serializer byte-identical (50k-trial differential fuzz zero drift), one-pass interface correct, blob store encode-once with stable pinned digests, security/atomicity preserved, benchmark one-pass test non-tautological, 32MiB child ~192MiB / 64MiB fresh ~383MiB.
+- Task B minors (deferred): canonicalJsonBytes computes discarded sha256 for bytes-only callers (small values); blob-store digest pins exercise only no-escape path (covered by unit vectors + fuzz); C0 test semi-self-referential; escape-path comment overstates O(1) peak; benchmark case-level guard redundant.
+- Carry to Task D/E: ~495MiB 100%-scale integrated-child headroom (thin ~18-41MiB) — qualification concern.
+
+
+## Task B dual review (spec)
+
+- Spec reviewer a34d94f4039d9b4db: **SPEC-OK** — JCS semantics preserved (90,660-string fuzz + Python golden digest cross-check, zero drift), one-pass correct, blob encode-once with stable pins, frozen bounds + manifest untouched, memory plausible (fast path single concat). 2 cosmetic minors.
+- Task B complete (commit 9048a0d, dual-approved).
+
+## Task C — projection/Seal N+1 I/O fix — in progress
+
+- Implementer: TBD (opus-tier)
+- Scope: immutable GenerationIndex cache per generationId; content-revision presence/digest separated from content-blob hydration (readContentPresence root-only + lazy per-slot hydration); listSlots reads metadata + presence only (no full hydration); readSlot loads target content only; Seal/full-scaffold batch generation read (one file open, no 10k index re-parse) + bounded concurrency for many content blobs; keep single-slot read / content-addressing / integrity / hidden-slot / cursor/grant fail-closed; tests proving list 64 slots reads no content blobs + Seal does no 10k index parses.
+
+
+## Task C (cont.)
+
+- Implementer agent: ace89cc983399a776 (opus-tier)
+- Dispatch notes: immutable GenerationIndex cache; readContentPresence (root-only) + lazy per-slot hydration + bounded-concurrency readEffectiveContent; data source caches state + presence, getSlot no content hydration; Seal batch readGenerationSlots (one NDJSON open) + one index parse; mapLimit bounded concurrency; N+1 instrumented tests (list no content blobs / readSlot one blob / Seal O(1) index+open / state projection bounded / concurrency capped); keep all semantics.
+
+
+## Task C (cont.)
+
+- HEAD: 2109143 "perf: cache generation indexes and separate content presence from hydration" (8 files +1015/-117)
+- Harness re-verify: focused 40/40; N+1 tests 7/7; npm run check clean
+- N+1 before→after (100-slot gen): listSlots 100 blob reads+64 index parses → 0 blob reads+1 index parse; readSlot 100 blobs → 1; Seal 101 index parses+100 opens+100 blobs → 1 index+1 open; state re-projection per slot → 1 per op; Task A separation bench cold 31.3ms > hot 14.6ms
+- Dual review dispatched: Spec a0ac2c050137c55d3 + Quality a2681e0209dd6867a (parallel)
+
+
+## Task C dual review (quality)
+
+- Quality reviewer a2681e0209dd6867a: **QUALITY-ISSUES** — cache/readGenerationSlots/mapLimit/instrumentation/set-null all PASS; 1 Important: data-source getSlot/getActiveGeneration can serve a stale pre-merge revision from a long-lived source instead of GRANT_STALE (report's claim inaccurate); unreachable in production (per-operation sources) but the exact stale-cache read. Recommended: refresh cached state on event-tail advance OR re-validate active revision on content-level reads.
+- Task C minors: mapLimit NaN/error-drain; readGenerationSlots doesn't re-verify caller-supplied index.generationId; seal loadSlots `?? slot.content ?? null` treats set-null as missing (correct only because NDJSON records carry no content); getContentPresence returns cached object by reference.
+- Fix round: resume implementer ace89cc983399a776 with the Important + cheap minors.
+
+
+- Task C fix round: resumed implementer ace89cc983399a776 (Important stale-revision + seal null-resolution + index identity + presence defensive copy + report correction).
+- Task C Spec review (a0ac2c050137c55d3) still pending.
+
+
+## Task C fix round (cont.)
+
+- HEAD: 60f8694 "fix: recompute data source operation state and harden seal/n1 edges" (5 files +156/-58)
+- Harness re-verify: focused 40/40; npm run check clean; implementer two full runs 106/1976 pass/1 skip
+- Scoped re-review: reviewer aeb42d22d6b26fef8 dispatched (2109143..60f8694)
+- Task C Spec review (a0ac2c050137c55d3) still pending
+
+
+## Task C fix round re-review (quality)
+
+- Reviewer aeb42d22d6b26fef8: All 5 items ADDRESSED, no new Critical/Important breakage. Operation-boundary recompute stays per-operation (no per-slot event-read regression); seal null-resolution correct; index identity check + defensive copy + report correction done. 2 stale-comment nits (non-blocking).
+- Task C Spec review (a0ac2c050137c55d3) still pending.
+
+
+## Task C dual review (spec) — verdict recovered from transcript
+
+- Spec reviewer a0ac2c050137c55d3: **SPEC-OK** (completed 2026-08-11T17:32:43Z, notification lost; final output recovered). Integrity/single-range/presence-separation/projection-semantics all PASS. Its only Important (data-source caching stale-revision, not reachable in production) is the SAME finding the quality review raised — ADDRESSED by fix round 60f8694 and closed by the scoped re-review (aeb42d22d6b26fef8: all addressed, no new breakage).
+- **Task C COMPLETE** (commits 2109143 + 60f8694, dual-approved, fix round closed).
+
+## Task D — benchmark calibration — in progress
+
+- Implementer: TBD (opus-tier)
+- Scope: authorized-projection-500-issues case precisely measures the PURE authorized verdict projection (projectStructuredVerdict) with warmup + multiple samples (the 250ms bound target); cold owner outline + hot owner outline as SEPARATE diagnostic cases (kept, not dropped); per-case RSS/time diagnostics in evidence; total child peak RSS remains the authoritative 512MiB gate (no per-case subprocess evasion); keep scales 100/75/50/25 + required cases + fail-closed failure evidence; if evidence schema extended → exact-versioned + positive/negative tests; sync benchmark clarifications to Design/Spec/Plan/report without changing frozen values.
+
+
+## Task D (cont.)
+
+- Implementer agent: a09af40fad0d4491c (opus-tier)
+- Dispatch notes: adapter split (runAuthorizedProjection500Issues = PURE projectStructuredVerdict; add runOwnerOutlineCold/Hot diagnostics); benchmark case uses pure with warmup>=3/samples>=10 + outline diagnostic cases (not bound-gated) + per-case postCasePeakRssBytes in evidence; REQUIRED_BOUND_CASE_IDS unchanged (6); evidence schema extended (additive under schemaVersion 1 + validator updated + pos/neg tests); docs note (250ms bound = pure projection; cold/hot diagnostics); no frozen-value change; total child peak RSS remains the gate.
+
+
+- Task D note: implementer a09af40fad0d4491c stopped mid-work (6 files modified + 2 new test files, no commit/report). Resumed via SendMessage with continue-and-complete nudge.
+
+
+## Task D (cont.)
+
+- HEAD: a779ce0 "perf: measure the pure authorized projection and add outline diagnostics" (9 files +835/-77)
+- Harness re-verify: focused 41/41; npm run check clean; git diff --check clean; full 108 files/1994 pass/1 skip
+- New per-scale child peaks after Tasks B+C: 100%=965MiB, 75%=995MiB, 50%=673MiB, 25%=467MiB (pre-B/C 2.74/2.84/2.86/2.27GB). 25% PASSES every bound (467<512MiB, all timings); pure projection p95 0.44-0.75ms (was ~316ms); outline cold 133-492ms / hot 123-483ms; seal max ≤1.3s; content-root max ≤205ms. Implementer deliberately did NOT run integrated-qualify (Task E authority).
+- Implementer concerns: 25% passes but thin ~22-45MiB margin under 512MiB — re-verify on clean tree; evidence file left as pre-existing untracked failure evidence.
+- Dual review dispatched: Spec a4baacf0d9b02fea6 + Quality a8ae5d5ceb0f05eeb (parallel)
+
+
+## Task D dual review (spec)
+
+- Spec reviewer a4baacf0d9b02fea6: **SPEC-OK** — bounds/REQUIRED ids unchanged; 250ms gates PURE projection (warmup3/samples10); outline diagnostics bound-free but emission-required; scales 100/75/50/25 + total child RSS authoritative (no per-case isolation); evidence additive under schemaVersion 1 with pos/neg tests + unchanged digest chain; docs additive no frozen-value change; implementer honestly refrained from integrated-qualify (profile still provisional; evidence on disk is old format).
+- Task D minors (deferred): stale pre-Task-D failure evidence will be overwritten by Task E (hygiene); 25% margin ~45MiB thin (re-verify on clean tree); cosmetic §16.3 comment refs.
+
