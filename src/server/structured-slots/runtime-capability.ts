@@ -207,6 +207,25 @@ export function createProductionRuntimeEnvironment(
 }
 
 /**
+ * True when a structured runtime environment is actually runnable: an enabled
+ * capability WITH its matching non-null profile. A disabled capability (or an
+ * enabled one whose profile is missing) means every structured entry point must
+ * fail closed with `TEMPLATE_RUNTIME_UNAVAILABLE` (spec §5 / design O04/O05).
+ * The scheduler and runner recheck this SAME immutable reference on every
+ * start/resume/retry/answer and per structured Turn — never a second default
+ * and never an environment-variable fallback.
+ */
+export function isStructuredRuntimeEnabled(
+  environment: StructuredRuntimeEnvironmentV1 | undefined,
+): boolean {
+  return (
+    environment !== undefined &&
+    environment.capability.status === 'enabled' &&
+    environment.profile !== null
+  );
+}
+
+/**
  * Test/dev-only convenience (design §5 / O08): builds a matching enabled
  * environment with the provisional candidate profile. Production callers never
  * use this — explicit injection only, never an implicit fallback.

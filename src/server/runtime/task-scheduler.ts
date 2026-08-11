@@ -51,6 +51,9 @@
  * business vocabulary lives here (iron rule 1).
  */
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { parse as parseYaml } from 'yaml';
 import type { TaskStatus, TaskSummary } from '../../shared/contracts';
 import {
   TASK_CONTRACT_INCOMPATIBLE_ACTION,
@@ -59,8 +62,19 @@ import {
   type PublicCoreError,
 } from '../../shared/errors';
 import type { CoreService } from '../core-service';
+import type { CommittedEvent } from '../storage/event-store';
 import type { TaskEvent } from '../storage/task-events';
-import { isTurnContractSupported, type FrozenTemplate } from '../template/template-schema';
+import { isTurnContractSupported, TEMPLATE_ERROR_CODES, type FrozenTemplate } from '../template/template-schema';
+import type { StructuredRuntimeEnvironmentV1 } from '../structured-slots/runtime-capability';
+import { isStructuredRuntimeEnabled } from '../structured-slots/runtime-capability';
+import { STORAGE_ERROR_CODES, StorageError } from '../storage/atomic-file';
+import { StructuredSlotPrivateStore } from '../storage/structured-slot-private-store';
+import {
+  recoverDanglingAttempts,
+  terminalize,
+  deriveDraftId,
+  type ActiveAttempt,
+} from './structured-slot/attempt-coordinator';
 import { RuntimeAbortedError } from './agent-runtime';
 import type { AgentRuntime } from './agent-runtime';
 import type { AcceptanceStopHook } from '../acceptance-boundary';
@@ -79,6 +93,8 @@ export const SCHEDULER_ERROR_CODES = {
   TASK_ALREADY_RUNNING: 'TASK_ALREADY_RUNNING',
   /** The projected task status does not allow the requested lifecycle move. */
   INVALID_TRANSITION: 'INVALID_TRANSITION',
+  /** The structured human answer already committed a different canonical answer. */
+  IDEMPOTENCY_CONFLICT: 'IDEMPOTENCY_CONFLICT',
 } as const;
 
 /** Public lifecycle conflict; serialized through the API error map. */
@@ -125,6 +141,35 @@ function contractIncompatible(): SchedulerError {
     TASK_CONTRACT_INCOMPATIBLE_MESSAGE,
     TASK_CONTRACT_INCOMPATIBLE_ACTION,
   );
+}
+
+/**
+ * Public rejection for a structured task whose host runtime is not ready (spec
+ * §5 / design O04/O05): the SAME `TEMPLATE_RUNTIME_UNAVAILABLE` code the
+ * Loader/Catalog/TaskStore surface, never a "template missing" or a generic
+ * transition rejection. Start/resume/retry/answer all fail closed on it.
+ */
+function runtimeUnavailable(): SchedulerError {
+  return new SchedulerError(
+    TEMPLATE_ERROR_CODES.TEMPLATE_RUNTIME_UNAVAILABLE,
+    '结构化运行时能力未就绪，无法运行该任务。',
+    '等待结构化运行时就绪后重试。',
+  );
+}
+
+/**
+ * True when the frozen snapshot may be run: a structured template requires the
+ * SAME enabled runtime environment the Catalog holds (design O05); a basic
+ * template keeps the existing all-v2 gate.
+ */
+function isTaskRunnable(
+  frozen: FrozenTemplate,
+  environment: StructuredRuntimeEnvironmentV1 | undefined,
+): boolean {
+  if (frozen.productionMode === 'structured_slots') {
+    return isStructuredRuntimeEnabled(environment);
+  }
+  return isTurnContractSupported(frozen);
 }
 
 /**
@@ -240,6 +285,14 @@ export interface TaskSchedulerOptions {
   service: CoreService;
   runner: TaskRunner;
   runtime: AgentRuntime;
+  /**
+   * The ONE structured runtime environment (spec §5 / design O05): the same
+   * immutable reference frozen in CoreService construction. Rechecked on every
+   * start/resume/retry/answer; a structured task fails closed with
+   * `TEMPLATE_RUNTIME_UNAVAILABLE` while it is disabled. Never a second default
+   * and never an environment-variable fallback.
+   */
+  runtimeEnvironment?: StructuredRuntimeEnvironmentV1;
   /** Retry timing hooks; production defaults unless tests inject their own. */
   retryPolicy?: RetryPolicyHooks;
   /**
@@ -404,6 +457,8 @@ export class TaskScheduler {
 
   readonly #runner: TaskRunner;
 
+  readonly #runtimeEnvironment: StructuredRuntimeEnvironmentV1 | undefined;
+
   readonly #maxAutoRetries: number;
 
   readonly #retryDelayMs: (retryNumber: number) => number;
@@ -422,6 +477,7 @@ export class TaskScheduler {
     this.#service = options.service;
     this.#runner = options.runner;
     this.runtime = options.runtime;
+    this.#runtimeEnvironment = options.runtimeEnvironment;
     const policy = options.retryPolicy ?? {};
     this.#maxAutoRetries = policy.maxAutoRetries ?? MAX_AUTO_RETRIES;
     this.#retryDelayMs = policy.delayMs ?? ((retryNumber) => autoRetryDelayMs(retryNumber));
@@ -507,7 +563,14 @@ export class TaskScheduler {
         throw invalidTransition('当前任务未在运行，无法停止。');
       }
     }
-    await this.appendLifecycle(taskId, 'task_stopped');
+    // Structured stop (design §11.5/§25.6 G03): close the active attempt with
+    // its Draft/Attempt abandonment facts AND task_stopped in ONE batch, then
+    // best-effort reconcile the private caches. Basic tasks keep the single
+    // task_stopped append.
+    const closed = await this.closeActiveStructuredAttempt(taskId, 'task_stop');
+    if (!closed) {
+      await this.appendLifecycle(taskId, 'task_stopped');
+    }
     return (await this.#service.getWorkspace(taskId)).task;
   }
 
@@ -566,7 +629,7 @@ export class TaskScheduler {
       let frozenSnapshot: FrozenTemplate | null = null;
       try {
         frozenSnapshot = await this.#service.tasks.readFrozenTemplate(summary.id);
-        snapshotSupported = isTurnContractSupported(frozenSnapshot);
+        snapshotSupported = isTaskRunnable(frozenSnapshot, this.#runtimeEnvironment);
       } catch {
         continue;
       }
@@ -588,6 +651,19 @@ export class TaskScheduler {
       );
       if (!everStarted) {
         continue; // Confirmed inputs alone never prove an interrupted run.
+      }
+      // Structured recovery (design §11.5): scan dangling starts and commit the
+      // Draft terminal when opened + abandoned/crash_recovery + task_interrupted
+      // in ONE authority batch BEFORE the task becomes resumable, then
+      // best-effort reconcile private caches. Basic tasks keep the single
+      // task_interrupted append.
+      if (frozenSnapshot.productionMode === 'structured_slots') {
+        const closed = await this.recoverStructuredTask(summary.id, committed);
+        if (!closed) {
+          await this.appendLifecycle(summary.id, 'task_interrupted');
+        }
+        interrupted.push(summary.id);
+        continue;
       }
       await this.appendLifecycle(summary.id, 'task_interrupted');
       interrupted.push(summary.id);
@@ -697,9 +773,17 @@ export class TaskScheduler {
     answer?: HumanAnswerRequest,
   ): Promise<void> {
     try {
-      const workspace = await this.#service.getWorkspace(taskId);
-      const frozen = await this.#service.tasks.readFrozenTemplate(taskId);
-      if (!isTurnContractSupported(frozen)) {
+      const workspace = await this.workspaceForPrepare(taskId);
+      const frozen = await this.frozenForPrepare(taskId);
+      // The readiness gate runs before any status check (spec §5 / design
+      // O04/O05): a basic task without a supported turn contract rejects with
+      // TASK_CONTRACT_INCOMPATIBLE; a structured task whose runtime environment
+      // is disabled rejects with TEMPLATE_RUNTIME_UNAVAILABLE — no matter what
+      // the projection says.
+      if (!isTaskRunnable(frozen, this.#runtimeEnvironment)) {
+        if (frozen.productionMode === 'structured_slots') {
+          throw runtimeUnavailable();
+        }
         throw contractIncompatible();
       }
       const status = workspace.task.status;
@@ -734,14 +818,90 @@ export class TaskScheduler {
         }
       } else {
         // kind === 'answer'
+        const request = answer ?? { kind: 'answer', text: '' };
+        // Structured v3 atomic-answer replay-first (spec §11.5): a committed
+        // answer commit is checked BEFORE the status rejection so an idempotent
+        // retry of the same canonical answer returns the original success and
+        // a different answer conflicts — it can never be overwritten.
+        if (frozen.productionMode === 'structured_slots' && request.kind === 'answer') {
+          const events = (await this.#service.events.read(taskId)).map((entry) => entry.event);
+          const outcome = await this.replayStructuredAnswer(taskId, events, request.text);
+          if (outcome === 'replayed') {
+            return;
+          }
+          if (outcome === 'conflict') {
+            throw new SchedulerError(
+              SCHEDULER_ERROR_CODES.IDEMPOTENCY_CONFLICT,
+              '该人工提问已收到不同的回答，不能覆盖第一次回答。',
+            );
+          }
+        }
         if (status !== 'waiting_human') {
           throw invalidTransition('只有等待人工回答的任务可以提交回答。');
         }
-        await this.applyHumanAnswer(taskId, run, answer ?? { kind: 'answer', text: '' });
+        await this.applyHumanAnswer(taskId, run, request);
       }
     } catch (error) {
       this.release(run);
       throw error;
+    }
+  }
+
+  /**
+   * Projects one task for a lifecycle move. A disabled structured task's
+   * snapshot fails to load (TASK_CORRUPTED from `readFrozenTemplate`); the
+   * scheduler probes the snapshot's pipeline to surface the SAME
+   * `TEMPLATE_RUNTIME_UNAVAILABLE` code instead of masquerading as corruption
+   * (design O05).
+   */
+  private async workspaceForPrepare(taskId: string): Promise<Awaited<ReturnType<CoreService['getWorkspace']>>> {
+    try {
+      return await this.#service.getWorkspace(taskId);
+    } catch (error) {
+      if (
+        error instanceof StorageError &&
+        error.code === STORAGE_ERROR_CODES.TASK_CORRUPTED &&
+        (await this.isStructuredSnapshot(taskId))
+      ) {
+        throw runtimeUnavailable();
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Reads the frozen snapshot for a lifecycle move with the same
+   * disabled-structured mapping as `workspaceForPrepare`.
+   */
+  private async frozenForPrepare(taskId: string): Promise<FrozenTemplate> {
+    try {
+      return await this.#service.tasks.readFrozenTemplate(taskId);
+    } catch (error) {
+      if (
+        error instanceof StorageError &&
+        error.code === STORAGE_ERROR_CODES.TASK_CORRUPTED &&
+        (await this.isStructuredSnapshot(taskId))
+      ) {
+        throw runtimeUnavailable();
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Probes the task snapshot's `pipeline.yaml` for `productionMode:
+   * structured_slots` — the loader's own mode split — so a snapshot that
+   * cannot load under a disabled runtime environment is still recognized as
+   * structured (design O05). Basic/corrupt snapshots return false.
+   */
+  private async isStructuredSnapshot(taskId: string): Promise<boolean> {
+    try {
+      const pipelinePath = join(this.#service.paths.taskSnapshotRoot(taskId), 'pipeline.yaml');
+      const raw = await readFile(pipelinePath, 'utf8');
+      const parsed = parseYaml(raw) as { productionMode?: unknown } | null;
+      return parsed !== null && parsed.productionMode === 'structured_slots';
+    } catch {
+      return false;
     }
   }
 
@@ -1067,7 +1227,291 @@ export class TaskScheduler {
     if (request.kind !== 'answer') {
       throw invalidTransition('该人工提问只接受文字回答，不支持结构化决策。');
     }
+    const frozen = await this.#service.tasks.readFrozenTemplate(taskId);
+    if (frozen.productionMode === 'structured_slots') {
+      // Structured v3 atomic answer (spec §11.5): human_answered + the fresh
+      // confirmed agent_input land in ONE appendBatch derived from the pending
+      // request ID — never the two single-event helpers.
+      await this.appendStructuredHumanAnswer(taskId, events, pendingRequest, request.text);
+      return;
+    }
     await this.appendHumanAnswer(taskId, events, pendingRequest, request.text);
+  }
+
+  /**
+   * Structured v3 atomic human answer (spec §11.5 / design §11.5 step 1-3):
+   * the answer commitId and the deterministic event ids derive from the
+   * pending request event ID, and `human_answered` + the fresh confirmed
+   * `agent_input` are appended together with the observed tail in ONE
+   * appendBatch. A crash before the batch keeps the question answerable; a
+   * crash after it leaves both events committed. The fresh input carries
+   * `attemptCount: 1` and starts its own epoch 1 (design §11.5).
+   */
+  private async appendStructuredHumanAnswer(
+    taskId: string,
+    events: readonly TaskEvent[],
+    pendingRequest: Extract<TaskEvent, { type: 'human_requested' }>,
+    answer: string,
+  ): Promise<void> {
+    const commitId = `answer-${pendingRequest.id}`;
+    const humanAnsweredId = `${pendingRequest.id}-answered`;
+    const agentInputId = `${pendingRequest.id}-input`;
+    const agentId = pendingRequest.node.agentId;
+    const frozen = await this.#service.tasks.readFrozenTemplate(taskId);
+    const agentName = frozen.agents.find((agent) => agent.id === agentId)?.name ?? agentId;
+    const sequence = nextSequence(events);
+    const at = new Date().toISOString();
+    const committedTail = await this.#service.events.read(taskId);
+    const expectedLastSequence = committedTail[committedTail.length - 1]?.sequence ?? 0;
+    const batch: TaskEvent[] = [
+      {
+        id: humanAnsweredId,
+        at,
+        type: 'human_answered',
+        node: {
+          sequence,
+          agentId,
+          kind: 'human_answer',
+          title: agentName,
+          body: answer,
+          status: 'confirmed',
+          attemptCount: 1,
+          inputVersion: null,
+        },
+        answer,
+      },
+      {
+        id: agentInputId,
+        at,
+        type: 'agent_input',
+        node: {
+          sequence: sequence + 1,
+          agentId,
+          kind: 'input',
+          title: agentName,
+          body: answer,
+          status: 'confirmed',
+          attemptCount: 1,
+          inputVersion: null,
+        },
+      },
+    ];
+    await this.#service.events.appendBatch(taskId, commitId, batch, {
+      expectedLastSequence,
+    });
+  }
+
+  /**
+   * Structured v3 answer replay/conflict check (spec §11.5 step 4): scans the
+   * structured agent_request human requests newest-first, derives each one's
+   * answer commitId and reads the committed batch. A matching canonical answer
+   * replays the original success; a different answer conflicts (never
+   * overwrites the first answer); no committed batch means the answer is still
+   * pending and the caller proceeds.
+   */
+  private async replayStructuredAnswer(
+    taskId: string,
+    events: readonly TaskEvent[],
+    answer: string,
+  ): Promise<'none' | 'replayed' | 'conflict'> {
+    const requests: Array<Extract<TaskEvent, { type: 'human_requested' }>> = [];
+    for (const event of events) {
+      if (event.type === 'human_requested' && (event.source ?? 'agent_request') === 'agent_request') {
+        requests.push(event);
+      }
+    }
+    for (let index = requests.length - 1; index >= 0; index -= 1) {
+      const request = requests[index];
+      const committed = await this.#service.events.readBatchByCommitId(taskId, `answer-${request.id}`);
+      if (committed === null) {
+        continue;
+      }
+      const answered = committed.find((entry) => entry.event.type === 'human_answered');
+      if (
+        answered !== undefined &&
+        answered.event.type === 'human_answered' &&
+        answered.event.answer === answer
+      ) {
+        return 'replayed';
+      }
+      return 'conflict';
+    }
+    return 'none';
+  }
+
+  // --------------------------------------------------------------------------
+  // Structured stop / crash recovery (design §11.5 / §25.6 G03).
+  // --------------------------------------------------------------------------
+
+  /** Started-without-terminal structured attempts across all input nodes. */
+  private danglingStructuredAttempts(events: readonly TaskEvent[]): ActiveAttempt[] {
+    const terminalTurns = new Set<string>();
+    for (const event of events) {
+      if (event.type === 'structured_slot_attempt_terminal') {
+        terminalTurns.add(event.turnId);
+      }
+    }
+    const attempts: ActiveAttempt[] = [];
+    for (const event of events) {
+      if (event.type !== 'structured_slot_attempt_started') {
+        continue;
+      }
+      if (terminalTurns.has(event.turnId)) {
+        continue;
+      }
+      attempts.push({
+        inputNodeId: event.inputNodeId,
+        attemptEpoch: event.attemptEpoch,
+        turnId: event.turnId,
+        sessionKind: event.sessionKind,
+      });
+    }
+    return attempts;
+  }
+
+  /** The committed logical tail (the appendBatch CAS anchor). */
+  private tailSequence(committed: readonly CommittedEvent[]): number {
+    return committed[committed.length - 1]?.sequence ?? 0;
+  }
+
+  /**
+   * Closes every active structured attempt with the Draft/Attempt abandonment
+   * facts AND the lifecycle event in ONE batch per attempt (the single-slot
+   * scheduler holds at most one), then best-effort reconciles private caches
+   * (design §11.5 / spec §8.1). Returns true when at least one attempt was
+   * closed (the caller then skips the separate lifecycle append).
+   */
+  private async closeActiveStructuredAttempt(
+    taskId: string,
+    reason: 'task_stop' | 'crash_recovery',
+  ): Promise<boolean> {
+    const committed = await this.#service.events.read(taskId);
+    const events = committed.map((entry) => entry.event);
+    const attempts = this.danglingStructuredAttempts(events);
+    if (attempts.length === 0) {
+      return false;
+    }
+    const at = new Date().toISOString();
+    const openedByTurn = new Map<string, Extract<TaskEvent, { type: 'structured_fill_draft_opened' }>>();
+    for (const event of events) {
+      if (event.type === 'structured_fill_draft_opened') {
+        openedByTurn.set(event.turnId, event);
+      }
+    }
+    const lifecycleEvent: TaskEvent = {
+      id: reason === 'task_stop' ? `${taskId}-task-stopped` : `${taskId}-task-interrupted`,
+      at,
+      type: reason === 'task_stop' ? 'task_stopped' : 'task_interrupted',
+    };
+    let first = true;
+    for (const attempt of attempts) {
+      const companions: TaskEvent[] = [];
+      if (attempt.sessionKind === 'fill') {
+        const opened = openedByTurn.get(attempt.turnId);
+        if (opened !== undefined) {
+          companions.push({
+            id: `${opened.draftId}-terminal`,
+            at,
+            type: 'structured_fill_draft_terminal',
+            draftId: opened.draftId,
+            turnId: attempt.turnId,
+            status: 'abandoned',
+            baseRevision: opened.baseRevision,
+            resultRevision: 0,
+            changeCount: 0,
+            content: null,
+          });
+        }
+      }
+      if (first) {
+        companions.push(lifecycleEvent);
+        first = false;
+      }
+      try {
+        await terminalize({
+          taskId,
+          inputNodeId: attempt.inputNodeId,
+          attemptEpoch: attempt.attemptEpoch,
+          turnId: attempt.turnId,
+          status: 'abandoned',
+          reason,
+          companions,
+          expectedTail: this.tailSequence(committed),
+          readEvents: async () => this.#service.events.read(taskId),
+          appendBatch: (commitId, batch, expectedLastSequence) =>
+            this.#service.events.appendBatch(taskId, commitId, batch, { expectedLastSequence }),
+        });
+      } catch (error) {
+        if (error instanceof StorageError && error.code === STORAGE_ERROR_CODES.EVENT_ID_CONFLICT) {
+          // A competitor already closed this attempt (its terminal event id is
+          // committed); the caller appends the lifecycle event separately.
+          continue;
+        }
+        throw error;
+      }
+    }
+    await this.reconcilePrivateCaches(taskId, attempts);
+    // The caller skips the separate lifecycle append only when the abandonment
+    // batch actually carried it (wiring note 2: read the full terminal batch —
+    // a racing loser's terminalize returns only the single terminal entry).
+    const firstAttempt = attempts[0];
+    if (firstAttempt !== undefined) {
+      const batch = await this.#service.events.readBatchByCommitId(
+        taskId,
+        `${firstAttempt.turnId}-terminal`,
+      );
+      return batch?.some((entry) => entry.event.type === lifecycleEvent.type) ?? false;
+    }
+    return false;
+  }
+
+  /**
+   * Startup recovery for a structured task (design §11.5): scans dangling
+   * starts and commits the Draft terminal when opened + abandoned/crash_recovery
+   * + task_interrupted in ONE authority batch via the coordinator, then
+   * best-effort reconciles private caches. Returns true when a dangling attempt
+   * was closed (the caller then skips the separate lifecycle append).
+   */
+  private async recoverStructuredTask(
+    taskId: string,
+    committed: readonly CommittedEvent[],
+  ): Promise<boolean> {
+    const attempts = this.danglingStructuredAttempts(committed.map((entry) => entry.event));
+    if (attempts.length === 0) {
+      return false;
+    }
+    const result = await recoverDanglingAttempts({
+      taskId,
+      events: committed,
+      appendBatch: (commitId, batch, expectedLastSequence) =>
+        this.#service.events.appendBatch(taskId, commitId, batch, { expectedLastSequence }),
+      companions: [{ id: randomUUID(), at: new Date().toISOString(), type: 'task_interrupted' }],
+    });
+    if (result.committed !== null) {
+      await this.reconcilePrivateCaches(taskId, attempts);
+    }
+    return true;
+  }
+
+  /**
+   * Best-effort private-cache reconciliation AFTER an authority batch (design
+   * O02): clears the lifecycle-cache markers of the abandoned Proposal/Draft so
+   * a later read rebuilds them from events. Never gates anything — a crash here
+   * is repaired from events on the next startup.
+   */
+  private async reconcilePrivateCaches(taskId: string, attempts: readonly ActiveAttempt[]): Promise<void> {
+    try {
+      const store = new StructuredSlotPrivateStore(this.#service.paths, taskId);
+      for (const attempt of attempts) {
+        if (attempt.sessionKind === 'fill') {
+          await store.clearDraftLifecycleCache(deriveDraftId(attempt.turnId));
+        } else if (attempt.sessionKind === 'structure') {
+          await store.clearProposalLifecycleCache(`${attempt.turnId}-proposal`);
+        }
+      }
+    } catch {
+      // Best-effort only: the authority batch is the source of truth (O02).
+    }
   }
 
   /**

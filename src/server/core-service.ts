@@ -39,9 +39,13 @@ import type { TaskEvent } from './storage/task-events';
 import { TraceStore } from './storage/trace-store';
 import { TemplateCatalog } from './template/template-catalog';
 import type { StructuredRuntimeEnvironmentV1 } from './structured-slots/runtime-capability';
-import type { AgentRuntime } from './runtime/agent-runtime';
+import type { AgentRuntime, AgentTurnInput } from './runtime/agent-runtime';
 import type { AcceptanceStopHook } from './acceptance-boundary';
-import { PiAgentRuntime } from './runtime/pi-agent-runtime';
+import {
+  PiAgentRuntime,
+  type PiStructuredSlotRuntime,
+  type StructuredSlotRuntimeContext,
+} from './runtime/pi-agent-runtime';
 import { LiveStore } from './runtime/live-store';
 import { WorkspaceStore } from './runtime/workspace-store';
 import { SkillService } from './runtime/skill-service';
@@ -130,6 +134,15 @@ export class CoreService {
   readonly scheduler: TaskScheduler;
 
   /**
+   * The ONE structured runtime environment (spec §5 / design O05): the same
+   * immutable reference the TemplateCatalog holds. TaskStore derives it from
+   * the catalog and the Scheduler/Runner recheck the same reference on every
+   * start/resume/retry/answer and per structured Turn — never a second default
+   * and never an environment-variable fallback.
+   */
+  readonly runtimeEnvironment: StructuredRuntimeEnvironmentV1;
+
+  /**
    * Memory-only live-preview buffer behind `TaskWorkspace.activeTurn` (plan
    * C realtime streaming). Strictly in-memory: streamed thinking/text never
    * touches files or events.
@@ -139,11 +152,12 @@ export class CoreService {
   constructor(paths: CorePaths, options: CoreServiceOptions = {}) {
     this.paths = paths;
     // The catalog owns ONE structured runtime environment; TaskStore derives
-    // it from the catalog and Task 17 will reuse the same reference for the
-    // Scheduler (design O05).
+    // it from the catalog and the Scheduler/Runner reuse the same reference
+    // (design O05).
     this.templates = new TemplateCatalog(paths, {
       runtimeEnvironment: options.runtimeEnvironment,
     });
+    this.runtimeEnvironment = this.templates.runtimeEnvironment;
     this.tasks = new TaskStore(paths, this.templates);
     this.events = new EventStore(paths);
     this.artifacts = new ArtifactStore(paths, this.events);
@@ -151,9 +165,20 @@ export class CoreService {
     // the same derivation (plan Task E3).
     this.workspaces = new WorkspaceStore(paths);
     this.traces = new TraceStore(paths);
+    // Task 17: the per-turn structured slot runtime seam. The production Pi
+    // adapter resolves it after the runner exists (the runner owns the
+    // coordinator/session bundle); the mutable holder is filled below so the
+    // runtime can be constructed first. Fakes/tests never read the seam.
+    const structuredSlotSeam: {
+      createContext?: (input: AgentTurnInput) => Promise<StructuredSlotRuntimeContext | null>;
+    } = {};
     this.runtime =
       options.runtime ??
-      new PiAgentRuntime({ coreCwd: paths.dataRoot, workspaces: this.workspaces });
+      new PiAgentRuntime({
+        coreCwd: paths.dataRoot,
+        workspaces: this.workspaces,
+        structuredSlot: structuredSlotSeam as PiStructuredSlotRuntime,
+      });
     // Structural fake-runtime wiring: the deterministic fake applies scripted
     // workspace writes through the offered sink; real runtimes own their
     // workspace tools and never expose the method.
@@ -237,12 +262,19 @@ export class CoreService {
       runtime: this.runtime,
       workspaces: this.workspaces,
       traces: this.traces,
+      paths: this.paths,
+      runtimeEnvironment: this.runtimeEnvironment,
       liveSink: (taskId, patch) => this.live.merge(taskId, patch),
     });
+    // Fill the mutable structured-slot seam now that the runner exists: the Pi
+    // runtime builds its per-turn structured slot context (tool set, meter,
+    // dispatch guard) from the runner's coordinator-built session bundle.
+    structuredSlotSeam.createContext = (input) => this.runner.createStructuredSlotContext(input);
     this.scheduler = new TaskScheduler({
       service: this,
       runner: this.runner,
       runtime: this.runtime,
+      runtimeEnvironment: this.runtimeEnvironment,
       ...(options.acceptanceStopAfterCommit !== undefined
         ? { acceptanceStopAfterCommit: options.acceptanceStopAfterCommit }
         : {}),

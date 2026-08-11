@@ -23,11 +23,15 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { TaskWorkspace } from '../../shared/contracts';
+import type { StructureSessionGrantV1 } from '../../shared/structured-slots';
 import { CoreService } from '../core-service';
 import type { CorePaths } from '../storage/core-paths';
 import type { EventStore } from '../storage/event-store';
 import type { TaskEvent } from '../storage/task-events';
 import { TraceStore } from '../storage/trace-store';
+import { StructuredSlotBlobStore } from '../storage/structured-slot-blob-store';
+import { StructuredSlotPrivateStore } from '../storage/structured-slot-private-store';
+import { createTestRuntimeEnvironment } from '../structured-slots/runtime-capability';
 import {
   catalogWithOneTemplate,
   disposeAllTestRoots,
@@ -36,10 +40,14 @@ import {
   makeTempCorePaths,
   validTaskRequest,
 } from '../test-support';
+import type { FrozenTemplate } from '../template/template-schema';
 import { RuntimeAbortedError, RuntimeFailure } from './agent-runtime';
+import type { AgentRuntime, AgentTurnInput, AgentTurnResult } from './agent-runtime';
 import { ActionCommitter } from './action-committer';
 import { FakeAgentRuntime, type FakeScriptStep } from './fake-agent-runtime';
 import { SkillService } from './skill-service';
+import { deriveDraftId, deriveTurnId } from './structured-slot/attempt-coordinator';
+import { StructuredSlotProposalService } from './structured-slot/proposal-service';
 import { buildTurnChecklist, TaskRunner, turnPlanCompleted, type RunNextResult } from './task-runner';
 import { WorkspaceStore } from './workspace-store';
 import { RecordingRuntime } from './test-support';
@@ -1524,5 +1532,337 @@ describe('TaskRunner basic-path non-regression (Task 15 Step 1)', () => {
     // basic runNext path keeps writing legacy single-event files only.
     const names = await readdir(harness.paths.taskEventsRoot(harness.taskId));
     expect(names.some((name) => name.endsWith('.batch.json'))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 17: structured v3 runNext path (spec §8.1/§11.5/§13, design §11.5/O01).
+// ---------------------------------------------------------------------------
+
+/** Locates the structured-valid template fixture (node + jsdom fallback). */
+function structuredFixtureDir(): string {
+  try {
+    return fileURLToPath(
+      new URL('../template/__fixtures__/structured-valid', import.meta.url),
+    );
+  } catch {
+    return join(
+      process.cwd(),
+      'src',
+      'server',
+      'template',
+      '__fixtures__',
+      'structured-valid',
+    );
+  }
+}
+
+interface StructuredRunnerHarness {
+  paths: CorePaths;
+  service: CoreService;
+  events: EventStore;
+  runner: TaskRunner;
+  fake: FakeAgentRuntime;
+  taskId: string;
+  frozen: FrozenTemplate;
+  controller: AbortController;
+}
+
+/** Builds a structured-valid CoreService with the injected enabled environment. */
+async function structuredRunnerHarness(options: {
+  runtime?: AgentRuntime;
+} = {}): Promise<StructuredRunnerHarness> {
+  const { paths } = makeTempCorePaths('forge-core-structured-runner-');
+  const templateDir = join(paths.templateRoot, 'structured-valid');
+  cpSync(structuredFixtureDir(), templateDir, { recursive: true });
+  const fake = new FakeAgentRuntime();
+  const runtime = options.runtime ?? fake;
+  const service = new CoreService(paths, {
+    runtime,
+    runtimeEnvironment: createTestRuntimeEnvironment(),
+  });
+  await service.initialize();
+  const created = await service.createTask({
+    templateId: 'structured-valid',
+    name: 'Structured Runner Task',
+    input: { 'source-text': 'neutral structured source' },
+  });
+  const frozen = await service.tasks.readFrozenTemplate(created.id);
+  return {
+    paths,
+    service,
+    events: service.events,
+    runner: service.runner,
+    fake,
+    taskId: created.id,
+    frozen,
+    controller: new AbortController(),
+  };
+}
+
+/** Seeds one confirmed input node for a structured agent. */
+async function seedStructuredInput(
+  harness: StructuredRunnerHarness,
+  id: string,
+  agentId: string,
+  body: string,
+): Promise<void> {
+  const committed = await harness.events.read(harness.taskId);
+  let sequence = 0;
+  for (const entry of committed) {
+    if ('node' in entry.event) {
+      sequence = Math.max(sequence, entry.event.node.sequence);
+    }
+  }
+  await harness.events.append(harness.taskId, {
+    id,
+    at: new Date().toISOString(),
+    type: 'agent_input',
+    node: {
+      sequence: sequence + 1,
+      agentId,
+      kind: 'input',
+      title: agentId,
+      body,
+      status: 'confirmed',
+      attemptCount: 1,
+      inputVersion: null,
+    },
+  });
+}
+
+/** Reads committed events as plain TaskEvent[]. */
+async function committedEvents(harness: StructuredRunnerHarness): Promise<TaskEvent[]> {
+  return (await harness.events.read(harness.taskId)).map((entry) => entry.event);
+}
+
+describe('TaskRunner structured v3 runNext (Task 17)', () => {
+  it('runs a structure turn end-to-end: attempt started, generation committed, one terminal', async () => {
+    const h = await structuredRunnerHarness();
+    await seedStructuredInput(h, 'in-structure', 'structure', 'create the scaffold');
+    // Pre-seed the private Proposal + candidate so the model Turn can dispatch
+    // the completion (the model itself would form it via submit_structure_proposal).
+    const turnId = deriveTurnId('in-structure', 1);
+    const proposalId = `${turnId}-proposal`;
+    const privateStore = new StructuredSlotPrivateStore(h.paths, h.taskId);
+    await privateStore.materializeProposal(turnId, proposalId);
+    await privateStore.replaceProposal(proposalId, {
+      clientKey: 'root',
+      typeId: 'document',
+      spec: {},
+      children: [{ clientKey: 't', typeId: 'title', spec: {}, children: [] }],
+    });
+    const grant: StructureSessionGrantV1 = {
+      grantId: 'grant-structure',
+      kind: 'structure',
+      caseId: h.taskId,
+      turnId,
+      agentId: 'structure',
+      snapshotHash: h.frozen.versionHash,
+      capabilities: ['read_structure_contract', 'write_structure_proposal', 'submit_structure_proposal'],
+      proposalId,
+    };
+    const proposalService = new StructuredSlotProposalService({
+      taskId: h.taskId,
+      snapshotHash: h.frozen.versionHash,
+      contract: h.frozen.structuredSlots as NonNullable<FrozenTemplate['structuredSlots']>,
+      store: privateStore,
+      events: async () => committedEvents(h),
+    });
+    const submit = await proposalService.submitProposal(grant, {
+      scaffoldId: `${turnId}-scaffold`,
+      generationId: `${turnId}-generation`,
+    });
+    expect(submit.ok).toBe(true);
+    h.fake.setScript('structure', [
+      {
+        kind: 'result',
+        publicText: 'structure committed',
+        actions: [{ type: 'send_message', targetAgentId: 'fill', summary: 'scaffold ready' }],
+      },
+    ]);
+
+    const result = await h.runner.runNext(h.taskId, h.controller.signal);
+    expect(result.committed).toBe(true);
+    expect(result.attemptFailed).toBe(false);
+    expect(result.attemptCount).toBe(1);
+
+    const events = await committedEvents(h);
+    const started = events.filter((e) => e.type === 'structured_slot_attempt_started');
+    expect(started).toHaveLength(1);
+    expect(started[0]).toMatchObject({
+      turnId,
+      attemptEpoch: 1,
+      sessionKind: 'structure',
+      inputNodeId: 'in-structure',
+    });
+    const generation = events.find((e) => e.type === 'structured_scaffold_generation_committed');
+    expect(generation).toBeDefined();
+    expect(generation).toMatchObject({ scaffoldId: `${turnId}-scaffold`, proposalId });
+    const terminals = events.filter((e) => e.type === 'structured_slot_attempt_terminal');
+    expect(terminals).toHaveLength(1);
+    expect(terminals[0]).toMatchObject({ status: 'committed', reason: 'completion_dispatch', turnId });
+  });
+
+  it('closes the attempt with failed/runtime_failure on a transient runtime failure', async () => {
+    const h = await structuredRunnerHarness();
+    await seedStructuredInput(h, 'in-fail', 'structure', 'create the scaffold');
+    h.fake.setScript('structure', [
+      { kind: 'failure', failure: RuntimeFailure.transient('PROVIDER_ERROR', 'scripted transient failure') },
+    ]);
+
+    const result = await h.runner.runNext(h.taskId, h.controller.signal);
+    expect(result.attemptFailed).toBe(true);
+    expect(result.retryable).toBe(true);
+
+    const events = await committedEvents(h);
+    const terminals = events.filter((e) => e.type === 'structured_slot_attempt_terminal');
+    expect(terminals).toHaveLength(1);
+    expect(terminals[0]).toMatchObject({
+      status: 'failed',
+      reason: 'runtime_failure',
+      turnId: deriveTurnId('in-fail', 1),
+    });
+    const failures = events.filter((e) => e.type === 'agent_attempt_failed');
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({ nodeId: 'in-fail' });
+  });
+
+  it('a structure turn without a candidate fails permanently (never auto-retries)', async () => {
+    const h = await structuredRunnerHarness();
+    await seedStructuredInput(h, 'in-nocandidate', 'structure', 'create the scaffold');
+    h.fake.setScript('structure', [
+      {
+        kind: 'result',
+        publicText: 'dispatched without a candidate',
+        actions: [{ type: 'send_message', targetAgentId: 'fill', summary: 'premature' }],
+      },
+    ]);
+
+    const result = await h.runner.runNext(h.taskId, h.controller.signal);
+    expect(result.attemptFailed).toBe(true);
+    expect(result.retryable).toBe(false);
+    const events = await committedEvents(h);
+    expect(events.filter((e) => e.type === 'structured_slot_attempt_terminal')).toHaveLength(1);
+  });
+
+  it('fill start emits attempt_started + draft_opened atomically before private materialization', async () => {
+    const h = await structuredRunnerHarness();
+    // Seed an active scaffold (generation + content blobs + committed events)
+    // so the fill turn can bind draft_opened to it.
+    const blobStore = new StructuredSlotBlobStore(h.paths, h.taskId);
+    const manifest = await blobStore.putGeneration({
+      generationId: 'gen-1',
+      scaffoldId: 'scaffold-1',
+      slots: [
+        { slotId: 'r', scaffoldId: 'scaffold-1', parentSlotId: null, order: 0, typeId: 'document', spec: {}, contentPresence: 'unset' },
+        { slotId: 't1', scaffoldId: 'scaffold-1', parentSlotId: 'r', order: 1, typeId: 'title', spec: {}, contentPresence: 'unset' },
+      ],
+    });
+    const contentRef = await blobStore.putContentRevision({ r: 'unset', t1: 'unset' });
+    await h.events.append(h.taskId, {
+      id: 'gen-committed',
+      at: new Date().toISOString(),
+      type: 'structured_scaffold_generation_committed',
+      scaffoldId: 'scaffold-1',
+      generationId: 'gen-1',
+      supersedesGenerationId: null,
+      rootSlotId: 'r',
+      slotCount: 2,
+      maxDepth: 1,
+      structure: manifest.structure,
+      content: contentRef,
+      contentRevision: 0,
+      proposalId: 'p-1',
+    });
+    await seedStructuredInput(h, 'in-fill', 'fill', 'fill the slots');
+    // The fill turn abandons to human (no candidate needed) so we can observe
+    // the atomic start without a Merge Gate.
+    h.fake.setScript('fill', [
+      {
+        kind: 'result',
+        publicText: 'need human',
+        actions: [{ type: 'request_human_input', question: 'need guidance' }],
+      },
+    ]);
+
+    const result = await h.runner.runNext(h.taskId, h.controller.signal);
+    expect(result.waitingHuman).toBe(true);
+    expect(result.committed).toBe(true);
+
+    const events = await committedEvents(h);
+    const turnId = deriveTurnId('in-fill', 1);
+    const draftId = deriveDraftId(turnId);
+    const started = events.find((e) => e.type === 'structured_slot_attempt_started' && e.turnId === turnId);
+    expect(started).toMatchObject({ sessionKind: 'fill', attemptEpoch: 1, turnId });
+    const opened = events.find((e) => e.type === 'structured_fill_draft_opened' && e.turnId === turnId);
+    expect(opened).toMatchObject({
+      draftId,
+      scaffoldId: 'scaffold-1',
+      generationId: 'gen-1',
+      baseRevision: 0,
+    });
+    // The private Draft was materialized only AFTER the atomic batch.
+    const privateStore = new StructuredSlotPrivateStore(h.paths, h.taskId);
+    const draftView = await privateStore.readDraft(draftId, events);
+    expect(draftView.draftId).toBe(draftId);
+    expect(draftView.turnId).toBe(turnId);
+    const terminals = events.filter((e) => e.type === 'structured_slot_attempt_terminal');
+    expect(terminals).toHaveLength(1);
+    expect(terminals[0]).toMatchObject({ status: 'waiting_human', reason: 'human_request' });
+  });
+});
+
+describe('TaskRunner structured resource-limit closure (Task 17, spec §7.6/N04)', () => {
+  it('a closed Attempt meter aborts the provider and commits failed/runtime_failure', async () => {
+    // A runtime that honours the composite Attempt signal exactly like the Pi
+    // adapter: a closed meter aborts the session handle, so the run fails
+    // before any tool/dispatch/human can happen.
+    const abortAware: AgentRuntime = {
+      async run(input: AgentTurnInput, signal: AbortSignal, options?: unknown): Promise<AgentTurnResult> {
+        if (input.slotSession !== null && input.slotSession.signal.aborted) {
+          throw new RuntimeAbortedError('attempt closed before the provider ran');
+        }
+        void options;
+        return { turnId: input.turnId, publicText: 'unreachable', actions: [], usage: null, trace: [] };
+      },
+      async disposeAgent(): Promise<void> { return undefined; },
+      async disposeAll(): Promise<void> { return undefined; },
+    };
+    const h = await structuredRunnerHarness({ runtime: abortAware });
+    await seedStructuredInput(h, 'in-limit', 'structure', 'create the scaffold');
+    const turnId = deriveTurnId('in-limit', 1);
+    // Persist a closed meter for the attempt BEFORE the Turn runs.
+    const privateStore = new StructuredSlotPrivateStore(h.paths, h.taskId);
+    await privateStore.writeAttemptMeter(turnId, {
+      version: 1,
+      turnId,
+      startedAtMs: 0,
+      toolCalls: [],
+      usage: {
+        slotToolCalls: 0,
+        validationRuns: 0,
+        validatorInvocations: 0,
+        validatorCpuMs: 0,
+        validatorWallClockMs: 0,
+        validatorOutputBytes: 0,
+      },
+      terminal: {
+        code: 'RESOURCE_LIMIT_EXCEEDED',
+        cause: 'deadline',
+        message: 'attempt deadline reached',
+      },
+    });
+
+    const result = await h.runner.runNext(h.taskId, h.controller.signal);
+    expect(result.attemptFailed).toBe(true);
+    expect(result.retryable).toBe(false);
+    const events = await committedEvents(h);
+    const terminals = events.filter((e) => e.type === 'structured_slot_attempt_terminal');
+    expect(terminals).toHaveLength(1);
+    expect(terminals[0]).toMatchObject({ status: 'failed', reason: 'runtime_failure' });
+    // No tool/dispatch/human facts were ever produced.
+    expect(events.some((e) => e.type === 'human_requested')).toBe(false);
+    expect(events.some((e) => e.type === 'route_executed')).toBe(false);
   });
 });

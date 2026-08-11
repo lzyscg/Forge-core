@@ -17,6 +17,8 @@ import {
   CANDIDATE_PROFILE_LIMITS_V1,
   createProductionRuntimeEnvironment,
   createRuntimeEnvironment,
+  createTestRuntimeEnvironment,
+  isStructuredRuntimeEnabled,
   validateProductionProfile,
   validateRuntimeCapability,
   validatePlatformProfile,
@@ -132,8 +134,7 @@ describe('runtime-capability — validation and injection', () => {
   });
 });
 
-describe('runtime-capability — production capability validator rejects provisional (Task 9)', () => {
-  /** Smaller final-shaped profile the unit tests may inject (spec §5 allows any legal limits). */
+describe('runtime-capability — production capability validator rejects provisional (Task 9)', () => {  /** Smaller final-shaped profile the unit tests may inject (spec §5 allows any legal limits). */
   const finalProfile = () => ({
     version: 1 as const,
     status: 'final' as const,
@@ -168,5 +169,29 @@ describe('runtime-capability — production capability validator rejects provisi
     expect(() =>
       validateProductionProfile({ ...finalProfile(), evidenceDigest: null }),
     ).toThrow();
+  });
+});
+
+describe('runtime-capability — readiness predicate and enabled injection (Task 17)', () => {
+  it('treats the disabled production default as not runnable', () => {
+    const env = createProductionRuntimeEnvironment();
+    expect(isStructuredRuntimeEnabled(env)).toBe(false);
+    expect(isStructuredRuntimeEnabled(undefined)).toBe(false);
+  });
+
+  it('treats an injected enabled environment with a matching profile as runnable', () => {
+    const env = createTestRuntimeEnvironment();
+    expect(isStructuredRuntimeEnabled(env)).toBe(true);
+    // The profile and capability are the SAME immutable references — never a
+    // second default and never an environment-variable fallback.
+    expect(env.capability.status).toBe('enabled');
+    expect(env.profile).not.toBeNull();
+  });
+
+  it('fails closed when an enabled capability has no matching profile', () => {
+    // The constructor REJECTS the mismatched pair; no component can ever read
+    // a divergent default (spec §5).
+    const capability = createTestRuntimeEnvironment().capability;
+    expect(() => createRuntimeEnvironment(capability, null)).toThrow();
   });
 });

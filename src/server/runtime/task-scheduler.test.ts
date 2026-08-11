@@ -22,10 +22,13 @@
  * Neutral identities only (iron rule 1); fixture agent ids appear exclusively
  * in test data.
  */
-import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { readFileSync, readdirSync, writeFileSync, cpSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { RuntimeFailure } from './agent-runtime';
+import type { AgentRuntime } from './agent-runtime';
 import { FakeAgentRuntime, type FakeScriptStep } from './fake-agent-runtime';
 import {
   createDeferred,
@@ -39,13 +42,22 @@ import {
   seedAgentInputVersion,
   type SchedulerEnvironment,
 } from './test-support';
-import { downgradeTaskSnapshotToLegacy, makeEventNode, makeTaskEvent } from '../test-support';
+import {
+  downgradeTaskSnapshotToLegacy,
+  makeEventNode,
+  makeTaskEvent,
+  makeTempCorePaths,
+} from '../test-support';
 import { PROGRESS_GUARD_QUESTION } from './progress-guard';
 import type { ArtifactStore } from '../storage/artifact-store';
 import type { TaskEvent } from '../storage/task-events';
 import { TraceStore } from '../storage/trace-store';
 import { ActionCommitter } from './action-committer';
 import { SkillService } from './skill-service';
+import { startAttempt, deriveTurnId } from './structured-slot/attempt-coordinator';
+import { createTestRuntimeEnvironment } from '../structured-slots/runtime-capability';
+import { CoreService } from '../core-service';
+import type { CorePaths } from '../storage/core-paths';
 import { TaskRunner } from './task-runner';
 import { TaskScheduler } from './task-scheduler';
 import { WorkspaceStore } from './workspace-store';
@@ -1758,5 +1770,245 @@ describe('TaskScheduler interrupted-commit re-entry (review F4)', () => {
     ).toHaveLength(1);
     expect(committed.filter((entry) => entry.event.type === 'artifact_published')).toEqual([]);
     expect(await harness.environment.artifacts.list(harness.taskId)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 17: structured scheduler lifecycle (spec §11.5/§13, design §11.5).
+// ---------------------------------------------------------------------------
+
+/** Locates the structured-valid fixture (node + jsdom fallback). */
+function structuredSchedulerFixtureDir(): string {
+  try {
+    return fileURLToPath(
+      new URL('../template/__fixtures__/structured-valid', import.meta.url),
+    );
+  } catch {
+    return join(
+      process.cwd(),
+      'src',
+      'server',
+      'template',
+      '__fixtures__',
+      'structured-valid',
+    );
+  }
+}
+
+interface StructuredSchedulerHarness {
+  paths: CorePaths;
+  service: CoreService;
+  scheduler: TaskScheduler;
+  runtime: AgentRuntime;
+  taskId: string;
+  restart(): Promise<TaskScheduler>;
+}
+
+/** Builds a structured-valid scheduler harness with the injected enabled env. */
+async function createStructuredSchedulerHarness(options: {
+  runtime?: AgentRuntime;
+} = {}): Promise<StructuredSchedulerHarness> {
+  const { paths } = makeTempCorePaths('forge-core-structured-scheduler-');
+  const templateDir = join(paths.templateRoot, 'structured-valid');
+  cpSync(structuredSchedulerFixtureDir(), templateDir, { recursive: true });
+  const runtime = options.runtime ?? new FakeAgentRuntime();
+  const service = new CoreService(paths, {
+    runtime,
+    runtimeEnvironment: createTestRuntimeEnvironment(),
+  });
+  await service.initialize();
+  const created = await service.createTask({
+    templateId: 'structured-valid',
+    name: 'Structured Scheduler Task',
+    input: { 'source-text': 'neutral structured source' },
+  });
+  return {
+    paths,
+    service,
+    scheduler: service.scheduler,
+    runtime,
+    taskId: created.id,
+    async restart() {
+      const restartedService = new CoreService(paths, {
+        runtime: new FakeAgentRuntime(),
+        runtimeEnvironment: createTestRuntimeEnvironment(),
+      });
+      await restartedService.initialize();
+      return restartedService.scheduler;
+    },
+  };
+}
+
+/** Appends a structured `agent_request` human request with a known id. */
+async function seedStructuredHumanRequest(
+  harness: StructuredSchedulerHarness,
+  id: string,
+  agentId: string,
+  question: string,
+): Promise<void> {
+  await harness.service.events.append(harness.taskId, {
+    id,
+    at: new Date().toISOString(),
+    type: 'human_requested',
+    node: {
+      sequence: 1,
+      agentId,
+      kind: 'human_request',
+      title: agentId,
+      body: question,
+      status: 'confirmed',
+      attemptCount: 1,
+      inputVersion: null,
+    },
+    question,
+    source: 'agent_request',
+  });
+}
+
+/** Seeds one confirmed input node for a structured agent. */
+async function seedStructuredSchedulerInput(
+  harness: StructuredSchedulerHarness,
+  id: string,
+  agentId: string,
+  body: string,
+): Promise<void> {
+  const committed = await harness.service.events.read(harness.taskId);
+  let sequence = 0;
+  for (const entry of committed) {
+    if ('node' in entry.event) {
+      sequence = Math.max(sequence, entry.event.node.sequence);
+    }
+  }
+  await harness.service.events.append(harness.taskId, {
+    id,
+    at: new Date().toISOString(),
+    type: 'agent_input',
+    node: {
+      sequence: sequence + 1,
+      agentId,
+      kind: 'input',
+      title: agentId,
+      body,
+      status: 'confirmed',
+      attemptCount: 1,
+      inputVersion: null,
+    },
+  });
+}
+
+describe('TaskScheduler atomic structured human answer (Task 17, spec §11.5)', () => {
+  it('appends human_answered + fresh agent_input in ONE commit; same answer replays; different answer conflicts', async () => {
+    const h = await createStructuredSchedulerHarness();
+    await seedStructuredHumanRequest(h, 'hr-1', 'structure', 'which shape?');
+
+    // The pending request parks the task in waiting_human.
+    const before = await h.service.getWorkspace(h.taskId);
+    expect(before.task.status).toBe('waiting_human');
+
+    const summary = await h.scheduler.answer(h.taskId, 'a title slot first');
+    void summary;
+
+    // Both events landed and the answer commit exists under the derived id.
+    const committed = await h.service.events.read(h.taskId);
+    expect(committed.some((e) => e.event.type === 'human_answered' && e.event.id === 'hr-1-answered')).toBe(true);
+    const freshInput = committed.find((e) => e.event.type === 'agent_input' && e.event.id === 'hr-1-input');
+    expect(freshInput).toBeDefined();
+    const batch = await h.service.events.readBatchByCommitId(h.taskId, 'answer-hr-1');
+    expect(batch).not.toBeNull();
+    expect(batch?.map((entry) => entry.event.type).sort()).toEqual(['agent_input', 'human_answered']);
+
+    // The same canonical answer replays the original success.
+    await expect(h.scheduler.answer(h.taskId, 'a title slot first')).resolves.toBeDefined();
+    // A different canonical answer conflicts — the first answer is never overwritten.
+    await expect(h.scheduler.answer(h.taskId, 'a body slot first')).rejects.toMatchObject({
+      code: 'IDEMPOTENCY_CONFLICT',
+    });
+  });
+
+  it('a fresh answered input starts its own attempt epoch 1', async () => {
+    const h = await createStructuredSchedulerHarness();
+    await seedStructuredHumanRequest(h, 'hr-2', 'structure', 'which shape?');
+    await h.scheduler.answer(h.taskId, 'a title slot first');
+    // The runner's structured path starts the fresh input's FIRST attempt at
+    // epoch 1 (deriveTurnId of the fresh input id).
+    const committed = await h.service.events.read(h.taskId);
+    const started = committed
+      .map((e) => e.event)
+      .filter(
+        (event): event is Extract<TaskEvent, { type: 'structured_slot_attempt_started' }> =>
+          event.type === 'structured_slot_attempt_started',
+      );
+    expect(started.length).toBeGreaterThanOrEqual(1);
+    const freshStarted = started.find((event) => event.inputNodeId === 'hr-2-input');
+    expect(freshStarted?.attemptEpoch).toBe(1);
+    expect(freshStarted?.turnId).toBe(deriveTurnId('hr-2-input', 1));
+  });
+});
+
+describe('TaskScheduler structured stop and recovery (Task 17, design §11.5)', () => {
+  it('stop closes the active structured attempt in ONE batch (abandonment + task_stopped)', async () => {
+    const deferred = new DeferredAgentRuntime();
+    const h = await createStructuredSchedulerHarness({ runtime: deferred });
+    await seedStructuredSchedulerInput(h, 'in-stop', 'structure', 'create the scaffold');
+    const runPromise = h.scheduler.start(h.taskId);
+    await deferred.waitForPendingTurn(); // the structure Turn is in flight; the attempt started
+
+    const summary = await h.scheduler.stop(h.taskId);
+    void summary;
+    await runPromise.catch(() => undefined);
+
+    const committed = await h.service.events.read(h.taskId);
+    const turnId = deriveTurnId('in-stop', 1);
+    const terminal = committed.find(
+      (e) => e.event.type === 'structured_slot_attempt_terminal' && e.event.turnId === turnId,
+    );
+    expect(terminal?.event).toMatchObject({ status: 'abandoned', reason: 'task_stop' });
+    expect(committed.some((e) => e.event.type === 'task_stopped')).toBe(true);
+    // The abandonment facts and task_stopped share ONE batch (the terminal
+    // commitId); no second terminal exists.
+    const terminalBatch = await h.service.events.readBatchByCommitId(h.taskId, `${turnId}-terminal`);
+    expect(terminalBatch).not.toBeNull();
+    expect(
+      committed.filter((e) => e.event.type === 'structured_slot_attempt_terminal'),
+    ).toHaveLength(1);
+  });
+
+  it('startup recovery closes dangling structured starts (crash_recovery + task_interrupted) before resume', async () => {
+    const h = await createStructuredSchedulerHarness();
+    // Simulate a crash mid-run: task_started + a started-without-terminal attempt.
+    await h.service.events.append(h.taskId, {
+      id: randomUUID(),
+      at: new Date().toISOString(),
+      type: 'task_started',
+    });
+    await seedStructuredSchedulerInput(h, 'in-crash', 'structure', 'create the scaffold');
+    const readEvents = async () => h.service.events.read(h.taskId);
+    await startAttempt({
+      taskId: h.taskId,
+      inputNodeId: 'in-crash',
+      agentId: 'structure',
+      sessionKind: 'structure',
+      events: await readEvents(),
+      readEvents,
+      appendBatch: (commitId, batch, expectedLastSequence) =>
+        h.service.events.appendBatch(h.taskId, commitId, batch, { expectedLastSequence }),
+    });
+
+    const restarted = await h.restart();
+    const interrupted = await restarted.recoverInterruptedTasks();
+    expect(interrupted).toContain(h.taskId);
+
+    const committed = await h.service.events.read(h.taskId);
+    expect(
+      committed.some(
+        (e) =>
+          e.event.type === 'structured_slot_attempt_terminal' &&
+          e.event.reason === 'crash_recovery',
+      ),
+    ).toBe(true);
+    expect(committed.some((e) => e.event.type === 'task_interrupted')).toBe(true);
+    // The attempt is no longer dangling: resume is allowed.
+    const summary = await restarted.resume(h.taskId);
+    expect(['running', 'interrupted', 'retryable_failure']).toContain(summary.status);
   });
 });
