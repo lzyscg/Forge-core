@@ -34,13 +34,22 @@
  * yield one winner; a changed candidate digest or dispatch target does NOT
  * reuse the prior result and loses against the already committed terminal.
  *
+ * Step 6 (Task 16) — seal success: a `passed` seal candidate dispatches
+ * `publish_artifact` (artifact_published + structured_scaffold_sealed + Agent
+ * result + terminal + artifact Route/input in ONE batch) or
+ * `submit_final_artifact` by the declared submitter (the SAME batch plus
+ * final_submission_accepted — the ONLY task-completing event). Plain Seal/
+ * publish never completes the task (design §17.3).
+ *
  * No business vocabulary lives here (iron rule 1): task/turn/agent/slot ids
  * are stable platform identifiers.
  */
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import { EventStore, type CommittedEvent } from '../../storage/event-store';
 import { StructuredSlotBlobStore, type SlotInstance } from '../../storage/structured-slot-blob-store';
 import { StructuredSlotPrivateStore } from '../../storage/structured-slot-private-store';
+import { ArtifactStore } from '../../storage/artifact-store';
 import {
   disposeAllTestRoots,
   makeEventNode,
@@ -74,6 +83,12 @@ import {
   prepareStructuredCommit,
   type StructuredCommitContext,
 } from './structured-committer';
+import type { SealCandidateV1 } from './tool-factory';
+import type { SealRecord } from '../../../shared/structured-slots';
+
+function sha256(content: string): string {
+  return createHash('sha256').update(content, 'utf8').digest('hex');
+}
 
 afterEach(() => {
   disposeAllTestRoots();
@@ -272,13 +287,14 @@ function makeAgent(id: string, name: string, contract: StructuredTurnContractV3)
   };
 }
 
-/** The base structured harness: real store + blob/private stores + one input. */
+/** The base structured harness: real store + blob/private/artifact stores + one input. */
 async function structuredHarness(): Promise<{
   paths: ReturnType<typeof makeTempCorePaths>['paths'];
   taskId: string;
   store: EventStore;
   blobStore: StructuredSlotBlobStore;
   privateStore: StructuredSlotPrivateStore;
+  artifactStore: ArtifactStore;
   contract: FrozenStructuredSlotContractV1;
   readEvents: () => Promise<readonly CommittedEvent[]>;
   seedInput: () => Promise<void>;
@@ -293,6 +309,7 @@ async function structuredHarness(): Promise<{
     store,
     blobStore: new StructuredSlotBlobStore(paths, taskId),
     privateStore: new StructuredSlotPrivateStore(paths, taskId),
+    artifactStore: new ArtifactStore(paths, store),
     contract: makeContract(),
     readEvents: () => store.read(taskId),
     async seedInput() {
@@ -319,6 +336,8 @@ function contextBase(h: Awaited<ReturnType<typeof structuredHarness>>, turnId: s
   events: EventStore;
   blobStore: StructuredSlotBlobStore;
   privateStore: StructuredSlotPrivateStore;
+  artifactStore: ArtifactStore;
+  finalSubmitters: readonly string[];
   submitStructureContext: SubmitStructureContext;
   agents: ReadonlyArray<{ id: string; name: string }>;
   declaredRoutes: ReadonlyArray<{ from: string; to: string; kind: 'message' | 'artifact'; label: string }>;
@@ -333,6 +352,8 @@ function contextBase(h: Awaited<ReturnType<typeof structuredHarness>>, turnId: s
     events: h.store,
     blobStore: h.blobStore,
     privateStore: h.privateStore,
+    artifactStore: h.artifactStore,
+    finalSubmitters: [AGENT_ONE],
     submitStructureContext: { scaffoldId: SC, generationId: GEN },
     agents: AGENTS,
     declaredRoutes: MESSAGE_ROUTES,
@@ -374,6 +395,74 @@ async function startFillAttempt(
     draftContext: { scaffoldId: SC, generationId: GEN, baseRevision },
   });
   return { turnId: result.turnId, attemptEpoch: result.attemptEpoch, draftId: deriveDraftId(result.turnId) };
+}
+
+async function startSealAttempt(
+  h: Awaited<ReturnType<typeof structuredHarness>>,
+): Promise<{ turnId: string; attemptEpoch: number }> {
+  const events = await h.readEvents();
+  const result = await startAttempt({
+    taskId: h.taskId,
+    inputNodeId: INPUT,
+    agentId: AGENT_ONE,
+    sessionKind: 'seal',
+    events,
+    readEvents: async () => h.readEvents(),
+    appendBatch: (commitId, batch, expectedLastSequence) =>
+      h.store.appendBatch(h.taskId, commitId, batch, { expectedLastSequence }),
+  });
+  return { turnId: result.turnId, attemptEpoch: result.attemptEpoch };
+}
+
+/** Stages a custody candidate and freezes the seal dispatch state (Task 16). */
+async function formSealCandidate(
+  h: Awaited<ReturnType<typeof structuredHarness>>,
+  turnId: string,
+  content = 'sealed story body',
+): Promise<SealCandidateV1> {
+  const contentIdentity = 'e'.repeat(64);
+  const sealRecord: SealRecord = {
+    sealId: `seal-${contentIdentity.slice(0, 8)}`,
+    caseId: h.taskId,
+    scaffoldId: SC,
+    scaffoldRevision: 0,
+    scaffoldTreeHash: 'a'.repeat(64),
+    templateId: 'tpl',
+    templateVersion: 'v1',
+    snapshotHash: SNAPSHOT,
+    assemblerId: 'asm',
+    assemblerVersion: 'asm-v1',
+    artifactVersionRef: { artifactId: '', version: 0 },
+    outputs: [
+      {
+        routeId: 'out-1',
+        path: 'content.md',
+        mediaType: 'text/markdown; charset=utf-8',
+        byteLength: Buffer.byteLength(content, 'utf8'),
+        sha256: sha256(content),
+      },
+    ],
+    sealedAt: '2026-01-01T00:00:00.000Z',
+  };
+  const prepared = await h.artifactStore.prepareStructuredVersion(h.taskId, {
+    contentIdentity,
+    files: [{ name: 'content.md', content }],
+    meta: { title: 'Sealed Story', sourceNodeId: `${turnId}-result`, format: 'markdown' },
+    sealRecord,
+  });
+  return {
+    sealId: prepared.sealRecord.sealId,
+    contentIdentity,
+    turnId,
+    scaffoldId: SC,
+    generationId: GEN,
+    scaffoldRevision: 0,
+    artifact: prepared,
+    sealRecord: prepared.sealRecord,
+    sourceNodeId: `${turnId}-result`,
+    title: prepared.title,
+    format: prepared.format,
+  };
 }
 
 /** Forms the structure candidate through the REAL proposal service + gate. */
@@ -1116,5 +1205,232 @@ describe('prepareStructuredCommit — completion-signature replay', () => {
         entry.event.type === 'structured_fill_draft_terminal',
     );
     expect(draftTerminal?.event).toMatchObject({ draftId, status: 'merged', resultRevision: 1 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Step 6 (Task 16): seal success — publish + direct final
+// ---------------------------------------------------------------------------
+
+const SEAL_ROUTES = [
+  { from: AGENT_ONE, to: AGENT_TWO, kind: 'message' as const, label: 'message reply' },
+  { from: AGENT_ONE, to: AGENT_TWO, kind: 'artifact' as const, label: 'artifact handoff' },
+];
+
+describe('prepareStructuredCommit — seal success (Task 16)', () => {
+  it('publish_artifact creates artifact_published + sealed + Agent result + terminal + artifact Route/input in ONE batch', async () => {
+    const h = await structuredHarness();
+    await h.seedInput();
+    await seedGeneration(h);
+    const { turnId } = await startSealAttempt(h);
+    const candidate = await formSealCandidate(h, turnId);
+
+    const context: StructuredCommitContext = {
+      ...contextBase(h, turnId),
+      sessionKind: 'seal',
+      structureCandidate: null,
+      mergeCandidate: null,
+      sealDispatch: { status: 'passed', declaredDispatches: ['publish_artifact', 'submit_final_artifact'], candidate },
+      publicText: 'sealed',
+      currentAgent: makeAgent(AGENT_ONE, 'Agent One', V3_SEAL_CONTRACT),
+      declaredRoutes: SEAL_ROUTES,
+    };
+    const action: ForgeAction = { type: 'publish_artifact' };
+
+    const prepared = await prepareStructuredCommit(context, action);
+    expect(prepared.kind).toBe('seal_publish');
+    expect(prepared.taskCompleted).toBe(false); // Seal/publish NEVER completes the task
+    expect(prepared.publishedVersions).toEqual([1]);
+    expect(prepared.nextAgentIds).toEqual([AGENT_TWO]);
+    expect(prepared.phase).toMatchObject({ state: 'dispatched', dispatchAction: 'publish_artifact', target: AGENT_TWO });
+
+    const snapshot = (await h.readEvents()).map((entry) => entry.event);
+    const commitId = deriveStructuredCommitId(context, 'seal_publish', action, snapshot);
+    const batch = await h.store.readBatchByCommitId(h.taskId, commitId);
+    expect(batch).not.toBeNull();
+    const batchEvents = batch!.map((entry) => entry.event);
+    const types = batchEvents.map((event) => event.type).sort();
+    expect(types).toEqual([
+      'agent_input',
+      'agent_result',
+      'artifact_published',
+      'route_executed',
+      'structured_scaffold_sealed',
+      'structured_slot_attempt_terminal',
+    ]);
+
+    const published = batchEvents.find((event): event is Extract<TaskEvent, { type: 'artifact_published' }> => event.type === 'artifact_published')!;
+    expect(published.artifact).toMatchObject({
+      version: 1,
+      title: 'Sealed Story',
+      format: 'markdown',
+      artifactId: candidate.artifact.artifactId,
+    });
+    expect(published.artifact.files).toEqual([{ name: 'content.md', hash: sha256('sealed story body') }]);
+
+    const sealed = batchEvents.find((event): event is Extract<TaskEvent, { type: 'structured_scaffold_sealed' }> => event.type === 'structured_scaffold_sealed')!;
+    expect(sealed).toMatchObject({
+      sealId: candidate.sealId,
+      scaffoldId: SC,
+      generationId: GEN,
+      scaffoldRevision: 0,
+      artifactId: candidate.artifact.artifactId,
+      artifactVersion: 1,
+    });
+    expect(sealed.sealRecord.kind).toBe('seal_record');
+    expect(sealed.sealRecord.sha256).toMatch(/^[a-f0-9]{64}$/);
+
+    const terminal = batchEvents.find(isAttemptTerminal)!;
+    expect(terminal).toMatchObject({ turnId, status: 'committed', reason: 'completion_dispatch' });
+
+    const route = batchEvents.find((event): event is Extract<TaskEvent, { type: 'route_executed' }> => event.type === 'route_executed')!;
+    expect(route.route).toMatchObject({ kind: 'artifact', fromNodeId: `${turnId}-result`, label: 'artifact handoff' });
+    const input = batchEvents.find((event): event is Extract<TaskEvent, { type: 'agent_input' }> => event.type === 'agent_input')!;
+    expect(input.node).toMatchObject({ agentId: AGENT_TWO, kind: 'input', inputVersion: 1 });
+
+    // The promoted version is now event-backed and readable, with the SealRecord
+    // blob readable through the blob store.
+    const entry = await h.artifactStore.read(h.taskId, 1);
+    expect(entry.files[0].content).toBe('sealed story body');
+    const sealRecordBlob = await h.blobStore.readBlob(sealed.sealRecord.sha256);
+    const parsed = JSON.parse(sealRecordBlob.toString('utf8')) as SealRecord;
+    expect(parsed.artifactVersionRef).toEqual({ artifactId: candidate.artifact.artifactId, version: 1 });
+
+    // The projection flips the scaffold to sealed.
+    const state = await import('../../storage/structured-slot-state').then((m) => m.projectStructuredSlotState(snapshot));
+    expect(state.sealStatus).toBe('sealed');
+  });
+
+  it('submit_final_artifact by the declared submitter creates artifact_published + sealed + final_submission_accepted and completes the task', async () => {
+    const h = await structuredHarness();
+    await h.seedInput();
+    await seedGeneration(h);
+    const { turnId } = await startSealAttempt(h);
+    const candidate = await formSealCandidate(h, turnId);
+
+    const context: StructuredCommitContext = {
+      ...contextBase(h, turnId),
+      sessionKind: 'seal',
+      structureCandidate: null,
+      mergeCandidate: null,
+      sealDispatch: { status: 'passed', declaredDispatches: ['publish_artifact', 'submit_final_artifact'], candidate },
+      publicText: 'sealed final',
+      currentAgent: makeAgent(AGENT_ONE, 'Agent One', V3_SEAL_CONTRACT),
+      declaredRoutes: SEAL_ROUTES,
+    };
+    const action: ForgeAction = { type: 'submit_final_artifact' };
+
+    const prepared = await prepareStructuredCommit(context, action);
+    expect(prepared.kind).toBe('seal_final');
+    expect(prepared.taskCompleted).toBe(true); // ONLY final_submission_accepted completes the task
+    expect(prepared.publishedVersions).toEqual([1]);
+    expect(prepared.nextAgentIds).toEqual([]);
+    expect(prepared.phase).toMatchObject({ state: 'dispatched', dispatchAction: 'submit_final_artifact', target: null });
+
+    const snapshot = (await h.readEvents()).map((entry) => entry.event);
+    const commitId = deriveStructuredCommitId(context, 'seal_final', action, snapshot);
+    const batch = await h.store.readBatchByCommitId(h.taskId, commitId);
+    expect(batch).not.toBeNull();
+    const batchEvents = batch!.map((entry) => entry.event);
+    const types = batchEvents.map((event) => event.type).sort();
+    expect(types).toEqual([
+      'agent_result',
+      'artifact_published',
+      'final_submission_accepted',
+      'structured_scaffold_sealed',
+      'structured_slot_attempt_terminal',
+    ]);
+    const final = batchEvents.find((event): event is Extract<TaskEvent, { type: 'final_submission_accepted' }> => event.type === 'final_submission_accepted')!;
+    expect(final).toMatchObject({ artifactId: candidate.artifact.artifactId, version: 1 });
+    // No Route/input for a direct final.
+    expect(batchEvents.some((event) => event.type === 'route_executed')).toBe(false);
+    expect(batchEvents.some((event) => event.type === 'agent_input')).toBe(false);
+  });
+
+  it('rejects submit_final_artifact when the current agent is not the declared submitter', async () => {
+    const h = await structuredHarness();
+    await h.seedInput();
+    await seedGeneration(h);
+    const { turnId } = await startSealAttempt(h);
+    const candidate = await formSealCandidate(h, turnId);
+
+    const context: StructuredCommitContext = {
+      ...contextBase(h, turnId),
+      sessionKind: 'seal',
+      structureCandidate: null,
+      mergeCandidate: null,
+      sealDispatch: { status: 'passed', declaredDispatches: ['submit_final_artifact'], candidate },
+      publicText: 'sealed',
+      currentAgent: makeAgent(AGENT_ONE, 'Agent One', V3_SEAL_CONTRACT),
+      finalSubmitters: [AGENT_TWO], // AGENT_ONE is NOT the declared submitter
+      declaredRoutes: SEAL_ROUTES,
+    };
+    const before = await h.readEvents();
+    await expect(
+      prepareStructuredCommit(context, { type: 'submit_final_artifact' }),
+    ).rejects.toThrow(/ROUTE_NOT_ALLOWED/);
+    expect(await h.readEvents()).toEqual(before);
+    expect(await h.artifactStore.list(h.taskId)).toEqual([]);
+  });
+
+  it('a publish without a passed seal candidate fails closed and writes nothing', async () => {
+    const h = await structuredHarness();
+    await h.seedInput();
+    await seedGeneration(h);
+    const { turnId } = await startSealAttempt(h);
+
+    const context: StructuredCommitContext = {
+      ...contextBase(h, turnId),
+      sessionKind: 'seal',
+      structureCandidate: null,
+      mergeCandidate: null,
+      sealDispatch: { status: 'none' },
+      publicText: 'sealed',
+      currentAgent: makeAgent(AGENT_ONE, 'Agent One', V3_SEAL_CONTRACT),
+      declaredRoutes: SEAL_ROUTES,
+    };
+    const before = await h.readEvents();
+    await expect(
+      prepareStructuredCommit(context, { type: 'publish_artifact' }),
+    ).rejects.toThrow(/DISPATCH_NOT_ALLOWED/);
+    expect(await h.readEvents()).toEqual(before);
+  });
+
+  it('replays a seal publish exactly (original mapping) on a response-loss retry', async () => {
+    const h = await structuredHarness();
+    await h.seedInput();
+    await seedGeneration(h);
+    const { turnId } = await startSealAttempt(h);
+    const candidate = await formSealCandidate(h, turnId);
+
+    const context: StructuredCommitContext = {
+      ...contextBase(h, turnId),
+      sessionKind: 'seal',
+      structureCandidate: null,
+      mergeCandidate: null,
+      sealDispatch: { status: 'passed', declaredDispatches: ['publish_artifact'], candidate },
+      publicText: 'sealed',
+      currentAgent: makeAgent(AGENT_ONE, 'Agent One', V3_SEAL_CONTRACT),
+      declaredRoutes: SEAL_ROUTES,
+    };
+    const action: ForgeAction = { type: 'publish_artifact' };
+
+    const first = await prepareStructuredCommit(context, action);
+    expect(first.kind).toBe('seal_publish');
+    expect(first.replayed).toBe(false);
+
+    let nowMs = Date.parse('2026-02-02T02:02:02.000Z');
+    const second = await prepareStructuredCommit({ ...context, clock: () => new Date(nowMs) }, action);
+    expect(second.replayed).toBe(true);
+    expect(second.committed.map((entry) => entry.event.id)).toEqual(
+      first.committed.map((entry) => entry.event.id),
+    );
+    for (let i = 0; i < first.committed.length; i += 1) {
+      expect(second.committed[i]?.event.at).toBe(first.committed[i]?.event.at);
+    }
+    const all = (await h.readEvents()).map((entry) => entry.event);
+    expect(all.filter((event) => event.type === 'artifact_published')).toHaveLength(1);
+    expect(all.filter((event) => event.type === 'structured_scaffold_sealed')).toHaveLength(1);
+    expect(all.filter((event) => event.type === 'final_submission_accepted')).toHaveLength(0);
   });
 });

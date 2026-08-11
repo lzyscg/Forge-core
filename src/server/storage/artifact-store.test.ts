@@ -22,8 +22,10 @@ import {
   ArtifactStore,
   type AnnotateProposal,
   type ArtifactProposal,
+  type PrepareStructuredVersionInput,
   type PublishedArtifact,
 } from './artifact-store';
+import type { SealRecord } from '../../shared/structured-slots';
 import { EventStore } from './event-store';
 import { TaskStore } from './task-store';
 
@@ -366,5 +368,200 @@ describe('ArtifactStore — v7 cross-check and recovery', () => {
     writeFileSync(join(artifactsRoot, 'notes.txt'), 'irrelevant', 'utf8');
     const listed = await store.list(taskId);
     expect(listed.map((item) => item.meta.version)).toEqual([1]);
+  });
+});
+
+describe('ArtifactStore — structured custody (Task 16)', () => {
+  const CONTENT_IDENTITY = 'c'.repeat(64);
+
+  function sealRecord(artifactId: string, version: number): SealRecord {
+    return {
+      sealId: 'seal-1',
+      caseId: taskId,
+      scaffoldId: 'scaffold-1',
+      scaffoldRevision: 1,
+      scaffoldTreeHash: 'a'.repeat(64),
+      templateId: 'tpl',
+      templateVersion: 'v1',
+      snapshotHash: 'snap',
+      assemblerId: 'asm',
+      assemblerVersion: 'asm-v1',
+      artifactVersionRef: { artifactId, version },
+      outputs: [
+        { routeId: 'out-1', path: 'content.md', mediaType: 'text/markdown; charset=utf-8', byteLength: 11, sha256: sha256('sealed body') },
+      ],
+      sealedAt: '2026-01-01T00:00:00.000Z',
+    };
+  }
+
+  function custodyInput(content = 'sealed body'): PrepareStructuredVersionInput {
+    return {
+      contentIdentity: CONTENT_IDENTITY,
+      files: [{ name: 'content.md', content }],
+      meta: { title: 'Sealed', sourceNodeId: 'turn-1-result', format: 'markdown' },
+      sealRecord: sealRecord('', 0), // the store stamps artifactId/version
+    };
+  }
+
+  function custodyRoot(): string {
+    return join(paths.taskStructuredCustodyRoot(taskId), CONTENT_IDENTITY);
+  }
+
+  it('stages an unreferenced custody candidate; list/read ignore it until the batch', async () => {
+    const prepared = await store.prepareStructuredVersion(taskId, custodyInput());
+    expect(prepared.version).toBe(1); // allocated from the (empty) event stream
+    expect(prepared.artifactId).toMatch(UUID_RE);
+    expect(prepared.sealRecord.artifactVersionRef).toEqual({
+      artifactId: prepared.artifactId,
+      version: 1,
+    });
+    expect(prepared.files).toEqual([{ name: 'content.md', sha256: sha256('sealed body'), byteLength: 11 }]);
+
+    // The custody directory exists but no event references it.
+    expect(readdirSync(custodyRoot()).sort()).toEqual(['content.md', 'manifest.json', 'meta.json', 'seal-record.json']);
+    // list/read ignore the unreferenced staging.
+    expect(await store.list(taskId)).toEqual([]);
+    await expect(store.read(taskId, 1)).rejects.toMatchObject({ code: 'TASK_NOT_FOUND' });
+  });
+
+  it('crash before promote: the custody orphan is reused or removed by digest', async () => {
+    const first = await store.prepareStructuredVersion(taskId, custodyInput('sealed body'));
+    expect(readdirSync(custodyRoot()).length).toBe(4);
+
+    // Re-prepare with the SAME digest reuses the same artifact identity/version.
+    const reused = await store.prepareStructuredVersion(taskId, {
+      ...custodyInput('sealed body'),
+      artifactId: first.artifactId,
+    });
+    expect(reused.version).toBe(1);
+    expect(reused.artifactId).toBe(first.artifactId);
+
+    // A re-prepare with a DIFFERENT digest removes the old orphan before staging.
+    const changed = await store.prepareStructuredVersion(taskId, {
+      ...custodyInput('changed body'),
+      artifactId: first.artifactId,
+    });
+    expect(changed.version).toBe(1);
+    expect(readdirSync(custodyRoot()).sort()).toEqual(['content.md', 'manifest.json', 'meta.json', 'seal-record.json']);
+    expect(readFileSync(join(custodyRoot(), 'content.md'), 'utf8')).toBe('changed body');
+  });
+
+  it('crash after promote/before batch: the final directory is an unreferenced orphan', async () => {
+    const prepared = await store.prepareStructuredVersion(taskId, custodyInput());
+    await store.promotePreparedVersion(taskId, prepared);
+
+    const artifactsRoot = paths.taskArtifactsRoot(taskId);
+    expect(readdirSync(artifactsRoot).includes('v001')).toBe(true);
+    // No event yet: list/read still ignore the promoted directory.
+    expect(await store.list(taskId)).toEqual([]);
+    await expect(store.read(taskId, 1)).rejects.toMatchObject({ code: 'TASK_NOT_FOUND' });
+
+    // Recovery reconciles the orphan: the final dir is removed and the custody
+    // candidate (kept intact by promote) is reused by digest.
+    const recovery = await store.recoverStructuredCustody(taskId, {
+      contentIdentity: CONTENT_IDENTITY,
+      expectedArtifactId: prepared.artifactId,
+      expectedVersion: 1,
+      expectedFiles: [{ name: 'content.md', sha256: sha256('sealed body') }],
+    });
+    expect(recovery.status).toBe('orphan_reused');
+    expect(recovery.handle?.version).toBe(1);
+    expect(readdirSync(artifactsRoot).includes('v001')).toBe(false);
+  });
+
+  it('after the batch: all files + the SealRecord are readable and verified', async () => {
+    const prepared = await store.prepareStructuredVersion(taskId, custodyInput());
+    await store.promotePreparedVersion(taskId, prepared);
+    // The committer's ONE batch: artifact_published references the promoted version.
+    await events.append(taskId, {
+      id: randomUUID(),
+      at: new Date().toISOString(),
+      type: 'artifact_published',
+      artifact: {
+        version: prepared.version,
+        title: prepared.title,
+        sourceNodeId: prepared.sourceNodeId,
+        format: prepared.format,
+        files: prepared.files.map((file) => ({ name: file.name, hash: file.sha256 })),
+        artifactType: null,
+        artifactId: prepared.artifactId,
+      },
+    });
+
+    const listed = await store.list(taskId);
+    expect(listed.map((item) => item.meta.version)).toEqual([1]);
+    expect((await store.read(taskId, 1)).files[0].content).toBe('sealed body');
+
+    const recovery = await store.recoverStructuredCustody(taskId, {
+      contentIdentity: CONTENT_IDENTITY,
+      expectedArtifactId: prepared.artifactId,
+      expectedVersion: 1,
+      expectedFiles: [{ name: 'content.md', sha256: sha256('sealed body') }],
+    });
+    expect(recovery.status).toBe('referenced');
+    expect(recovery.handle?.sealRecord.artifactVersionRef).toEqual({
+      artifactId: prepared.artifactId,
+      version: 1,
+    });
+    // The SealRecord is readable from the promoted version directory.
+    const onDisk = JSON.parse(
+      readFileSync(join(paths.taskArtifactVersionRoot(taskId, 1), 'seal-record.json'), 'utf8'),
+    );
+    expect(onDisk.sealId).toBe('seal-1');
+  });
+
+  it('hash mismatch fails with ARTIFACT_INTEGRITY_FAILED and is never absorbed', async () => {
+    const prepared = await store.prepareStructuredVersion(taskId, custodyInput('sealed body'));
+    // Tamper with the staged file BEFORE promote.
+    writeFileSync(join(custodyRoot(), 'content.md'), 'tampered', 'utf8');
+    await expect(store.promotePreparedVersion(taskId, prepared)).rejects.toMatchObject({
+      code: 'ARTIFACT_INTEGRITY_FAILED',
+    });
+
+    // A tampered final directory after the batch is also ARTIFACT_INTEGRITY_FAILED
+    // through the recovery path.
+    const second = await store.prepareStructuredVersion(taskId, custodyInput('sealed body'));
+    await store.promotePreparedVersion(taskId, second);
+    await events.append(taskId, {
+      id: randomUUID(),
+      at: new Date().toISOString(),
+      type: 'artifact_published',
+      artifact: {
+        version: 1,
+        title: second.title,
+        sourceNodeId: second.sourceNodeId,
+        format: second.format,
+        files: second.files.map((file) => ({ name: file.name, hash: file.sha256 })),
+        artifactType: null,
+        artifactId: second.artifactId,
+      },
+    });
+    writeFileSync(join(paths.taskArtifactVersionRoot(taskId, 1), 'content.md'), 'tampered', 'utf8');
+    await expect(
+      store.recoverStructuredCustody(taskId, {
+        contentIdentity: CONTENT_IDENTITY,
+        expectedArtifactId: second.artifactId,
+        expectedVersion: 1,
+        expectedFiles: [{ name: 'content.md', sha256: sha256('sealed body') }],
+      }),
+    ).rejects.toMatchObject({ code: 'ARTIFACT_INTEGRITY_FAILED' });
+  });
+
+  it('a future prepare removes a DIFFERENT unreferenced final-dir orphan', async () => {
+    // Crash window: promoted to v001 but the event never landed.
+    const prepared = await store.prepareStructuredVersion(taskId, custodyInput('sealed body'));
+    await store.promotePreparedVersion(taskId, prepared);
+    expect(readdirSync(paths.taskArtifactsRoot(taskId)).includes('v001')).toBe(true);
+
+    // A new prepare (different content identity) allocates the same version 1
+    // and must prove no event references it before replacing the orphan.
+    const otherIdentity = 'd'.repeat(64);
+    const next = await store.prepareStructuredVersion(taskId, {
+      ...custodyInput('sealed body'),
+      contentIdentity: otherIdentity,
+    });
+    expect(next.version).toBe(1);
+    expect(readdirSync(paths.taskArtifactsRoot(taskId)).includes('v001')).toBe(false);
+    expect(readdirSync(join(paths.taskStructuredCustodyRoot(taskId), otherIdentity)).length).toBe(4);
   });
 });

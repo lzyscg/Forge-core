@@ -37,9 +37,12 @@ import { CorePathError } from './core-paths';
 import { STORAGE_ERROR_CODES, StorageError, writeNewAtomic } from './atomic-file';
 import type { EventStore, CommittedEvent } from './event-store';
 import type { TaskEvent } from './task-events';
+import type { SealRecord } from '../../shared/structured-slots';
 
 const TMP_PREFIX = '.tmp-';
 const ANNOTATE_TMP_PREFIX = '.tmp-annotate-';
+const CUSTODY_MANIFEST_FILE = 'manifest.json';
+const CUSTODY_SEAL_RECORD_FILE = 'seal-record.json';
 
 const VERSION_DIR = /^v(\d{3})$/;
 
@@ -109,7 +112,73 @@ export interface AnnotatedFile {
   nodeId: string;
 }
 
+/** One staged/promoted custody file's recorded identity (spec §12). */
+export interface PreparedStructuredFile {
+  name: string;
+  sha256: string;
+  byteLength: number;
+}
+
+/**
+ * Structured custody staging input (spec §12 / design §17.1 step 7). The
+ * content identity (J06) keys the custody directory; the version is ALWAYS
+ * allocated by the store from the committed event count. The `sealRecord` may
+ * carry a provisional `artifactVersionRef`; the store stamps the real
+ * `{ artifactId, version }` and stages it as `seal-record.json`.
+ */
+export interface PrepareStructuredVersionInput {
+  contentIdentity: string;
+  artifactId?: string;
+  /** Optional replay drift guard: must equal the store-allocated version. */
+  version?: number;
+  files: ArtifactFileInput[];
+  meta: { title: string; sourceNodeId: string; format: 'markdown' | 'text' };
+  sealRecord: SealRecord;
+}
+
+/**
+ * A prepared (staged) structured artifact version: all files/meta/manifest/
+ * SealRecord live under `structured-slots/custody/<contentIdentity>/`, still
+ * invisible to `list`/`read` until the batch event references the promoted
+ * version. The SealRecord's `artifactVersionRef` is final.
+ */
+export interface PreparedStructuredVersion {
+  contentIdentity: string;
+  artifactId: string;
+  version: number;
+  title: string;
+  sourceNodeId: string;
+  format: 'markdown' | 'text';
+  files: PreparedStructuredFile[];
+  sealRecord: SealRecord;
+  createdAt: string;
+}
+
+/** The recovery classification of one custody key after a crash. */
+export interface RecoverStructuredCustodyResult {
+  /**
+   * `referenced`: an `artifact_published` event already commits this version —
+   * all files + SealRecord verified readable. `orphan_reused`: an unreferenced
+   * custody directory matches the expected digest and is kept. `orphan_removed`:
+   * unreferenced residue was reconciled away (nothing to promote).
+   */
+  status: 'referenced' | 'orphan_reused' | 'orphan_removed';
+  /** The verified handle on `referenced` / `orphan_reused`; null otherwise. */
+  handle: PreparedStructuredVersion | null;
+}
+
+/** Expected custody digest used to prove an orphan by hash (spec §12). */
+export interface RecoverStructuredCustodyInput {
+  contentIdentity: string;
+  expectedArtifactId: string;
+  expectedVersion: number;
+  expectedFiles: Array<{ name: string; sha256: string }>;
+}
+
 const META_FILE = 'meta.json';
+
+/** Reserved custody bookkeeping files that are never artifact file bodies. */
+const CUSTODY_BOOKKEEPING = new Set([META_FILE, CUSTODY_MANIFEST_FILE, CUSTODY_SEAL_RECORD_FILE]);
 
 /** File names a publish/annotate may never claim (reserved). */
 const RESERVED_FILE_NAMES = new Set([META_FILE]);
@@ -124,6 +193,16 @@ function corrupt(message: string): StorageError {
     message,
     null,
     '检查该任务的本地产物目录。',
+  );
+}
+
+/** Sealed custody integrity failure — never absorbed back into slot content. */
+function integrityFailed(message: string): StorageError {
+  return new StorageError(
+    STORAGE_ERROR_CODES.ARTIFACT_INTEGRITY_FAILED,
+    message,
+    null,
+    '检查该任务的 sealed artifact 暂存目录。',
   );
 }
 
@@ -342,6 +421,50 @@ export class ArtifactStore {
     return this.enqueue(taskId, () => this.listExclusive(taskId));
   }
 
+  /**
+   * Stages a structured artifact custody candidate (spec §12 / design §17.1):
+   * allocates the NEXT event-backed version, stages every file/meta/manifest/
+   * SealRecord under `structured-slots/custody/<contentIdentity>/`, stamps the
+   * SealRecord's final `{ artifactId, version }` and verifies every staged hash.
+   * The staged candidate is invisible to `list`/`read`; no event is written.
+   * An unreferenced final-dir orphan at the allocated version is removed only
+   * after proving no event references it (spec §12).
+   */
+  async prepareStructuredVersion(
+    taskId: string,
+    input: PrepareStructuredVersionInput,
+  ): Promise<PreparedStructuredVersion> {
+    return this.enqueue(taskId, () => this.prepareStructuredVersionExclusive(taskId, input));
+  }
+
+  /**
+   * Promotes a prepared custody candidate to its unreferenced FINAL
+   * `artifacts/vNNN/` directory (spec §12 / design §17.1 step 8). The promoted
+   * version stays invisible to `list`/`read` until the batch event references
+   * it; the custody directory is consumed by the atomic rename. A pre-existing
+   * final directory is reused only when its content matches the recorded
+   * digest — otherwise `ARTIFACT_INTEGRITY_FAILED` (never overwritten).
+   */
+  async promotePreparedVersion(
+    taskId: string,
+    handle: PreparedStructuredVersion,
+  ): Promise<PreparedStructuredVersion> {
+    return this.enqueue(taskId, () => this.promotePreparedVersionExclusive(taskId, handle));
+  }
+
+  /**
+   * Crash recovery for one custody key (spec §12 / design §17.3): after the
+   * batch all files + SealRecord are verified readable; before the batch an
+   * orphan is reused (digest match) or removed. A hash mismatch anywhere is
+   * `ARTIFACT_INTEGRITY_FAILED` — never absorbed back into slot content.
+   */
+  async recoverStructuredCustody(
+    taskId: string,
+    input: RecoverStructuredCustodyInput,
+  ): Promise<RecoverStructuredCustodyResult> {
+    return this.enqueue(taskId, () => this.recoverStructuredCustodyExclusive(taskId, input));
+  }
+
   /** Runs work behind the per-task mutex; failures never jam the queue. */
   private enqueue<T>(taskId: string, work: () => Promise<T>): Promise<T> {
     const previous = this.queues.get(taskId) ?? Promise.resolve();
@@ -536,6 +659,12 @@ export class ArtifactStore {
     if (!dirStat.isDirectory()) {
       throw notFound(taskId);
     }
+    // Unreferenced final directories (structured custody promote before the
+    // batch, spec §12) are invisible to read until the event references them.
+    const events = await this.events.read(taskId);
+    if (!publishedEvents(events).some((event) => event.artifact.version === version)) {
+      throw notFound(taskId);
+    }
     const entry = await this.readVersionDir(taskId, version, versionRoot);
     return this.crossCheck(taskId, version, entry);
   }
@@ -620,7 +749,11 @@ export class ArtifactStore {
     }
     const files: ArtifactStoredFile[] = [];
     for (const name of names) {
-      if (name === META_FILE || name.startsWith(TMP_PREFIX) || name.startsWith(ANNOTATE_TMP_PREFIX)) {
+      if (
+        CUSTODY_BOOKKEEPING.has(name) ||
+        name.startsWith(TMP_PREFIX) ||
+        name.startsWith(ANNOTATE_TMP_PREFIX)
+      ) {
         continue;
       }
       let content: string;
@@ -766,5 +899,425 @@ export class ArtifactStore {
       }
       throw notFound(taskId);
     }
+  }
+
+  // --------------------------------------------------------------------------
+  // Structured custody (spec §12 / design §17) — stage → promote → batch.
+  // --------------------------------------------------------------------------
+
+  /** A content identity must be a single safe segment (64-hex SHA-256). */
+  private assertContentIdentity(contentIdentity: string): string {
+    if (!/^[a-f0-9]{64}$/.test(contentIdentity)) {
+      throw invalidInput('结构化产物内容身份必须是 64 位十六进制 SHA-256。', '重新运行 request_seal。');
+    }
+    return contentIdentity;
+  }
+
+  private async isDirectory(path: string): Promise<boolean> {
+    try {
+      const dirStat = await stat(path);
+      return dirStat.isDirectory();
+    } catch {
+      return false;
+    }
+  }
+
+  /** Reads and re-validates a custody directory's manifest entry. */
+  private async readCustodyManifest(
+    custodyDir: string,
+    version: number,
+  ): Promise<{ contentIdentity: string; artifactId: string; files: Array<{ name: string; sha256: string; byteLength: number }> }> {
+    let raw: string;
+    try {
+      raw = await readFile(join(custodyDir, CUSTODY_MANIFEST_FILE), 'utf8');
+    } catch {
+      throw integrityFailed('custody manifest 不可读。');
+    }
+    let value: unknown;
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      throw integrityFailed('custody manifest 不是有效 JSON。');
+    }
+    if (!isPlainObject(value)) {
+      throw integrityFailed('custody manifest 形状非法。');
+    }
+    const record = value as Record<string, unknown>;
+    if (
+      typeof record.contentIdentity !== 'string' ||
+      typeof record.artifactId !== 'string' ||
+      typeof record.version !== 'number' ||
+      record.version !== version ||
+      !Array.isArray(record.files)
+    ) {
+      throw integrityFailed('custody manifest 字段非法。');
+    }
+    const files: Array<{ name: string; sha256: string; byteLength: number }> = [];
+    for (const entry of record.files) {
+      if (!isPlainObject(entry)) {
+        throw integrityFailed('custody manifest 文件条目非法。');
+      }
+      const file = entry as Record<string, unknown>;
+      if (
+        typeof file.name !== 'string' ||
+        typeof file.sha256 !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(file.sha256) ||
+        typeof file.byteLength !== 'number' ||
+        !Number.isInteger(file.byteLength) ||
+        file.byteLength < 0
+      ) {
+        throw integrityFailed('custody manifest 文件条目字段非法。');
+      }
+      files.push({ name: file.name, sha256: file.sha256, byteLength: file.byteLength });
+    }
+    return { contentIdentity: record.contentIdentity, artifactId: record.artifactId, files };
+  }
+
+  /** Reads and re-validates a staged `seal-record.json`. */
+  private async readCustodySealRecord(
+    custodyDir: string,
+  ): Promise<SealRecord> {
+    let raw: string;
+    try {
+      raw = await readFile(join(custodyDir, CUSTODY_SEAL_RECORD_FILE), 'utf8');
+    } catch {
+      throw integrityFailed('custody seal-record 不可读。');
+    }
+    let value: unknown;
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      throw integrityFailed('custody seal-record 不是有效 JSON。');
+    }
+    if (!isPlainObject(value) || typeof (value as Record<string, unknown>).sealId !== 'string') {
+      throw integrityFailed('custody seal-record 形状非法。');
+    }
+    return value as unknown as SealRecord;
+  }
+
+  /** Verifies the on-disk custody files against the manifest digests. */
+  private async verifyCustodyFiles(
+    custodyDir: string,
+    files: Array<{ name: string; sha256: string; byteLength: number }>,
+  ): Promise<void> {
+    for (const file of files) {
+      let content: string;
+      try {
+        content = await readFile(join(custodyDir, file.name), 'utf8');
+      } catch {
+        throw integrityFailed(`custody 文件 ${file.name} 缺失。`);
+      }
+      if (Buffer.byteLength(content, 'utf8') !== file.byteLength) {
+        throw integrityFailed(`custody 文件 ${file.name} 字节长度与清单不一致。`);
+      }
+      if (sha256(content) !== file.sha256) {
+        throw integrityFailed(`custody 文件 ${file.name} 与清单哈希不一致。`);
+      }
+    }
+  }
+
+  /** Writes one custody directory from the in-memory candidate. */
+  private async writeCustodyDir(
+    custodyDir: string,
+    input: PrepareStructuredVersionInput,
+    artifactId: string,
+    version: number,
+    sealRecord: SealRecord,
+    createdAt: string,
+  ): Promise<PreparedStructuredVersion> {
+    await rm(custodyDir, { recursive: true, force: true }).catch(() => undefined);
+    await mkdir(custodyDir, { recursive: true });
+    const meta: ArtifactMeta = {
+      id: artifactId,
+      version,
+      title: input.meta.title,
+      sourceNodeId: input.meta.sourceNodeId,
+      format: input.meta.format,
+      createdAt,
+    };
+    const files: PreparedStructuredFile[] = input.files.map((file) => ({
+      name: file.name,
+      sha256: sha256(file.content),
+      byteLength: Buffer.byteLength(file.content, 'utf8'),
+    }));
+    const manifest = {
+      version,
+      contentIdentity: input.contentIdentity,
+      artifactId,
+      files,
+    };
+    try {
+      await writeNewAtomic(
+        join(custodyDir, META_FILE),
+        Buffer.from(`${JSON.stringify(meta, null, 2)}\n`, 'utf8'),
+      );
+      await writeNewAtomic(
+        join(custodyDir, CUSTODY_MANIFEST_FILE),
+        Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8'),
+      );
+      await writeNewAtomic(
+        join(custodyDir, CUSTODY_SEAL_RECORD_FILE),
+        Buffer.from(`${JSON.stringify(sealRecord, null, 2)}\n`, 'utf8'),
+      );
+      for (const file of input.files) {
+        await writeNewAtomic(join(custodyDir, file.name), Buffer.from(file.content, 'utf8'));
+      }
+    } catch (error) {
+      await rm(custodyDir, { recursive: true, force: true }).catch(() => undefined);
+      if (error instanceof StorageError) {
+        throw error;
+      }
+      throw integrityFailed('custody 暂存写入失败。');
+    }
+    return {
+      contentIdentity: input.contentIdentity,
+      artifactId,
+      version,
+      title: input.meta.title,
+      sourceNodeId: input.meta.sourceNodeId,
+      format: input.meta.format,
+      files,
+      sealRecord,
+      createdAt,
+    };
+  }
+
+  /** Rebuilds a handle from a custody directory (recovery reuse path). */
+  private async handleFromCustodyDir(
+    custodyDir: string,
+    version: number,
+  ): Promise<PreparedStructuredVersion> {
+    const manifest = await this.readCustodyManifest(custodyDir, version);
+    await this.verifyCustodyFiles(custodyDir, manifest.files);
+    const sealRecord = await this.readCustodySealRecord(custodyDir);
+    let metaRaw: string;
+    try {
+      metaRaw = await readFile(join(custodyDir, META_FILE), 'utf8');
+    } catch {
+      throw integrityFailed('custody meta 不可读。');
+    }
+    const meta = validateMeta(metaRaw, version);
+    if (meta.id !== manifest.artifactId || sealRecord.artifactVersionRef.artifactId !== manifest.artifactId) {
+      throw integrityFailed('custody 身份与清单不一致。');
+    }
+    return {
+      contentIdentity: manifest.contentIdentity,
+      artifactId: manifest.artifactId,
+      version,
+      title: meta.title,
+      sourceNodeId: meta.sourceNodeId,
+      format: meta.format,
+      files: manifest.files,
+      sealRecord,
+      createdAt: meta.createdAt,
+    };
+  }
+
+  private async prepareStructuredVersionExclusive(
+    taskId: string,
+    input: PrepareStructuredVersionInput,
+  ): Promise<PreparedStructuredVersion> {
+    await this.ensureTaskRoot(taskId);
+    this.assertContentIdentity(input.contentIdentity);
+    if (!Array.isArray(input.files) || input.files.length === 0) {
+      throw invalidInput('结构化产物文件列表不能为空。', '至少提交一个产物文件。');
+    }
+    const validatedFiles: ArtifactFileInput[] = input.files.map((entry, index) => {
+      if (!isPlainObject(entry)) {
+        throw invalidInput(`结构化产物文件[${index}]必须是对象。`, '按模板产物要求重新提交。');
+      }
+      const name = assertFileName(entry.name, `结构化产物文件[${index}].name`);
+      if (typeof entry.content !== 'string' || entry.content.length === 0) {
+        throw invalidInput(`结构化产物文件[${index}]正文不能为空。`, '填写产物正文后重新提交。');
+      }
+      return { name, content: entry.content };
+    });
+    if (
+      typeof input.meta.title !== 'string' ||
+      input.meta.title.length === 0 ||
+      typeof input.meta.sourceNodeId !== 'string' ||
+      input.meta.sourceNodeId.length === 0
+    ) {
+      throw invalidInput('结构化产物 meta 缺失标题或来源。', '按模板产物要求重新提交。');
+    }
+    if (input.meta.format !== 'markdown' && input.meta.format !== 'text') {
+      throw invalidInput('结构化产物格式必须是 markdown 或 text。', '按模板声明的产物格式重新提交。');
+    }
+
+    const events = await this.events.read(taskId);
+    const version = publishedEvents(events).length + 1;
+    if (input.version !== undefined && input.version !== version) {
+      throw invalidInput('结构化产物版本必须由事件流分配。', '重试以分配一致的版本。');
+    }
+
+    // A future prepare may replace a DIFFERENT orphan only after proving no
+    // event references it (spec §12). The allocated version is always
+    // count + 1, so no event can reference this directory.
+    const destination = this.paths.taskArtifactVersionRoot(taskId, version);
+    if (await this.isDirectory(destination)) {
+      await rm(destination, { recursive: true, force: true }).catch(() => undefined);
+    }
+
+    const artifactId = input.artifactId ?? randomUUID();
+    const createdAt = new Date().toISOString();
+    const sealRecord: SealRecord = {
+      ...input.sealRecord,
+      artifactVersionRef: { artifactId, version },
+    };
+    const custodyDir = join(this.paths.taskStructuredCustodyRoot(taskId), input.contentIdentity);
+    return this.writeCustodyDir(custodyDir, { ...input, files: validatedFiles }, artifactId, version, sealRecord, createdAt);
+  }
+
+  private async promotePreparedVersionExclusive(
+    taskId: string,
+    handle: PreparedStructuredVersion,
+  ): Promise<PreparedStructuredVersion> {
+    await this.ensureTaskRoot(taskId);
+    const custodyDir = join(this.paths.taskStructuredCustodyRoot(taskId), handle.contentIdentity);
+    if (!(await this.isDirectory(custodyDir))) {
+      throw integrityFailed('custody 暂存目录缺失，无法 promote。');
+    }
+    // Re-verify the staged data matches the handle's recorded digest.
+    const manifest = await this.readCustodyManifest(custodyDir, handle.version);
+    if (manifest.artifactId !== handle.artifactId) {
+      throw integrityFailed('custody 身份与 handle 不一致。');
+    }
+    await this.verifyCustodyFiles(custodyDir, handle.files);
+
+    const destination = this.paths.taskArtifactVersionRoot(taskId, handle.version);
+    if (await this.isDirectory(destination)) {
+      // After-promote-before-batch orphan: reuse only when the content matches
+      // the recorded digest; anything else is corruption, never overwritten.
+      let claimed: ArtifactEntry;
+      try {
+        claimed = await this.readVersionDir(taskId, handle.version, destination);
+      } catch {
+        throw integrityFailed(`产物版本 ${handle.version} 已存在但内容不可读。`);
+      }
+      const diskByName = new Map(claimed.files.map((file) => [file.name, sha256(file.content)]));
+      const matches = handle.files.every((file) => diskByName.get(file.name) === file.sha256);
+      if (!matches) {
+        throw integrityFailed(`产物版本 ${handle.version} 已存在但内容不一致。`);
+      }
+      return handle;
+    }
+
+    await this.cleanStagingFor(taskId, `v${String(handle.version).padStart(3, '0')}`);
+    const stageDir = join(
+      this.paths.taskArtifactsRoot(taskId),
+      `${TMP_PREFIX}v${String(handle.version).padStart(3, '0')}-${randomUUID()}`,
+    );
+    try {
+      await mkdir(stageDir, { recursive: true });
+      await writeNewAtomic(join(stageDir, META_FILE), Buffer.from(await readFile(join(custodyDir, META_FILE), 'utf8'), 'utf8'));
+      await writeNewAtomic(
+        join(stageDir, CUSTODY_MANIFEST_FILE),
+        Buffer.from(await readFile(join(custodyDir, CUSTODY_MANIFEST_FILE), 'utf8'), 'utf8'),
+      );
+      await writeNewAtomic(
+        join(stageDir, CUSTODY_SEAL_RECORD_FILE),
+        Buffer.from(await readFile(join(custodyDir, CUSTODY_SEAL_RECORD_FILE), 'utf8'), 'utf8'),
+      );
+      for (const file of handle.files) {
+        await writeNewAtomic(
+          join(stageDir, file.name),
+          Buffer.from(await readFile(join(custodyDir, file.name), 'utf8'), 'utf8'),
+        );
+      }
+      await rename(stageDir, destination);
+    } catch (error) {
+      await rm(stageDir, { recursive: true, force: true }).catch(() => undefined);
+      if (error instanceof StorageError) {
+        throw error;
+      }
+      throw integrityFailed('custody promote 失败。');
+    }
+    return handle;
+  }
+
+  private async recoverStructuredCustodyExclusive(
+    taskId: string,
+    input: RecoverStructuredCustodyInput,
+  ): Promise<RecoverStructuredCustodyResult> {
+    await this.ensureTaskRoot(taskId);
+    this.assertContentIdentity(input.contentIdentity);
+    const events = await this.events.read(taskId);
+    const committed = publishedEvents(events);
+    const referenced = committed.find(
+      (event) =>
+        (event.artifact.artifactId !== null && event.artifact.artifactId === input.expectedArtifactId) ||
+        event.artifact.version === input.expectedVersion,
+    );
+
+    const custodyDir = join(this.paths.taskStructuredCustodyRoot(taskId), input.contentIdentity);
+    const destination = this.paths.taskArtifactVersionRoot(taskId, input.expectedVersion);
+
+    if (referenced !== undefined) {
+      // After the batch: every file + the SealRecord must be readable.
+      let entry: ArtifactEntry;
+      try {
+        entry = await this.readVersionDir(taskId, input.expectedVersion, destination);
+        await this.crossCheck(taskId, input.expectedVersion, entry);
+      } catch (error) {
+        if (
+          error instanceof StorageError &&
+          error.code === STORAGE_ERROR_CODES.ARTIFACT_INTEGRITY_FAILED
+        ) {
+          throw error;
+        }
+        throw integrityFailed(`产物版本 ${input.expectedVersion} 目录缺失或与事件不一致。`);
+      }
+      let sealRecord: SealRecord;
+      try {
+        sealRecord = await this.readCustodySealRecord(destination);
+      } catch {
+        throw integrityFailed('已提交版本的 SealRecord 不可读。');
+      }
+      if (sealRecord.artifactVersionRef.artifactId !== input.expectedArtifactId) {
+        throw integrityFailed('SealRecord 引用的 artifactId 与提交事件不一致。');
+      }
+      const handle: PreparedStructuredVersion = {
+        contentIdentity: input.contentIdentity,
+        artifactId: entry.meta.id,
+        version: entry.meta.version,
+        title: entry.meta.title,
+        sourceNodeId: entry.meta.sourceNodeId,
+        format: entry.meta.format,
+        files: entry.files.map((file) => ({
+          name: file.name,
+          sha256: sha256(file.content),
+          byteLength: Buffer.byteLength(file.content, 'utf8'),
+        })),
+        sealRecord,
+        createdAt: entry.meta.createdAt,
+      };
+      return { status: 'referenced', handle };
+    }
+
+    // Unreferenced orphan: reconcile by digest (spec §12).
+    if (await this.isDirectory(destination)) {
+      // A promoted-but-unbatched orphan can be discarded: the custody dir is
+      // the recovery source (batch-before-promote crash) or it can be re-staged.
+      await rm(destination, { recursive: true, force: true }).catch(() => undefined);
+    }
+    if (await this.isDirectory(custodyDir)) {
+      try {
+        const manifest = await this.readCustodyManifest(custodyDir, input.expectedVersion);
+        const expectedByName = new Map(input.expectedFiles.map((file) => [file.name, file.sha256]));
+        const matches =
+          manifest.artifactId === input.expectedArtifactId &&
+          manifest.files.length === input.expectedFiles.length &&
+          manifest.files.every((file) => expectedByName.get(file.name) === file.sha256);
+        if (matches) {
+          const handle = await this.handleFromCustodyDir(custodyDir, input.expectedVersion);
+          return { status: 'orphan_reused', handle };
+        }
+        await rm(custodyDir, { recursive: true, force: true }).catch(() => undefined);
+      } catch {
+        // A damaged custody directory is removed, never silently accepted.
+        await rm(custodyDir, { recursive: true, force: true }).catch(() => undefined);
+      }
+    }
+    return { status: 'orphan_removed', handle: null };
   }
 }

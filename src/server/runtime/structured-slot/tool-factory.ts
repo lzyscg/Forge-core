@@ -32,12 +32,14 @@ import { Type, type Static, type TSchema } from 'typebox';
 import { canonicalJsonBytes, canonicalJsonSha256 } from '../../structured-slots/canonical-json';
 import type {
   JsonValue,
+  SealRecord,
   SlotCapabilityV1,
   SlotSessionGrantV1,
   StructuredSlotTreeCursorV1,
   StructuredVerdictV1,
 } from '../../../shared/structured-slots';
 import type { ForgeAction } from '../forge-actions';
+import type { PreparedStructuredVersion } from '../../storage/artifact-store';
 import type { StructuredSlotPrivateStore } from '../../storage/structured-slot-private-store';
 import type { TaskEvent } from '../../storage/task-events';
 import {
@@ -194,9 +196,52 @@ export async function consumeSlotToolPrecharge(
 /** The seal completion dispatch state (design §11.3 matrix). */
 export type SealDispatchStateV1 =
   | { status: 'none' }
-  | { status: 'passed'; declaredDispatches: Array<'publish_artifact' | 'submit_final_artifact'> }
-  | { status: 'rework_required'; reworkTarget: string }
+  | {
+      status: 'passed';
+      declaredDispatches: Array<'publish_artifact' | 'submit_final_artifact'>;
+      /** Turn-bound frozen sealed candidate (Task 16); null = not yet formed. */
+      candidate?: SealCandidateV1;
+    }
+  | {
+      status: 'rework_required';
+      reworkTarget: string;
+      /** Revision-bound rework receipt; null = not yet frozen. */
+      receipt?: SealReworkReceiptV1;
+    }
   | { status: 'incomplete' };
+
+/**
+ * The frozen, turn-bound sealed candidate (design §17.1 step 7): custody is
+ * staged, the SealRecord is immutable and NO event has been written. The
+ * ActionCommitter promotes the prepared artifact and reveals it in one batch.
+ */
+export interface SealCandidateV1 {
+  sealId: string;
+  contentIdentity: string;
+  turnId: string;
+  scaffoldId: string;
+  generationId: string;
+  scaffoldRevision: number;
+  /** The prepared custody handle (files/meta/SealRecord staged, unreferenced). */
+  artifact: PreparedStructuredVersion;
+  /** The immutable SealRecord candidate referencing the prepared version. */
+  sealRecord: SealRecord;
+  /** The result node id the artifact_published event will reference. */
+  sourceNodeId: string;
+  title: string;
+  format: 'markdown' | 'text';
+}
+
+/** The revision-bound `seal_rework_required` receipt (not a candidate). */
+export interface SealReworkReceiptV1 {
+  sealId: string;
+  contentIdentity: string;
+  turnId: string;
+  scaffoldId: string;
+  generationId: string;
+  scaffoldRevision: number;
+  issueSummary: { errors: number; warnings: number };
+}
 
 /** Safe seal receipt the model may see after a Seal Gate (design §11.3). */
 export interface SealSafeReceiptV1 {

@@ -61,6 +61,7 @@ import type {
   StructuredSlotPrivateStore,
 } from '../../storage/structured-slot-private-store';
 import { projectStructuredSlotState } from '../../storage/structured-slot-state';
+import type { ArtifactStore } from '../../storage/artifact-store';
 import type {
   StructuredAttemptReason,
   StructuredAttemptStatus,
@@ -81,6 +82,7 @@ export const STRUCTURED_COMMIT_ERROR_CODES = {
   CONTRACT_INVALID: 'CONTRACT_INVALID',
   ROUTE_NOT_ALLOWED: 'ROUTE_NOT_ALLOWED',
   SEAL_RECEIPT_REQUIRED: 'SEAL_RECEIPT_REQUIRED',
+  SEAL_CANDIDATE_REQUIRED: 'SEAL_CANDIDATE_REQUIRED',
   DISPATCH_NOT_ALLOWED: 'DISPATCH_NOT_ALLOWED',
   IDEMPOTENCY_CONFLICT: 'IDEMPOTENCY_CONFLICT',
 } as const;
@@ -110,6 +112,8 @@ export type StructuredCommitKind =
   | 'fill_noop'
   | 'fill_stale'
   | 'seal_rework'
+  | 'seal_publish'
+  | 'seal_final'
   | 'human_abandon'
   | 'runtime_failure'
   | 'task_stop'
@@ -143,6 +147,10 @@ export interface StructuredCommitContext {
   events: EventStore;
   blobStore: StructuredSlotBlobStore;
   privateStore: StructuredSlotPrivateStore;
+  /** Sealed artifact custody store (Task 16 seal success batches). */
+  artifactStore: ArtifactStore;
+  /** The template's declared final submitters (design §17.1). */
+  finalSubmitters: readonly string[];
   /**
    * The submit-time structure identity (design §9.3 / Task 12 note): the
    * scaffoldId the candidate's slotIds were derived from at submit time MUST be
@@ -151,7 +159,7 @@ export interface StructuredCommitContext {
   submitStructureContext: SubmitStructureContext;
   structureCandidate: StructureCommitCandidate | null;
   mergeCandidate: MergeCommitCandidate | null;
-  /** Seal dispatch state (from the seal session); `rework_required` only. */
+  /** Seal dispatch state (from the seal session); passed/rework/incomplete. */
   sealDispatch: SealDispatchStateV1;
   /** Forced terminal (no dispatch action) for failure/stop/crash paths. */
   forced?: ForcedStructuredTerminal;
@@ -200,6 +208,8 @@ function terminalStatusFor(kind: StructuredCommitKind): StructuredAttemptStatus 
     case 'fill_merge':
     case 'fill_noop':
     case 'seal_rework':
+    case 'seal_publish':
+    case 'seal_final':
       return 'committed';
     case 'human_abandon':
       return 'waiting_human';
@@ -217,6 +227,8 @@ function terminalReasonFor(kind: StructuredCommitKind): StructuredAttemptReason 
     case 'structure_generation':
     case 'fill_merge':
     case 'fill_noop':
+    case 'seal_publish':
+    case 'seal_final':
       return 'completion_dispatch';
     case 'seal_rework':
       return 'rework_dispatch';
@@ -464,6 +476,47 @@ function pushMessageRoute(
   });
 }
 
+/** The artifact Route/input pair delivered with a publish_artifact dispatch. */
+function pushArtifactRoute(
+  events: TaskEvent[],
+  context: StructuredCommitContext,
+  route: StructuredRouteDeclaration,
+  resultEventId: string,
+  inputEventId: string,
+  title: string,
+  version: number,
+  nextSequence: () => number,
+  at: string,
+): void {
+  events.push({
+    id: `${context.turnId}-artifact-route-0`,
+    at,
+    type: 'route_executed',
+    route: {
+      sequence: nextSequence(),
+      fromNodeId: resultEventId,
+      toNodeId: inputEventId,
+      kind: 'artifact',
+      label: route.label,
+    },
+  });
+  events.push({
+    id: inputEventId,
+    at,
+    type: 'agent_input',
+    node: {
+      sequence: nextSequence(),
+      agentId: route.to,
+      kind: 'input',
+      title: agentName(context, route.to),
+      body: title,
+      status: 'confirmed',
+      attemptCount: 1,
+      inputVersion: version,
+    },
+  });
+}
+
 /** The Draft terminal event (merged/stale/abandoned; no content on stale/abandoned). */
 function draftTerminalEvent(
   context: StructuredCommitContext,
@@ -621,6 +674,109 @@ async function buildSealReworkBatch(
   return events;
 }
 
+/**
+ * Seal success batch (spec §11 seal success / design §17.1 step 8): promote the
+ * custody candidate to the unreferenced final address, then reveal
+ * `artifact_published` + `structured_scaffold_sealed` + Agent result + terminal
+ * + the chosen publish Route (seal_publish) OR `final_submission_accepted`
+ * (seal_final, the ONLY task-completing event) in ONE appendBatch. Plain
+ * Seal/publish never completes the task (design §17.3).
+ */
+async function buildSealSuccessBatch(
+  context: StructuredCommitContext,
+  kind: 'seal_publish' | 'seal_final',
+  at: string,
+  nextSequence: () => number,
+  events: TaskEvent[],
+): Promise<TaskEvent[]> {
+  if (context.sealDispatch.status !== 'passed' || context.sealDispatch.candidate === undefined) {
+    throw fail(
+      STRUCTURED_COMMIT_ERROR_CODES.SEAL_CANDIDATE_REQUIRED,
+      'seal 提交需要已冻结的 sealed candidate。',
+    );
+  }
+  const candidate = context.sealDispatch.candidate;
+  if (kind === 'seal_final' && !context.finalSubmitters.includes(context.currentAgent.id)) {
+    throw fail(
+      STRUCTURED_COMMIT_ERROR_CODES.ROUTE_NOT_ALLOWED,
+      '只有模板声明的 final submitter 才能直接提交最终产物。',
+    );
+  }
+  let publishRoute: StructuredRouteDeclaration | undefined;
+  if (kind === 'seal_publish') {
+    publishRoute = context.declaredRoutes.find(
+      (candidateRoute) =>
+        candidateRoute.from === context.currentAgent.id && candidateRoute.kind === 'artifact',
+    );
+    if (publishRoute === undefined) {
+      throw fail(
+        STRUCTURED_COMMIT_ERROR_CODES.ROUTE_NOT_ALLOWED,
+        'publish_artifact 需要从当前 agent 出发的 artifact 连线。',
+      );
+    }
+  }
+
+  // Promote the custody candidate to its unreferenced final address first; the
+  // batch file is the only visibility point (design §18.3 G05).
+  await context.artifactStore.promotePreparedVersion(context.taskId, candidate.artifact);
+  const sealRecordRef = await context.blobStore.putJsonBlob(candidate.sealRecord, 'seal_record');
+
+  events.push({
+    id: `${context.turnId}-artifact-1`,
+    at,
+    type: 'artifact_published',
+    artifact: {
+      version: candidate.artifact.version,
+      title: candidate.artifact.title,
+      sourceNodeId: candidate.sourceNodeId,
+      format: candidate.artifact.format,
+      files: candidate.artifact.files.map((file) => ({ name: file.name, hash: file.sha256 })),
+      artifactType: null,
+      artifactId: candidate.artifact.artifactId,
+    },
+  });
+  events.push({
+    id: `${context.turnId}-sealed`,
+    at,
+    type: 'structured_scaffold_sealed',
+    sealId: candidate.sealId,
+    scaffoldId: candidate.scaffoldId,
+    generationId: candidate.generationId,
+    scaffoldRevision: candidate.scaffoldRevision,
+    sealRecord: sealRecordRef,
+    artifactId: candidate.artifact.artifactId,
+    artifactVersion: candidate.artifact.version,
+  });
+
+  const resultEventId = `${context.turnId}-result`;
+  events.push(agentResultEvent(context, 'send', nextSequence, at));
+  events.push(attemptTerminalEvent(context, 'committed', 'completion_dispatch', at));
+
+  if (kind === 'seal_publish') {
+    const inputEventId = `${context.turnId}-artifact-input-0`;
+    pushArtifactRoute(
+      events,
+      context,
+      publishRoute!,
+      resultEventId,
+      inputEventId,
+      candidate.artifact.title,
+      candidate.artifact.version,
+      nextSequence,
+      at,
+    );
+  } else {
+    events.push({
+      id: `${context.turnId}-final-accepted`,
+      at,
+      type: 'final_submission_accepted',
+      artifactId: candidate.artifact.artifactId,
+      version: candidate.artifact.version,
+    });
+  }
+  return events;
+}
+
 async function buildHumanBatch(
   context: StructuredCommitContext,
   snapshot: readonly TaskEvent[],
@@ -742,6 +898,9 @@ async function buildBatch(
       return buildFillBatch(context, kind, action!, at, nextSequence, events);
     case 'seal_rework':
       return buildSealReworkBatch(context, action!, at, nextSequence, events);
+    case 'seal_publish':
+    case 'seal_final':
+      return buildSealSuccessBatch(context, kind, at, nextSequence, events);
     case 'human_abandon':
       return buildHumanBatch(context, snapshot, action!, at, nextSequence, events);
     case 'runtime_failure':
@@ -815,6 +974,24 @@ function candidateDigestFor(
         generationId: state.generationId,
         contentRevision: state.contentRevision,
         reworkTarget: context.sealDispatch.reworkTarget,
+      });
+    }
+    case 'seal_publish':
+    case 'seal_final': {
+      if (context.sealDispatch.status !== 'passed' || context.sealDispatch.candidate === undefined) {
+        throw fail(
+          STRUCTURED_COMMIT_ERROR_CODES.SEAL_CANDIDATE_REQUIRED,
+          'seal 提交需要已冻结的 sealed candidate。',
+        );
+      }
+      const candidate = context.sealDispatch.candidate;
+      return canonicalJsonSha256({
+        contentIdentity: candidate.contentIdentity,
+        sealId: candidate.sealId,
+        artifactId: candidate.artifact.artifactId,
+        version: candidate.artifact.version,
+        files: candidate.artifact.files,
+        sealRecord: candidate.sealRecord,
       });
     }
     case 'human_abandon': {
@@ -909,33 +1086,46 @@ function determineCandidateKind(
   if (action.type === 'request_human_input') {
     return 'human_abandon';
   }
-  if (action.type !== 'send_message') {
-    throw fail(
-      STRUCTURED_COMMIT_ERROR_CODES.DISPATCH_NOT_ALLOWED,
-      `结构化 v3 提交只允许 send_message / request_human_input，收到 ${action.type}。`,
-    );
-  }
-  switch (context.sessionKind) {
-    case 'structure':
-      if (context.structureCandidate === null) {
-        throw fail(STRUCTURED_COMMIT_ERROR_CODES.CANDIDATE_REQUIRED, 'structure 提交需要已冻结的 StructureCommitCandidate。');
+  if (action.type === 'send_message') {
+    switch (context.sessionKind) {
+      case 'structure':
+        if (context.structureCandidate === null) {
+          throw fail(STRUCTURED_COMMIT_ERROR_CODES.CANDIDATE_REQUIRED, 'structure 提交需要已冻结的 StructureCommitCandidate。');
+        }
+        return 'structure_generation';
+      case 'fill': {
+        if (context.mergeCandidate === null) {
+          throw fail(STRUCTURED_COMMIT_ERROR_CODES.CANDIDATE_REQUIRED, 'fill 提交需要已冻结的 MergeCommitCandidate。');
+        }
+        return context.mergeCandidate.changeCount === 0 ? 'fill_noop' : 'fill_merge';
       }
-      return 'structure_generation';
-    case 'fill': {
-      if (context.mergeCandidate === null) {
-        throw fail(STRUCTURED_COMMIT_ERROR_CODES.CANDIDATE_REQUIRED, 'fill 提交需要已冻结的 MergeCommitCandidate。');
-      }
-      return context.mergeCandidate.changeCount === 0 ? 'fill_noop' : 'fill_merge';
+      case 'seal':
+        if (context.sealDispatch.status !== 'rework_required') {
+          // A passed seal may only publish/final-submit; an incomplete or none
+          // seal has no send dispatch at all (design L01).
+          throw fail(
+            context.sealDispatch.status === 'passed'
+              ? STRUCTURED_COMMIT_ERROR_CODES.DISPATCH_NOT_ALLOWED
+              : STRUCTURED_COMMIT_ERROR_CODES.SEAL_RECEIPT_REQUIRED,
+            'seal 会话只有 rework receipt 才允许 send_message。',
+          );
+        }
+        return 'seal_rework';
     }
-    case 'seal':
-      if (context.sealDispatch.status !== 'rework_required') {
-        throw fail(
-          STRUCTURED_COMMIT_ERROR_CODES.SEAL_RECEIPT_REQUIRED,
-          'seal rework 提交需要 rework receipt（可靠失败的 Seal Gate）。',
-        );
-      }
-      return 'seal_rework';
   }
+  if (action.type === 'publish_artifact' || action.type === 'submit_final_artifact') {
+    if (context.sessionKind !== 'seal' || context.sealDispatch.status !== 'passed') {
+      throw fail(
+        STRUCTURED_COMMIT_ERROR_CODES.DISPATCH_NOT_ALLOWED,
+        'publish/final 提交只允许在 passed Seal 之后。',
+      );
+    }
+    return action.type === 'publish_artifact' ? 'seal_publish' : 'seal_final';
+  }
+  throw fail(
+    STRUCTURED_COMMIT_ERROR_CODES.DISPATCH_NOT_ALLOWED,
+    `结构化 v3 提交只允许 send_message / publish_artifact / submit_final_artifact / request_human_input，收到 ${action.type}。`,
+  );
 }
 
 /**
@@ -1064,6 +1254,41 @@ function assertBatchMatchesSignature(
     case 'task_stop':
     case 'crash_recovery':
       break;
+    case 'seal_publish':
+    case 'seal_final': {
+      const candidate = context.sealDispatch.status === 'passed' ? context.sealDispatch.candidate : undefined;
+      const published = events.find((event) => event.type === 'artifact_published');
+      const sealed = events.find((event) => event.type === 'structured_scaffold_sealed');
+      if (
+        candidate === undefined ||
+        published === undefined ||
+        published.type !== 'artifact_published' ||
+        published.artifact.version !== candidate.artifact.version ||
+        published.artifact.artifactId !== candidate.artifact.artifactId
+      ) {
+        throw fail(
+          STRUCTURED_COMMIT_ERROR_CODES.IDEMPOTENCY_CONFLICT,
+          '已提交 artifact_published 与 completion signature 不匹配。',
+        );
+      }
+      if (
+        sealed === undefined ||
+        sealed.type !== 'structured_scaffold_sealed' ||
+        sealed.sealId !== candidate.sealId
+      ) {
+        throw fail(
+          STRUCTURED_COMMIT_ERROR_CODES.IDEMPOTENCY_CONFLICT,
+          '已提交 structured_scaffold_sealed 与 completion signature 不匹配。',
+        );
+      }
+      if (kind === 'seal_final' && !events.some((event) => event.type === 'final_submission_accepted')) {
+        throw fail(
+          STRUCTURED_COMMIT_ERROR_CODES.IDEMPOTENCY_CONFLICT,
+          '已提交 seal_final batch 缺少 final_submission_accepted。',
+        );
+      }
+      break;
+    }
     case 'human_abandon':
       if (!events.some((event) => event.type === 'human_requested')) {
         throw fail(
@@ -1109,7 +1334,9 @@ function buildPrepared(
 ): PreparedStructuredCommit {
   let phase: TurnTracePhase;
   let waitingHuman = false;
+  let taskCompleted = false;
   const nextAgentIds: string[] = [];
+  let publishedVersions: number[] = [];
   switch (kind) {
     case 'structure_generation':
     case 'fill_merge':
@@ -1120,6 +1347,37 @@ function buildPrepared(
       if (target !== null) {
         nextAgentIds.push(target);
       }
+      break;
+    }
+    case 'seal_publish': {
+      const candidate = context.sealDispatch.status === 'passed' ? context.sealDispatch.candidate : undefined;
+      const route = context.declaredRoutes.find(
+        (declared) => declared.from === context.currentAgent.id && declared.kind === 'artifact',
+      );
+      const target = route?.to ?? null;
+      phase = {
+        state: 'dispatched',
+        dispatchAction: 'publish_artifact',
+        target,
+        message:
+          candidate !== undefined ? `已发布产物「${candidate.artifact.title}」v${candidate.artifact.version}` : null,
+      };
+      if (target !== null) {
+        nextAgentIds.push(target);
+      }
+      publishedVersions = candidate !== undefined ? [candidate.artifact.version] : [];
+      break;
+    }
+    case 'seal_final': {
+      const candidate = context.sealDispatch.status === 'passed' ? context.sealDispatch.candidate : undefined;
+      phase = {
+        state: 'dispatched',
+        dispatchAction: 'submit_final_artifact',
+        target: null,
+        message: '已提交最终产物，任务完成。',
+      };
+      taskCompleted = true;
+      publishedVersions = candidate !== undefined ? [candidate.artifact.version] : [];
       break;
     }
     case 'human_abandon':
@@ -1143,9 +1401,9 @@ function buildPrepared(
     replayed,
     phase,
     waitingHuman,
-    taskCompleted: false,
+    taskCompleted,
     nextAgentIds,
-    publishedVersions: [],
+    publishedVersions,
   };
 }
 

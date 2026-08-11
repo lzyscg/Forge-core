@@ -33,6 +33,12 @@ export const STORAGE_ERROR_CODES = {
   INVALID_INPUT: 'INVALID_INPUT',
   TASK_NOT_FOUND: 'TASK_NOT_FOUND',
   TASK_CORRUPTED: 'TASK_CORRUPTED',
+  /**
+   * Sealed artifact custody integrity failed (design §17.3 / spec §12): a
+   * staged/promoted file or SealRecord no longer matches its recorded digest.
+   * Never absorbed back into slot content.
+   */
+  ARTIFACT_INTEGRITY_FAILED: 'ARTIFACT_INTEGRITY_FAILED',
 } as const;
 
 export type StorageErrorCode = (typeof STORAGE_ERROR_CODES)[keyof typeof STORAGE_ERROR_CODES];
