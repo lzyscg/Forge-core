@@ -172,6 +172,18 @@ function productionManifestPath(): string {
 }
 
 /**
+ * The checked-in production profile path (the exact final profile file an
+ * enabled manifest references). Resolved the same way as the manifest path.
+ */
+function productionProfilePath(): string {
+  try {
+    return fileURLToPath(new URL('platform-profile-v1.json', import.meta.url));
+  } catch {
+    return resolve(process.cwd(), 'src', 'server', 'structured-slots', 'platform-profile-v1.json');
+  }
+}
+
+/**
  * The production default environment: reads and validates the exact checked-in
  * manifest, which must start `disabled` with no final profile. Reads a file —
  * never an environment variable — so there is no fallback to bypass.
@@ -180,7 +192,10 @@ function productionManifestPath(): string {
  * a future manifest is enabled (Task 19), the production capability validator
  * REQUIRES an exact final profile file — a provisional profile can never
  * satisfy production readiness — and cross-checks the capability's declared
- * profileDigest against the canonical digest of that file.
+ * profileDigest against the canonical digest of that file. When no explicit
+ * `profileFile` is supplied, the production default reads the checked-in
+ * `platform-profile-v1.json` (the same file the promotion froze); a caller may
+ * inject a different path only for tests.
  */
 export function createProductionRuntimeEnvironment(
   profileFile?: string | URL,
@@ -196,10 +211,8 @@ export function createProductionRuntimeEnvironment(
   if (capability.profileIdentity !== PROFILE_IDENTITY) {
     invalid('an enabled production manifest must reference the structured runtime profile');
   }
-  if (profileFile === undefined) {
-    invalid('an enabled production manifest requires its exact final profile file');
-  }
-  const profile = validateProductionProfile(loadStructuredPlatformProfile(profileFile));
+  const profileFileResolved = profileFile ?? productionProfilePath();
+  const profile = validateProductionProfile(loadStructuredPlatformProfile(profileFileResolved));
   if (capability.profileDigest !== null && capability.profileDigest !== profileCanonicalDigest(profile)) {
     invalid('capability.profileDigest does not match the checked-in profile file');
   }
