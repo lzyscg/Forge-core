@@ -121,6 +121,70 @@ describe('canonicalJson — JCS core', () => {
     expect(canonicalJson({ a: { b: [1, { c: 2 }] } })).toBe('{"a":{"b":[1,{"c":2}]}}');
     expect(canonicalJson({ b: 2, a: { d: 4, c: 3 } })).toBe('{"a":{"c":3,"d":4},"b":2}');
   });
+
+  it('escapes every C0 control char with its minimal form / lowercase hex (Task B fast-path lock)', () => {
+    const control = Array.from({ length: 32 }, (_, i) => i);
+    const expected = control
+      .map((code) => {
+        switch (code) {
+          case 0x08:
+            return '\\b';
+          case 0x09:
+            return '\\t';
+          case 0x0a:
+            return '\\n';
+          case 0x0c:
+            return '\\f';
+          case 0x0d:
+            return '\\r';
+          default:
+            return `\\u${code.toString(16).padStart(4, '0')}`;
+        }
+      })
+      .join('');
+    expect(canonicalJson(String.fromCharCode(...control))).toBe(`"${expected}"`);
+  });
+
+  it('leaves U+2028, U+2029 and DEL (U+007F) raw — JCS never escapes them', () => {
+    expect(canonicalJson(' ')).toBe('" "');
+    expect(canonicalJson(' ')).toBe('" "');
+    expect(canonicalJson('')).toBe('""');
+  });
+
+  it('rejects a lone surrogate anywhere — high or low, start/middle/end, object/array', () => {
+    expect(() => canonicalJson('\ud800x')).toThrow('CANONICAL_JSON_INVALID');
+    expect(() => canonicalJson('x\udfff')).toThrow('CANONICAL_JSON_INVALID');
+    expect(() => canonicalJson('\ud800\ud800')).toThrow('CANONICAL_JSON_INVALID');
+    expect(() => canonicalJson('\udc00\udc00')).toThrow('CANONICAL_JSON_INVALID');
+    expect(() => canonicalJson({ a: '\ud800' })).toThrow('CANONICAL_JSON_INVALID');
+    expect(() => canonicalJson(['\udc00'])).toThrow('CANONICAL_JSON_INVALID');
+  });
+
+  it('accepts a valid surrogate pair and emits it raw', () => {
+    expect(canonicalJson('😀')).toBe('"😀"');
+    expect(canonicalJson('a😀b')).toBe('"a😀b"');
+  });
+
+  it('serializes extreme and negative-exponent numbers in shortest round-trip form', () => {
+    expect(canonicalJson(5e-324)).toBe('5e-324');
+    expect(canonicalJson(-1e-7)).toBe('-1e-7');
+    expect(canonicalJson(1e-21)).toBe('1e-21');
+    expect(canonicalJson(-0)).toBe('0');
+  });
+
+  it('sorts keys by UTF-16 code unit order for non-ASCII and astral keys', () => {
+    expect(canonicalJson({ 'é': 1, z: 2 })).toBe('{"z":2,"é":1}');
+    expect(canonicalJson({ '😀': 1, z: 2 })).toBe('{"z":2,"😀":1}');
+    expect(canonicalJson({ '😀': 1, '😁': 2 })).toBe('{"😀":1,"😁":2}');
+  });
+
+  it('a long plain string (no escaping) round-trips byte-identically and hashes deterministically', () => {
+    const long = 'x'.repeat(100_000);
+    expect(canonicalJson(long)).toBe(`"${long}"`);
+    expect(canonicalJsonBytes(long).toString('utf8')).toBe(canonicalJson(long));
+    expect(canonicalJsonSha256(long)).toBe(canonicalJsonSha256(long));
+    expect(canonicalJsonSha256(long)).toBe(createHash('sha256').update(canonicalJsonBytes(long)).digest('hex'));
+  });
 });
 
 describe('canonicalJsonBytes / canonicalJsonSha256', () => {
@@ -143,5 +207,17 @@ describe('canonicalJsonBytes / canonicalJsonSha256', () => {
   it('produces a stable golden digest', () => {
     expect(canonicalJsonSha256('')).toBe('12ae32cb1ec02d01eda3581b127c1fee3b0dc53572ed6baf239721a03d82e126');
     expect(canonicalJsonSha256({ a: 1 })).toBe('015abd7f5cc57a2dd94b7590f04ad8084273905ee33ec5cebeae62276a97f862');
+  });
+
+  it('bytes and sha256 agree with the canonical string for nested/long values', () => {
+    const value = { nested: { list: [1, 'a', 5e-324], 'é': '😀' }, z: -0 };
+    const canonical = canonicalJson(value);
+    const bytes = canonicalJsonBytes(value);
+    expect(bytes.toString('utf8')).toBe(canonical);
+    expect(canonicalJsonSha256(value)).toBe(createHash('sha256').update(bytes).digest('hex'));
+    // A long plain string keeps the same agreement (Task B fast-path precondition).
+    const long = 'x'.repeat(100_000);
+    expect(canonicalJsonBytes(long).toString('utf8')).toBe(canonicalJson(long));
+    expect(canonicalJsonSha256(long)).toBe(createHash('sha256').update(canonicalJsonBytes(long)).digest('hex'));
   });
 });
