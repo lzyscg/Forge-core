@@ -7,7 +7,7 @@
  *
  * Platform-generic: no business vocabulary (iron rule 1).
  */
-import { Type } from 'typebox';
+import { Type, type TSchema } from 'typebox';
 
 /* ------------------------------ request bodies ------------------------------ */
 
@@ -213,6 +213,29 @@ const liveTurnSchema = Type.Object({
   updatedAt: Type.String(),
 });
 
+/** Optional TaskWorkspace structured summary (spec §14 / I01). */
+export const structuredSlotsSummarySchema = Type.Object(
+  {
+    version: Type.Literal(1),
+    mode: Type.Literal('structured_slots'),
+    scaffoldId: Type.Union([Type.String(), Type.Null()]),
+    generationId: Type.Union([Type.String(), Type.Null()]),
+    contentRevision: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()]),
+    structureStatus: Type.Union([Type.Literal('none'), Type.Literal('active')]),
+    sealStatus: Type.Union([Type.Literal('unsealed'), Type.Literal('sealed')]),
+    visibleSlotCount: Type.Integer({ minimum: 0 }),
+    filledSlotCount: Type.Integer({ minimum: 0 }),
+    issueSummary: Type.Object(
+      {
+        errors: Type.Integer({ minimum: 0 }),
+        warnings: Type.Integer({ minimum: 0 }),
+      },
+      { additionalProperties: false },
+    ),
+  },
+  { additionalProperties: false },
+);
+
 export const taskWorkspaceSchema = Type.Object({
   task: taskSummarySchema,
   frozenInput: Type.Record(Type.String(), Type.String()),
@@ -229,6 +252,7 @@ export const taskWorkspaceSchema = Type.Object({
     Type.Null(),
   ]),
   activeTurn: Type.Optional(Type.Union([liveTurnSchema, Type.Null()])),
+  structuredSlots: Type.Optional(structuredSlotsSummarySchema),
 });
 
 export const healthSchema = Type.Object({
@@ -286,3 +310,302 @@ export const skillContentSchema = Type.Object({
   content: Type.String(),
   versionHash: Type.String(),
 });
+
+/* ------------------- structured slots read-only API (spec §14) ------------------- */
+
+/** Signed, bound pagination cursor (design §25.13 / Task 10). */
+export const structuredSlotTreeCursorSchema = Type.Object(
+  {
+    version: Type.Literal(1),
+    generationId: Type.String(),
+    revision: Type.Integer({ minimum: 0 }),
+    projectionHash: Type.String(),
+    lastDocumentKey: Type.Union([Type.String(), Type.Null()]),
+    orderingVersion: Type.Integer(),
+    signature: Type.String(),
+  },
+  { additionalProperties: false },
+);
+
+/** The ten closed issue phases (design §19.1). */
+const issuePhaseSchema = Type.Union([
+  Type.Literal('template_load'),
+  Type.Literal('structure'),
+  Type.Literal('draft'),
+  Type.Literal('merge'),
+  Type.Literal('seal_input'),
+  Type.Literal('assemble'),
+  Type.Literal('seal_output'),
+  Type.Literal('publish'),
+]);
+
+/** The ten closed issue sources (design §19.1). */
+const issueSourceSchema = Type.Union([
+  Type.Literal('template_loader'),
+  Type.Literal('slot_schema'),
+  Type.Literal('layout_grammar'),
+  Type.Literal('access_control'),
+  Type.Literal('resource_limits'),
+  Type.Literal('lifecycle'),
+  Type.Literal('validator'),
+  Type.Literal('assembler'),
+  Type.Literal('artifact_validator'),
+  Type.Literal('publisher'),
+]);
+
+const textSpanSchema = Type.Object(
+  {
+    start: Type.Object(
+      { line: Type.Integer({ minimum: 0 }), column: Type.Integer({ minimum: 0 }) },
+      { additionalProperties: false },
+    ),
+    end: Type.Object(
+      { line: Type.Integer({ minimum: 0 }), column: Type.Integer({ minimum: 0 }) },
+      { additionalProperties: false },
+    ),
+  },
+  { additionalProperties: false },
+);
+
+/** Closed six-variant IssueLocation union (design §19.2). */
+const issueLocationSchema = Type.Union([
+  Type.Object({ kind: Type.Literal('contract'), pointer: Type.String() }, { additionalProperties: false }),
+  Type.Object(
+    { kind: Type.Literal('template_resource'), resourcePath: Type.String(), span: Type.Union([textSpanSchema, Type.Null()]) },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      kind: Type.Literal('proposal'),
+      clientKey: Type.String(),
+      instancePath: Type.String(),
+      field: Type.Union([Type.Literal('node'), Type.Literal('typeId'), Type.Literal('spec'), Type.Literal('children')]),
+      valuePointer: Type.String(),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      kind: Type.Literal('slot'),
+      slotId: Type.String(),
+      field: Type.Union([Type.Literal('node'), Type.Literal('spec'), Type.Literal('content'), Type.Literal('children')]),
+      valuePointer: Type.String(),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { kind: Type.Literal('artifact'), routeId: Type.String(), artifactPath: Type.String(), valuePointer: Type.String() },
+    { additionalProperties: false },
+  ),
+  Type.Object({ kind: Type.Literal('operation') }, { additionalProperties: false }),
+]);
+
+export const structuredIssueSchema = Type.Object(
+  {
+    version: Type.Literal(1),
+    code: Type.String(),
+    severity: Type.Union([Type.Literal('error'), Type.Literal('warning')]),
+    phase: issuePhaseSchema,
+    source: issueSourceSchema,
+    message: Type.String(),
+    primaryLocation: issueLocationSchema,
+    relatedLocations: Type.Array(issueLocationSchema),
+    details: Type.Record(Type.String(), Type.Unknown()),
+  },
+  { additionalProperties: false },
+);
+
+/** Paged owner-visible issues. */
+export const structuredIssuePageSchema = Type.Object(
+  {
+    issues: Type.Array(structuredIssueSchema),
+    nextCursor: Type.Union([structuredSlotTreeCursorSchema, Type.Null()]),
+  },
+  { additionalProperties: false },
+);
+
+/** One row of the owner outline (spec §14). */
+export const structuredSlotOutlineEntrySchema = Type.Object(
+  {
+    slotId: Type.String(),
+    typeId: Type.String(),
+    contentPresence: Type.Union([Type.Literal('unset'), Type.Literal('set')]),
+    parentSlotId: Type.Union([Type.String(), Type.Null()]),
+    shell: Type.Boolean(),
+    level: Type.Union([Type.Literal('outline'), Type.Literal('spec'), Type.Literal('content')]),
+    spec: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+  },
+  { additionalProperties: false },
+);
+
+/** Paged owner outline. */
+export const structuredSlotOutlinePageSchema = Type.Object(
+  {
+    entries: Type.Array(structuredSlotOutlineEntrySchema),
+    nextCursor: Type.Union([structuredSlotTreeCursorSchema, Type.Null()]),
+  },
+  { additionalProperties: false },
+);
+
+/** The authorized projection of one slot. */
+export const structuredSlotReadResponseSchema = Type.Object(
+  {
+    slot: Type.Object(
+      {
+        slotId: Type.String(),
+        typeId: Type.String(),
+        contentPresence: Type.Union([Type.Literal('unset'), Type.Literal('set')]),
+        level: Type.Union([Type.Literal('outline'), Type.Literal('spec'), Type.Literal('content')]),
+        spec: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+        content: Type.Optional(Type.Unknown()),
+        ancestors: Type.Array(
+          Type.Object(
+            {
+              slotId: Type.String(),
+              typeId: Type.String(),
+              contentPresence: Type.Union([Type.Literal('unset'), Type.Literal('set')]),
+            },
+            { additionalProperties: false },
+          ),
+        ),
+      },
+      { additionalProperties: false },
+    ),
+  },
+  { additionalProperties: false },
+);
+
+/** The immutable SealRecord (design §17.2). */
+export const structuredSealRecordSchema = Type.Object(
+  {
+    sealId: Type.String(),
+    caseId: Type.String(),
+    scaffoldId: Type.String(),
+    scaffoldRevision: Type.Integer(),
+    scaffoldTreeHash: Type.String(),
+    templateId: Type.String(),
+    templateVersion: Type.String(),
+    snapshotHash: Type.String(),
+    assemblerId: Type.String(),
+    assemblerVersion: Type.String(),
+    artifactVersionRef: Type.Object(
+      { artifactId: Type.String(), version: Type.Integer({ minimum: 1 }) },
+      { additionalProperties: false },
+    ),
+    outputs: Type.Array(
+      Type.Object(
+        {
+          routeId: Type.String(),
+          path: Type.String(),
+          mediaType: Type.String(),
+          byteLength: Type.Integer(),
+          sha256: Type.String(),
+        },
+        { additionalProperties: false },
+      ),
+    ),
+    sealedAt: Type.String(),
+  },
+  { additionalProperties: false },
+);
+
+/** One 28-field limits group helper (spec §5). */
+function limitsGroup(fields: readonly string[]): TSchema {
+  const props: Record<string, TSchema> = {};
+  for (const field of fields) {
+    props[field] = Type.Integer({ minimum: 1 });
+  }
+  return Type.Object(props, { additionalProperties: false });
+}
+
+/** The full 28-field structured limits profile. */
+export const structuredSlotLimitsSchema = Type.Object(
+  {
+    schema: limitsGroup(['maxSchemaDepth', 'maxSchemaNodes', 'maxEnumItems', 'maxPatternLength']),
+    structure: limitsGroup(['maxSlots', 'maxTreeDepth', 'maxChildrenPerSlot']),
+    payload: limitsGroup(['maxSpecBytesPerSlot', 'maxContentBytesPerSlot', 'maxScaffoldPayloadBytes']),
+    draft: limitsGroup(['maxChangedSlots', 'maxDraftBytes']),
+    attempt: limitsGroup([
+      'maxSlotToolCallsPerAttempt',
+      'maxValidationRunsPerAttempt',
+      'maxValidatorInvocationsPerAttempt',
+      'maxAggregateValidatorCpuMsPerAttempt',
+      'maxAggregateValidatorWallClockMsPerAttempt',
+      'maxValidatorOutputBytesPerAttempt',
+      'maxAttemptWallClockMs',
+    ]),
+    validation: limitsGroup([
+      'maxValidators',
+      'maxValidatorInvocationsPerGate',
+      'maxAggregateValidatorCpuMsPerGate',
+      'maxAggregateValidatorWallClockMsPerGate',
+      'maxValidatorOutputBytesPerGate',
+      'maxIssuesPerRun',
+    ]),
+    output: limitsGroup(['maxArtifactFiles', 'maxArtifactBytesPerFile', 'maxTotalArtifactBytes']),
+  },
+  { additionalProperties: false },
+);
+
+/**
+ * Public contract projection (spec §14): slot types + grammar + limits + ABI
+ * identity, WITHOUT implementation paths, validators, accessProfiles or the
+ * resource manifest. `specSchema`/`children` are serialized plain JSON.
+ */
+export const structuredSlotPublicContractSchema = Type.Object(
+  {
+    version: Type.Literal(1),
+    slotTypes: Type.Array(
+      Type.Object(
+        {
+          id: Type.String(),
+          name: Type.String(),
+          description: Type.String(),
+          specSchema: Type.Record(Type.String(), Type.Unknown()),
+          content: Type.Union([
+            Type.Object({ presence: Type.Literal('forbidden') }, { additionalProperties: false }),
+            Type.Object(
+              {
+                presence: Type.Union([Type.Literal('optional'), Type.Literal('required')]),
+                schema: Type.Record(Type.String(), Type.Unknown()),
+              },
+              { additionalProperties: false },
+            ),
+          ]),
+        },
+        { additionalProperties: false },
+      ),
+    ),
+    layoutGrammar: Type.Object(
+      {
+        rootType: Type.String(),
+        productions: Type.Record(
+          Type.String(),
+          Type.Object(
+            {
+              children: Type.Record(Type.String(), Type.Unknown()),
+              nullable: Type.Boolean(),
+              minConsumption: Type.Integer(),
+              maxConsumption: Type.Integer(),
+              first: Type.Array(Type.String()),
+              generatable: Type.Boolean(),
+            },
+            { additionalProperties: false },
+          ),
+        ),
+      },
+      { additionalProperties: false },
+    ),
+    limits: structuredSlotLimitsSchema,
+    abiProfileIdentity: Type.Object(
+      {
+        validatorAbi: Type.Literal('forge-validator/v1'),
+        assemblerAbi: Type.Literal('forge-assembler/v1'),
+        profileIdentity: Type.Literal('forge-structured-runtime/v1'),
+      },
+      { additionalProperties: false },
+    ),
+    semanticDigest: Type.String(),
+  },
+  { additionalProperties: false },
+);

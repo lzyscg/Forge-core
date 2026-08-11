@@ -3,7 +3,16 @@
  * 平台契约不含任何业务角色/产物/场景条件分支（铁律 1）；
  * 具体业务语义只允许出现在 Mock fixture 数据中。
  */
-import type { StructuredSlotsSummaryV1 } from './structured-slots';
+import type {
+  JsonObject,
+  JsonValue,
+  StructuredIssueV1,
+  StructuredSlotTreeCursorV1,
+  StructuredSlotsSummaryV1,
+} from './structured-slots';
+
+/** Re-exported so gateway consumers import the seal fact from one place. */
+export type { SealRecord } from './structured-slots';
 
 export type TaskStatus =
   | 'draft'
@@ -298,4 +307,95 @@ export interface CapabilityEvidence {
   realAcceptance: CapabilityStage;
   command: string | null;
   observedAt: string | null;
+}
+
+/* ------------------- read-only structured slots API (spec §14) ------------------- */
+
+/**
+ * Public projection of the frozen structured-slot contract (spec §14 / I02).
+ * The owner audit view exposes the slot types, layout grammar, limits and the
+ * ABI/profile identity — but NEVER implementation paths, validator/Assembler
+ * source registrations, accessProfiles (ACL) or the resource manifest (host
+ * paths). `specSchema` / grammar `children` are plain serialized JSON (the
+ * compiled schemas drop their internal hash/matcher fields).
+ */
+export interface StructuredSlotPublicContractV1 {
+  version: 1;
+  slotTypes: Array<{
+    id: string;
+    name: string;
+    description: string;
+    specSchema: JsonObject;
+    content:
+      | { presence: 'forbidden' }
+      | { presence: 'optional' | 'required'; schema: JsonObject };
+  }>;
+  layoutGrammar: {
+    rootType: string;
+    productions: Record<
+      string,
+      {
+        children: JsonObject;
+        nullable: boolean;
+        minConsumption: number;
+        maxConsumption: number;
+        first: string[];
+        generatable: boolean;
+      }
+    >;
+  };
+  limits: import('./structured-slots').StructuredSlotLimitsV1;
+  abiProfileIdentity: {
+    validatorAbi: 'forge-validator/v1';
+    assemblerAbi: 'forge-assembler/v1';
+    profileIdentity: 'forge-structured-runtime/v1';
+  };
+  semanticDigest: string;
+}
+
+/** One row of the owner outline (mirrors the projection entry, spec §14). */
+export interface StructuredSlotOutlineEntryV1 {
+  slotId: string;
+  typeId: string;
+  contentPresence: 'unset' | 'set';
+  parentSlotId: string | null;
+  /** True for an ancestor outline shell (no spec, D04). */
+  shell: boolean;
+  level: 'outline' | 'spec' | 'content';
+  spec?: JsonObject;
+}
+
+/** Paged owner outline; the cursor is the signed, bound tree cursor. */
+export interface StructuredSlotOutlinePageV1 {
+  entries: StructuredSlotOutlineEntryV1[];
+  nextCursor: StructuredSlotTreeCursorV1 | null;
+}
+
+/** Ancestor outline shell of a visible deep node (root first). */
+export interface StructuredSlotAncestorV1 {
+  slotId: string;
+  typeId: string;
+  contentPresence: 'unset' | 'set';
+}
+
+/** The authorized projection of one slot (spec §14 / design §10.6). */
+export interface StructuredSlotReadV1 {
+  slotId: string;
+  typeId: string;
+  contentPresence: 'unset' | 'set';
+  level: 'outline' | 'spec' | 'content';
+  spec?: JsonObject;
+  content?: JsonValue;
+  ancestors: StructuredSlotAncestorV1[];
+}
+
+/** GET /slots/:slotId response body. */
+export interface StructuredSlotReadResponseV1 {
+  slot: StructuredSlotReadV1;
+}
+
+/** Paged owner-visible issues; the cursor is the signed, bound tree cursor. */
+export interface StructuredIssuePageV1 {
+  issues: StructuredIssueV1[];
+  nextCursor: StructuredSlotTreeCursorV1 | null;
 }

@@ -7,6 +7,7 @@ import { ConfigDrawer } from '../components/config-drawer';
 import { NodeDetailDialog } from '../components/node-detail-dialog';
 import { ProcessTraceDialog } from '../components/process-trace-dialog';
 import { StatusChip } from '../components/status-chip';
+import { StructuredSlotDrawer } from '../components/structured-slot-drawer';
 import { TaskControls } from '../components/task-controls';
 import { WorkspaceCanvas } from '../components/workspace-canvas';
 import { CORE_ERROR_CODES } from '../gateway/core-errors';
@@ -62,6 +63,7 @@ function ProductionWorkspace({ workspace }: { workspace: TaskWorkspace }) {
   const navigate = useNavigate();
   const [configOpen, setConfigOpen] = useState(false);
   const [artifactsOpen, setArtifactsOpen] = useState(false);
+  const [structuredOpen, setStructuredOpen] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [highlightedNodeId, setHighlightedNodeId] = useState<string | null>(null);
   const [selectedVersion, setSelectedVersion] = useState<number | null>(null);
@@ -79,9 +81,15 @@ function ProductionWorkspace({ workspace }: { workspace: TaskWorkspace }) {
     setDrawerRevision((revision) => revision + 1);
   }, []);
 
+  const toggleStructured = useCallback(() => {
+    setStructuredOpen((open) => !open);
+    setDrawerRevision((revision) => revision + 1);
+  }, []);
+
   const closeDrawers = useCallback(() => {
     setConfigOpen(false);
     setArtifactsOpen(false);
+    setStructuredOpen(false);
     setDrawerRevision((revision) => revision + 1);
   }, []);
 
@@ -184,6 +192,16 @@ function ProductionWorkspace({ workspace }: { workspace: TaskWorkspace }) {
           >
             产物
           </button>
+          {workspace.structuredSlots !== undefined ? (
+            <button
+              type="button"
+              className="fc-button fc-button--secondary"
+              aria-expanded={structuredOpen}
+              onClick={toggleStructured}
+            >
+              结构
+            </button>
+          ) : null}
         </div>
       </header>
 
@@ -191,7 +209,7 @@ function ProductionWorkspace({ workspace }: { workspace: TaskWorkspace }) {
         <PublicErrorNotice title="克隆任务失败。" error={cloneError} />
       ) : null}
 
-      {configOpen || artifactsOpen ? (
+      {configOpen || artifactsOpen || structuredOpen ? (
         <div className="fc-drawer-backdrop" aria-hidden="true" onClick={closeDrawers} />
       ) : null}
 
@@ -221,6 +239,10 @@ function ProductionWorkspace({ workspace }: { workspace: TaskWorkspace }) {
           onLocateArtifact={handleLocateArtifact}
           onClose={toggleArtifacts}
         />
+      ) : null}
+
+      {structuredOpen ? (
+        <StructuredSlotDrawer workspace={workspace} onClose={toggleStructured} />
       ) : null}
 
       {selectedNode !== null ? (

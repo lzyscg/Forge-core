@@ -518,6 +518,109 @@ describe('createHttpGateway', () => {
     expect(resolveForgeCoreMode('http')).toBe('http');
     expect(resolveForgeCoreMode('anything-else')).toBe('mock');
   });
+
+  it('decodes structured read responses through the shared schemas', async () => {
+    const calls: Array<{ url: string }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        calls.push({ url });
+        if (url.includes('/structured-slots/tree')) {
+          return jsonResponse(200, {
+            entries: [
+              {
+                slotId: 'root',
+                typeId: 'document',
+                contentPresence: 'unset',
+                parentSlotId: null,
+                shell: false,
+                level: 'content',
+                spec: { type: 'object' },
+              },
+            ],
+            nextCursor: null,
+          });
+        }
+        if (url.includes('/structured-slots/slots/')) {
+          return jsonResponse(200, {
+            slot: {
+              slotId: 'title',
+              typeId: 'title',
+              contentPresence: 'set',
+              level: 'content',
+              spec: { type: 'object' },
+              content: 'The Title',
+              ancestors: [{ slotId: 'root', typeId: 'document', contentPresence: 'unset' }],
+            },
+          });
+        }
+        return jsonResponse(404, {
+          error: {
+            code: 'STRUCTURED_NOT_ACTIVE',
+            message: '任务未启用结构槽。',
+            location: null,
+            action: null,
+          },
+        });
+      }),
+    );
+    const gateway = createHttpGateway();
+
+    const page = await gateway.listStructuredSlots('task-x', null, 5);
+    expect(page.entries.map((entry) => entry.slotId)).toEqual(['root']);
+    expect(page.nextCursor).toBeNull();
+    const url = new URL(calls[0].url, 'http://forge-core.local');
+    expect(url.searchParams.get('limit')).toBe('5');
+    expect(url.searchParams.get('cursor')).toBeNull();
+
+    const read = await gateway.getStructuredSlot('task-x', 'title');
+    expect(read.slot.content).toBe('The Title');
+    expect(read.slot.ancestors.map((ancestor) => ancestor.slotId)).toEqual(['root']);
+
+    await expect(gateway.getStructuredContract('task-x')).rejects.toMatchObject({
+      code: 'STRUCTURED_NOT_ACTIVE',
+    });
+    await expect(gateway.getStructuredSeal('task-x')).rejects.toMatchObject({
+      code: 'STRUCTURED_NOT_ACTIVE',
+    });
+  });
+
+  it('rejects a structured success payload that fails the shared schema', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse(200, { entries: [{ slotId: 42 }], nextCursor: null })),
+    );
+    const gateway = createHttpGateway();
+    await expect(gateway.listStructuredSlots('task-x', null, 5)).rejects.toMatchObject({
+      code: 'INTERNAL_ERROR',
+    });
+  });
+
+  it('serializes a bound cursor into the tree/issues query string', async () => {
+    const cursor = {
+      version: 1 as const,
+      generationId: 'gen-1',
+      revision: 0,
+      projectionHash: 'a'.repeat(64),
+      lastDocumentKey: 'title',
+      orderingVersion: 1,
+      signature: 'b'.repeat(64),
+    };
+    const calls: Array<{ url: string }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        calls.push({ url });
+        return jsonResponse(200, { issues: [], nextCursor: null });
+      }),
+    );
+    const gateway = createHttpGateway();
+    await gateway.listStructuredIssues('task-x', cursor, 20);
+    const url = new URL(calls[0].url, 'http://forge-core.local');
+    expect(url.searchParams.get('limit')).toBe('20');
+    expect(JSON.parse(url.searchParams.get('cursor') ?? '')).toEqual(cursor);
+    expect(url.pathname).toBe('/api/tasks/task-x/structured-slots/issues');
+  });
 });
 
 // Keeps the stub fetch type honest for RequestInit assertions above.

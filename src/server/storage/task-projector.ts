@@ -33,10 +33,13 @@ import type {
   WorkspaceNode,
   WorkspaceRoute,
 } from '../../shared/contracts';
+import type { StructuredIssueV1, StructuredSlotsSummaryV1 } from '../../shared/structured-slots';
+import { makeStructuredIssue } from '../structured-slots/issues';
 import type { FrozenTemplate } from '../template/template-schema';
 import type { TaskRecord } from './task-store';
 import type { EventNode, TaskEvent } from './task-events';
 import type { ArtifactEntry } from './artifact-store';
+import { projectStructuredSlotState } from './structured-slot-state';
 
 /** Identity inputs of one projection: immutable record + frozen snapshot. */
 export interface TaskProjectionTask {
@@ -407,7 +410,7 @@ export function projectTask(
       final: state.finalArtifactId !== null && entry.meta.id === state.finalArtifactId,
     }));
 
-  return {
+  const workspace: TaskWorkspace = {
     task: buildSummary(task, state, artifacts),
     frozenInput: { ...task.record.frozenInput },
     templateVersion: task.record.templateVersion,
@@ -418,5 +421,91 @@ export function projectTask(
     artifacts: inputVersions,
     pendingHumanQuestion: state.pendingHumanQuestion,
     pendingHumanSource: state.pendingHumanSource,
+  };
+  // Structured templates always carry the summary; basic workspaces omit the
+  // field entirely (spec §14 / I01). The summary is a pure fold of
+  // authoritative structured events and never embeds content, the full tree,
+  // Grants or private Drafts.
+  const structuredSlots = projectStructuredSlotsSummary(events, task.frozenTemplate);
+  if (structuredSlots !== null) {
+    workspace.structuredSlots = structuredSlots;
+  }
+  return workspace;
+}
+
+/**
+ * Owner-visible issues derived from authoritative structured events (spec §14
+ * / design F06). v1 folds the ONLY persistent issue-like records the events
+ * carry — stale fill drafts — into a registered `DRAFT_STALE` error. Failed
+ * attempts are transient runtime states, not validation issues, and private
+ * Proposal/Draft journals are never read by the owner projection.
+ */
+export function deriveOwnerIssues(events: readonly TaskEvent[]): StructuredIssueV1[] {
+  const issues: StructuredIssueV1[] = [];
+  for (const event of events) {
+    if (event.type === 'structured_fill_draft_terminal' && event.status === 'stale') {
+      // The draft was superseded by a newer revision before it merged — a
+      // lifecycle error the audit view must surface. No draft identity is
+      // echoed (the issue stays operation-located and detail-free).
+      issues.push(makeStructuredIssue('DRAFT_STALE', 'merge', { kind: 'operation' }, {}));
+    }
+  }
+  return issues;
+}
+
+/** The last committed generation event (authoritative active identity). */
+function latestGenerationEvent(events: readonly TaskEvent[]): Extract<
+  TaskEvent,
+  { type: 'structured_scaffold_generation_committed' }
+> | null {
+  let latest: Extract<TaskEvent, { type: 'structured_scaffold_generation_committed' }> | null = null;
+  for (const event of events) {
+    if (event.type === 'structured_scaffold_generation_committed') {
+      latest = event;
+    }
+  }
+  return latest;
+}
+
+/**
+ * The structured summary fold (spec §14 / I01). Basic templates return null
+ * (the workspace omits the field). For structured templates the summary is a
+ * pure function of authoritative committed events: identity/status from the
+ * structured state projection, `visibleSlotCount` from the active generation's
+ * committed slot count (the owner sees every formal slot), `filledSlotCount`
+ * as the event-derived cumulative change count of merged drafts (capped at
+ * the visible count — the exact per-slot presence lives in the content
+ * revision blob, which the pure projector never reads), and `issueSummary`
+ * from the same owner-visible issue fold the read-only API serves.
+ */
+export function projectStructuredSlotsSummary(
+  events: readonly TaskEvent[],
+  frozen: FrozenTemplate,
+): StructuredSlotsSummaryV1 | null {
+  if (frozen.productionMode !== 'structured_slots') {
+    return null;
+  }
+  const state = projectStructuredSlotState(events);
+  const generation = latestGenerationEvent(events);
+  const visibleSlotCount = generation?.slotCount ?? 0;
+  let filledSlotCount = 0;
+  for (const event of events) {
+    if (event.type === 'structured_fill_draft_terminal' && event.status === 'merged' && event.content !== null) {
+      filledSlotCount = Math.min(visibleSlotCount, filledSlotCount + event.changeCount);
+    }
+  }
+  const issues = deriveOwnerIssues(events);
+  const errors = issues.filter((issue) => issue.severity === 'error').length;
+  return {
+    version: 1,
+    mode: 'structured_slots',
+    scaffoldId: state.scaffoldId,
+    generationId: state.generationId,
+    contentRevision: state.contentRevision,
+    structureStatus: state.structureStatus,
+    sealStatus: state.sealStatus,
+    visibleSlotCount,
+    filledSlotCount,
+    issueSummary: { errors, warnings: issues.length - errors },
   };
 }

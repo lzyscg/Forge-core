@@ -48,6 +48,20 @@ const CORRUPT_TASK_DIAGNOSTIC = '任务文件损坏、只能查看诊断。';
 const CLONE_NAME_SUFFIX = '（重跑）';
 const CLONE_NAME_MAX_CODE_POINTS = 120;
 
+/**
+ * The mock simulates basic templates only, so every read-only structured slot
+ * method rejects with the same stable code the HTTP server returns for a basic
+ * task (spec §14 basic-task absence behavior).
+ */
+function structuredNotActive(location: string): CoreError {
+  return new CoreError(
+    CORE_ERROR_CODES.STRUCTURED_NOT_ACTIVE,
+    '该任务未启用结构槽。',
+    location,
+    '查看基本任务画布。',
+  );
+}
+
 /** `<source name>（重跑）` truncated to 120 code points, exactly like the server. */
 function buildCloneName(sourceName: string): string {
   const combined = `${sourceName}${CLONE_NAME_SUFFIX}`;
@@ -533,6 +547,38 @@ export function createMockGateway(
       }
       store.deleteTaskRecord(taskId);
       notify(taskId);
+    },
+
+    /* ---------- read-only structured slots (spec §14, mock is basic-only) ---------- */
+
+    async getStructuredContract(taskId: string): Promise<never> {
+      const location = 'MockGateway.getStructuredContract';
+      requireRecord(taskId, location);
+      throw structuredNotActive(location);
+    },
+
+    async listStructuredSlots(taskId: string): Promise<never> {
+      const location = 'MockGateway.listStructuredSlots';
+      requireRecord(taskId, location);
+      throw structuredNotActive(location);
+    },
+
+    async getStructuredSlot(taskId: string): Promise<never> {
+      const location = 'MockGateway.getStructuredSlot';
+      requireRecord(taskId, location);
+      throw structuredNotActive(location);
+    },
+
+    async listStructuredIssues(taskId: string): Promise<never> {
+      const location = 'MockGateway.listStructuredIssues';
+      requireRecord(taskId, location);
+      throw structuredNotActive(location);
+    },
+
+    async getStructuredSeal(taskId: string): Promise<never> {
+      const location = 'MockGateway.getStructuredSeal';
+      requireRecord(taskId, location);
+      throw structuredNotActive(location);
     },
 
     /* ------------------------- DevelopmentGateway ------------------------ */

@@ -26,16 +26,28 @@ import { stat } from 'node:fs/promises';
 import type {
   ArtifactVersion,
   SkillContent,
+  StructuredIssuePageV1,
+  StructuredSlotOutlinePageV1,
+  StructuredSlotPublicContractV1,
+  StructuredSlotReadResponseV1,
   TaskSummary,
   TaskWorkspace,
   TurnTrace,
 } from '../shared/contracts';
+import type {
+  JsonObject,
+  SealRecord,
+  StructuredIssueV1,
+  StructuredSlotTreeCursorV1,
+} from '../shared/structured-slots';
 import { CorePaths } from './storage/core-paths';
 import { ArtifactStore, type ArtifactProposal } from './storage/artifact-store';
 import { EventStore, type CommittedEvent } from './storage/event-store';
 import { TaskStore, type CreateTaskRequest, type CreatedTask } from './storage/task-store';
-import { projectTask } from './storage/task-projector';
+import { deriveOwnerIssues, projectTask } from './storage/task-projector';
 import type { TaskEvent } from './storage/task-events';
+import { StructuredSlotBlobStore } from './storage/structured-slot-blob-store';
+import { projectStructuredSlotState } from './storage/structured-slot-state';
 import { TraceStore } from './storage/trace-store';
 import { TemplateCatalog } from './template/template-catalog';
 import type { StructuredRuntimeEnvironmentV1 } from './structured-slots/runtime-capability';
@@ -53,6 +65,23 @@ import { GateRunner } from './runtime/gate-runner';
 import { ActionCommitter } from './runtime/action-committer';
 import { TaskRunner } from './runtime/task-runner';
 import { TaskScheduler, type HumanAnswerRequest } from './runtime/task-scheduler';
+import type {
+  FrozenStructuredSlotContractV1,
+} from './template/structured-slot-contract';
+import {
+  createStructuredSlotDataSource,
+} from './runtime/structured-slot/session-service';
+import {
+  createTaskLocalCursorSigner,
+  StructuredSlotProjectionService,
+  type ProjectionErrorCode,
+  type StructuredSlotDataSource,
+  type TaskLocalCursorSigner,
+} from './runtime/structured-slot/projection-service';
+import { canonicalJson, canonicalJsonSha256 } from './structured-slots/canonical-json';
+import { ALL_LOCATION_KINDS, projectStructuredVerdict } from './structured-slots/issues';
+import type { CompiledSlotSchemaV1 } from './structured-slots/slot-schema';
+import type { CompiledLayoutGrammarV1 } from './structured-slots/layout-grammar';
 
 export interface CoreServiceOptions {
   /** Injected runtime (tests use the deterministic fake); defaults to Pi. */
@@ -99,6 +128,33 @@ interface WorkspaceSinkTarget {
       writes: ReadonlyArray<{ path: string; content: string }>,
     ) => Promise<void>,
   ) => void;
+}
+
+/**
+ * Read-only structured slot projection failure (spec §14). Satisfies the
+ * public error shape so the router maps it through the stable status table:
+ * `STRUCTURED_NOT_ACTIVE` / `SEAL_NOT_FOUND` → 404, `CURSOR_INVALID` → 409,
+ * `SLOT_NOT_VISIBLE` → 404 (identical for missing and hidden).
+ */
+export class StructuredSlotReadError extends Error {
+  readonly code: 'STRUCTURED_NOT_ACTIVE' | 'SLOT_NOT_VISIBLE' | 'CURSOR_INVALID' | 'SEAL_NOT_FOUND';
+
+  readonly location: string | null;
+
+  readonly action: string | null;
+
+  constructor(
+    code: StructuredSlotReadError['code'],
+    message: string,
+    location: string | null = null,
+    action: string | null = null,
+  ) {
+    super(message);
+    this.name = 'StructuredSlotReadError';
+    this.code = code;
+    this.location = location;
+    this.action = action;
+  }
 }
 
 export class CoreService {
@@ -148,6 +204,14 @@ export class CoreService {
    * touches files or events.
    */
   readonly live: LiveStore;
+
+  /**
+   * ONE cursor signer per task (Task 10 note): the projection service binds
+   * every cursor to a task-local in-memory HMAC secret, so pagination stays
+   * coherent across REST requests and a process restart invalidates held
+   * cursors (fail closed).
+   */
+  private readonly structuredCursorSigners = new Map<string, TaskLocalCursorSigner>();
 
   constructor(paths: CorePaths, options: CoreServiceOptions = {}) {
     this.paths = paths;
@@ -344,6 +408,147 @@ export class CoreService {
   }
 
   /**
+   * Public contract projection of the frozen structured-slot contract (spec
+   * §14 / I02). Executes as the built-in `task_owner` subject and NEVER
+   * includes implementation paths, validator/Assembler registrations,
+   * accessProfiles (ACL) or the resource manifest (host paths). Basic tasks
+   * reject with STRUCTURED_NOT_ACTIVE; runtime-unavailable snapshots surface
+   * the stable TEMPLATE_RUNTIME_UNAVAILABLE.
+   */
+  async getStructuredContract(taskId: string): Promise<StructuredSlotPublicContractV1> {
+    const context = await this.structuredReadContext(taskId);
+    return projectPublicContract(context.contract);
+  }
+
+  /**
+   * Paged owner outline (spec §14 / design §10.6). The owner sees every formal
+   * slot/spec/content of the active scaffold; the cursor binds generation,
+   * revision, the owner projection identity and document order — a stale or
+   * forged cursor is a stable CURSOR_INVALID. Never reveals hidden totals.
+   */
+  async listStructuredSlots(
+    taskId: string,
+    cursor: StructuredSlotTreeCursorV1 | null,
+    limit: number,
+  ): Promise<StructuredSlotOutlinePageV1> {
+    const context = await this.structuredReadContext(taskId);
+    const result = await context.projection.listSlots({ kind: 'task_owner' }, cursor, limit);
+    if (!result.ok) {
+      throw structuredReadFailure(result.code, result.reason);
+    }
+    return { entries: result.entries, nextCursor: result.nextCursor };
+  }
+
+  /**
+   * The authorized owner projection of one slot. Missing and hidden slots
+   * return the IDENTICAL stable SLOT_NOT_VISIBLE envelope (D05 — no slotId
+   * echo). A visible deep node is padded with its ancestor outline shell.
+   */
+  async getStructuredSlot(taskId: string, slotId: string): Promise<StructuredSlotReadResponseV1> {
+    const context = await this.structuredReadContext(taskId);
+    const result = await context.projection.readSlot({ kind: 'task_owner' }, slotId);
+    if (!result.ok) {
+      throw structuredReadFailure(result.code, result.reason);
+    }
+    return { slot: result.slot };
+  }
+
+  /**
+   * Paged owner-visible issues (spec §14 / F06). Issues are folded from
+   * authoritative structured events and projected through the closed registry
+   * pipeline with owner visibility (all location kinds); private Draft/Proposal
+   * journals are never read. The cursor binds the same generation/revision/
+   * projection identity as the tree outline.
+   */
+  async listStructuredIssues(
+    taskId: string,
+    cursor: StructuredSlotTreeCursorV1 | null,
+    limit: number,
+  ): Promise<StructuredIssuePageV1> {
+    const context = await this.structuredReadContext(taskId);
+    const events = (await this.events.read(taskId)).map((entry) => entry.event);
+    const issues = deriveOwnerIssues(events);
+    const errors = issues.filter((issue) => issue.severity === 'error').length;
+    const verdict = projectStructuredVerdict(
+      {
+        version: 1,
+        status: errors > 0 ? 'failed' : 'passed',
+        issues,
+        truncated: false,
+        summary: { errors, warnings: issues.length - errors },
+      },
+      { visibleLocationKinds: ALL_LOCATION_KINDS },
+    );
+    const sorted = verdict.issues;
+
+    if (limit < 1) {
+      throw structuredReadFailure('CURSOR_INVALID', 'limit must be a positive safe integer');
+    }
+    const identity = {
+      generationId: context.state.generationId,
+      revision: context.state.contentRevision,
+      projectionHash: OWNER_PROJECTION_HASH,
+    };
+    let start = 0;
+    if (cursor !== null) {
+      const invalid = validateIssueCursor(identity, cursor, this.signerFor(taskId), sorted);
+      if (invalid !== null) {
+        throw structuredReadFailure('CURSOR_INVALID', invalid);
+      }
+      const lastKey = cursor.lastDocumentKey;
+      const index = sorted.findIndex((issue, index) => issueCursorKey(issue, index) === lastKey);
+      if (index === -1) {
+        throw structuredReadFailure('CURSOR_INVALID', 'cursor does not belong to this issue projection');
+      }
+      start = index + 1;
+    }
+    const page = sorted.slice(start, start + limit);
+    const hasMore = start + limit < sorted.length;
+    let nextCursor: StructuredSlotTreeCursorV1 | null = null;
+    if (hasMore && page.length > 0) {
+      const lastIndex = start + page.length - 1;
+      const payload = issueCursorPayload(identity, issueCursorKey(page[page.length - 1], lastIndex));
+      nextCursor = {
+        version: 1,
+        generationId: identity.generationId ?? '',
+        revision: identity.revision ?? 0,
+        projectionHash: identity.projectionHash,
+        lastDocumentKey: issueCursorKey(page[page.length - 1], lastIndex),
+        orderingVersion: 1,
+        signature: this.signerFor(taskId).sign(canonicalJson(payload)),
+      };
+    }
+    return { issues: page, nextCursor };
+  }
+
+  /**
+   * The immutable SealRecord of the active sealed scaffold (design §17.2).
+   * The owner reads the content-addressed seal-record blob referenced by the
+   * committed `structured_scaffold_sealed` event — never a staging path.
+   * Unsealed scaffolds reject with the stable SEAL_NOT_FOUND.
+   */
+  async getStructuredSeal(taskId: string): Promise<SealRecord> {
+    const context = await this.structuredReadContext(taskId);
+    const events = (await this.events.read(taskId)).map((entry) => entry.event);
+    let sealEvent: Extract<TaskEvent, { type: 'structured_scaffold_sealed' }> | null = null;
+    for (const event of events) {
+      if (event.type === 'structured_scaffold_sealed') {
+        sealEvent = event;
+      }
+    }
+    if (sealEvent === null) {
+      throw new StructuredSlotReadError(
+        'SEAL_NOT_FOUND',
+        '该任务尚未封存，没有 SealRecord。',
+        'CoreService.structuredRead',
+        '等待封存完成后重试。',
+      );
+    }
+    const bytes = await context.blobStore.readBlob(sealEvent.sealRecord.sha256);
+    return JSON.parse(bytes.toString('utf8')) as SealRecord;
+  }
+
+  /**
    * Clones one task with the same frozen input on the CURRENT template
    * version (plan Phase E Task 3, Global Constraint 12): a fresh frozen task
    * named `<source name>（重跑）` (120-code-point bound). The source task is
@@ -461,6 +666,51 @@ export class CoreService {
     return this.enrichSkillNodeBodies(taskId, workspace);
   }
 
+  /** The ONE cursor signer per task (Task 10 note). */
+  private signerFor(taskId: string): TaskLocalCursorSigner {
+    const cached = this.structuredCursorSigners.get(taskId);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const signer = createTaskLocalCursorSigner(taskId);
+    this.structuredCursorSigners.set(taskId, signer);
+    return signer;
+  }
+
+  /**
+   * Builds the owner read context: the frozen structured template/contract,
+   * the same authorized projection service Agent grants use (spec §14), and
+   * the task's structured state. Basic tasks reject with STRUCTURED_NOT_ACTIVE;
+   * storage identity failures propagate their public codes.
+   */
+  private async structuredReadContext(taskId: string): Promise<{
+    contract: FrozenStructuredSlotContractV1;
+    projection: StructuredSlotProjectionService;
+    blobStore: StructuredSlotBlobStore;
+    state: ReturnType<typeof projectStructuredSlotState>;
+  }> {
+    const frozen = await this.tasks.readFrozenTemplate(taskId);
+    if (frozen.productionMode !== 'structured_slots' || frozen.structuredSlots === null) {
+      throw new StructuredSlotReadError(
+        'STRUCTURED_NOT_ACTIVE',
+        '该任务未启用结构槽。',
+        'CoreService.structuredRead',
+        '查看基本任务画布。',
+      );
+    }
+    const blobStore = new StructuredSlotBlobStore(this.paths, taskId);
+    const events = async (): Promise<readonly TaskEvent[]> =>
+      (await this.events.read(taskId)).map((entry) => entry.event);
+    const source: StructuredSlotDataSource = createStructuredSlotDataSource({ blobStore, events });
+    const projection = new StructuredSlotProjectionService({
+      contract: frozen.structuredSlots,
+      source,
+      signer: this.signerFor(taskId),
+    });
+    const state = projectStructuredSlotState(await events());
+    return { contract: frozen.structuredSlots, projection, blobStore, state };
+  }
+
   /**
    * Replaces each skill node body with the loaded content's display version
    * hash (first 12 hex characters, template-version display policy); any
@@ -520,4 +770,169 @@ export class CoreService {
 
 export function createCoreService(paths: CorePaths, options: CoreServiceOptions = {}): CoreService {
   return new CoreService(paths, options);
+}
+
+/* ------------------- owner structured-slot read helpers (spec §14) ------------------- */
+
+/** The owner projection identity hash (matches the projection service formula). */
+const OWNER_PROJECTION_HASH = canonicalJsonSha256({ subject: 'task_owner' });
+
+/** Stable public envelope for the projection failures the owner can hit. */
+function structuredReadFailure(code: ProjectionErrorCode, _reason: string): StructuredSlotReadError {
+  if (code === 'SLOT_NOT_VISIBLE') {
+    // D05: identical for missing and hidden; never echoes the slotId.
+    return new StructuredSlotReadError(
+      'SLOT_NOT_VISIBLE',
+      '槽位不可见。',
+      'CoreService.structuredRead',
+      '从树形大纲中选择可见槽位。',
+    );
+  }
+  if (code === 'CURSOR_INVALID') {
+    return new StructuredSlotReadError(
+      'CURSOR_INVALID',
+      '分页游标已失效，请从第一页重新读取。',
+      'CoreService.structuredRead',
+      '返回第一页重试。',
+    );
+  }
+  // The owner subject is fixed at `task_owner`, so agent-only failures
+  // (GRANT_INVALID / GRANT_STALE / UNKNOWN_SUBJECT) are unreachable here. Fail
+  // closed with the stable internal envelope rather than leaking a reason.
+  return new StructuredSlotReadError(
+    'CURSOR_INVALID',
+    '分页游标已失效，请从第一页重新读取。',
+    'CoreService.structuredRead',
+    '返回第一页重试。',
+  );
+}
+
+/** Issue-page cursor key: (phase, code, index) — stable sorted position. */
+function issueCursorKey(issue: StructuredIssueV1, index: number): string {
+  return `${issue.phase}|${issue.code}|${index}`;
+}
+
+/** Canonical signed payload binding the owner issue projection identity. */
+function issueCursorPayload(
+  identity: { generationId: string | null; revision: number | null; projectionHash: string },
+  lastDocumentKey: string | null,
+): Record<string, unknown> {
+  return {
+    version: 1,
+    generationId: identity.generationId,
+    revision: identity.revision,
+    projectionHash: identity.projectionHash,
+    lastDocumentKey,
+    orderingVersion: 1,
+    subject: 'task_owner',
+  };
+}
+
+/** Validates an issue cursor against the current projection identity. */
+function validateIssueCursor(
+  identity: { generationId: string | null; revision: number | null; projectionHash: string },
+  cursor: StructuredSlotTreeCursorV1,
+  signer: TaskLocalCursorSigner,
+  sorted: readonly StructuredIssueV1[],
+): string | null {
+  if (cursor.version !== 1 || cursor.orderingVersion !== 1) {
+    return 'unsupported cursor version';
+  }
+  if (cursor.generationId !== (identity.generationId ?? '')) {
+    return 'cursor is bound to a different generation';
+  }
+  if (cursor.revision !== (identity.revision ?? 0)) {
+    return 'cursor is bound to a different revision';
+  }
+  if (cursor.projectionHash !== identity.projectionHash) {
+    return 'cursor is bound to a different projection';
+  }
+  if (
+    cursor.lastDocumentKey !== null &&
+    !sorted.some((issue, index) => issueCursorKey(issue, index) === cursor.lastDocumentKey)
+  ) {
+    return 'cursor references an unknown issue position';
+  }
+  const payload = issueCursorPayload(identity, cursor.lastDocumentKey);
+  if (!signer.verify(canonicalJson(payload), cursor.signature)) {
+    return 'cursor signature is invalid';
+  }
+  return null;
+}
+
+/** Serializes one compiled slot schema, dropping the internal hash fields. */
+function serializeSchema(schema: CompiledSlotSchemaV1): JsonObject {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(schema)) {
+    if (key === '_enumHashes' || key === '_constHash') continue;
+    if (key === 'pattern' && value !== undefined) {
+      const compiled = value as { pattern: string; sourceLength: number };
+      out[key] = { pattern: compiled.pattern, sourceLength: compiled.sourceLength };
+      continue;
+    }
+    if (key === 'properties' && value !== undefined) {
+      const properties: Record<string, unknown> = {};
+      for (const [name, child] of Object.entries(value as Record<string, CompiledSlotSchemaV1>)) {
+        properties[name] = serializeSchema(child);
+      }
+      out[key] = properties;
+      continue;
+    }
+    if (key === 'items' && value !== undefined) {
+      out[key] = serializeSchema(value as CompiledSlotSchemaV1);
+      continue;
+    }
+    if (key === 'additionalProperties' && value !== undefined && typeof value === 'object') {
+      out[key] = serializeSchema(value as CompiledSlotSchemaV1);
+      continue;
+    }
+    if (value !== undefined) {
+      out[key] = value;
+    }
+  }
+  return out as JsonObject;
+}
+
+/** Serializes the compiled grammar: sets to arrays, drops the internal matcher. */
+function serializeGrammar(
+  grammar: CompiledLayoutGrammarV1,
+): StructuredSlotPublicContractV1['layoutGrammar'] {
+  const productions: StructuredSlotPublicContractV1['layoutGrammar']['productions'] = {};
+  for (const [typeId, production] of Object.entries(grammar.productions)) {
+    productions[typeId] = {
+      children: production.children as JsonObject,
+      nullable: production.nullable,
+      minConsumption: production.minConsumption,
+      maxConsumption: production.maxConsumption,
+      first: [...production.first],
+      generatable: production.generatable,
+    };
+  }
+  return { rootType: grammar.rootType, productions };
+}
+
+/**
+ * The owner contract projection: slot types (serialized schemas), the layout
+ * grammar, the frozen limits and the ABI/profile identity. Implementation
+ * paths, validator/Assembler registrations, accessProfiles and the resource
+ * manifest are NEVER included (I02/I05).
+ */
+function projectPublicContract(contract: FrozenStructuredSlotContractV1): StructuredSlotPublicContractV1 {
+  return {
+    version: 1,
+    slotTypes: contract.slotTypes.map((slotType) => ({
+      id: slotType.id,
+      name: slotType.name,
+      description: slotType.description,
+      specSchema: serializeSchema(slotType.specSchema),
+      content:
+        slotType.content.presence === 'forbidden'
+          ? { presence: 'forbidden' as const }
+          : { presence: slotType.content.presence, schema: serializeSchema(slotType.content.schema) },
+    })),
+    layoutGrammar: serializeGrammar(contract.layoutGrammar),
+    limits: contract.limits,
+    abiProfileIdentity: contract.abiProfileIdentity,
+    semanticDigest: contract.semanticDigest,
+  };
 }

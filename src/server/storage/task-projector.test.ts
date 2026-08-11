@@ -27,7 +27,7 @@ import {
 import { CoreService } from '../core-service';
 import type { CorePaths } from './core-paths';
 import { formatEventFileName } from './core-paths';
-import { projectTask } from './task-projector';
+import { deriveOwnerIssues, projectStructuredSlotsSummary, projectTask } from './task-projector';
 
 let paths: CorePaths;
 let service: CoreService;
@@ -548,5 +548,168 @@ describe('task-projector incompatibility gate (plan 2026-08-04 Task 3, spec §7.
         reason: 'SOMETHING_ELSE',
       } as never),
     ).rejects.toMatchObject({ code: 'EVENT_INVALID' });
+  });
+});
+
+/* ------------------- structured slots summary (spec §14 / I01) ------------------- */
+
+import type { StructuredBlobRefV1 } from '../../shared/structured-slots';
+import type { FrozenTemplate } from '../template/template-schema';
+
+/** Minimal structured frozen template: only the projection reads productionMode. */
+const STRUCTURED_FROZEN = {
+  productionMode: 'structured_slots',
+} as FrozenTemplate;
+
+const BASIC_FROZEN = {
+  productionMode: 'basic',
+} as FrozenTemplate;
+
+function blobRef(kind: StructuredBlobRefV1['kind'], seed = 'a'): StructuredBlobRefV1 {
+  return { version: 1, kind, sha256: seed.repeat(64), byteLength: 4 };
+}
+
+function generationEvent(overrides: Record<string, unknown> = {}) {
+  return makeTaskEvent({
+    type: 'structured_scaffold_generation_committed',
+    scaffoldId: 'scaffold-1',
+    generationId: 'gen-1',
+    supersedesGenerationId: null,
+    rootSlotId: 'root',
+    slotCount: 4,
+    maxDepth: 2,
+    structure: blobRef('generation'),
+    content: blobRef('content_revision', 'c'),
+    contentRevision: 0,
+    proposalId: 'prop-1',
+    ...overrides,
+  });
+}
+
+function mergedDraftEvent(changeCount: number, resultRevision = 1) {
+  return makeTaskEvent({
+    type: 'structured_fill_draft_terminal',
+    draftId: 'draft-1',
+    turnId: 'turn-1',
+    status: 'merged',
+    baseRevision: 0,
+    resultRevision,
+    changeCount,
+    content: blobRef('content_revision', 'd'),
+  });
+}
+
+function staleDraftEvent() {
+  return makeTaskEvent({
+    type: 'structured_fill_draft_terminal',
+    draftId: 'draft-2',
+    turnId: 'turn-2',
+    status: 'stale',
+    baseRevision: 0,
+    resultRevision: 0,
+    changeCount: 0,
+    content: null,
+  });
+}
+
+function sealedEvent() {
+  return makeTaskEvent({
+    type: 'structured_scaffold_sealed',
+    sealId: 'seal-1',
+    scaffoldId: 'scaffold-1',
+    generationId: 'gen-1',
+    scaffoldRevision: 1,
+    sealRecord: blobRef('seal_record', 's'),
+    artifactId: 'artifact-1',
+    artifactVersion: 1,
+  });
+}
+
+describe('projectStructuredSlotsSummary (spec §14 / I01)', () => {
+  it('returns null for basic templates', () => {
+    expect(projectStructuredSlotsSummary([], BASIC_FROZEN)).toBeNull();
+  });
+
+  it('returns a pre-scaffold summary for a structured template before any events', () => {
+    const summary = projectStructuredSlotsSummary([], STRUCTURED_FROZEN);
+    expect(summary).toEqual({
+      version: 1,
+      mode: 'structured_slots',
+      scaffoldId: null,
+      generationId: null,
+      contentRevision: null,
+      structureStatus: 'none',
+      sealStatus: 'unsealed',
+      visibleSlotCount: 0,
+      filledSlotCount: 0,
+      issueSummary: { errors: 0, warnings: 0 },
+    });
+  });
+
+  it('folds the active generation and merged content into the summary', () => {
+    const events = [generationEvent(), mergedDraftEvent(2), staleDraftEvent(), sealedEvent()];
+    const summary = projectStructuredSlotsSummary(events, STRUCTURED_FROZEN);
+    expect(summary).toEqual({
+      version: 1,
+      mode: 'structured_slots',
+      scaffoldId: 'scaffold-1',
+      generationId: 'gen-1',
+      contentRevision: 1,
+      structureStatus: 'active',
+      sealStatus: 'sealed',
+      visibleSlotCount: 4,
+      filledSlotCount: 2,
+      issueSummary: { errors: 1, warnings: 0 },
+    });
+    // The summary never embeds content, the tree, Drafts or Grants.
+    expect(Object.keys(summary ?? {}).sort()).toEqual([
+      'contentRevision',
+      'filledSlotCount',
+      'generationId',
+      'issueSummary',
+      'mode',
+      'scaffoldId',
+      'sealStatus',
+      'structureStatus',
+      'version',
+      'visibleSlotCount',
+    ]);
+  });
+
+  it('caps filledSlotCount at the visible slot count', () => {
+    const events = [generationEvent(), mergedDraftEvent(9)];
+    const summary = projectStructuredSlotsSummary(events, STRUCTURED_FROZEN);
+    expect(summary?.filledSlotCount).toBe(4);
+  });
+
+  it('a later generation supersedes the earlier one for the active identity', () => {
+    const events = [
+      generationEvent({ scaffoldId: 'scaffold-1', generationId: 'gen-1', slotCount: 2 }),
+      generationEvent({ scaffoldId: 'scaffold-2', generationId: 'gen-2', slotCount: 7 }),
+    ];
+    const summary = projectStructuredSlotsSummary(events, STRUCTURED_FROZEN);
+    expect(summary?.scaffoldId).toBe('scaffold-2');
+    expect(summary?.generationId).toBe('gen-2');
+    expect(summary?.visibleSlotCount).toBe(7);
+  });
+});
+
+describe('deriveOwnerIssues (spec §14 owner-visible issues)', () => {
+  it('derives a DRAFT_STALE error for a stale draft terminal and nothing else', () => {
+    const issues = deriveOwnerIssues([generationEvent(), mergedDraftEvent(1), staleDraftEvent()]);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({
+      version: 1,
+      code: 'DRAFT_STALE',
+      severity: 'error',
+      phase: 'merge',
+      source: 'lifecycle',
+      primaryLocation: { kind: 'operation' },
+    });
+    expect(JSON.stringify(issues[0])).not.toContain('draft-2');
+  });
+
+  it('derives no issues from a clean structured history', () => {
+    expect(deriveOwnerIssues([generationEvent(), mergedDraftEvent(1), sealedEvent()])).toEqual([]);
   });
 });

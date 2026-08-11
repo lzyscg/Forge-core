@@ -508,5 +508,40 @@ export function runForgeCoreGatewayContract(
         });
       });
     });
+
+    it('agrees on basic-task structured absence/error behavior', async () => {
+      await withGateway(async (gateway) => {
+        const detail = await loadFirstTemplate(gateway);
+        const created = await gateway.createTask({
+          templateId: detail.id,
+          name: '契约套件任务',
+          input: inputWithRequiredFields(detail.inputFields),
+        });
+
+        // The basic template has no structured slots: every read-only
+        // structured method rejects with the SAME stable public code on both
+        // implementations.
+        const calls: Array<() => Promise<unknown>> = [
+          () => gateway.getStructuredContract(created.id),
+          () => gateway.listStructuredSlots(created.id, null, 50),
+          () => gateway.getStructuredSlot(created.id, 'root'),
+          () => gateway.listStructuredIssues(created.id, null, 50),
+          () => gateway.getStructuredSeal(created.id),
+        ];
+        for (const call of calls) {
+          const outcome = await settle(call());
+          if (outcome.ok) {
+            expect.unreachable('a basic task must reject every structured read');
+          }
+          expectPublicCoreErrorShape(outcome.error);
+          expect((outcome.error as { code?: string }).code).toBe('STRUCTURED_NOT_ACTIVE');
+        }
+
+        // Unknown tasks surface TASK_NOT_FOUND, never STRUCTURED_NOT_ACTIVE.
+        const missed = await settle(gateway.getStructuredContract('task-missing'));
+        if (missed.ok) expect.unreachable('an unknown task must reject structured reads');
+        expect((missed.error as { code?: string }).code).toBe('TASK_NOT_FOUND');
+      });
+    });
   });
 }

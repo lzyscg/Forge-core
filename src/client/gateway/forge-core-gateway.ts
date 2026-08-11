@@ -1,12 +1,18 @@
 import type {
   HumanDecision,
+  SealRecord,
   SkillContent,
+  StructuredIssuePageV1,
+  StructuredSlotOutlinePageV1,
+  StructuredSlotPublicContractV1,
+  StructuredSlotReadResponseV1,
   TaskSummary,
   TaskWorkspace,
   TemplateDetail,
   TemplateSummary,
   TurnTrace,
 } from '../../shared/contracts';
+import type { StructuredSlotTreeCursorV1 } from '../../shared/structured-slots';
 
 /**
  * 正式页面唯一的生产数据接口。页面不得直接访问 localStorage、
@@ -57,4 +63,37 @@ export interface ForgeCoreGateway {
    * Unknown ids reject with TASK_NOT_FOUND.
    */
   deleteTask(taskId: string): Promise<void>;
+  /**
+   * Public contract projection of the structured-slot contract (spec §14).
+   * The owner projection never includes implementation paths, validators,
+   * accessProfiles or the resource manifest. Basic tasks reject with
+   * STRUCTURED_NOT_ACTIVE.
+   */
+  getStructuredContract(taskId: string): Promise<StructuredSlotPublicContractV1>;
+  /**
+   * Paged owner slot outline (spec §14). The cursor is the signed, bound tree
+   * cursor; a stale cursor rejects with CURSOR_INVALID. Basic tasks reject
+   * with STRUCTURED_NOT_ACTIVE.
+   */
+  listStructuredSlots(
+    taskId: string,
+    cursor: StructuredSlotTreeCursorV1 | null,
+    limit: number,
+  ): Promise<StructuredSlotOutlinePageV1>;
+  /**
+   * The authorized owner projection of one slot (spec §14). Missing and hidden
+   * slots return the IDENTICAL SLOT_NOT_VISIBLE envelope.
+   */
+  getStructuredSlot(taskId: string, slotId: string): Promise<StructuredSlotReadResponseV1>;
+  /**
+   * Paged owner-visible issues (spec §14). Basic tasks reject with
+   * STRUCTURED_NOT_ACTIVE.
+   */
+  listStructuredIssues(
+    taskId: string,
+    cursor: StructuredSlotTreeCursorV1 | null,
+    limit: number,
+  ): Promise<StructuredIssuePageV1>;
+  /** The immutable SealRecord of the sealed scaffold (design §17.2). */
+  getStructuredSeal(taskId: string): Promise<SealRecord>;
 }

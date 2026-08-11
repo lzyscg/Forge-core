@@ -1126,12 +1126,18 @@
   right: 0;
 }
 
+.fc-drawer--structured {
+  right: 0;
+  width: min(24rem, 92vw);
+}
+
 @media (prefers-reduced-motion: no-preference) {
   .fc-drawer--config {
     animation: fc-drawer-slide-left 180ms ease;
   }
 
-  .fc-drawer--artifacts {
+  .fc-drawer--artifacts,
+  .fc-drawer--structured {
     animation: fc-drawer-slide-right 180ms ease;
   }
 
@@ -1256,6 +1262,139 @@
 
 .fc-artifact-empty {
   color: var(--fc-muted);
+}
+
+/* Structured slot drawer (read-only 结构, spec §14 / I04) */
+
+.fc-struct-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--fc-border);
+  border-radius: var(--fc-radius-sm);
+  font-size: 0.875rem;
+  color: var(--fc-text);
+}
+
+.fc-struct-summary__status {
+  font-weight: 600;
+}
+
+.fc-struct-heading {
+  margin: 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.fc-struct-tree {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.fc-struct-tree__button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  width: 100%;
+  min-height: 36px;
+  padding: 0 0.6rem;
+  border: 1px solid var(--fc-border);
+  border-radius: var(--fc-radius-sm);
+  background-color: var(--fc-surface);
+  color: var(--fc-text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.fc-struct-tree__button:hover {
+  background-color: var(--fc-surface-strong);
+}
+
+.fc-struct-tree__type {
+  font-weight: 600;
+}
+
+.fc-struct-tree__presence {
+  font-size: 0.8125rem;
+  color: var(--fc-muted);
+}
+
+.fc-struct-slot__status {
+  margin: 0 0 0.5rem;
+  font-size: 0.875rem;
+  color: var(--fc-muted);
+}
+
+.fc-struct-slot__label {
+  margin: 0.75rem 0 0.25rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--fc-muted);
+}
+
+.fc-struct-slot__json {
+  margin: 0;
+  max-height: 14rem;
+  overflow: auto;
+  padding: 0.6rem;
+  border: 1px solid var(--fc-border);
+  border-radius: var(--fc-radius-sm);
+  background-color: var(--fc-surface-strong);
+  font-size: 0.8125rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.fc-struct-issues__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.fc-struct-issues__item {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  font-size: 0.875rem;
+}
+
+.fc-struct-issues__code {
+  font-weight: 600;
+}
+
+.fc-struct-issues__severity {
+  color: var(--fc-muted);
+}
+
+.fc-struct-issues__empty {
+  margin: 0;
+  color: var(--fc-muted);
+  font-size: 0.875rem;
+}
+
+.fc-struct-seal__line {
+  margin: 0 0 0.25rem;
+  font-size: 0.875rem;
+}
+
+.fc-struct-seal__link {
+  color: var(--fc-accent);
+  text-decoration: underline;
+}
+
+.fc-struct-error {
+  margin: 0;
+  color: var(--fc-danger, #b3261e);
+  font-size: 0.875rem;
 }
 
 .fc-version-chain {

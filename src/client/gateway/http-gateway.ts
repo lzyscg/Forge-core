@@ -22,17 +22,28 @@ import type { TSchema } from 'typebox';
 import { Value } from 'typebox/value';
 import type {
   HumanDecision,
+  SealRecord,
   SkillContent,
+  StructuredIssuePageV1,
+  StructuredSlotOutlinePageV1,
+  StructuredSlotPublicContractV1,
+  StructuredSlotReadResponseV1,
   TaskSummary,
   TaskWorkspace,
   TemplateDetail,
   TemplateSummary,
   TurnTrace,
 } from '../../shared/contracts';
+import type { StructuredSlotTreeCursorV1 } from '../../shared/structured-slots';
 import type { PublicCoreError } from '../../shared/errors';
 import {
   errorBodySchema,
   skillContentSchema,
+  structuredIssuePageSchema,
+  structuredSealRecordSchema,
+  structuredSlotOutlinePageSchema,
+  structuredSlotPublicContractSchema,
+  structuredSlotReadResponseSchema,
   taskSummaryListSchema,
   taskSummarySchema,
   taskWorkspaceSchema,
@@ -362,5 +373,63 @@ export function createHttpGateway(options: HttpGatewayOptions = {}): ForgeCoreGa
       // stale watchTask call fails exactly like a never-seen id.
       knownTaskIds.delete(taskId);
     },
+
+    async getStructuredContract(taskId: string): Promise<StructuredSlotPublicContractV1> {
+      return getDecoded<StructuredSlotPublicContractV1>(
+        structuredSlotPublicContractSchema,
+        `/api/tasks/${encodeURIComponent(taskId)}/structured-slots/contract`,
+      );
+    },
+
+    async listStructuredSlots(
+      taskId: string,
+      cursor: StructuredSlotTreeCursorV1 | null,
+      limit: number,
+    ): Promise<StructuredSlotOutlinePageV1> {
+      return getDecoded<StructuredSlotOutlinePageV1>(
+        structuredSlotOutlinePageSchema,
+        structuredPageUrl(taskId, 'tree', cursor, limit),
+      );
+    },
+
+    async getStructuredSlot(taskId: string, slotId: string): Promise<StructuredSlotReadResponseV1> {
+      return getDecoded<StructuredSlotReadResponseV1>(
+        structuredSlotReadResponseSchema,
+        `/api/tasks/${encodeURIComponent(taskId)}/structured-slots/slots/${encodeURIComponent(slotId)}`,
+      );
+    },
+
+    async listStructuredIssues(
+      taskId: string,
+      cursor: StructuredSlotTreeCursorV1 | null,
+      limit: number,
+    ): Promise<StructuredIssuePageV1> {
+      return getDecoded<StructuredIssuePageV1>(
+        structuredIssuePageSchema,
+        structuredPageUrl(taskId, 'issues', cursor, limit),
+      );
+    },
+
+    async getStructuredSeal(taskId: string): Promise<SealRecord> {
+      return getDecoded<SealRecord>(
+        structuredSealRecordSchema,
+        `/api/tasks/${encodeURIComponent(taskId)}/structured-slots/seal`,
+      );
+    },
   };
+}
+
+/** Builds the paged structured URL: `/.../tree|issues?cursor=&limit=`. */
+function structuredPageUrl(
+  taskId: string,
+  resource: 'tree' | 'issues',
+  cursor: StructuredSlotTreeCursorV1 | null,
+  limit: number,
+): string {
+  const params = new URLSearchParams();
+  params.set('limit', String(limit));
+  if (cursor !== null) {
+    params.set('cursor', JSON.stringify(cursor));
+  }
+  return `/api/tasks/${encodeURIComponent(taskId)}/structured-slots/${resource}?${params.toString()}`;
 }

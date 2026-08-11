@@ -16,6 +16,7 @@ import type { PublicCoreError } from '../../shared/errors';
 import type { CoreService } from '../core-service';
 import { CorePathError } from '../storage/core-paths';
 import { artifactRoutes } from './artifact-routes';
+import { structuredSlotRoutes } from './structured-slot-routes';
 import { taskRoutes } from './task-routes';
 import { templateRoutes } from './template-routes';
 
@@ -67,11 +68,16 @@ export const STATUS_BY_CODE: Readonly<Record<string, number>> = {
   ARTIFACT_VERSION_NOT_FOUND: 404,
   TRACE_NOT_FOUND: 404,
   SKILL_NOT_FOUND: 404,
+  SLOT_NOT_VISIBLE: 404,
+  SEAL_NOT_FOUND: 404,
+  STRUCTURED_NOT_ACTIVE: 404,
+  CURSOR_INVALID: 409,
   INVALID_INPUT: 400,
   EVENT_INVALID: 400,
   BAD_REQUEST: 400,
   CORE_PATH_INVALID: 400,
   RUNTIME_NOT_CONNECTED: 503,
+  TEMPLATE_RUNTIME_UNAVAILABLE: 503,
   TASK_ALREADY_RUNNING: 409,
   INVALID_TRANSITION: 409,
   FILE_EXISTS: 409,
@@ -281,7 +287,13 @@ const HEALTH_ROUTE: ApiRoute = {
 };
 
 export function createApiRouter(service: CoreService): ApiRouter {
-  const routes: ApiRoute[] = [HEALTH_ROUTE, ...templateRoutes(), ...taskRoutes(), ...artifactRoutes()];
+  const routes: ApiRoute[] = [
+    HEALTH_ROUTE,
+    ...templateRoutes(),
+    ...taskRoutes(),
+    ...artifactRoutes(),
+    ...structuredSlotRoutes(),
+  ];
 
   async function dispatch(req: IncomingMessage, res: ServerResponse, pathname: string): Promise<void> {
     let segments: string[];

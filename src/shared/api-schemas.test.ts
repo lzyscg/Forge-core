@@ -8,7 +8,17 @@
  */
 import { describe, expect, it } from 'vitest';
 import { Value } from 'typebox/value';
-import { taskWorkspaceSchema, traceEntrySchema, turnTraceSchema } from './api-schemas';
+import {
+  structuredIssuePageSchema,
+  structuredSealRecordSchema,
+  structuredSlotOutlinePageSchema,
+  structuredSlotPublicContractSchema,
+  structuredSlotReadResponseSchema,
+  structuredSlotsSummarySchema,
+  taskWorkspaceSchema,
+  traceEntrySchema,
+  turnTraceSchema,
+} from './api-schemas';
 
 describe('turnTraceSchema phase compatibility (spec §7.5)', () => {
   it('accepts a trace without phase (backward compatible)', () => {
@@ -157,5 +167,288 @@ describe('taskWorkspaceSchema activeTurn (plan C realtime streaming)', () => {
       updatedAt: '2026-08-05T00:00:01.000Z',
     });
     expect(Value.Check(taskWorkspaceSchema, badTool)).toBe(false);
+  });
+});
+
+/* ------------------- structured slots summary (spec §14 / I01) ------------------- */
+
+const SUMMARY = {
+  version: 1,
+  mode: 'structured_slots',
+  scaffoldId: 'scaffold-1',
+  generationId: 'gen-1',
+  contentRevision: 2,
+  structureStatus: 'active',
+  sealStatus: 'unsealed',
+  visibleSlotCount: 12,
+  filledSlotCount: 9,
+  issueSummary: { errors: 1, warnings: 2 },
+};
+
+function workspaceWithStructured(extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    ...baseWorkspace(),
+    structuredSlots: { ...SUMMARY, ...extra },
+  };
+}
+
+describe('structuredSlots summary schema (spec §14)', () => {
+  it('accepts the complete structured summary', () => {
+    expect(Value.Check(structuredSlotsSummarySchema, SUMMARY)).toBe(true);
+  });
+
+  it('accepts a pre-scaffold structured summary with null identities', () => {
+    expect(
+      Value.Check(structuredSlotsSummarySchema, {
+        version: 1,
+        mode: 'structured_slots',
+        scaffoldId: null,
+        generationId: null,
+        contentRevision: null,
+        structureStatus: 'none',
+        sealStatus: 'unsealed',
+        visibleSlotCount: 0,
+        filledSlotCount: 0,
+        issueSummary: { errors: 0, warnings: 0 },
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects unknown summary fields so content/tree/Draft/Grant never leak', () => {
+    expect(Value.Check(structuredSlotsSummarySchema, SUMMARY)).toBe(true);
+    for (const leak of ['content', 'tree', 'drafts', 'grant', 'scaffold', 'structure']) {
+      expect(
+        Value.Check(structuredSlotsSummarySchema, { ...SUMMARY, [leak]: { anything: 1 } }),
+      ).toBe(false);
+    }
+  });
+
+  it('rejects malformed summary values', () => {
+    expect(Value.Check(structuredSlotsSummarySchema, { ...SUMMARY, structureStatus: 'bogus' })).toBe(false);
+    expect(Value.Check(structuredSlotsSummarySchema, { ...SUMMARY, visibleSlotCount: -1 })).toBe(false);
+    expect(Value.Check(structuredSlotsSummarySchema, { ...SUMMARY, issueSummary: { errors: 1 } })).toBe(false);
+  });
+});
+
+describe('taskWorkspaceSchema structuredSlots (basic omits the field)', () => {
+  it('basic workspace without structuredSlots stays legal (backward compatible)', () => {
+    expect(Value.Check(taskWorkspaceSchema, baseWorkspace())).toBe(true);
+  });
+
+  it('accepts a structured workspace carrying the summary', () => {
+    expect(Value.Check(taskWorkspaceSchema, workspaceWithStructured())).toBe(true);
+  });
+
+  it('rejects a structured summary that embeds content/tree/Draft/Grant on the wire', () => {
+    for (const leak of ['content', 'tree', 'drafts', 'grant']) {
+      expect(Value.Check(taskWorkspaceSchema, workspaceWithStructured({ [leak]: [1, 2] }))).toBe(false);
+    }
+  });
+});
+
+/* ------------------- structured slot read-only response schemas (spec §14) ------------------- */
+
+const VALID_CURSOR = {
+  version: 1,
+  generationId: 'gen-1',
+  revision: 0,
+  projectionHash: 'a'.repeat(64),
+  lastDocumentKey: 'title',
+  orderingVersion: 1,
+  signature: 'b'.repeat(64),
+};
+
+describe('structured slot read-only response schemas (spec §14)', () => {
+  it('accepts a valid public contract projection without implementation paths', () => {
+    const contract = {
+      version: 1,
+      slotTypes: [
+        {
+          id: 'title',
+          name: 'Title',
+          description: 'leaf',
+          specSchema: { type: 'object', additionalProperties: false },
+          content: { presence: 'required', schema: { type: 'string', minLength: 1 } },
+        },
+        {
+          id: 'document',
+          name: 'Document',
+          description: 'root',
+          specSchema: { type: 'object' },
+          content: { presence: 'forbidden' },
+        },
+      ],
+      layoutGrammar: {
+        rootType: 'document',
+        productions: {
+          document: {
+            children: { kind: 'sequence', items: [{ kind: 'slot', type: 'title' }] },
+            nullable: false,
+            minConsumption: 1,
+            maxConsumption: 1,
+            first: ['title'],
+            generatable: true,
+          },
+        },
+      },
+      limits: {
+        schema: { maxSchemaDepth: 4, maxSchemaNodes: 1024, maxEnumItems: 64, maxPatternLength: 128 },
+        structure: { maxSlots: 2500, maxTreeDepth: 8, maxChildrenPerSlot: 250 },
+        payload: { maxSpecBytesPerSlot: 16384, maxContentBytesPerSlot: 262144, maxScaffoldPayloadBytes: 16777216 },
+        draft: { maxChangedSlots: 500, maxDraftBytes: 4194304 },
+        attempt: {
+          maxSlotToolCallsPerAttempt: 128,
+          maxValidationRunsPerAttempt: 4,
+          maxValidatorInvocationsPerAttempt: 10000,
+          maxAggregateValidatorCpuMsPerAttempt: 60000,
+          maxAggregateValidatorWallClockMsPerAttempt: 120000,
+          maxValidatorOutputBytesPerAttempt: 4194304,
+          maxAttemptWallClockMs: 150000,
+        },
+        validation: {
+          maxValidators: 16,
+          maxValidatorInvocationsPerGate: 2500,
+          maxAggregateValidatorCpuMsPerGate: 15000,
+          maxAggregateValidatorWallClockMsPerGate: 30000,
+          maxValidatorOutputBytesPerGate: 1048576,
+          maxIssuesPerRun: 125,
+        },
+        output: { maxArtifactFiles: 16, maxArtifactBytesPerFile: 4194304, maxTotalArtifactBytes: 16777216 },
+      },
+      abiProfileIdentity: {
+        validatorAbi: 'forge-validator/v1',
+        assemblerAbi: 'forge-assembler/v1',
+        profileIdentity: 'forge-structured-runtime/v1',
+      },
+      semanticDigest: 'c'.repeat(64),
+    };
+    expect(Value.Check(structuredSlotPublicContractSchema, contract)).toBe(true);
+  });
+
+  it('rejects a contract response carrying implementation paths or ACL as unknown fields', () => {
+    const valid = structuredSlotPublicContractSchema;
+    const withLeak = {
+      version: 1,
+      slotTypes: [],
+      layoutGrammar: { rootType: 'document', productions: {} },
+      limits: {
+        schema: { maxSchemaDepth: 4, maxSchemaNodes: 1024, maxEnumItems: 64, maxPatternLength: 128 },
+        structure: { maxSlots: 2500, maxTreeDepth: 8, maxChildrenPerSlot: 250 },
+        payload: { maxSpecBytesPerSlot: 16384, maxContentBytesPerSlot: 262144, maxScaffoldPayloadBytes: 16777216 },
+        draft: { maxChangedSlots: 500, maxDraftBytes: 4194304 },
+        attempt: {
+          maxSlotToolCallsPerAttempt: 128,
+          maxValidationRunsPerAttempt: 4,
+          maxValidatorInvocationsPerAttempt: 10000,
+          maxAggregateValidatorCpuMsPerAttempt: 60000,
+          maxAggregateValidatorWallClockMsPerAttempt: 120000,
+          maxValidatorOutputBytesPerAttempt: 4194304,
+          maxAttemptWallClockMs: 150000,
+        },
+        validation: {
+          maxValidators: 16,
+          maxValidatorInvocationsPerGate: 2500,
+          maxAggregateValidatorCpuMsPerGate: 15000,
+          maxAggregateValidatorWallClockMsPerGate: 30000,
+          maxValidatorOutputBytesPerGate: 1048576,
+          maxIssuesPerRun: 125,
+        },
+        output: { maxArtifactFiles: 16, maxArtifactBytesPerFile: 4194304, maxTotalArtifactBytes: 16777216 },
+      },
+      abiProfileIdentity: {
+        validatorAbi: 'forge-validator/v1',
+        assemblerAbi: 'forge-assembler/v1',
+        profileIdentity: 'forge-structured-runtime/v1',
+      },
+      semanticDigest: 'c'.repeat(64),
+    };
+    expect(Value.Check(valid, withLeak)).toBe(true);
+    for (const leak of ['validators', 'assembler', 'accessProfiles', 'resourceManifest']) {
+      expect(Value.Check(structuredSlotPublicContractSchema, { ...withLeak, [leak]: [] })).toBe(false);
+    }
+  });
+
+  it('accepts and rejects the paged outline response exactly', () => {
+    const page = {
+      entries: [
+        {
+          slotId: 'root',
+          typeId: 'document',
+          contentPresence: 'unset',
+          parentSlotId: null,
+          shell: false,
+          level: 'content',
+          spec: { type: 'object' },
+        },
+      ],
+      nextCursor: VALID_CURSOR,
+    };
+    expect(Value.Check(structuredSlotOutlinePageSchema, page)).toBe(true);
+    expect(Value.Check(structuredSlotOutlinePageSchema, { entries: [], nextCursor: null })).toBe(true);
+    expect(Value.Check(structuredSlotOutlinePageSchema, { ...page, entries: [{ ...page.entries[0], shell: 'yes' }] })).toBe(false);
+    expect(Value.Check(structuredSlotOutlinePageSchema, { ...page, totals: 1 })).toBe(false);
+  });
+
+  it('accepts and rejects the slot read response exactly', () => {
+    const read = {
+      slot: {
+        slotId: 'title',
+        typeId: 'title',
+        contentPresence: 'set',
+        level: 'content',
+        spec: { type: 'object' },
+        content: 'The Title',
+        ancestors: [{ slotId: 'root', typeId: 'document', contentPresence: 'unset' }],
+      },
+    };
+    expect(Value.Check(structuredSlotReadResponseSchema, read)).toBe(true);
+    expect(Value.Check(structuredSlotReadResponseSchema, { ...read, slot: { ...read.slot, childCount: 3 } })).toBe(false);
+    expect(Value.Check(structuredSlotReadResponseSchema, { ...read, grant: {} })).toBe(false);
+  });
+
+  it('accepts and rejects the paged issues response exactly', () => {
+    const page = {
+      issues: [
+        {
+          version: 1,
+          code: 'DRAFT_STALE',
+          severity: 'error',
+          phase: 'merge',
+          source: 'lifecycle',
+          message: 'DRAFT_STALE (merge)',
+          primaryLocation: { kind: 'operation' },
+          relatedLocations: [],
+          details: { draftId: 'draft-1' },
+        },
+      ],
+      nextCursor: null,
+    };
+    expect(Value.Check(structuredIssuePageSchema, page)).toBe(true);
+    expect(Value.Check(structuredIssuePageSchema, { issues: [], nextCursor: VALID_CURSOR })).toBe(true);
+    expect(Value.Check(structuredIssuePageSchema, { ...page, issues: [{ ...page.issues[0], version: 2 }] })).toBe(false);
+    expect(Value.Check(structuredIssuePageSchema, { ...page, truncated: false })).toBe(false);
+  });
+
+  it('accepts and rejects the SealRecord response exactly', () => {
+    const seal = {
+      sealId: 'seal-1',
+      caseId: 'task-1',
+      scaffoldId: 'scaffold-1',
+      scaffoldRevision: 3,
+      scaffoldTreeHash: 'a'.repeat(64),
+      templateId: 'tpl',
+      templateVersion: 'v1',
+      snapshotHash: 'b'.repeat(64),
+      assemblerId: 'render',
+      assemblerVersion: 'v1',
+      artifactVersionRef: { artifactId: 'artifact-1', version: 1 },
+      outputs: [
+        { routeId: 'document-md', path: 'document.md', mediaType: 'text/markdown; charset=utf-8', byteLength: 120, sha256: 'c'.repeat(64) },
+      ],
+      sealedAt: '2026-08-05T00:00:00.000Z',
+    };
+    expect(Value.Check(structuredSealRecordSchema, seal)).toBe(true);
+    expect(Value.Check(structuredSealRecordSchema, { ...seal, outputs: [{ ...seal.outputs[0], extra: 1 }] })).toBe(false);
+    expect(Value.Check(structuredSealRecordSchema, { ...seal, stagingPath: '/tmp/x' })).toBe(false);
   });
 });

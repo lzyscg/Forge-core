@@ -357,4 +357,23 @@ describe('createMockGateway deleteTask (task list delete)', () => {
       code: 'TASK_NOT_FOUND',
     });
   });
+
+  it('rejects every structured read on a basic task with STRUCTURED_NOT_ACTIVE', async () => {
+    const gateway = createMockGateway(new MemoryStorage(), createFixedClock());
+    const task = await gateway.createTask(validCreateRequest);
+    const calls: Array<() => Promise<unknown>> = [
+      () => gateway.getStructuredContract(task.id),
+      () => gateway.listStructuredSlots(task.id, null, 5),
+      () => gateway.getStructuredSlot(task.id, 'root'),
+      () => gateway.listStructuredIssues(task.id, null, 5),
+      () => gateway.getStructuredSeal(task.id),
+    ];
+    for (const call of calls) {
+      await expect(call()).rejects.toMatchObject({ code: 'STRUCTURED_NOT_ACTIVE' });
+    }
+    // Unknown tasks keep their own stable code before the absence check.
+    await expect(gateway.getStructuredContract('task-missing')).rejects.toMatchObject({
+      code: 'TASK_NOT_FOUND',
+    });
+  });
 });
