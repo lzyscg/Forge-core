@@ -33,6 +33,8 @@ import {
   SettingsManager,
   type CreateAgentSessionOptions,
 } from '@earendil-works/pi-coding-agent';
+import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
+import { canonicalJsonSha256 } from '../structured-slots/canonical-json';
 import type { TraceEntry } from '../../shared/contracts';
 import type { TurnContract } from '../template/template-schema';
 import type {
@@ -55,6 +57,14 @@ import {
 } from './pi-tool-factory';
 import type { WorkspaceStore } from './workspace-store';
 import { createWorkspaceToolDefinitions } from './workspace-tools';
+import {
+  SLOT_TOOL_NAME_SET,
+  RESOURCE_LIMIT_EXCEEDED,
+} from './structured-slot/tool-factory';
+import {
+  AttemptMeter,
+  type AttemptTerminalFailure,
+} from './structured-slot/attempt-meter';
 
 /** Stable runtime error codes owned by the Pi adapter (presentable only). */
 export const PI_RUNTIME_ERROR_CODES = {
@@ -104,10 +114,52 @@ export interface PiSessionEventLike {
   result?: unknown;
 }
 
+/** Minimal structural view of session events the adapter consumes. */
+export interface PiSessionEventLike {
+  type?: unknown;
+  message?: {
+    role?: unknown;
+    content?: unknown;
+    usage?: unknown;
+    stopReason?: unknown;
+  };
+  /** Present on tool_execution_start / tool_execution_end events. */
+  toolName?: unknown;
+  /** Present on tool_execution_start events. */
+  args?: unknown;
+  /** Present on tool_execution_end events. */
+  result?: unknown;
+  /** Present on tool_execution_end events (error result flag). */
+  isError?: unknown;
+}
+
+/**
+ * Minimal structural view of the raw Pi Agent events (the underlying
+ * `session.agent` seam, forge-pi-slot-preflight/v1). The production factory
+ * maps the raw seam to the public Pi 0.82 `Agent.subscribe`, whose listener
+ * promises the Agent loop AWAITS in subscription order BEFORE tool lookup and
+ * TypeBox argument validation (verified in the Pi 0.82 SDK characterization).
+ */
+export interface PiRawAgentEventLike {
+  type?: unknown;
+  toolCallId?: unknown;
+  toolName?: unknown;
+  args?: unknown;
+}
+
 /** Minimal structural view of the Pi session the adapter drives. */
 export interface PiSessionHandle {
   prompt(text: string, options?: { expandPromptTemplates?: boolean }): Promise<void>;
   subscribe(listener: (event: PiSessionEventLike) => void): () => void;
+  /**
+   * REQUIRED raw-Agent subscription seam (Task 14): maps to the underlying
+   * public Pi `session.agent.subscribe`, whose listener promises Pi AWAITS at
+   * the pre-validation boundary. The session-level `subscribe` (public-output
+   * listeners) is NOT the pre-validation authority boundary and must never be
+   * used for precharging. Every PiSessionHandle implementation (production
+   * factory, ScriptedPiSession, the probe wrapper) implements this seam.
+   */
+  agentSubscribe(listener: (event: PiRawAgentEventLike, signal: AbortSignal) => Promise<void> | void): () => void;
   abort(): Promise<void>;
   dispose(): void;
   setAutoCompactionEnabled(enabled: boolean): void;
@@ -115,9 +167,18 @@ export interface PiSessionHandle {
 
 export type PiSessionFactory = (options: CreateAgentSessionOptions) => Promise<PiSessionHandle>;
 
-/** Production factory: the real SDK createAgentSession. */
-export const defaultPiSessionFactory: PiSessionFactory = async (options) =>
-  (await createAgentSession(options)).session;
+/** Production factory: the real SDK createAgentSession, wrapping the raw seam. */
+export const defaultPiSessionFactory: PiSessionFactory = async (options) => {
+  const session = (await createAgentSession(options)).session;
+  return {
+    prompt: (text, promptOptions) => session.prompt(text, promptOptions),
+    subscribe: (listener) => session.subscribe(listener as Parameters<typeof session.subscribe>[0]),
+    agentSubscribe: (listener) => session.agent.subscribe(listener as Parameters<typeof session.agent.subscribe>[0]),
+    abort: () => session.abort(),
+    dispose: () => session.dispose(),
+    setAutoCompactionEnabled: (enabled) => session.setAutoCompactionEnabled(enabled),
+  };
+};
 
 export interface PiAgentRuntimeOptions {
   /** Core data root; sessions are in-memory and never write under it. */
@@ -130,6 +191,83 @@ export interface PiAgentRuntimeOptions {
   resolveModelBinding?: PiModelBindingResolver;
   /** Sanitized lifecycle logger; never receives raw events or credentials. */
   log?: (line: string) => void;
+  /**
+   * Structured-slot runtime seam (Task 14): assembles the per-turn slot tool
+   * set, the persistent Attempt meter, the dispatch guard and the corrective
+   * prompt for a structured v3 turn. Returns null for a basic turn (or any
+   * turn without a structured slot session). Task 17 wires the coordinator/
+   * session services; tests inject fakes.
+   */
+  structuredSlot?: PiStructuredSlotRuntime;
+}
+
+/**
+ * The per-turn structured slot runtime context the Pi adapter consumes (Task
+ * 14). `signal` is the composite Attempt signal carried by
+ * `AgentTurnInput.slotSession.signal` (deadline/resource closure ∪ scheduler
+ * stop); context compaction and corrective prompts never recreate it or the
+ * meter.
+ */
+export interface StructuredSlotRuntimeContext {
+  sessionKind: 'structure' | 'fill' | 'seal';
+  turnId: string;
+  /** The persistent Attempt meter (raw preflight seam + consume). */
+  meter: AttemptMeter;
+  /** The closed per-kind Slot Tool definitions bound to the session services. */
+  toolDefinitions: ToolDefinition[];
+  /** Dispatch guard for the basic forge tools (design §11.3 matrix). */
+  beforePropose: (action: ForgeAction) => { ok: true } | { ok: false; code: string; reason: string };
+  /** Corrective prompt naming the required Slot completion before dispatch. */
+  correctivePrompt: string;
+}
+
+/** Builds the per-turn structured slot runtime context; null for a basic turn. */
+export interface PiStructuredSlotRuntime {
+  createContext(input: AgentTurnInput): Promise<StructuredSlotRuntimeContext | null>;
+}
+
+/**
+ * The locked Pi 0.82 pre-validation charging seam (spec §5 / O06,
+ * forge-pi-slot-preflight/v1): subscribe this listener to the raw
+ * `session.agent.subscribe` seam. Pi emits `tool_execution_start` BEFORE tool
+ * lookup and TypeBox argument validation and AWAITS every listener's promise
+ * in subscription order, so a closed Slot Tool call is durably precharged —
+ * schema-invalid, unexposed-but-closed-name and truncated calls all reach this
+ * entry and count, while execute only consumes the existing precharge. Unknown
+ * non-Slot tool names never count. On limit closure the meter aborts the
+ * composite signal and `onLimitClose` surfaces the coordinator's terminal
+ * failure.
+ */
+export function createForgePiSlotPreflight(options: {
+  meter: AttemptMeter;
+  onLimitClose?: (failure: AttemptTerminalFailure) => void;
+}): (event: PiRawAgentEventLike, signal: AbortSignal) => Promise<void> {
+  const { meter, onLimitClose } = options;
+  return async (event: PiRawAgentEventLike): Promise<void> => {
+    if (event?.type !== 'tool_execution_start') return;
+    const toolName = typeof event.toolName === 'string' ? event.toolName : '';
+    if (!SLOT_TOOL_NAME_SET.has(toolName)) return;
+    const toolCallId = typeof event.toolCallId === 'string' ? event.toolCallId : '';
+    let canonicalArgsHash: string;
+    try {
+      canonicalArgsHash = canonicalJsonSha256(event.args);
+    } catch {
+      canonicalArgsHash = canonicalJsonSha256({ __non_json_args: true });
+    }
+    // Task 11 note: a scheduler stop aborts the composite without minting a
+    // terminal; the tool path must never charge or mint a spurious
+    // resource-limit terminal on an externally-aborted attempt.
+    if (meter.signal.aborted) {
+      if (meter.closed && meter.terminalFailure !== null) {
+        onLimitClose?.(meter.terminalFailure);
+      }
+      return;
+    }
+    const charge = await meter.prechargeRawTool({ toolCallId, canonicalArgsHash, toolName });
+    if (charge.status === 'closed') {
+      onLimitClose?.(charge.failure);
+    }
+  };
 }
 
 /** Parses a frozen agent model spec `<provider>/<model>` (first slash splits). */
@@ -450,6 +588,8 @@ export class PiAgentRuntime implements AgentRuntime {
 
   readonly #log: (line: string) => void;
 
+  readonly #structuredSlot: PiStructuredSlotRuntime | undefined;
+
   readonly #live = new Map<string, LiveSession>();
 
   #disposed = false;
@@ -535,6 +675,7 @@ export class PiAgentRuntime implements AgentRuntime {
     this.#createSession = options.createSession ?? defaultPiSessionFactory;
     this.#resolveModelBinding = options.resolveModelBinding ?? createDefaultModelBindingResolver();
     this.#log = options.log ?? (() => undefined);
+    this.#structuredSlot = options.structuredSlot;
   }
 
   async run(
@@ -564,13 +705,18 @@ export class PiAgentRuntime implements AgentRuntime {
     const live: LiveSession = { session: null, platformAborted: false };
     this.#live.set(sessionKey, live);
 
+    // Task 14: a structured v3 turn runs under the composite Attempt signal
+    // carried by AgentTurnInput.slotSession (deadline/resource closure ∪
+    // scheduler stop); basic turns keep the scheduler signal (byte-for-byte).
+    const runAbortSignal = input.slotSession !== null ? input.slotSession.signal : signal;
+
     // Registered before any await as well: an abort firing during session
     // setup is caught up below via the signal.aborted check.
     const onAbort = () => {
       live.platformAborted = true;
       void live.session?.abort().catch(() => undefined);
     };
-    signal.addEventListener('abort', onAbort, { once: true });
+    runAbortSignal.addEventListener('abort', onAbort, { once: true });
 
     const buffer = new ActionBuffer(input.turnId);
     // Display-only live-preview sink (plan C): patches are memory-bound and
@@ -585,7 +731,16 @@ export class PiAgentRuntime implements AgentRuntime {
       }
     };
     let unsubscribe: (() => void) | null = null;
+    let structuredUnsubscribe: (() => void) | null = null;
+    // Task 14: the structured slot runtime context (tool set, meter, dispatch
+    // guard, corrective prompt) is resolved once per turn and is NOT recreated
+    // by Pi auto-compaction or corrective prompts. Resolved inside the try so a
+    // provider failure still runs the failure/finally cleanup below.
+    let structuredCtx: StructuredSlotRuntimeContext | null = null;
     try {
+      if (input.slotSession !== null && this.#structuredSlot !== undefined) {
+        structuredCtx = await this.#structuredSlot.createContext(input);
+      }
       const binding = await this.#resolveModelBinding(input.agent.model);
 
       // Fresh in-memory session per Turn: Forge events are the only recovery
@@ -623,6 +778,9 @@ export class PiAgentRuntime implements AgentRuntime {
               this.#skillReader === null
                 ? Promise.resolve(null)
                 : this.#skillReader(input.taskId, input.agent.id, skillId),
+            // Task 14: the structured dispatch guard (design §11.3 matrix)
+            // runs before any forge action is buffered.
+            beforePropose: structuredCtx?.beforePropose,
           }),
           ...createWorkspaceToolDefinitions({
             workspaces: this.#workspaces,
@@ -656,11 +814,26 @@ export class PiAgentRuntime implements AgentRuntime {
             taskId: input.taskId,
             agentId: input.agent.id,
           }),
+          // Task 14: the closed per-kind Slot Tool set (structure/fill/seal)
+          // for a structured v3 turn; an empty spread for basic turns.
+          ...(structuredCtx?.toolDefinitions ?? []),
         ],
       });
       live.session = session;
       session.setAutoCompactionEnabled(true);
       this.#log(`pi-agent-runtime: turn started (agent=${input.agent.id})`);
+
+      // Task 14: the raw pre-validation charging seam (forge-pi-slot-preflight
+      // /v1). Pi emits tool_execution_start BEFORE tool lookup/TypeBox
+      // validation and AWAITS this listener, so every closed Slot Tool call is
+      // durably precharged before the SDK validates or executes; unknown
+      // non-Slot names never count. On limit closure the meter aborts the
+      // composite signal (wired above) and the terminal surfaces below.
+      if (structuredCtx !== null) {
+        structuredUnsubscribe = session.agentSubscribe(
+          createForgePiSlotPreflight({ meter: structuredCtx.meter }),
+        );
+      }
 
       // Holder object: closure assignment would otherwise be invisible to
       // control-flow narrowing of a local `let`.
@@ -702,14 +875,19 @@ export class PiAgentRuntime implements AgentRuntime {
 
       let promptError: unknown = null;
       try {
-        if (!signal.aborted && !live.platformAborted) {
+        if (!runAbortSignal.aborted && !live.platformAborted) {
           await session.prompt(input.inputText, { expandPromptTemplates: false });
         }
       } catch (error) {
         promptError = error;
       }
 
-      if (signal.aborted || live.platformAborted) {
+      if (runAbortSignal.aborted || live.platformAborted) {
+        // Task 14: a resource/deadline closure minted a terminal — surface the
+        // coordinator's terminal failure, never a bare abort.
+        if (structuredCtx !== null && structuredCtx.meter.closed && structuredCtx.meter.terminalFailure !== null) {
+          throw RuntimeFailure.permanent(RESOURCE_LIMIT_EXCEEDED, structuredCtx.meter.terminalFailure.message);
+        }
         throw new RuntimeAbortedError(`turn ${input.turnId} was aborted`);
       }
       if (promptError !== null) {
@@ -747,12 +925,19 @@ export class PiAgentRuntime implements AgentRuntime {
         if (buffer.phase === 'dispatched' || buffer.phase === 'human_interrupted') {
           break;
         }
-        const reminder = buffer.phase === 'production'
-          ? '你还没有调用 finish_production。请立即调用 finish_production 封存你的生产结果，然后调用一个发送动作。文字输出不是动作，不能代替工具调用。'
-          : sealedPhaseReminder(input.agent.turnContract);
+        // Task 14: a structured turn names the required Slot completion before
+        // dispatch; basic turns keep the production/dispatch reminders.
+        const reminder = structuredCtx !== null
+          ? structuredCtx.correctivePrompt
+          : buffer.phase === 'production'
+            ? '你还没有调用 finish_production。请立即调用 finish_production 封存你的生产结果，然后调用一个发送动作。文字输出不是动作，不能代替工具调用。'
+            : sealedPhaseReminder(input.agent.turnContract);
         this.#log('pi-agent-runtime: phase incomplete (' + buffer.phase + '), corrective prompt ' + (nudge + 1));
         await session.prompt(reminder, { expandPromptTemplates: false });
-        if (signal.aborted || live.platformAborted) {
+        if (runAbortSignal.aborted || live.platformAborted) {
+          if (structuredCtx !== null && structuredCtx.meter.closed && structuredCtx.meter.terminalFailure !== null) {
+            throw RuntimeFailure.permanent(RESOURCE_LIMIT_EXCEEDED, structuredCtx.meter.terminalFailure.message);
+          }
           throw new RuntimeAbortedError('turn ' + input.turnId + ' was aborted during corrective prompt');
         }
         // A nudge the provider answers with an error or an abort ends the
@@ -811,12 +996,16 @@ export class PiAgentRuntime implements AgentRuntime {
       await live.session?.abort().catch(() => undefined);
       throw error;
     } finally {
-      // Every exit path (success, failure, abort) drops the live buffer.
+      // Every exit path (success, failure, abort) drops the live buffer and
+      // unsubscribes both the session trace and the raw preflight seam.
       emitLive({ finished: true });
       if (unsubscribe !== null) {
         unsubscribe();
       }
-      signal.removeEventListener('abort', onAbort);
+      if (structuredUnsubscribe !== null) {
+        structuredUnsubscribe();
+      }
+      runAbortSignal.removeEventListener('abort', onAbort);
       try {
         live.session?.dispose();
       } catch {

@@ -295,6 +295,61 @@ describe('ActionBuffer failure path', () => {
   });
 });
 
+describe('ActionBuffer structured dispatch guard (Task 14, design §11.3)', () => {
+  it('beforePropose rejects a send before the slot candidate; nothing is buffered', () => {
+    const guard = (action: ForgeAction): ActionBufferError | null =>
+      action.type === 'send_message'
+        ? new ActionBufferError(
+            ACTION_BUFFER_ERROR_CODES.STRUCTURE_ACTION_NOT_ALLOWED,
+            'a structured session may only end in send_message after a candidate is formed',
+          )
+        : null;
+    const buffer = new ActionBuffer('turn-structured-1', { beforePropose: guard });
+    expect(() => buffer.propose(sendMessageProposal())).toThrowError(
+      ACTION_BUFFER_ERROR_CODES.STRUCTURE_ACTION_NOT_ALLOWED,
+    );
+    expect(buffer.snapshot()).toEqual([]);
+  });
+
+  it('beforePropose permits send once the candidate guard accepts it', () => {
+    let candidateFormed = false;
+    const guard = (action: ForgeAction): ActionBufferError | null => {
+      if (action.type === 'send_message' && !candidateFormed) {
+        return new ActionBufferError(
+          ACTION_BUFFER_ERROR_CODES.STRUCTURE_ACTION_NOT_ALLOWED,
+          'no candidate yet',
+        );
+      }
+      return null;
+    };
+    const buffer = new ActionBuffer('turn-structured-2', { beforePropose: guard });
+    expect(() => buffer.propose(sendMessageProposal())).toThrowError(
+      ACTION_BUFFER_ERROR_CODES.STRUCTURE_ACTION_NOT_ALLOWED,
+    );
+    candidateFormed = true;
+    buffer.propose(sendMessageProposal());
+    expect(buffer.snapshot()).toEqual([sendMessageProposal()]);
+  });
+
+  it('the human interrupt stays available even when the guard rejects dispatch', () => {
+    const guard = (action: ForgeAction): ActionBufferError | null =>
+      action.type === 'send_message'
+        ? new ActionBufferError(ACTION_BUFFER_ERROR_CODES.STRUCTURE_ACTION_NOT_ALLOWED, 'no candidate')
+        : null;
+    const buffer = new ActionBuffer('turn-structured-3', { beforePropose: guard });
+    buffer.propose(humanRequest());
+    expect(buffer.phase).toBe('human_interrupted');
+    buffer.succeed('interrupted', null);
+    expect(buffer.commit()).toEqual([humanRequest()]);
+  });
+
+  it('a buffer without the guard behaves byte-for-byte (send dispatches directly)', () => {
+    const buffer = new ActionBuffer('turn-structured-4');
+    buffer.propose(sendMessageProposal());
+    expect(buffer.phase).toBe('dispatched');
+  });
+});
+
 describe('ActionBuffer illegal transitions', () => {
   it('commit on an open buffer is TURN_NOT_SUCCESSFUL', () => {
     const buffer = new ActionBuffer('turn-1');

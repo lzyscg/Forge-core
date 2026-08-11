@@ -52,6 +52,8 @@ export const ACTION_BUFFER_ERROR_CODES = {
   PHASE_ANNOTATE_AFTER_SEAL_INVALID: 'PHASE_ANNOTATE_AFTER_SEAL_INVALID',
   /** publish_artifact without a preceding finish_production. */
   PHASE_PUBLISH_WITHOUT_FINISH_INVALID: 'PHASE_PUBLISH_WITHOUT_FINISH_INVALID',
+  /** The structured-slot dispatch guard rejected the action (Task 14). */
+  STRUCTURE_ACTION_NOT_ALLOWED: 'STRUCTURE_ACTION_NOT_ALLOWED',
 } as const;
 
 export type ActionBufferErrorCode =
@@ -84,6 +86,15 @@ const PRODUCTION_PHASE_TYPES: ReadonlySet<ForgeAction['type']> = new Set([
   'finish_production',
 ]);
 
+/**
+ * Optional structured-slot dispatch guard (Task 14): when wired, `propose`
+ * runs it against the session completion BEFORE the action is buffered. A
+ * rejected guard throws a coded ActionBufferError (nothing buffered); the tool
+ * layer surfaces the code so the model can self-correct. With no guard wired
+ * the buffer behaves byte-for-byte.
+ */
+export type ActionBufferBeforePropose = (action: ForgeAction) => ActionBufferError | null;
+
 export class ActionBuffer {
   readonly turnId: string;
 
@@ -95,8 +106,11 @@ export class ActionBuffer {
 
   #failureCause: Error | null = null;
 
-  constructor(turnId: string) {
+  readonly #beforePropose: ActionBufferBeforePropose | null;
+
+  constructor(turnId: string, options?: { beforePropose?: ActionBufferBeforePropose }) {
     this.turnId = turnId;
+    this.#beforePropose = options?.beforePropose ?? null;
   }
 
   get state(): ActionBufferState {
@@ -130,6 +144,10 @@ export class ActionBuffer {
         ACTION_BUFFER_ERROR_CODES.BUFFER_NOT_OPEN,
         `proposals are only accepted while the buffer is open (state=${this.#state})`,
       );
+    }
+    const guarded = this.#beforePropose?.(action);
+    if (guarded !== null && guarded !== undefined) {
+      throw guarded;
     }
     this.assertPhaseTransition(action);
     this.#proposals.push(action);

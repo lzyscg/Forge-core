@@ -100,6 +100,26 @@ export type AttemptChargeResult =
   | { status: 'ok'; replayed: boolean }
   | { status: 'closed'; failure: AttemptTerminalFailure };
 
+/**
+ * The full precharge outcome the tool path understands (Task 14):
+ * `prechargeRawTool` itself only returns ok/closed; the raw pre-validation
+ * seam and the consume-only tool adapter additionally distinguish an external
+ * scheduler-stop abort (no terminal minted) from a meter-bypass (no raw
+ * precharge was ever persisted for the key).
+ */
+export type AttemptPrechargeResult =
+  | { status: 'ok'; replayed: boolean }
+  | { status: 'closed'; failure: AttemptTerminalFailure }
+  | { status: 'aborted' }
+  | { status: 'not_precharged' };
+
+/** One Slot Tool invocation identity (the metering unit; spec §5). */
+export interface SlotToolCallContext {
+  toolCallId: string;
+  canonicalArgsHash: string;
+  toolName: string;
+}
+
 /** The minimal Task 7 Attempt-store surface the meter persists through. */
 export type AttemptMeterStore = Pick<
   StructuredSlotPrivateStore,

@@ -69,8 +69,10 @@ import type { ForgeAction } from './forge-actions';
 import {
   PiAgentRuntime,
   type PiModelDescriptor,
+  type PiRawAgentEventLike,
   type PiSessionEventLike,
   type PiSessionHandle,
+  type PiStructuredSlotRuntime,
 } from './pi-agent-runtime';
 import { autoRetryDelayMs, classifyRuntimeError } from './retry-policy';
 import { WorkspaceStore } from './workspace-store';
@@ -217,6 +219,12 @@ export function deferredScript(
 export interface PiScriptedTurn {
   /** Tool calls executed against the recorded customTools before the reply. */
   toolCalls?: Array<{ name: string; args: Record<string, unknown> }>;
+  /**
+   * Truncated tool calls (Task 14): the raw pre-validation seam fires and
+   * counts, execute NEVER runs, and an error result is reported — mirroring
+   * the real Pi loop's "length" stop.
+   */
+  truncatedToolCalls?: Array<{ name: string; args: Record<string, unknown> }>;
   /** Final public assistant text block (omitted with `noAssistant`). */
   text?: string;
   /**
@@ -313,6 +321,12 @@ export class ScriptedPiSession implements PiSessionHandle {
 
   readonly #listeners = new Set<(event: PiSessionEventLike) => void>();
 
+  readonly #rawListeners = new Set<
+    (event: PiRawAgentEventLike, signal: AbortSignal) => Promise<void> | void
+  >();
+
+  readonly #abortController = new AbortController();
+
   readonly #abortWaiters = new Set<() => void>();
 
   #promptIndex = 0;
@@ -336,6 +350,20 @@ export class ScriptedPiSession implements PiSessionHandle {
     };
   }
 
+  /**
+   * The REQUIRED raw-Agent seam (Task 14): mirrors the public Pi 0.82
+   * `session.agent.subscribe`, whose listener promises Pi AWAITS in
+   * subscription order BEFORE tool lookup/TypeBox validation. The scripted
+   * tool loop below emits an AWAITED synthetic `tool_execution_start` on this
+   * seam before executing the tool, exactly like the real agent loop.
+   */
+  agentSubscribe(listener: (event: PiRawAgentEventLike, signal: AbortSignal) => Promise<void> | void): () => void {
+    this.#rawListeners.add(listener);
+    return () => {
+      this.#rawListeners.delete(listener);
+    };
+  }
+
   setAutoCompactionEnabled(enabled: boolean): void {
     this.autoCompactionCalls.push(enabled);
   }
@@ -343,6 +371,7 @@ export class ScriptedPiSession implements PiSessionHandle {
   async abort(): Promise<void> {
     this.abortCount += 1;
     this.#aborted = true;
+    this.#abortController.abort();
     for (const waiter of [...this.#abortWaiters]) {
       this.#abortWaiters.delete(waiter);
       waiter();
@@ -402,11 +431,29 @@ export class ScriptedPiSession implements PiSessionHandle {
       }
     }
     for (const [index, call] of (step.toolCalls ?? []).entries()) {
+      const toolCallId = `tc-${this.promptCalls.length}-${index}`;
+      // Task 14: the AWAITED raw pre-validation seam fires BEFORE the tool
+      // lookup, exactly like the real Pi 0.82 agent loop. The raw preflight
+      // listener persists the precharge before the SDK validates or executes.
+      await this.#emitRaw({ type: 'tool_execution_start', toolCallId, toolName: call.name, args: call.args });
       const tool = this.#customTools.find((candidate) => candidate.name === call.name);
       if (!tool) {
-        throw new Error(`ScriptedPiSession: no custom tool named '${call.name}'`);
+        // Unknown/unexposed tool name: the real loop returns an immediate
+        // error result without calling execute (the precharge already counted).
+        const errResult = {
+          content: [{ type: 'text' as const, text: `Tool ${call.name} not found` }],
+          details: {},
+        };
+        this.#emit({ type: 'tool_execution_start', toolName: call.name, args: call.args });
+        this.#emit({ type: 'tool_execution_end', toolName: call.name, result: errResult, isError: true });
+        this.toolExecutions.push({
+          name: call.name,
+          args: call.args,
+          resultText: `Tool ${call.name} not found`,
+          accepted: false,
+        });
+        continue;
       }
-      const toolCallId = `tc-${this.promptCalls.length}-${index}`;
       this.#emit({ type: 'tool_execution_start', toolName: call.name, args: call.args });
       const result = await tool.execute(
         toolCallId,
@@ -423,6 +470,25 @@ export class ScriptedPiSession implements PiSessionHandle {
         args: call.args,
         resultText: firstBlock?.type === 'text' ? (firstBlock.text ?? '') : '',
         accepted: details?.accepted === true,
+      });
+    }
+    // Truncated tool calls (mirror of the real loop's "length" stop): the raw
+    // pre-validation seam fires and counts, execute NEVER runs, and the loop
+    // reports an error result so the model re-issues the call.
+    for (const [index, call] of (step.truncatedToolCalls ?? []).entries()) {
+      const toolCallId = `tc-${this.promptCalls.length}-truncated-${index}`;
+      await this.#emitRaw({ type: 'tool_execution_start', toolCallId, toolName: call.name, args: call.args });
+      this.#emit({ type: 'tool_execution_start', toolName: call.name, args: call.args });
+      const errResult = {
+        content: [{ type: 'text' as const, text: `Tool call "${call.name}" was not executed: the response hit the output token limit` }],
+        details: {},
+      };
+      this.#emit({ type: 'tool_execution_end', toolName: call.name, result: errResult, isError: true });
+      this.toolExecutions.push({
+        name: call.name,
+        args: call.args,
+        resultText: 'truncated tool call',
+        accepted: false,
       });
     }
     if (step.noAssistant) {
@@ -467,6 +533,19 @@ export class ScriptedPiSession implements PiSessionHandle {
     }
   }
 
+  /**
+   * Emits one synthetic raw Agent event and AWAITS every raw listener's
+   * promise in subscription order (mirroring the real Pi 0.82
+   * `Agent.processEvents`). A throwing raw listener fails the run, exactly as
+   * the real loop does.
+   */
+  async #emitRaw(event: PiRawAgentEventLike): Promise<void> {
+    const signal = this.#abortController.signal;
+    for (const listener of [...this.#rawListeners]) {
+      await listener(event, signal);
+    }
+  }
+
   #waitForDeferredOrAbort(deferred: Deferred<unknown>): Promise<void> {
     if (this.#aborted) {
       return Promise.resolve();
@@ -508,6 +587,8 @@ export interface PiHarnessOptions {
   coreCwd?: string;
   /** Scripted Turns consumed one per prompt() call. */
   script?: readonly PiScriptedTurn[];
+  /** Structured-slot runtime seam (Task 14); wired into the harness runtime. */
+  structuredSlot?: PiStructuredSlotRuntime;
 }
 
 /** Everything tests need to observe about the injected Pi session factory. */
@@ -553,6 +634,7 @@ export function createPiHarness(options: PiHarnessOptions = {}): PiHarness {
       resolvedModelSpecs.push(modelSpec);
       return { model: stubModel };
     },
+    structuredSlot: options.structuredSlot,
     createSession: async (sessionOptions) => {
       const customTools = (sessionOptions.customTools ?? []) as unknown as PiToolDefinitionLike[];
       const session = new ScriptedPiSession(script, customTools, stubModel);

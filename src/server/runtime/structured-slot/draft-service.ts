@@ -86,7 +86,11 @@ import type {
   StructuredSlotProjectionService,
 } from './projection-service';
 import type { ValidationEngine, GateSlotInput } from './validation-engine';
-import { AttemptMeter, type AttemptTerminalFailure } from './attempt-meter';
+import {
+  AttemptMeter,
+  type AttemptPrechargeResult,
+  type AttemptTerminalFailure,
+} from './attempt-meter';
 
 export type { MergeCommitCandidate };
 
@@ -137,7 +141,9 @@ export type DraftOperationCode =
   | 'SLOT_WRITE_FORBIDDEN'
   | 'IDEMPOTENCY_CONFLICT'
   | 'RESOURCE_LIMIT_EXCEEDED'
-  | 'SCAFFOLD_NOT_ACTIVE';
+  | 'SCAFFOLD_NOT_ACTIVE'
+  | 'ATTEMPT_ABORTED'
+  | 'NOT_PRECHARGED';
 
 /** Typed failure for the fill Draft operations. */
 export interface DraftFailure {
@@ -181,6 +187,15 @@ export interface DraftServiceOptions {
   validation: ValidationEngine;
   meter: AttemptMeter;
   events: () => Promise<readonly TaskEvent[]>;
+  /**
+   * Consume-only precharge seam (Task 14): the Pi raw `tool_execution_start`
+   * seam already precharged every closed Slot Tool call before SDK validation,
+   * so when this seam is wired `prepareOp` CONSUMES the existing precharge
+   * (verifies it exists, checks the composite signal) instead of charging a
+   * second time. When omitted the service charges via `meter.prechargeRawTool`
+   * exactly as before (standalone/schema-invalid-call semantics).
+   */
+  precharge?: (ctx: FillToolContext) => Promise<AttemptPrechargeResult>;
 }
 
 /** Active scaffold bound by a fill grant (from the state projection). */
@@ -196,6 +211,8 @@ type OpStart =
   | { status: 'replay'; result: JsonValue }
   | { status: 'conflict' }
   | { status: 'closed'; failure: AttemptTerminalFailure }
+  | { status: 'aborted' }
+  | { status: 'not_precharged' }
   | { status: 'fail'; code: DraftOperationCode; reason: string; issues?: StructuredIssueV1[] };
 
 function failGrant(code: GrantResolutionErrorCode, reason: string): { ok: false; code: GrantResolutionErrorCode; reason: string } {
@@ -295,6 +312,9 @@ export class StructuredSlotDraftService {
 
   private readonly meter: AttemptMeter;
 
+  /** Consume-only precharge seam (Task 14); null keeps the default charge. */
+  private readonly precharge: ((ctx: FillToolContext) => Promise<AttemptPrechargeResult>) | null;
+
   private readonly events: () => Promise<readonly TaskEvent[]>;
 
   /** Best-effort last advisory validation summary per draft (in-memory). */
@@ -309,6 +329,7 @@ export class StructuredSlotDraftService {
     this.projection = options.projection;
     this.validation = options.validation;
     this.meter = options.meter;
+    this.precharge = options.precharge ?? null;
     this.events = options.events;
   }
 
@@ -606,9 +627,27 @@ export class StructuredSlotDraftService {
     grant: FillSessionGrantV1,
     ctx: FillToolContext,
   ): Promise<OpStart> {
-    const charge = await this.meter.prechargeRawTool(ctx);
+    // Task 11 note (carried to Task 14): a scheduler stop aborts the composite
+    // without minting a resource terminal — the tool path must never charge or
+    // mint a spurious RESOURCE_LIMIT_EXCEEDED on an externally-aborted attempt.
+    if (this.meter.signal.aborted) {
+      if (this.meter.closed && this.meter.terminalFailure !== null) {
+        return { status: 'closed', failure: this.meter.terminalFailure };
+      }
+      return { status: 'aborted' };
+    }
+    const charge =
+      this.precharge !== null ? await this.precharge(ctx) : await this.meter.prechargeRawTool(ctx);
     if (charge.status === 'closed') {
       return { status: 'closed', failure: charge.failure };
+    }
+    if (charge.status === 'aborted') {
+      return { status: 'aborted' };
+    }
+    if (charge.status === 'not_precharged') {
+      // A schema-valid executed call whose key was never precharged by the raw
+      // seam is a meter-bypass: fail closed (Task 11 note).
+      return { status: 'not_precharged' };
     }
     const view = await this.store.readDraft(grant.draftId, await this.events());
     const grantCheck = this.assertGrant(grant, view);
@@ -623,13 +662,27 @@ export class StructuredSlotDraftService {
     return { status: 'ok', view };
   }
 
-  private startFailure(start: Extract<OpStart, { status: 'fail' | 'conflict' }>): DraftFailure {
+  private startFailure(start: Extract<OpStart, { status: 'fail' | 'conflict' | 'aborted' | 'not_precharged' }>): DraftFailure {
     if (start.status === 'conflict') {
       return {
         ok: false,
         code: 'IDEMPOTENCY_CONFLICT',
         reason: 'the same toolCallId was already used with different arguments',
         issues: [makeStructuredIssue('IDEMPOTENCY_CONFLICT', 'draft', { kind: 'operation' }, {})],
+      };
+    }
+    if (start.status === 'aborted') {
+      return {
+        ok: false,
+        code: 'ATTEMPT_ABORTED',
+        reason: 'the attempt was stopped or closed by the platform',
+      };
+    }
+    if (start.status === 'not_precharged') {
+      return {
+        ok: false,
+        code: 'NOT_PRECHARGED',
+        reason: 'the tool call was not precharged by the raw pre-validation seam',
       };
     }
     return { ok: false, code: start.code, reason: start.reason, ...(start.issues !== undefined ? { issues: start.issues } : {}) };

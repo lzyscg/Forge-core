@@ -14,11 +14,15 @@
  * messages, hidden-thinking/secret exclusion, the buffer-only tool factory
  * and the no-discovery resource loader.
  */
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import { DefaultResourceLoader } from '@earendil-works/pi-coding-agent';
+import { Agent } from '@earendil-works/pi-agent-core';
+import { createAssistantMessageEventStream } from '@earendil-works/pi-ai';
+import { Type } from 'typebox';
 import { ActionBuffer } from './action-buffer';
 import { RuntimeAbortedError, RuntimeFailure } from './agent-runtime';
 import { FORGE_ACTION_NAMES, FORGE_ACTION_NAME_SET } from './forge-actions';
@@ -26,9 +30,11 @@ import type { GateRunner } from './gate-runner';
 import {
   MAX_CORRECTIVE_NUDGES,
   PI_RUNTIME_ERROR_CODES,
+  createForgePiSlotPreflight,
   parsePiModelSpec,
   sealedPhaseReminder,
   type PiAgentRuntime,
+  type StructuredSlotRuntimeContext,
 } from './pi-agent-runtime';
 import { assertNoDiscoveredResources, createForgeResourceLoader } from './pi-resource-loader';
 import { createForgeToolDefinitions } from './pi-tool-factory';
@@ -37,6 +43,7 @@ import { WORKSPACE_TOOL_NAMES, WORKSPACE_TOOL_NAME_SET } from './workspace-tools
 import {
   createDeferred,
   createPiHarness,
+  createPiStubModel,
   finishProductionProposal,
   publishPackageProposal,
   publisherContract,
@@ -44,6 +51,14 @@ import {
   sampleTurnInput,
   sendMessageProposal,
 } from './test-support';
+import { StructuredSlotPrivateStore } from '../storage/structured-slot-private-store';
+import { canonicalJsonSha256 } from '../structured-slots/canonical-json';
+import { makeTempCorePaths, disposeAllTestRoots } from '../test-support';
+import { AttemptMeter } from './structured-slot/attempt-meter';
+import {
+  RESOURCE_LIMIT_EXCEEDED,
+  SLOT_TOOL_NAME_SET,
+} from './structured-slot/tool-factory';
 
 const tempRoots: string[] = [];
 
@@ -57,6 +72,7 @@ afterEach(() => {
   while (tempRoots.length > 0) {
     rmSync(tempRoots.pop() as string, { recursive: true, force: true });
   }
+  disposeAllTestRoots();
 });
 
 function freshSignal(): AbortSignal {
@@ -1210,5 +1226,393 @@ describe('validate_artifact tool wiring (plan 2026-08-07 Phase 2, spec §4.4)', 
     expect(execution?.resultText).toContain('"pass":true');
     // Read-only: the validator run never proposes anything to the buffer.
     expect(result.actions).toEqual([]);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// Task 14 Step 1 — REAL locked Pi 0.82 Agent loop characterization
+// (forge-pi-slot-preflight/v1 ABI: pre-validation precharge + journal).
+// ---------------------------------------------------------------------------
+
+import { createRequire } from 'node:module';
+import type { StructuredSlotLimitsV1 } from '../../shared/structured-slots';
+import type { ForgeAction } from './forge-actions';
+
+const require = createRequire(import.meta.url);
+
+function charLimits(maxSlotToolCalls = 64): StructuredSlotLimitsV1 {
+  return {
+    schema: { maxSchemaDepth: 4, maxSchemaNodes: 1024, maxEnumItems: 64, maxPatternLength: 128 },
+    structure: { maxSlots: 64, maxTreeDepth: 8, maxChildrenPerSlot: 32 },
+    payload: { maxSpecBytesPerSlot: 4096, maxContentBytesPerSlot: 65536, maxScaffoldPayloadBytes: 65536 },
+    draft: { maxChangedSlots: 32, maxDraftBytes: 65536 },
+    attempt: {
+      maxSlotToolCallsPerAttempt: maxSlotToolCalls,
+      maxValidationRunsPerAttempt: 8,
+      maxValidatorInvocationsPerAttempt: 200,
+      maxAggregateValidatorCpuMsPerAttempt: 2000,
+      maxAggregateValidatorWallClockMsPerAttempt: 4000,
+      maxValidatorOutputBytesPerAttempt: 4096,
+      maxAttemptWallClockMs: 10000,
+    },
+    validation: {
+      maxValidators: 4,
+      maxValidatorInvocationsPerGate: 10,
+      maxAggregateValidatorCpuMsPerGate: 500,
+      maxAggregateValidatorWallClockMsPerGate: 1000,
+      maxValidatorOutputBytesPerGate: 512,
+      maxIssuesPerRun: 50,
+    },
+    output: { maxArtifactFiles: 4, maxArtifactBytesPerFile: 1024, maxTotalArtifactBytes: 4096 },
+  };
+}
+
+function toolCallBlock(name: string, args: unknown, id: string): Record<string, unknown> {
+  return { type: 'toolCall', id, name, arguments: args };
+}
+
+function assistantMessage(
+  content: Array<Record<string, unknown>>,
+  stopReason = 'stop',
+): Record<string, unknown> {
+  return {
+    role: 'assistant',
+    content,
+    api: 'forge-harness',
+    provider: 'configured',
+    model: 'test-model',
+    usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason,
+    timestamp: Date.now(),
+  };
+}
+
+interface CharAgent {
+  agent: InstanceType<typeof Agent>;
+  meter: AttemptMeter;
+  executed: Array<{ toolCallId: string; params: unknown }>;
+}
+
+/** A real locked Pi 0.82 Agent driven by a deterministic fake stream (no network). */
+async function createCharAgent(options: {
+  responses: Array<{ content: Array<Record<string, unknown>>; stopReason?: string }>;
+  maxSlotToolCalls?: number;
+}): Promise<CharAgent> {
+  const { paths, dataRoot } = makeTempCorePaths('forge-core-pi-char-');
+  tempRoots.push(dataRoot);
+  mkdirSync(paths.taskRoot('task-char'), { recursive: true });
+  const store = new StructuredSlotPrivateStore(paths, 'task-char');
+  const meter = await AttemptMeter.create({
+    turnId: 'turn-char',
+    privateStore: store,
+    limits: charLimits(options.maxSlotToolCalls),
+  });
+  const executed: Array<{ toolCallId: string; params: unknown }> = [];
+  const slotTool = {
+    name: 'read_slot',
+    label: 'read_slot',
+    description: 'read one slot',
+    parameters: Type.Object({ slotId: Type.String({ minLength: 1 }) }),
+    executionMode: 'sequential' as const,
+    execute: async (toolCallId: string, params: unknown): Promise<unknown> => {
+      executed.push({ toolCallId, params });
+      // The tool path records the result for eligible exact replay (the raw
+      // seam already charged the key exactly once).
+      await meter.recordToolResult({
+        toolCallId,
+        canonicalArgsHash: canonicalJsonSha256(params),
+        result: { ok: true },
+      });
+      return { content: [{ type: 'text', text: 'ok' }], details: { accepted: true } };
+    },
+  };
+  let index = 0;
+  const streamFn = async () => {
+    const step = options.responses[index++];
+    const message = assistantMessage(step.content, step.stopReason);
+    const stream = createAssistantMessageEventStream();
+    stream.push({ type: 'start', partial: message as never });
+    stream.end(message as never);
+    return stream;
+  };
+  const agent = new Agent({
+    initialState: {
+      systemPrompt: 'system',
+      model: createPiStubModel(),
+      thinkingLevel: 'off' as const,
+      tools: [slotTool as never],
+      messages: [],
+    },
+    streamFn: streamFn as never,
+  });
+  agent.subscribe(createForgePiSlotPreflight({ meter }) as never);
+  return { agent, meter, executed };
+}
+
+describe('Task 14 Step 1 — real locked Pi 0.82 Agent loop pre-validation precharge (forge-pi-slot-preflight/v1)', () => {
+  it('records the Pi package/lock ABI identity (locked 0.82)', () => {
+    const pkgVersion = (name: string): string => {
+      const pkg = JSON.parse(
+        readFileSync(join(process.cwd(), 'node_modules', '@earendil-works', name, 'package.json'), 'utf8'),
+      ) as { version: string };
+      return pkg.version;
+    };
+    expect(pkgVersion('pi-agent-core')).toBe('0.82.0');
+    expect(pkgVersion('pi-coding-agent')).toBe('0.82.0');
+    expect(pkgVersion('pi-ai')).toBe('0.82.0');
+    const lock = readFileSync(join(process.cwd(), 'package-lock.json'), 'utf8');
+    expect(lock).toContain('"version": "0.82.0"');
+    expect(createHash('sha256').update(lock).digest('hex').slice(0, 12).length).toBe(12);
+  });
+
+  it('awaits tool_execution_start before SDK validation: TypeBox-invalid args precharge, execute NEVER runs', async () => {
+    const harness = await createCharAgent({
+      responses: [
+        { content: [toolCallBlock('read_slot', { slotId: { bad: true } }, 'tc-invalid')] },
+        { content: [{ type: 'text', text: 'final' }] },
+      ],
+    });
+    const order: string[] = [];
+    harness.agent.subscribe(async (event: unknown) => {
+      const e = event as { type?: string };
+      if (e.type === 'tool_execution_start') {
+        order.push('raw-start');
+        await new Promise((r) => setTimeout(r, 5));
+        order.push('raw-end');
+      }
+    });
+    await harness.agent.prompt('hello');
+    // The raw listener's promise was fully awaited BEFORE tool lookup/validation.
+    expect(order).toEqual(['raw-start', 'raw-end']);
+    expect(harness.executed).toEqual([]);
+    // Journal: exactly ONE raw precharge for the key, result never recorded.
+    expect(harness.meter.usage.slotToolCalls).toBe(1);
+    expect(harness.meter.toolCalls).toHaveLength(1);
+    expect(harness.meter.toolCalls[0]?.toolName).toBe('read_slot');
+    expect(harness.meter.toolCalls[0]?.result).toBeNull();
+  });
+
+  it('precharges a closed Slot Tool name the session does not expose; execute never runs', async () => {
+    const harness = await createCharAgent({
+      responses: [
+        { content: [toolCallBlock('put_structure_proposal', { tree: {} }, 'tc-hidden')] },
+        { content: [{ type: 'text', text: 'final' }] },
+      ],
+    });
+    await harness.agent.prompt('hello');
+    expect(harness.executed).toEqual([]);
+    expect(harness.meter.usage.slotToolCalls).toBe(1);
+    expect(harness.meter.toolCalls[0]?.toolName).toBe('put_structure_proposal');
+  });
+
+  it('counts the SAME toolCallId with changed args as two distinct precharged keys', async () => {
+    const harness = await createCharAgent({
+      responses: [
+        {
+          content: [
+            toolCallBlock('read_slot', { slotId: 'a' }, 'tc-same'),
+            toolCallBlock('read_slot', { slotId: 'b' }, 'tc-same'),
+          ],
+        },
+        { content: [{ type: 'text', text: 'final' }] },
+      ],
+    });
+    await harness.agent.prompt('hello');
+    expect(harness.executed).toHaveLength(2);
+    expect(harness.meter.usage.slotToolCalls).toBe(2);
+    expect(harness.meter.toolCalls).toHaveLength(2);
+    expect(new Set(harness.meter.toolCalls.map((r) => r.canonicalArgsHash)).size).toBe(2);
+  });
+
+  it('precharges a TRUNCATED tool call (length stop) without ever executing', async () => {
+    const harness = await createCharAgent({
+      responses: [
+        { content: [toolCallBlock('read_slot', { slotId: 'partial' }, 'tc-trunc')], stopReason: 'length' },
+        { content: [{ type: 'text', text: 'final' }] },
+      ],
+    });
+    await harness.agent.prompt('hello');
+    expect(harness.executed).toEqual([]);
+    expect(harness.meter.usage.slotToolCalls).toBe(1);
+    expect(harness.meter.toolCalls[0]?.result).toBeNull();
+  });
+
+  it('valid execution consumes the existing precharge exactly once (no double charge)', async () => {
+    const harness = await createCharAgent({
+      responses: [
+        { content: [toolCallBlock('read_slot', { slotId: 'a' }, 'tc-ok')] },
+        { content: [{ type: 'text', text: 'final' }] },
+      ],
+    });
+    await harness.agent.prompt('hello');
+    expect(harness.executed).toEqual([{ toolCallId: 'tc-ok', params: { slotId: 'a' } }]);
+    expect(harness.meter.usage.slotToolCalls).toBe(1);
+  });
+
+  it('exact cached replay is free: a recorded key replays without a new charge', async () => {
+    const harness = await createCharAgent({
+      responses: [
+        { content: [toolCallBlock('read_slot', { slotId: 'a' }, 'tc-rep')] },
+        { content: [toolCallBlock('read_slot', { slotId: 'a' }, 'tc-rep')] },
+        { content: [{ type: 'text', text: 'final' }] },
+      ],
+    });
+    await harness.agent.prompt('hello');
+    expect(harness.executed).toHaveLength(2);
+    expect(harness.meter.usage.slotToolCalls).toBe(1);
+  });
+
+  it('limit-triggered abort: the precharge that would exceed closes the meter and aborts the composite', async () => {
+    const harness = await createCharAgent({
+      maxSlotToolCalls: 1,
+      responses: [
+        { content: [toolCallBlock('read_slot', { slotId: 'a' }, 'tc-1')] },
+        { content: [toolCallBlock('read_slot', { slotId: 'b' }, 'tc-2')] },
+        { content: [{ type: 'text', text: 'final' }] },
+      ],
+    });
+    const { agent, meter } = harness;
+    let sawLimit = false;
+    agent.subscribe(createForgePiSlotPreflight({ meter, onLimitClose: () => { sawLimit = true; } }) as never);
+    await agent.prompt('hello').catch(() => undefined);
+    expect(meter.closed).toBe(true);
+    expect(meter.terminalFailure?.code).toBe('RESOURCE_LIMIT_EXCEEDED');
+    expect(meter.signal.aborted).toBe(true);
+    expect(sawLimit).toBe(true);
+    const again = await meter.prechargeRawTool({ toolCallId: 'tc-3', canonicalArgsHash: 'x', toolName: 'read_slot' });
+    expect(again.status).toBe('closed');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 14 Step 7 — structured runtime integration (composite signal, corrective
+// prompt, compaction no-reset, basic-exposes-none).
+// ---------------------------------------------------------------------------
+
+describe('Task 14 Step 7 — structured runtime integration', () => {
+  it('a basic turn exposes NONE of the closed Slot Tool names', async () => {
+    const harness = createPiHarness({ coreCwd: tempCwd() });
+    await harness.runtime.run(sampleTurnInput(), freshSignal());
+    const names = harness.sessionOptions.customTools.map((tool) => tool.name);
+    for (const slotName of SLOT_TOOL_NAME_SET) {
+      expect(names).not.toContain(slotName);
+    }
+  });
+
+  it('a resource-limit closure surfaces RESOURCE_LIMIT_EXCEEDED (not a bare abort) through the composite signal', async () => {
+    const { paths, dataRoot } = makeTempCorePaths('forge-core-pi-structured-');
+    tempRoots.push(dataRoot);
+    mkdirSync(paths.taskRoot('task-structured'), { recursive: true });
+    const store = new StructuredSlotPrivateStore(paths, 'task-structured');
+    const meter = await AttemptMeter.create({ turnId: 'turn-structured', privateStore: store, limits: charLimits(1) });
+    const slotTools = [
+      {
+        name: 'read_slot',
+        label: 'read_slot',
+        description: 'read one slot',
+        parameters: Type.Object({ slotId: Type.String() }),
+        executionMode: 'sequential' as const,
+        execute: async () => ({ content: [{ type: 'text', text: 'ok' }], details: { accepted: true } }),
+      },
+    ];
+    const harness = createPiHarness({
+      coreCwd: tempCwd(),
+      script: [
+        {
+          toolCalls: [
+            { name: 'read_slot', args: { slotId: 'a' } },
+            { name: 'read_slot', args: { slotId: 'b' } },
+          ],
+          text: 'done',
+        },
+      ],
+      structuredSlot: {
+        createContext: async () => ({
+          sessionKind: 'fill' as const,
+          turnId: 'turn-structured',
+          meter,
+          toolDefinitions: slotTools as never,
+          beforePropose: (action: ForgeAction) =>
+            action.type === 'request_human_input'
+              ? { ok: true }
+              : { ok: false, code: 'STRUCTURE_ACTION_NOT_ALLOWED', reason: 'no candidate' },
+          correctivePrompt: '请先完成槽位工作，再调用发送动作。',
+        }),
+      },
+    });
+    await expect(
+      harness.runtime.run(
+        sampleTurnInput({ slotSession: { sessionKind: 'fill', turnId: 'turn-structured', signal: meter.signal } }),
+        freshSignal(),
+      ),
+    ).rejects.toThrowError(RESOURCE_LIMIT_EXCEEDED);
+    expect(meter.closed).toBe(true);
+    expect(meter.signal.aborted).toBe(true);
+  });
+
+  it('the corrective prompt names the required Slot completion before dispatch', async () => {
+    const { paths, dataRoot } = makeTempCorePaths('forge-core-pi-corrective-');
+    tempRoots.push(dataRoot);
+    mkdirSync(paths.taskRoot('task-corrective'), { recursive: true });
+    const store = new StructuredSlotPrivateStore(paths, 'task-corrective');
+    const meter = await AttemptMeter.create({ turnId: 'turn-corrective', privateStore: store, limits: charLimits() });
+    const correctivePrompt = '请先调用 submit_draft 完成合并，再调用发送动作。';
+    const harness = createPiHarness({
+      coreCwd: tempCwd(),
+      script: [{ text: 'text only, no dispatch' }],
+      structuredSlot: {
+        createContext: async () => ({
+          sessionKind: 'fill' as const,
+          turnId: 'turn-corrective',
+          meter,
+          toolDefinitions: [],
+          beforePropose: (action: ForgeAction) =>
+            action.type === 'request_human_input'
+              ? { ok: true }
+              : { ok: false, code: 'STRUCTURE_ACTION_NOT_ALLOWED', reason: 'no candidate' },
+          correctivePrompt,
+        }),
+      },
+    });
+    await harness.runtime.run(
+      sampleTurnInput({ slotSession: { sessionKind: 'fill', turnId: 'turn-corrective', signal: meter.signal } }),
+      freshSignal(),
+    );
+    expect(harness.session.promptCalls.some((p) => p.text === correctivePrompt)).toBe(true);
+  });
+
+  it('the structured runtime context is created exactly once per turn (compaction never recreates it)', async () => {
+    const { paths, dataRoot } = makeTempCorePaths('forge-core-pi-once-');
+    tempRoots.push(dataRoot);
+    mkdirSync(paths.taskRoot('task-once'), { recursive: true });
+    const store = new StructuredSlotPrivateStore(paths, 'task-once');
+    const meter = await AttemptMeter.create({ turnId: 'turn-once', privateStore: store, limits: charLimits() });
+    let createCount = 0;
+    const harness = createPiHarness({
+      coreCwd: tempCwd(),
+      script: [{ text: 'narrative' }],
+      structuredSlot: {
+        createContext: async () => {
+          createCount += 1;
+          return {
+            sessionKind: 'fill' as const,
+            turnId: 'turn-once',
+            meter,
+            toolDefinitions: [],
+            beforePropose: (action: ForgeAction) =>
+              action.type === 'request_human_input'
+                ? { ok: true }
+                : { ok: false, code: 'STRUCTURE_ACTION_NOT_ALLOWED', reason: 'no candidate' },
+            correctivePrompt: 'complete the slots first',
+          };
+        },
+      },
+    });
+    await harness.runtime.run(
+      sampleTurnInput({ slotSession: { sessionKind: 'fill', turnId: 'turn-once', signal: meter.signal } }),
+      freshSignal(),
+    );
+    expect(createCount).toBe(1);
   });
 });

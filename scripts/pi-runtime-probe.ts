@@ -220,6 +220,9 @@ async function main(): Promise<void> {
             }
             listener(event as PiSessionEventLike);
           }),
+        // Task 14: forward the REQUIRED raw-Agent pre-validation seam to the
+        // underlying public Pi 0.82 session.agent.subscribe.
+        agentSubscribe: (listener) => session.agentSubscribe(listener),
         abort: () => session.abort(),
         dispose: () => session.dispose(),
         setAutoCompactionEnabled: (enabled) => session.setAutoCompactionEnabled(enabled),

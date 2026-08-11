@@ -32,6 +32,7 @@
     "yaml": "2.9.0"
   },
   "devDependencies": {
+    "@earendil-works/pi-agent-core": "0.82.0",
     "@playwright/test": "1.55.0",
     "@testing-library/jest-dom": "^6.5.0",
     "@testing-library/react": "^16.0.0",

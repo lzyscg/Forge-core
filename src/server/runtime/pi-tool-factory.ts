@@ -29,6 +29,7 @@ import {
   PUBLISH_WORKSPACE_FILE_MAX_LENGTH,
   validateForgeAction,
   type ForgeActionName,
+  type ForgeAction,
 } from './forge-actions';
 import type { GateRunner, GateVerdict } from './gate-runner';
 import type { FrozenAgentConfig } from '../template/template-schema';
@@ -178,10 +179,17 @@ interface ForgeToolResult {
  * Read hooks for the two read-only tools. `readSkillContent` returns the full
  * skill text for an authorized id (null rejects); `readArtifactVersionFile`
  * returns one file of the input version (null when no input version).
+ *
+ * `beforePropose` (Task 14, optional) is the dispatch-guard seam: when wired,
+ * the factory validates every action against the session completion BEFORE it
+ * is buffered (design §11.3). A rejection returns the stable code to the model
+ * so it can self-correct in the same Turn; nothing is buffered. Basic turns
+ * leave it unset and the factory behaves byte-for-byte.
  */
 export interface ForgeToolFactoryOptions {
   readSkillContent?: (skillId: string) => Promise<{ content: string; versionHash: string } | null>;
   readArtifactVersionFile?: (file: string) => Promise<string | null>;
+  beforePropose?: (action: ForgeAction) => { ok: true } | { ok: false; code: string; reason: string };
 }
 
 function accepted(acknowledgement: string): ForgeToolResult {
@@ -203,19 +211,36 @@ export function createForgeToolDefinitions(
   buffer: ActionBuffer,
   options: ForgeToolFactoryOptions = {},
 ): ToolDefinition[] {
-  const { readSkillContent, readArtifactVersionFile } = options;
-  return TOOL_SPECS.map((spec) => ({
-    name: spec.name,
-    label: spec.name,
-    description: spec.description,
-    promptSnippet: spec.promptSnippet,
-    parameters: spec.parameters,
-    executionMode: 'sequential' as const,
-    execute: async (
-      _toolCallId: string,
-      params: Static<TSchema>,
-    ): Promise<ForgeToolResult> => {
-      try {
+  const { readSkillContent, readArtifactVersionFile, beforePropose } = options;
+  return TOOL_SPECS.map((spec) => {
+    /**
+     * Buffers one action only after the session dispatch guard accepts it
+     * (Task 14). Returns the stable rejection when the guard rejects (nothing
+     * buffered); returns null when the action was accepted, so the caller keeps
+     * its own acknowledgement text (byte-for-byte for basic turns).
+     */
+    const proposeOrReject = (action: ForgeAction): ForgeToolResult | null => {
+      if (beforePropose !== undefined) {
+        const guard = beforePropose(action);
+        if (!guard.ok) {
+          return rejected(guard.code, spec.name);
+        }
+      }
+      buffer.propose(action);
+      return null;
+    };
+    return {
+      name: spec.name,
+      label: spec.name,
+      description: spec.description,
+      promptSnippet: spec.promptSnippet,
+      parameters: spec.parameters,
+      executionMode: 'sequential' as const,
+      execute: async (
+        _toolCallId: string,
+        params: Static<TSchema>,
+      ): Promise<ForgeToolResult> => {
+        try {
         const action = validateForgeAction({
           type: spec.name,
           ...(params as Record<string, unknown>),
@@ -225,7 +250,10 @@ export function createForgeToolDefinitions(
           if (loaded === null) {
             return rejected('SKILL_NOT_AUTHORIZED', spec.name);
           }
-          buffer.propose(action);
+          const blocked = proposeOrReject(action);
+          if (blocked !== null) {
+            return blocked;
+          }
           return accepted(
             `load_skill accepted (${action.skillId}@${loaded.versionHash.slice(0, 12)}):\n${loaded.content}`,
           );
@@ -248,7 +276,10 @@ export function createForgeToolDefinitions(
             return rejected(ANNOTATE_FRONTMATTER_INVALID, spec.name);
           }
         }
-        buffer.propose(action);
+        const blocked = proposeOrReject(action);
+        if (blocked !== null) {
+          return blocked;
+        }
         return accepted(`${spec.name} proposal accepted`);
       } catch (error) {
         if (error instanceof ForgeActionValidationError) {
@@ -260,7 +291,8 @@ export function createForgeToolDefinitions(
         return rejected(ACTION_VALIDATION_CODES.ACTION_NOT_OBJECT, spec.name);
       }
     },
-  }));
+    };
+  });
 }
 
 /**
