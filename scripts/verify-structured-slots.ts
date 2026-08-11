@@ -40,9 +40,9 @@
  */
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { canonicalJsonSha256 } from '../src/server/structured-slots/canonical-json';
 import {
   loadStructuredPlatformProfile,
@@ -50,6 +50,13 @@ import {
 } from '../src/server/structured-slots/platform-profile';
 import { validateRuntimeCapability } from '../src/server/structured-slots/runtime-capability';
 import type { StructuredRuntimeCapabilityV1 } from '../src/server/structured-slots/runtime-capability';
+import {
+  RELEASE_FINAL_PROFILE_PATH,
+  RELEASE_PI_PREFLIGHT_CHARACTERIZATION,
+  RELEASE_PROFILE_EVIDENCE_PATH,
+  validateProfileEvidence,
+  validateReleaseEvidence,
+} from './structured-evidence-schema';
 
 const WORKSPACE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const NPM = 'npm';
@@ -59,6 +66,40 @@ const PROFILE_PATH = resolve(WORKSPACE_ROOT, 'src/server/structured-slots/platfo
 const MANIFEST_PATH = resolve(WORKSPACE_ROOT, 'src/server/structured-slots/runtime-capability-v1.json');
 const PROFILE_EVIDENCE_PATH = resolve(WORKSPACE_ROOT, 'docs/evidence/structured-slot-platform-profile-v1.json');
 const RELEASE_EVIDENCE_PATH = resolve(WORKSPACE_ROOT, 'docs/evidence/structured-slot-release-v1.json');
+
+/**
+ * The exact Step 7/8 qualification gate set. `validateReleaseEvidence` demands
+ * this set EXACTLY — no missing, no duplicates, no extras — and every gate's
+ * `exitCode` must be 0.
+ */
+export const RELEASE_EVIDENCE_GATE_IDS = [
+  'typecheck',
+  'unit-tests',
+  'build',
+  'e2e',
+  'structured-acceptance',
+  'forge-pi-slot-preflight',
+] as const;
+
+/**
+ * Injectable file paths so tests can drive qualify/promote against an isolated
+ * temp workspace without touching the checked-in manifest/profile/evidence.
+ */
+export interface VerifyPaths {
+  profilePath: string;
+  profileEvidencePath: string;
+  manifestPath: string;
+  releaseEvidencePath: string;
+  workspaceRoot: string;
+}
+
+const DEFAULT_PATHS: VerifyPaths = {
+  profilePath: PROFILE_PATH,
+  profileEvidencePath: PROFILE_EVIDENCE_PATH,
+  manifestPath: MANIFEST_PATH,
+  releaseEvidencePath: RELEASE_EVIDENCE_PATH,
+  workspaceRoot: WORKSPACE_ROOT,
+};
 
 const VERIFY_USAGE =
   'usage: verify-structured-slots --acceptance-only --capability <injected|production> | ' +
@@ -82,12 +123,25 @@ function sha256Hex(input: Buffer | string): string {
   return createHash('sha256').update(input).digest('hex');
 }
 
-function gitCommit(): string {
+/**
+ * Atomically writes a product file: writes to a unique temp sibling in the SAME
+ * directory, then renameSync renames over the destination. A crash/reader can
+ * never observe a partially-written product file, and a `.tmp-*` sibling is
+ * never mistaken for the product (unlike a plain writeFileSync which could
+ * leave a truncated release evidence behind).
+ */
+function writeFileAtomic(path: string, contents: string): void {
+  const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tmpPath, contents, 'utf8');
+  renameSync(tmpPath, path);
+}
+
+export function gitCommit(): string {
   return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: WORKSPACE_ROOT, encoding: 'utf8' }).trim();
 }
 
 /** SHA-256 over the sorted (relative path, sha256) of every git-tracked file. */
-function cleanSourceDigest(): string {
+export function cleanSourceDigest(): string {
   const files = execFileSync('git', ['ls-files'], { cwd: WORKSPACE_ROOT, encoding: 'utf8' })
     .split('\n')
     .map((line) => line.trim())
@@ -100,7 +154,7 @@ function cleanSourceDigest(): string {
   return canonicalJsonSha256(entries);
 }
 
-function packageLockSha256(): string {
+export function packageLockSha256(): string {
   return sha256Hex(readFileSync(resolve(WORKSPACE_ROOT, 'package-lock.json')));
 }
 
@@ -163,25 +217,40 @@ function runAcceptanceOnly(capability: string): number {
 /** Qualify (Step 7)                                                         */
 /** ------------------------------------------------------------------------ */
 
-function loadProfileEvidence(): Record<string, unknown> {
-  if (!existsSync(PROFILE_EVIDENCE_PATH)) {
+function loadProfileEvidence(path: string): Record<string, unknown> {
+  if (!existsSync(path)) {
     throw new VerifyError('profile evidence 不存在；必须先运行 integrated reference benchmark');
   }
-  return JSON.parse(readFileSync(PROFILE_EVIDENCE_PATH, 'utf8')) as Record<string, unknown>;
+  return JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
 }
 
-function readCurrentManifest(): StructuredRuntimeCapabilityV1 {
-  const raw = JSON.parse(readFileSync(MANIFEST_PATH, 'utf8')) as unknown;
+function readCurrentManifest(path: string): StructuredRuntimeCapabilityV1 {
+  const raw = JSON.parse(readFileSync(path, 'utf8')) as unknown;
   return validateRuntimeCapability(raw);
 }
 
-function runQualify(): number {
+/** Injectable dependencies so tests can drive qualify without real gates. */
+export interface QualifyDeps {
+  gates?: () => GateReport[];
+}
+
+/**
+ * Step 7 qualification (spec §16): re-runs the full hermetic command list and
+ * writes the release evidence ONLY when EVERY gate exits 0. A failed gate set
+ * writes a clearly-marked `.failed-<timestamp>` failure record at a DIFFERENT
+ * path — never the release evidence path — so a failure product can never be
+ * mistaken for release evidence by a later `--promote-capability`. A stale
+ * release evidence from a prior successful run is left untouched (promotion
+ * re-validates checkpoint freshness against HEAD).
+ */
+export function runQualify(paths: Partial<VerifyPaths> = {}, deps: QualifyDeps = {}): number {
+  const p = { ...DEFAULT_PATHS, ...paths };
   // 1. The final profile must be `final` and reference the integrated evidence.
-  const profile = loadStructuredPlatformProfile(PROFILE_PATH);
+  const profile = loadStructuredPlatformProfile(p.profilePath);
   if (profile.status !== 'final') {
     throw new VerifyError('qualification requires a FINAL profile (integrated reference benchmark evidence)');
   }
-  const evidence = loadProfileEvidence();
+  const evidence = loadProfileEvidence(p.profileEvidencePath);
   const evidenceDigest = canonicalJsonSha256(evidence);
   if (profile.evidenceDigest !== evidenceDigest) {
     throw new VerifyError('profile evidenceDigest does not match the profile evidence file');
@@ -189,35 +258,38 @@ function runQualify(): number {
 
   // 2. The production manifest must STILL be disabled (the promotion is a
   //    separate, later step; only it may flip the checked-in phase).
-  const manifest = readCurrentManifest();
+  const manifest = readCurrentManifest(p.manifestPath);
   if (manifest.status !== 'disabled') {
     throw new VerifyError('production manifest must still be disabled during qualification');
   }
 
   // 3. Re-run the full hermetic command list with the final profile in place,
   //    explicit capability injection in the structured acceptance only.
-  const gates: GateReport[] = [
-    runGate('typecheck', 'TypeScript 类型检查', NPM, ['run', 'check']),
-    runGate('unit-tests', '单元/集成测试', NPM, ['test', '--', '--reporter=dot']),
-    runGate('build', '客户端与服务端构建', NPM, ['run', 'build']),
-    runGate('e2e', 'Playwright 端到端', NPM, ['run', 'e2e']),
-    runGate(
-      'structured-acceptance',
-      '结构化槽端到端验收（注入环境）',
-      NPM,
-      ['run', 'verify:structured-slots', '--', '--acceptance-only', '--capability', 'injected'],
-    ),
-    runGate(
-      'forge-pi-slot-preflight',
-      '锁定 Pi 0.82 预校验计费特征',
-      NPX,
-      ['vitest', 'run', 'src/server/runtime/pi-agent-runtime.test.ts', '-t', 'Task 14 Step 1'],
-    ),
-  ];
+  const gates: GateReport[] =
+    deps.gates !== undefined
+      ? deps.gates()
+      : [
+          runGate('typecheck', 'TypeScript 类型检查', NPM, ['run', 'check']),
+          runGate('unit-tests', '单元/集成测试', NPM, ['test', '--', '--reporter=dot']),
+          runGate('build', '客户端与服务端构建', NPM, ['run', 'build']),
+          runGate('e2e', 'Playwright 端到端', NPM, ['run', 'e2e']),
+          runGate(
+            'structured-acceptance',
+            '结构化槽端到端验收（注入环境）',
+            NPM,
+            ['run', 'verify:structured-slots', '--', '--acceptance-only', '--capability', 'injected'],
+          ),
+          runGate(
+            'forge-pi-slot-preflight',
+            '锁定 Pi 0.82 预校验计费特征',
+            NPX,
+            ['vitest', 'run', 'src/server/runtime/pi-agent-runtime.test.ts', '-t', 'Task 14 Step 1'],
+          ),
+        ];
   const allPassed = gates.every((gate) => gate.exitCode === 0);
 
-  // 4. Write the release evidence. It must NOT contain the capability-manifest
-  //    digest (that is the next node in the one-way chain).
+  // 4. Build the qualification record. It must NOT contain the capability-
+  //    manifest digest (that is the next node in the one-way chain).
   const releaseEvidence = {
     schemaVersion: 1,
     gate: 'verify:structured-slots',
@@ -225,23 +297,49 @@ function runQualify(): number {
     checkpointCommit: gitCommit(),
     sourceTreeDigest: cleanSourceDigest(),
     packageLockSha256: packageLockSha256(),
-    profileEvidencePath: 'docs/evidence/structured-slot-platform-profile-v1.json',
+    profileEvidencePath: RELEASE_PROFILE_EVIDENCE_PATH,
     profileEvidenceDigest: evidenceDigest,
-    finalProfilePath: 'src/server/structured-slots/platform-profile-v1.json',
+    finalProfilePath: RELEASE_FINAL_PROFILE_PATH,
     finalProfileDigest: profileCanonicalDigest(profile),
     requiredAbis: [...manifest.requiredAbis],
-    piPreflightCharacterization: 'forge-pi-slot-preflight/v1',
+    piPreflightCharacterization: RELEASE_PI_PREFLIGHT_CHARACTERIZATION,
     gates: gates.map(({ id, label, command, exitCode }) => ({ id, label, command, exitCode })),
     observedAt: new Date().toISOString(),
   };
-  mkdirSync(dirname(RELEASE_EVIDENCE_PATH), { recursive: true });
-  writeFileSync(RELEASE_EVIDENCE_PATH, `${JSON.stringify(releaseEvidence, null, 2)}\n`, 'utf8');
-  process.stdout.write(`[verify-structured-slots] release evidence 已写入 ${RELEASE_EVIDENCE_PATH}\n`);
+  mkdirSync(dirname(p.releaseEvidencePath), { recursive: true });
 
+  // 5. A failed qualification NEVER writes the release evidence. It writes a
+  //    clearly-marked failure record at `<releaseEvidencePath>.failed-<ts>`
+  //    (a failure product can never be mistaken for release evidence) and
+  //    leaves any stale release evidence from a prior successful run untouched.
   if (!allPassed) {
-    process.stderr.write('[verify-structured-slots] qualification 有失败门禁\n');
+    const failedPath = `${p.releaseEvidencePath}.failed-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+    const failureRecord = {
+      schemaVersion: 1,
+      record: 'qualify-failed',
+      gate: 'verify:structured-slots',
+      mode: 'qualify',
+      failedAt: new Date().toISOString(),
+      releaseEvidencePath: p.releaseEvidencePath,
+      gates: gates.map(({ id, label, command, exitCode }) => ({ id, label, command, exitCode })),
+    };
+    writeFileSync(failedPath, `${JSON.stringify(failureRecord, null, 2)}\n`, 'utf8');
+    process.stderr.write(`[verify-structured-slots] qualification 有失败门禁；失败记录已写入 ${failedPath}\n`);
     return 1;
   }
+
+  // 6. All gates passed: the record must satisfy the promotion schema, then it
+  //    is written ATOMICALLY (temp sibling + rename). Stale release evidence
+  //    from a prior run is replaced only by this honest all-green product.
+  try {
+    validateReleaseEvidence(releaseEvidence, RELEASE_EVIDENCE_GATE_IDS);
+  } catch (error) {
+    throw new VerifyError(
+      `release evidence 未通过自身 schema 校验（不应发生）：${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  writeFileAtomic(p.releaseEvidencePath, `${JSON.stringify(releaseEvidence, null, 2)}\n`);
+  process.stdout.write(`[verify-structured-slots] release evidence 已写入 ${p.releaseEvidencePath}\n`);
   process.stdout.write('[verify-structured-slots] qualification 全绿\n');
   return 0;
 }
@@ -261,12 +359,35 @@ function porcelain(): string[] {
     .filter((line) => line.length > 0);
 }
 
-function runPromoteCapability(releaseEvidenceArg: string): number {
-  const releaseEvidencePath = resolve(WORKSPACE_ROOT, releaseEvidenceArg);
+/** Injectable dependencies so tests can drive promote against a temp workspace. */
+export interface PromoteDeps {
+  porcelain?: () => string[];
+}
+
+export function runPromoteCapability(
+  releaseEvidenceArg: string,
+  paths: Partial<VerifyPaths> = {},
+  deps: PromoteDeps = {},
+): number {
+  const p = { ...DEFAULT_PATHS, ...paths };
+  const releaseEvidencePath = resolve(p.workspaceRoot, releaseEvidenceArg);
   if (!existsSync(releaseEvidencePath)) {
     throw new VerifyError(`release evidence 不存在：${releaseEvidencePath}`, 2);
   }
   const release = JSON.parse(readFileSync(releaseEvidencePath, 'utf8')) as Record<string, unknown>;
+
+  // 0. EXACT release-evidence schema validation FIRST, before ANY digest or
+  //    checkpoint cross-check. Arbitrary JSON whose digests happen to match the
+  //    real files but whose structure/mode/gate set is wrong (e.g. a failure
+  //    record, a `mode: 'integrated-qualify'` record, a forged partial record)
+  //    is rejected here and can never reach the manifest write. Fail closed.
+  try {
+    validateReleaseEvidence(release, RELEASE_EVIDENCE_GATE_IDS);
+  } catch (error) {
+    throw new VerifyError(
+      `release evidence 校验失败：${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 
   // 1. Checkpoint HEAD must match the release evidence.
   if (release.checkpointCommit !== gitCommit()) {
@@ -280,12 +401,22 @@ function runPromoteCapability(releaseEvidenceArg: string): number {
     throw new VerifyError('package-lock digest 与 release evidence 不一致');
   }
 
-  // 3. Integrated profile evidence + exact final profile digest.
-  const evidence = JSON.parse(readFileSync(PROFILE_EVIDENCE_PATH, 'utf8')) as Record<string, unknown>;
+  // 3. Integrated profile evidence MUST be the SUCCESS shape (schemaVersion 1,
+  //    mode 'integrated-qualify', no `outcome` field). The honest-failure
+  //    shapes (`no_scale_passed` / `child_failed`) are rejected here — a failed
+  //    qualification must never promote. Then the exact digest cross-check.
+  const evidence = JSON.parse(readFileSync(p.profileEvidencePath, 'utf8')) as Record<string, unknown>;
+  try {
+    validateProfileEvidence(evidence);
+  } catch (error) {
+    throw new VerifyError(
+      `profile evidence 不是成功的 integrated-qualify 证据：${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   if (canonicalJsonSha256(evidence) !== release.profileEvidenceDigest) {
     throw new VerifyError('profile evidence digest 与 release evidence 不一致');
   }
-  const profile = loadStructuredPlatformProfile(PROFILE_PATH);
+  const profile = loadStructuredPlatformProfile(p.profilePath);
   if (profile.status !== 'final') {
     throw new VerifyError('promotion requires a FINAL profile');
   }
@@ -297,10 +428,8 @@ function runPromoteCapability(releaseEvidenceArg: string): number {
   }
 
   // 4. Required ABI list must match the current manifest.
-  const manifest = readCurrentManifest();
-  const releaseAbis = Array.isArray(release.requiredAbis)
-    ? (release.requiredAbis as unknown[])
-    : [];
+  const manifest = readCurrentManifest(p.manifestPath);
+  const releaseAbis = Array.isArray(release.requiredAbis) ? (release.requiredAbis as unknown[]) : [];
   if (
     releaseAbis.length !== manifest.requiredAbis.length ||
     !manifest.requiredAbis.every((abi) => releaseAbis.includes(abi))
@@ -315,14 +444,15 @@ function runPromoteCapability(releaseEvidenceArg: string): number {
     'docs/evidence/structured-slot-platform-profile-v1.json',
     'docs/evidence/structured-slot-release-v1.json',
   ]);
-  const offenders = porcelain().filter((path) => !allowed.has(path));
+  const offenders = (deps.porcelain ?? porcelain)().filter((path) => !allowed.has(path));
   if (offenders.length > 0) {
     throw new VerifyError(`dirty/untracked tree outside the generated-output allowlist: ${offenders.join(', ')}`);
   }
 
-  // 6. Write the ENABLED capability manifest. profileDigest references the
-  //    final profile; evidenceDigest references the release evidence — the
-  //    release evidence itself carries no capability-manifest digest.
+  // 6. Write the ENABLED capability manifest atomically. profileDigest
+  //    references the final profile; evidenceDigest references the release
+  //    evidence — the release evidence itself carries no capability-manifest
+  //    digest.
   const capability = {
     version: 1,
     status: 'enabled',
@@ -331,8 +461,8 @@ function runPromoteCapability(releaseEvidenceArg: string): number {
     evidenceDigest: canonicalJsonSha256(release),
     requiredAbis: [...manifest.requiredAbis],
   };
-  writeFileSync(MANIFEST_PATH, `${JSON.stringify(capability, null, 2)}\n`, 'utf8');
-  process.stdout.write(`[verify-structured-slots] capability manifest 已启用（${MANIFEST_PATH}）\n`);
+  writeFileAtomic(p.manifestPath, `${JSON.stringify(capability, null, 2)}\n`);
+  process.stdout.write(`[verify-structured-slots] capability manifest 已启用（${p.manifestPath}）\n`);
   return 0;
 }
 
@@ -382,17 +512,26 @@ function main(argv: readonly string[]): number {
   throw new VerifyError(VERIFY_USAGE, 2);
 }
 
-try {
-  const code = main(process.argv.slice(2));
-  process.exitCode = code;
-} catch (error) {
-  if (error instanceof VerifyError) {
-    process.stderr.write(`${error.message}\n`);
-    process.exitCode = error.exitCode;
-  } else {
-    process.stderr.write(
-      `VERIFY_STRUCTURED_SLOTS: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`,
-    );
-    process.exitCode = 1;
+/**
+ * Direct-execution guard: only run the CLI when this module is the entry point
+ * (`npx tsx scripts/verify-structured-slots.ts ...`), so tests can import
+ * `runQualify` / `runPromoteCapability` / the validators without triggering
+ * the CLI. `process.argv[1]` may be undefined (e.g. vitest), in which case
+ * `pathToFileURL('')` resolves the cwd and never equals this module URL.
+ */
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+  try {
+    const code = main(process.argv.slice(2));
+    process.exitCode = code;
+  } catch (error) {
+    if (error instanceof VerifyError) {
+      process.stderr.write(`${error.message}\n`);
+      process.exitCode = error.exitCode;
+    } else {
+      process.stderr.write(
+        `VERIFY_STRUCTURED_SLOTS: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`,
+      );
+      process.exitCode = 1;
+    }
   }
 }

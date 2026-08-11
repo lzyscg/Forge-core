@@ -339,5 +339,124 @@ export function validateProfileEvidenceFailure(value: unknown): void {
   requireString(value['selectionReason'], 'failure evidence.selectionReason');
 }
 
+/* -------------------------------------------------------------------------- */
+/* Release evidence shape (verify-structured-slots --qualify / --promote)      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The exact relative paths and characterization strings a release evidence must
+ * carry (the one-way chain source/runner -> profile evidence -> final profile
+ * -> release evidence -> capability manifest). Owned here so qualify and
+ * promote share one source of truth for the contract.
+ */
+export const RELEASE_PROFILE_EVIDENCE_PATH = 'docs/evidence/structured-slot-platform-profile-v1.json';
+export const RELEASE_FINAL_PROFILE_PATH = 'src/server/structured-slots/platform-profile-v1.json';
+export const RELEASE_PI_PREFLIGHT_CHARACTERIZATION = 'forge-pi-slot-preflight/v1';
+
+const RELEASE_EVIDENCE_FIELDS = [
+  'schemaVersion',
+  'gate',
+  'mode',
+  'checkpointCommit',
+  'sourceTreeDigest',
+  'packageLockSha256',
+  'profileEvidencePath',
+  'profileEvidenceDigest',
+  'finalProfilePath',
+  'finalProfileDigest',
+  'requiredAbis',
+  'piPreflightCharacterization',
+  'gates',
+  'observedAt',
+] as const;
+
+const RELEASE_GATE_FIELDS = ['id', 'label', 'command', 'exitCode'] as const;
+
+function requireNonEmptyStringArray(value: unknown, where: string): string[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    invalid(`${where} must be a non-empty string array`);
+  }
+  for (let i = 0; i < value.length; i += 1) {
+    const s = requireString(value[i], `${where}[${i}]`);
+    if (s.length === 0) invalid(`${where}[${i}] must be a non-empty string`);
+  }
+  return value as string[];
+}
+
+function requireIsoTimestamp(value: unknown, where: string): string {
+  const s = requireString(value, where);
+  if (Number.isNaN(Date.parse(s))) invalid(`${where} must be a parseable ISO timestamp`);
+  return s;
+}
+
+function validateReleaseGate(value: unknown, where: string): void {
+  if (!isPlainObject(value)) invalid(`${where} must be a plain object`);
+  rejectUnknownFields(value, RELEASE_GATE_FIELDS, where);
+  requireString(value['id'], `${where}.id`);
+  requireString(value['label'], `${where}.label`);
+  requireString(value['command'], `${where}.command`);
+  const exitCode = value['exitCode'];
+  if (typeof exitCode !== 'number' || !Number.isInteger(exitCode) || exitCode !== 0) {
+    invalid(`${where}.exitCode must be 0`);
+  }
+}
+
+/**
+ * Exact-validates a Step 7/8 release evidence. Throws
+ * `STRUCTURED_EVIDENCE_INVALID: ...` on any unknown field, missing field, shape
+ * violation, wrong gate/mode, non-zero gate, missing/duplicate/extra gate or
+ * malformed digest. Every gate must have `exitCode === 0` (a non-zero gate
+ * means the qualification failed and its record is a FAILURE record, never
+ * release evidence). The gate id set must be EXACTLY `expectedGateIds` — no
+ * missing, no duplicates, no extras. Returns nothing on success.
+ */
+export function validateReleaseEvidence(value: unknown, expectedGateIds: readonly string[]): void {
+  if (!isPlainObject(value)) invalid('release evidence must be a plain object');
+  rejectUnknownFields(value, RELEASE_EVIDENCE_FIELDS, 'release evidence');
+  if (value['schemaVersion'] !== 1) invalid('release evidence.schemaVersion must be 1');
+  if (value['gate'] !== 'verify:structured-slots') invalid('release evidence.gate must be "verify:structured-slots"');
+  if (value['mode'] !== 'qualify') invalid('release evidence.mode must be "qualify"');
+  // checkpointCommit is a git object id: SHA-1 (40-hex) or SHA-256 (64-hex),
+  // matching the fact validation used for profile evidence gitCommit.
+  requireGitCommit(value['checkpointCommit'], 'release evidence.checkpointCommit');
+  requireHex64(value['sourceTreeDigest'], 'release evidence.sourceTreeDigest');
+  requireHex64(value['packageLockSha256'], 'release evidence.packageLockSha256');
+  if (value['profileEvidencePath'] !== RELEASE_PROFILE_EVIDENCE_PATH) {
+    invalid(`release evidence.profileEvidencePath must be "${RELEASE_PROFILE_EVIDENCE_PATH}"`);
+  }
+  requireHex64(value['profileEvidenceDigest'], 'release evidence.profileEvidenceDigest');
+  if (value['finalProfilePath'] !== RELEASE_FINAL_PROFILE_PATH) {
+    invalid(`release evidence.finalProfilePath must be "${RELEASE_FINAL_PROFILE_PATH}"`);
+  }
+  requireHex64(value['finalProfileDigest'], 'release evidence.finalProfileDigest');
+  requireNonEmptyStringArray(value['requiredAbis'], 'release evidence.requiredAbis');
+  if (value['piPreflightCharacterization'] !== RELEASE_PI_PREFLIGHT_CHARACTERIZATION) {
+    invalid(`release evidence.piPreflightCharacterization must be "${RELEASE_PI_PREFLIGHT_CHARACTERIZATION}"`);
+  }
+  requireIsoTimestamp(value['observedAt'], 'release evidence.observedAt');
+
+  const gates = value['gates'];
+  if (!Array.isArray(gates) || gates.length === 0) {
+    invalid('release evidence.gates must be a non-empty array');
+  }
+  const seen = new Set<string>();
+  for (let i = 0; i < gates.length; i += 1) {
+    validateReleaseGate(gates[i], `release evidence.gates[${i}]`);
+    const id = requireString((gates[i] as Record<string, unknown>)['id'], `release evidence.gates[${i}].id`);
+    if (seen.has(id)) invalid(`release evidence.gates has duplicate id '${id}'`);
+    seen.add(id);
+  }
+  const expected = new Set(expectedGateIds);
+  if (expected.size !== expectedGateIds.length) {
+    invalid('expectedGateIds must be a unique set');
+  }
+  for (const id of expected) {
+    if (!seen.has(id)) invalid(`release evidence.gates missing required id '${id}'`);
+  }
+  for (const id of seen) {
+    if (!expected.has(id)) invalid(`release evidence.gates has unexpected id '${id}'`);
+  }
+}
+
 /** Re-exported type so callers can type the validated evidence payload. */
 export type { StructuredSlotLimitsV1 };
