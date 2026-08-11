@@ -376,6 +376,56 @@ describe('structured-slot read-only routes (spec §14, task_owner subject)', () 
     expect((response.body as { error: { code: string } }).error.code).toBe('SEAL_NOT_FOUND');
   });
 
+  it('fails closed when the sealed event references a non-seal blob', async () => {
+    client = await startStructuredApiClient();
+    const { taskId, blobStore } = await seedStructuredTask(client);
+    // A content blob is a valid content-addressed blob but NOT a seal_record:
+    // the server must reject the ref rather than return unvalidated bytes.
+    const contentBlob = await blobStore.putContentValue('not a seal record');
+    await client.service.appendTestEvent(
+      taskId,
+      makeTaskEvent({
+        type: 'structured_scaffold_sealed',
+        sealId: 'seal-bad',
+        scaffoldId: 'scaffold-1',
+        generationId: 'gen-1',
+        scaffoldRevision: 1,
+        sealRecord: { version: 1, kind: 'content_revision', sha256: contentBlob.sha256, byteLength: contentBlob.byteLength },
+        artifactId: 'artifact-1',
+        artifactVersion: 1,
+      }),
+    );
+
+    const response = await client.get(`/api/tasks/${taskId}/structured-slots/seal`);
+    expect(response.status).toBe(404);
+    expect((response.body as { error: { code: string } }).error.code).toBe('SEAL_NOT_FOUND');
+  });
+
+  it('fails closed when the seal-record blob violates the exact schema', async () => {
+    client = await startStructuredApiClient();
+    const { taskId, blobStore } = await seedStructuredTask(client);
+    // A seal_record kind blob whose bytes are NOT a valid SealRecord shape must
+    // be rejected server-side, never emitted to the client.
+    const garbage = await blobStore.putJsonBlob({ not: 'a seal record' }, 'seal_record');
+    await client.service.appendTestEvent(
+      taskId,
+      makeTaskEvent({
+        type: 'structured_scaffold_sealed',
+        sealId: 'seal-bad-2',
+        scaffoldId: 'scaffold-1',
+        generationId: 'gen-1',
+        scaffoldRevision: 1,
+        sealRecord: garbage,
+        artifactId: 'artifact-1',
+        artifactVersion: 1,
+      }),
+    );
+
+    const response = await client.get(`/api/tasks/${taskId}/structured-slots/seal`);
+    expect(response.status).toBe(404);
+    expect((response.body as { error: { code: string } }).error.code).toBe('SEAL_NOT_FOUND');
+  });
+
   it('rejects profile/principal query parameters on every endpoint (v1)', async () => {
     client = await startStructuredApiClient();
     const { taskId } = await seedStructuredTask(client);
@@ -434,6 +484,8 @@ describe('structured-slot read-only routes (spec §14, task_owner subject)', () 
       structureStatus: 'active',
       sealStatus: 'unsealed',
       visibleSlotCount: 4,
+      // The seed data commits exactly two set content slots (title, body).
+      filledSlotCount: 2,
       issueSummary: { errors: 0, warnings: 0 },
     });
     expect(JSON.stringify(summary)).not.toContain('"tree"');

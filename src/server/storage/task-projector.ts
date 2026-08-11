@@ -374,13 +374,25 @@ function toAgentSummary(template: FrozenTemplate): AgentSummary[] {
 }
 
 /**
+ * One content-revision root mapping (spec §7.1): slotId -> 'unset' | digest.
+ * This is the ONLY blob-derived input the summary accepts — a verifiable
+ * projection of the authoritative events (design §18.3), never content-inline.
+ */
+export type StructuredContentRootV1 = Readonly<Record<string, 'unset' | string>>;
+
+/**
  * Projects one task into the frozen workspace shape. Pure: identical inputs
  * always produce identical output; callers own any further caching.
+ *
+ * `structuredContentRoot` is the ACTIVE generation's content root mapping
+ * (read by the caller from the content-addressed blob referenced by the
+ * authoritative events) and drives the summary's exact `filledSlotCount`.
  */
 export function projectTask(
   task: TaskProjectionTask,
   events: readonly TaskEvent[],
   artifacts: readonly ArtifactEntry[],
+  structuredContentRoot?: StructuredContentRootV1 | null,
 ): TaskWorkspace {
   const state = fold(events);
   const orderIndex = new Map(state.nodeOrder.map((id, index) => [id, index]));
@@ -424,9 +436,9 @@ export function projectTask(
   };
   // Structured templates always carry the summary; basic workspaces omit the
   // field entirely (spec §14 / I01). The summary is a pure fold of
-  // authoritative structured events and never embeds content, the full tree,
-  // Grants or private Drafts.
-  const structuredSlots = projectStructuredSlotsSummary(events, task.frozenTemplate);
+  // authoritative structured events plus the active content root and never
+  // embeds content, the full tree, Grants or private Drafts.
+  const structuredSlots = projectStructuredSlotsSummary(events, task.frozenTemplate, structuredContentRoot);
   if (structuredSlots !== null) {
     workspace.structuredSlots = structuredSlots;
   }
@@ -470,17 +482,20 @@ function latestGenerationEvent(events: readonly TaskEvent[]): Extract<
 /**
  * The structured summary fold (spec §14 / I01). Basic templates return null
  * (the workspace omits the field). For structured templates the summary is a
- * pure function of authoritative committed events: identity/status from the
+ * pure function of authoritative committed events PLUS the active content root
+ * (design §18.3 "权威事件加可验证 blob 投影"): identity/status from the
  * structured state projection, `visibleSlotCount` from the active generation's
  * committed slot count (the owner sees every formal slot), `filledSlotCount`
- * as the event-derived cumulative change count of merged drafts (capped at
- * the visible count — the exact per-slot presence lives in the content
- * revision blob, which the pure projector never reads), and `issueSummary`
- * from the same owner-visible issue fold the read-only API serves.
+ * as the EXACT set-count of the active generation's content root (0 when no
+ * content root is committed or the caller cannot resolve one — never a
+ * cumulative change-count across generations, which would double-count slots
+ * and leak superseded-generation merges), and `issueSummary` from the same
+ * owner-visible issue fold the read-only API serves.
  */
 export function projectStructuredSlotsSummary(
   events: readonly TaskEvent[],
   frozen: FrozenTemplate,
+  contentRoot?: StructuredContentRootV1 | null,
 ): StructuredSlotsSummaryV1 | null {
   if (frozen.productionMode !== 'structured_slots') {
     return null;
@@ -489,9 +504,14 @@ export function projectStructuredSlotsSummary(
   const generation = latestGenerationEvent(events);
   const visibleSlotCount = generation?.slotCount ?? 0;
   let filledSlotCount = 0;
-  for (const event of events) {
-    if (event.type === 'structured_fill_draft_terminal' && event.status === 'merged' && event.content !== null) {
-      filledSlotCount = Math.min(visibleSlotCount, filledSlotCount + event.changeCount);
+  if (contentRoot !== undefined && contentRoot !== null) {
+    for (const value of Object.values(contentRoot)) {
+      if (value !== 'unset') filledSlotCount += 1;
+    }
+    // Defensive bound: the root is scoped to the active generation, but a
+    // stale root must never report more than the visible slot count.
+    if (filledSlotCount > visibleSlotCount) {
+      filledSlotCount = visibleSlotCount;
     }
   }
   const issues = deriveOwnerIssues(events);

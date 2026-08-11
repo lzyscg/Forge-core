@@ -646,9 +646,16 @@ describe('projectStructuredSlotsSummary (spec §14 / I01)', () => {
     });
   });
 
-  it('folds the active generation and merged content into the summary', () => {
+  it('reports the exact set-count from the active content root', () => {
     const events = [generationEvent(), mergedDraftEvent(2), staleDraftEvent(), sealedEvent()];
-    const summary = projectStructuredSlotsSummary(events, STRUCTURED_FROZEN);
+    // The active content root is the authoritative filled-set (design §18.3):
+    // two set slots even though one merge touched a different slot twice.
+    const contentRoot = {
+      title: 'a'.repeat(64),
+      body: 'b'.repeat(64),
+      note: 'unset',
+    };
+    const summary = projectStructuredSlotsSummary(events, STRUCTURED_FROZEN, contentRoot);
     expect(summary).toEqual({
       version: 1,
       mode: 'structured_slots',
@@ -676,10 +683,34 @@ describe('projectStructuredSlotsSummary (spec §14 / I01)', () => {
     ]);
   });
 
-  it('caps filledSlotCount at the visible slot count', () => {
+  it('reports 0 filled when no active content root is committed', () => {
+    // Merged drafts alone must NOT synthesize a filled count: the summary is
+    // scoped to the active generation's content root.
     const events = [generationEvent(), mergedDraftEvent(9)];
-    const summary = projectStructuredSlotsSummary(events, STRUCTURED_FROZEN);
-    expect(summary?.filledSlotCount).toBe(4);
+    expect(projectStructuredSlotsSummary(events, STRUCTURED_FROZEN)?.filledSlotCount).toBe(0);
+    expect(projectStructuredSlotsSummary(events, STRUCTURED_FROZEN, null)?.filledSlotCount).toBe(0);
+  });
+
+  it('never counts a superseded generation or double-counts a slot', () => {
+    // gen-1 commits and fills two slots; gen-2 supersedes it with a fresh root
+    // that only fills one — the summary follows the ACTIVE root.
+    const events = [
+      generationEvent({ scaffoldId: 'scaffold-1', generationId: 'gen-1', slotCount: 2 }),
+      generationEvent({ scaffoldId: 'scaffold-2', generationId: 'gen-2', slotCount: 7 }),
+    ];
+    const contentRoot = { title: 'a'.repeat(64), note: 'unset' };
+    const summary = projectStructuredSlotsSummary(events, STRUCTURED_FROZEN, contentRoot);
+    expect(summary?.scaffoldId).toBe('scaffold-2');
+    expect(summary?.generationId).toBe('gen-2');
+    expect(summary?.contentRevision).toBe(0);
+    expect(summary?.visibleSlotCount).toBe(7);
+    expect(summary?.filledSlotCount).toBe(1);
+  });
+
+  it('caps the count at the visible slot count defensively', () => {
+    const events = [generationEvent({ slotCount: 2 })];
+    const contentRoot = { a: '1'.repeat(64), b: '2'.repeat(64), c: '3'.repeat(64) };
+    expect(projectStructuredSlotsSummary(events, STRUCTURED_FROZEN, contentRoot)?.filledSlotCount).toBe(2);
   });
 
   it('a later generation supersedes the earlier one for the active identity', () => {
@@ -687,7 +718,7 @@ describe('projectStructuredSlotsSummary (spec §14 / I01)', () => {
       generationEvent({ scaffoldId: 'scaffold-1', generationId: 'gen-1', slotCount: 2 }),
       generationEvent({ scaffoldId: 'scaffold-2', generationId: 'gen-2', slotCount: 7 }),
     ];
-    const summary = projectStructuredSlotsSummary(events, STRUCTURED_FROZEN);
+    const summary = projectStructuredSlotsSummary(events, STRUCTURED_FROZEN, {});
     expect(summary?.scaffoldId).toBe('scaffold-2');
     expect(summary?.generationId).toBe('gen-2');
     expect(summary?.visibleSlotCount).toBe(7);

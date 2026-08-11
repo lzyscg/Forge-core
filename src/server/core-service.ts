@@ -21,8 +21,9 @@
  * Task 4; reused by the Task 6 e2e harness): the production event producer
  * is the committer (through the runner), never this service.
  */
-import { randomUUID } from 'node:crypto';
-import { stat } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { readFile, stat } from 'node:fs/promises';
+import { Value } from 'typebox/value';
 import type {
   ArtifactVersion,
   SkillContent,
@@ -34,6 +35,7 @@ import type {
   TaskWorkspace,
   TurnTrace,
 } from '../shared/contracts';
+import { structuredSealRecordSchema } from '../shared/api-schemas';
 import type {
   JsonObject,
   SealRecord,
@@ -68,6 +70,7 @@ import { TaskScheduler, type HumanAnswerRequest } from './runtime/task-scheduler
 import type {
   FrozenStructuredSlotContractV1,
 } from './template/structured-slot-contract';
+import type { FrozenTemplate } from './template/template-schema';
 import {
   createStructuredSlotDataSource,
 } from './runtime/structured-slot/session-service';
@@ -544,8 +547,49 @@ export class CoreService {
         '等待封存完成后重试。',
       );
     }
-    const bytes = await context.blobStore.readBlob(sealEvent.sealRecord.sha256);
-    return JSON.parse(bytes.toString('utf8')) as SealRecord;
+    // The committed ref must be a seal_record blob (guards a future committer
+    // bug that points the seal event at a non-seal blob), and the blob bytes
+    // must satisfy the exact SealRecord schema — the server fails closed
+    // rather than emitting unvalidated bytes.
+    if (sealEvent.sealRecord.kind !== 'seal_record') {
+      throw new StructuredSlotReadError(
+        'SEAL_NOT_FOUND',
+        '封存记录引用无效。',
+        'CoreService.structuredRead',
+        '联系平台检查该任务的封存记录。',
+      );
+    }
+    let bytes: Buffer;
+    try {
+      bytes = await context.blobStore.readBlob(sealEvent.sealRecord.sha256);
+    } catch {
+      throw new StructuredSlotReadError(
+        'SEAL_NOT_FOUND',
+        '封存记录不可读。',
+        'CoreService.structuredRead',
+        '联系平台检查该任务的封存记录。',
+      );
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(bytes.toString('utf8'));
+    } catch {
+      throw new StructuredSlotReadError(
+        'SEAL_NOT_FOUND',
+        '封存记录格式无效。',
+        'CoreService.structuredRead',
+        '联系平台检查该任务的封存记录。',
+      );
+    }
+    if (!Value.Check(structuredSealRecordSchema, parsed)) {
+      throw new StructuredSlotReadError(
+        'SEAL_NOT_FOUND',
+        '封存记录不符合契约。',
+        'CoreService.structuredRead',
+        '联系平台检查该任务的封存记录。',
+      );
+    }
+    return parsed as SealRecord;
   }
 
   /**
@@ -655,15 +699,74 @@ export class CoreService {
     const frozenTemplate = await this.tasks.readFrozenTemplate(taskId);
     const committed = await this.events.read(taskId);
     const artifacts = await this.artifacts.list(taskId);
+    const events = committed.map((entry) => entry.event);
     const workspace = projectTask(
       { record, frozenTemplate },
-      committed.map((entry) => entry.event),
+      events,
       artifacts,
+      // Exact filled-slot count from the ACTIVE generation's content root
+      // (design §18.3 authoritative events + verifiable blob projection). Null
+      // when none committed or unreadable → the summary reports 0 filled.
+      await this.structuredContentRootFor(taskId, frozenTemplate, events),
     );
     // Live-preview attachment (plan C): the in-memory buffer, when present,
     // rides along as activeTurn. Never persisted; display only.
     workspace.activeTurn = this.live.get(taskId);
     return this.enrichSkillNodeBodies(taskId, workspace);
+  }
+
+  /**
+   * Resolves the active generation's content root mapping from the content
+   * root blob referenced by the authoritative events (design §18.3). Returns
+   * null for basic templates, pre-scaffold tasks and unreadable/malformed
+   * roots — the summary then reports 0 filled. This is a display projection
+   * and never embeds content values (only slotId -> presence/digest).
+   */
+  private async structuredContentRootFor(
+    taskId: string,
+    frozen: FrozenTemplate,
+    events: readonly TaskEvent[],
+  ): Promise<Record<string, 'unset' | string> | null> {
+    if (frozen.productionMode !== 'structured_slots' || frozen.structuredSlots === null) {
+      return null;
+    }
+    const state = projectStructuredSlotState(events);
+    if (state.content === null) {
+      return null;
+    }
+    // The content root lives under content-revisions/ (not the generic blobs
+    // dir); read + re-hash it so the projection is verifiable (design §18.3).
+    let bytes: Buffer;
+    try {
+      bytes = await readFile(
+        this.paths.taskStructuredContentRevisionFile(taskId, state.content.sha256),
+      );
+    } catch {
+      return null;
+    }
+    if (createHash('sha256').update(bytes).digest('hex') !== state.content.sha256) {
+      return null;
+    }
+    let root: unknown;
+    try {
+      root = JSON.parse(bytes.toString('utf8'));
+    } catch {
+      return null;
+    }
+    if (typeof root !== 'object' || root === null) {
+      return null;
+    }
+    const mappings = (root as { version?: unknown; mappings?: unknown }).mappings;
+    if (typeof mappings !== 'object' || mappings === null) {
+      return null;
+    }
+    const out: Record<string, 'unset' | string> = {};
+    for (const [slotId, value] of Object.entries(mappings as Record<string, unknown>)) {
+      if (value === 'unset' || (typeof value === 'string' && /^[0-9a-f]{64}$/.test(value))) {
+        out[slotId] = value;
+      }
+    }
+    return out;
   }
 
   /** The ONE cursor signer per task (Task 10 note). */
