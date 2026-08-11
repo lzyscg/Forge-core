@@ -69,6 +69,22 @@ const BOUNDS: Record<string, number> = {
   peakRssBytes: 512 * 1024 * 1024,
 };
 
+/**
+ * Every case the SUCCESS profile evidence `cases` array must contain (the six
+ * frozen bound cases + the two owner-outline diagnostics the benchmark is
+ * required to emit).
+ */
+const REQUIRED_SUCCESS_CASE_IDS: readonly string[] = [
+  'indexed-slot-read',
+  'tree-match-10k',
+  'content-root-64mib',
+  'draft-journal-2k',
+  'seal-assembler-custody',
+  'authorized-projection-500-issues',
+  'owner-outline-cold',
+  'owner-outline-hot',
+];
+
 const tempDirs: string[] = [];
 
 afterEach(() => {
@@ -116,17 +132,16 @@ function validSuccessEvidence(): Record<string, unknown> {
     sampleCount: 10,
     peakRssBytes: 300 * 1024 * 1024,
     diskBytes: 17_000_000,
-    cases: [
-      {
-        id: 'indexed-slot-read',
-        rawSampleDigest: 'c'.repeat(64),
-        samples: 10,
-        warmup: 3,
-        p50Ms: 4.2,
-        p95Ms: 5.4,
-        maxMs: 5.4,
-      },
-    ],
+    cases: REQUIRED_SUCCESS_CASE_IDS.map((id, index) => ({
+      id,
+      rawSampleDigest: ['a'.repeat(64), 'b'.repeat(64), 'c'.repeat(64), 'd'.repeat(64), 'e'.repeat(64), 'f'.repeat(64), '9a'.repeat(32), '8b'.repeat(32)][index]!,
+      samples: 10,
+      warmup: 3,
+      p50Ms: 4.2,
+      p95Ms: 5.4,
+      maxMs: 5.4,
+      postCasePeakRssBytes: 300 * 1024 * 1024,
+    })),
     candidatePercentage: 25,
     selectionReason: 'greatest passing scale 25%',
     frozenLimits: STRUCTURED_SLOT_PROFILE_CANDIDATE as StructuredSlotLimitsV1,
@@ -144,6 +159,7 @@ function validSuccessEvidence(): Record<string, unknown> {
             p95Ms: 5.4,
             maxMs: 5.4,
             sampleDigest: 'c'.repeat(64),
+            postCasePeakRssBytes: 300 * 1024 * 1024,
           },
         ],
         peakRssBytes: 300 * 1024 * 1024,
@@ -179,6 +195,7 @@ function failureEvidence(outcome: 'no_scale_passed' | 'child_failed'): Record<st
             p95Ms: 5.4,
             maxMs: 5.4,
             sampleDigest: 'c'.repeat(64),
+            postCasePeakRssBytes: 2_714_386_432,
           },
         ],
         peakRssBytes: 2_714_386_432,

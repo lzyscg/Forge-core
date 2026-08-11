@@ -212,6 +212,8 @@ export interface CaseResult {
   sampleDigest: string;
   rawSamples: number[];
   diskBytes: number;
+  /** Cumulative child peak RSS (bytes) AFTER this case finished (diagnostic). */
+  postCasePeakRssBytes: number;
 }
 
 export interface CaseDefinition {
@@ -254,6 +256,11 @@ async function measureCase(
     sampleDigest: canonicalJsonSha256(raw),
     rawSamples: raw,
     diskBytes: state.diskBytes,
+    // The cumulative per-scale peak observed so far (post-unit RSS sampling).
+    // This is the honest cumulative-per-case peak — NOT per-case process
+    // isolation. The authoritative total child peak remains the single
+    // `peakRssBytes` of the whole scale run (the 512 MiB gate).
+    postCasePeakRssBytes: state.peakRssBytes,
   };
 }
 
@@ -270,6 +277,7 @@ function printCaseRecord(result: CaseResult, peakRssBytes: number): void {
       maxMs: round(result.maxMs),
       sampleDigest: result.sampleDigest,
       peakRssBytes,
+      postCasePeakRssBytes: result.postCasePeakRssBytes,
       diskBytes: result.diskBytes,
     })}\n`,
   );
@@ -371,6 +379,20 @@ export const REQUIRED_BOUND_CASE_IDS: readonly string[] = [
 ];
 
 /**
+ * The owner-outline cold/hot DIAGNOSTIC cases. They are measured and recorded
+ * (per-scale results + evidence) so a reader can see the projection N+1 cost
+ * separate from the PURE 500-issue projection — but they carry NO bound: the
+ * `issueProjectionMaxMs` (250 ms) gate measures the pure authorized verdict
+ * projection only. A report missing a diagnostic is still FAILED (a regression
+ * that drops the diagnostics must not silently pass) via the missing-case
+ * guard, but with a distinct `missing diagnostic case` violation.
+ */
+export const REQUIRED_DIAGNOSTIC_CASE_IDS: readonly string[] = [
+  'owner-outline-cold',
+  'owner-outline-hot',
+];
+
+/**
  * Pure per-scale verdict: judges ONE scale report against the frozen bounds
  * using ONLY that report's own peak RSS and case timings. A prior scale's
  * higher peak can never influence this verdict (P1-1 regression target). A
@@ -385,6 +407,13 @@ export function evaluateScaleReport(
   const violations: string[] = [];
   for (const id of REQUIRED_BOUND_CASE_IDS) {
     if (!byId.has(id)) violations.push(`missing case ${id}`);
+  }
+  // The outline diagnostics carry no bound, but a report that drops them is
+  // incomplete and must FAIL (a regression that drops the diagnostics must not
+  // silently pass). Distinct message so a reader can tell this is NOT a bound
+  // violation.
+  for (const id of REQUIRED_DIAGNOSTIC_CASE_IDS) {
+    if (!byId.has(id)) violations.push(`missing diagnostic case ${id}`);
   }
   const p95 = (id: string): number => byId.get(id)?.p95Ms ?? 0;
   const max = (id: string): number => byId.get(id)?.maxMs ?? 0;
@@ -962,7 +991,10 @@ function assertCleanSourceTree(): void {
  * Each method returns the wall-clock ms of one real run.
  */
 export interface IntegratedBenchmarkCasesV1 {
-  /** 500-issue authorized projection (Task 10). */
+  /**
+   * PURE 500-issue authorized verdict projection (Task 10 F06) — the exact
+   * operation the 250 ms `issueProjectionMaxMs` bound gates. No outline I/O.
+   */
   runAuthorizedProjection500Issues(): Promise<number>;
   /** 64 MiB real Seal/Assembler/custody (Task 16). */
   runSealAssemblerCustody64MiB(): Promise<number>;
@@ -970,6 +1002,10 @@ export interface IntegratedBenchmarkCasesV1 {
   runBatchRecovery(): Promise<number>;
   /** ONE indexed slot read through the real projection (p95 bound). */
   runIndexedSlotRead(): Promise<number>;
+  /** FIRST `task_owner` outline over the real task (diagnostic, cold). */
+  runOwnerOutlineCold(): Promise<number>;
+  /** SUBSEQUENT `task_owner` outline over the same task (diagnostic, warm). */
+  runOwnerOutlineHot(): Promise<number>;
 }
 
 /** Evidence record shape (brief Step 3); Task 19 freezes values. */
@@ -993,6 +1029,7 @@ export interface IntegratedBenchmarkEvidenceV1 {
     p50Ms: number;
     p95Ms: number;
     maxMs: number;
+    postCasePeakRssBytes: number;
   }>;
   candidatePercentage: number | null;
   selectionReason: string | null;
@@ -1127,6 +1164,7 @@ async function runIntegratedQualify(args: CliArgs): Promise<never> {
         p95Ms: round(r.p95Ms),
         maxMs: round(r.maxMs),
         sampleDigest: r.sampleDigest,
+        postCasePeakRssBytes: r.postCasePeakRssBytes,
       })),
       peakRssBytes: report.peakRssBytes,
       diskBytes: report.diskBytes,
@@ -1193,6 +1231,7 @@ async function runIntegratedQualify(args: CliArgs): Promise<never> {
       p50Ms: Number(entry.p50Ms),
       p95Ms: Number(entry.p95Ms),
       maxMs: Number(entry.maxMs),
+      postCasePeakRssBytes: Number(entry.postCasePeakRssBytes),
     })),
     candidatePercentage: greatest,
     selectionReason: `greatest passing scale ${greatest}%`,
@@ -1249,6 +1288,70 @@ function parseIntegratedScaleResult(stdout: string, scale: number): IntegratedSc
 }
 
 /**
+ * The integrated scale cases the child measures (bound-gated + diagnostics) over
+ * ONE scaled task. Exported so tests can assert the exact warmup/samples the
+ * bound-gated `authorized-projection-500-issues` case uses (warmup >= 3 /
+ * samples >= 10) and that the owner-outline diagnostics are emitted. The
+ * indexed-slot-read case is measured separately after these (kept out of this
+ * list so its p95 stays a single-page read on a warm projection).
+ */
+export function integratedScaleCaseDefinitions(
+  percentage: number,
+  limits: StructuredSlotLimitsV1,
+  adapter: IntegratedBenchmarkCasesV1,
+): CaseDefinition[] {
+  return [
+    {
+      // DIAGNOSTIC (no bound): the FIRST owner outline over the real task —
+      // projection build + generation-index read + presence-root read +
+      // per-slot NDJSON reads. warmup 0 / samples 1 so the ONE recorded sample
+      // is the genuinely cold first read (a warmup would discard it).
+      id: 'owner-outline-cold',
+      description: `owner outline cold (first listSlots) @ ${percentage}% (diagnostic, no bound)`,
+      warmup: 0,
+      samples: 1,
+      unit: async () => adapter.runOwnerOutlineCold(),
+    },
+    {
+      // DIAGNOSTIC (no bound): a SUBSEQUENT owner outline over the same task —
+      // projection service, data source, generation index and presence root are
+      // all cached; only the per-slot NDJSON reads remain.
+      id: 'owner-outline-hot',
+      description: `owner outline hot (warm listSlots) @ ${percentage}% (diagnostic, no bound)`,
+      warmup: 1,
+      samples: 5,
+      unit: async () => adapter.runOwnerOutlineHot(),
+    },
+    {
+      // The 250 ms `issueProjectionMaxMs` bound gates the PURE authorized
+      // verdict projection: `projectStructuredVerdict` over the 500-issue
+      // verdict with full visibility — no projection-service build, no
+      // listSlots/readSlot I/O. warmup >= 3 + samples >= 10 so p95 is over real
+      // samples, not a single accidental sample.
+      id: 'authorized-projection-500-issues',
+      description: `500-issue PURE authorized verdict projection (Task 10 F06) @ ${percentage}%`,
+      warmup: 3,
+      samples: 10,
+      unit: async () => adapter.runAuthorizedProjection500Issues(),
+    },
+    {
+      id: 'seal-assembler-custody',
+      description: `${Math.round(limits.payload.maxScaffoldPayloadBytes / (1024 * 1024))} MiB real Seal/Assembler/custody (Task 16) @ ${percentage}%`,
+      warmup: 0,
+      samples: 1,
+      unit: async () => adapter.runSealAssemblerCustody64MiB(),
+    },
+    {
+      id: 'batch-recovery',
+      description: `batch recovery (Task 16) @ ${percentage}%`,
+      warmup: 0,
+      samples: 1,
+      unit: async () => adapter.runBatchRecovery(),
+    },
+  ];
+}
+
+/**
  * HIDDEN child-worker mode: measures ONE scale in a FRESH process and prints a
  * single machine-readable `integrated-scale-result` JSON line, then exits 0.
  * The OS high-water mark (`osMaxRssBytes`) plus the per-unit RSS sampling in
@@ -1289,30 +1392,7 @@ async function runIntegratedScale(args: CliArgs): Promise<void> {
   for (const definition of primitiveCases(primitiveSetup)) {
     results.push(await measureCase(definition, scaleState));
   }
-  const scaleCases: CaseDefinition[] = [
-    {
-      id: 'authorized-projection-500-issues',
-      description: `500-issue authorized owner projection (Task 10) @ ${percentage}%`,
-      warmup: 0,
-      samples: 1,
-      unit: async () => adapter.runAuthorizedProjection500Issues(),
-    },
-    {
-      id: 'seal-assembler-custody',
-      description: `${Math.round(limits.payload.maxScaffoldPayloadBytes / (1024 * 1024))} MiB real Seal/Assembler/custody (Task 16) @ ${percentage}%`,
-      warmup: 0,
-      samples: 1,
-      unit: async () => adapter.runSealAssemblerCustody64MiB(),
-    },
-    {
-      id: 'batch-recovery',
-      description: `batch recovery (Task 16) @ ${percentage}%`,
-      warmup: 0,
-      samples: 1,
-      unit: async () => adapter.runBatchRecovery(),
-    },
-  ];
-  for (const definition of scaleCases) {
+  for (const definition of integratedScaleCaseDefinitions(percentage, limits, adapter)) {
     results.push(await measureCase(definition, scaleState));
   }
   // Indexed slot read p95: a SINGLE real owner-projection read through the

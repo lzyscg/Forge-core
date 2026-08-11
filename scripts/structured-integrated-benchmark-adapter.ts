@@ -25,7 +25,10 @@ import type { FrozenStructuredSlotContractV1 } from '../src/server/template/stru
 import { CorePaths } from '../src/server/storage/core-paths';
 import { EventStore } from '../src/server/storage/event-store';
 import { ArtifactStore } from '../src/server/storage/artifact-store';
-import { StructuredSlotBlobStore } from '../src/server/storage/structured-slot-blob-store';
+import {
+  StructuredSlotBlobStore,
+  type StructuredSlotBlobStoreInstrumentation,
+} from '../src/server/storage/structured-slot-blob-store';
 import { compileSlotSchemaV1 } from '../src/server/structured-slots/slot-schema';
 import { compileLayoutGrammarV1 } from '../src/server/structured-slots/layout-grammar';
 import { projectStructuredVerdict, makeStructuredIssue, ALL_LOCATION_KINDS } from '../src/server/structured-slots/issues';
@@ -41,7 +44,14 @@ import type { CommittedEvent } from '../src/server/storage/event-store';
 import type { TaskEvent } from '../src/server/storage/task-events';
 
 export interface IntegratedBenchmarkCasesV1 {
-  /** 500-issue authorized owner projection (Task 10). */
+  /**
+   * PURE 500-issue authorized verdict projection (Task 10 F06): builds the
+   * 500-issue `StructuredVerdictV1` and calls `projectStructuredVerdict` with
+   * full visibility. NO projection-service build and NO listSlots/readSlot I/O
+   * in this method — this is exactly the operation the 250 ms
+   * `issueProjectionMaxMs` bound gates. (The projection-service outline is
+   * measured separately by `runOwnerOutlineCold`/`runOwnerOutlineHot`.)
+   */
   runAuthorizedProjection500Issues(): Promise<number>;
   /** 64 MiB real Seal/Assembler/custody (Task 16). */
   runSealAssemblerCustody64MiB(): Promise<number>;
@@ -49,6 +59,13 @@ export interface IntegratedBenchmarkCasesV1 {
   runBatchRecovery(): Promise<number>;
   /** ONE indexed slot read through the real projection (p95 bound). */
   runIndexedSlotRead(): Promise<number>;
+  /**
+   * FIRST `task_owner` outline read over the real task (diagnostic): projection
+   * build + generation-index read + presence-root read + per-slot NDJSON reads.
+   */
+  runOwnerOutlineCold(): Promise<number>;
+  /** SUBSEQUENT `task_owner` outline over the same task (diagnostic, warm). */
+  runOwnerOutlineHot(): Promise<number>;
 }
 
 function sha256Hex(content: string): string {
@@ -103,9 +120,10 @@ export async function buildBenchTask(
   paths: CorePaths,
   taskId: string,
   limits: StructuredSlotLimitsV1,
+  instrumentation?: StructuredSlotBlobStoreInstrumentation,
 ): Promise<BenchTask> {
   mkdirSync(paths.taskRoot(taskId), { recursive: true });
-  const blobStore = new StructuredSlotBlobStore(paths, taskId);
+  const blobStore = new StructuredSlotBlobStore(paths, taskId, instrumentation);
 
   const { slotCount, contentBytes } = integratedTaskLoad(limits);
   const contractLimits: StructuredSlotLimitsV1 = {
@@ -259,12 +277,14 @@ export async function createIntegratedBenchmarkAdapter(options: {
   paths: CorePaths;
   taskId: string;
   limits: StructuredSlotLimitsV1;
+  /** Optional blob-store instrumentation (tests count reads/opens). */
+  instrumentation?: StructuredSlotBlobStoreInstrumentation;
 }): Promise<IntegratedBenchmarkCasesV1> {
-  const { paths, taskId, limits } = options;
-  const task = await buildBenchTask(paths, taskId, limits);
+  const { paths, taskId, limits, instrumentation } = options;
+  const task = await buildBenchTask(paths, taskId, limits, instrumentation);
   const events = new EventStore(paths);
   const readEvents = async (): Promise<readonly CommittedEvent[]> => events.read(taskId);
-  const blobStore = new StructuredSlotBlobStore(paths, taskId);
+  const blobStore = new StructuredSlotBlobStore(paths, taskId, instrumentation);
   let projectionService: StructuredSlotProjectionService | null = null;
 
   async function ownerProjection(): Promise<StructuredSlotProjectionService> {
@@ -282,38 +302,64 @@ export async function createIntegratedBenchmarkAdapter(options: {
     return projectionService;
   }
 
+  // The outline diagnostics read the ENTIRE real outline in one page (root +
+  // `maxSlots` filled children) so cold measures the full projection build,
+  // generation-index read, presence-root read AND per-slot NDJSON reads.
+  const outlineLimit = limits.structure.maxSlots + 1;
+
+  /** The exact 500-issue verdict the authorized projection bound exercises. */
+  function buildFiveHundredIssueVerdict(): StructuredVerdictV1 {
+    const issues = Array.from({ length: 500 }, (_, i) =>
+      makeStructuredIssue(
+        i % 2 === 0 ? 'CONTENT_REQUIRED' : 'SLOT_NOT_VISIBLE',
+        i % 2 === 0 ? 'seal_input' : 'merge',
+        i % 2 === 0
+          ? { kind: 'slot', slotId: `bench-${i}`, field: 'content', valuePointer: '' }
+          : { kind: 'operation' },
+        {},
+      ),
+    );
+    return {
+      version: 1,
+      status: 'failed',
+      issues,
+      truncated: false,
+      summary: { errors: 250, warnings: 250 },
+    };
+  }
+
   return {
     async runAuthorizedProjection500Issues(): Promise<number> {
       const started = Date.now();
-      const projection = await ownerProjection();
-      // Indexed read + owner outline (the Task 10 authorized projection).
-      const owner = await projection.listSlots({ kind: 'task_owner' }, null, 64);
-      if (!owner.ok) throw new Error('BENCH_PROJECTION_FAILED');
-      const first = owner.entries[0];
-      if (first !== undefined) {
-        const read = await projection.readSlot({ kind: 'task_owner' }, first.slotId);
-        if (!read.ok) throw new Error('BENCH_PROJECTION_READ_FAILED');
-      }
-      // The real issue projection pipeline over a 500-issue verdict.
-      const issues = Array.from({ length: 500 }, (_, i) =>
-        makeStructuredIssue(
-          i % 2 === 0 ? 'CONTENT_REQUIRED' : 'SLOT_NOT_VISIBLE',
-          i % 2 === 0 ? 'seal_input' : 'merge',
-          i % 2 === 0
-            ? { kind: 'slot', slotId: `bench-${i}`, field: 'content', valuePointer: '' }
-            : { kind: 'operation' },
-          {},
-        ),
-      );
-      const verdict: StructuredVerdictV1 = {
-        version: 1,
-        status: 'failed',
-        issues,
-        truncated: false,
-        summary: { errors: 250, warnings: 250 },
-      };
-      const projected = projectStructuredVerdict(verdict, { visibleLocationKinds: ALL_LOCATION_KINDS });
+      // PURE authorized verdict projection — no projection-service build, no
+      // listSlots/readSlot I/O. This is exactly the operation the 250 ms
+      // `issueProjectionMaxMs` bound gates (spec §16.3).
+      const projected = projectStructuredVerdict(buildFiveHundredIssueVerdict(), {
+        visibleLocationKinds: ALL_LOCATION_KINDS,
+      });
       if (projected.issues.length !== 500) throw new Error('BENCH_ISSUE_PROJECTION_FAILED');
+      return Date.now() - started;
+    },
+
+    async runOwnerOutlineCold(): Promise<number> {
+      const started = Date.now();
+      const projection = await ownerProjection();
+      // FIRST owner outline: includes the projection build (event-state
+      // projection), the generation-index read + parse, the presence-root read
+      // and one NDJSON open per visible slot.
+      const owner = await projection.listSlots({ kind: 'task_owner' }, null, outlineLimit);
+      if (!owner.ok) throw new Error('BENCH_PROJECTION_FAILED');
+      return Date.now() - started;
+    },
+
+    async runOwnerOutlineHot(): Promise<number> {
+      const started = Date.now();
+      const projection = await ownerProjection();
+      // SUBSEQUENT outline over the SAME task: the projection service and the
+      // data source are cached, the generation index and presence root are
+      // already cached — only the per-slot NDJSON reads remain.
+      const owner = await projection.listSlots({ kind: 'task_owner' }, null, outlineLimit);
+      if (!owner.ok) throw new Error('BENCH_PROJECTION_FAILED');
       return Date.now() - started;
     },
 

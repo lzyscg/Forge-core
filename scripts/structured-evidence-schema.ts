@@ -94,7 +94,16 @@ const BOUNDS_FIELDS = [
   'sealMaxMs',
   'peakRssBytes',
 ] as const;
-const EVIDENCE_CASE_FIELDS = ['id', 'rawSampleDigest', 'samples', 'warmup', 'p50Ms', 'p95Ms', 'maxMs'] as const;
+const EVIDENCE_CASE_FIELDS = [
+  'id',
+  'rawSampleDigest',
+  'samples',
+  'warmup',
+  'p50Ms',
+  'p95Ms',
+  'maxMs',
+  'postCasePeakRssBytes',
+] as const;
 const PER_SCALE_CASE_FIELDS = [
   'id',
   'description',
@@ -104,6 +113,7 @@ const PER_SCALE_CASE_FIELDS = [
   'p95Ms',
   'maxMs',
   'sampleDigest',
+  'postCasePeakRssBytes',
 ] as const;
 const PER_SCALE_RESULT_FIELDS = [
   'scale',
@@ -112,6 +122,26 @@ const PER_SCALE_RESULT_FIELDS = [
   'diskBytes',
   'violations',
   'passed',
+] as const;
+
+/**
+ * Every required integrated case the SUCCESS profile evidence's `cases` array
+ * must contain (the six frozen bound cases + the two owner-outline diagnostics).
+ * The bound cases are enforced by the benchmark's per-scale verdict; the outline
+ * diagnostics carry NO bound but ARE required to be emitted, so a success
+ * evidence that dropped them is incomplete and must fail. Per-scale RESULTS are
+ * NOT required to be complete here — an honest failing scale's report may be
+ * truncated and is still recorded.
+ */
+const REQUIRED_EVIDENCE_CASE_IDS: readonly string[] = [
+  'indexed-slot-read',
+  'tree-match-10k',
+  'content-root-64mib',
+  'draft-journal-2k',
+  'seal-assembler-custody',
+  'authorized-projection-500-issues',
+  'owner-outline-cold',
+  'owner-outline-hot',
 ] as const;
 
 /** The exact ordered field map of the frozen v1 limit groups (design §7.6). */
@@ -202,6 +232,7 @@ function validatePerScaleCase(value: unknown, where: string): void {
   requireNonNegativeNumber(value['p95Ms'], `${where}.p95Ms`);
   requireNonNegativeNumber(value['maxMs'], `${where}.maxMs`);
   requireHex64(value['sampleDigest'], `${where}.sampleDigest`);
+  requireNonNegativeInt(value['postCasePeakRssBytes'], `${where}.postCasePeakRssBytes`);
 }
 
 function validatePerScaleResult(value: unknown): void {
@@ -262,6 +293,7 @@ function validateEvidenceCase(value: unknown, where: string): void {
   requireNonNegativeNumber(value['p50Ms'], `${where}.p50Ms`);
   requireNonNegativeNumber(value['p95Ms'], `${where}.p95Ms`);
   requireNonNegativeNumber(value['maxMs'], `${where}.maxMs`);
+  requireNonNegativeInt(value['postCasePeakRssBytes'], `${where}.postCasePeakRssBytes`);
 }
 
 /**
@@ -284,6 +316,10 @@ export function validateProfileEvidence(value: unknown): void {
   if (!Array.isArray(cases)) invalid('evidence.cases must be an array');
   for (let i = 0; i < cases.length; i += 1) {
     validateEvidenceCase(cases[i], `evidence.cases[${i}]`);
+  }
+  const presentCaseIds = new Set(cases.map((entry) => (entry as Record<string, unknown>)['id']));
+  for (const id of REQUIRED_EVIDENCE_CASE_IDS) {
+    if (!presentCaseIds.has(id)) invalid(`evidence.cases missing required case '${id}'`);
   }
   const candidatePercentage = value['candidatePercentage'];
   if (

@@ -19,7 +19,10 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   evaluateScaleReport,
+  integratedScaleCaseDefinitions,
   scaledLimits,
+  REQUIRED_DIAGNOSTIC_CASE_IDS,
+  type IntegratedBenchmarkCasesV1,
   type IntegratedScaleReport,
   type ScaleBounds,
 } from './benchmark-structured-slots';
@@ -52,15 +55,17 @@ const BOUNDS: ScaleBounds = {
   peakRssBytes: 512 * 1024 * 1024,
 };
 
-/** A results array whose timings all satisfy the bounds. */
+/** A results array whose timings all satisfy the bounds (incl. diagnostics). */
 function passingResults(scale: number): IntegratedScaleReport['results'] {
   return [
-    { id: 'indexed-slot-read', description: '', warmup: 3, samples: 10, p50Ms: 1, p95Ms: 2, maxMs: 3, sampleDigest: 'a'.repeat(64), rawSamples: [], diskBytes: 0 },
-    { id: 'tree-match-10k', description: '', warmup: 1, samples: 5, p50Ms: 10, p95Ms: 15, maxMs: 20, sampleDigest: 'b'.repeat(64), rawSamples: [], diskBytes: 0 },
-    { id: 'content-root-64mib', description: '', warmup: 1, samples: 3, p50Ms: 100, p95Ms: 200, maxMs: 300, sampleDigest: 'c'.repeat(64), rawSamples: [], diskBytes: 0 },
-    { id: 'draft-journal-2k', description: '', warmup: 1, samples: 5, p50Ms: 1, p95Ms: 2, maxMs: 3, sampleDigest: 'd'.repeat(64), rawSamples: [], diskBytes: 0 },
-    { id: 'seal-assembler-custody', description: '', warmup: 0, samples: 1, p50Ms: 1000, p95Ms: 2000, maxMs: 3000, sampleDigest: 'e'.repeat(64), rawSamples: [], diskBytes: 0 },
-    { id: 'authorized-projection-500-issues', description: '', warmup: 0, samples: 1, p50Ms: 10, p95Ms: 20, maxMs: 30, sampleDigest: 'f'.repeat(64), rawSamples: [], diskBytes: 0 },
+    { id: 'owner-outline-cold', description: '', warmup: 0, samples: 1, p50Ms: 20, p95Ms: 20, maxMs: 20, sampleDigest: 'a'.repeat(64), rawSamples: [], diskBytes: 0, postCasePeakRssBytes: 100 * 1024 * 1024 },
+    { id: 'owner-outline-hot', description: '', warmup: 1, samples: 5, p50Ms: 8, p95Ms: 10, maxMs: 12, sampleDigest: 'b'.repeat(64), rawSamples: [], diskBytes: 0, postCasePeakRssBytes: 100 * 1024 * 1024 },
+    { id: 'indexed-slot-read', description: '', warmup: 3, samples: 10, p50Ms: 1, p95Ms: 2, maxMs: 3, sampleDigest: 'c'.repeat(64), rawSamples: [], diskBytes: 0, postCasePeakRssBytes: 100 * 1024 * 1024 },
+    { id: 'tree-match-10k', description: '', warmup: 1, samples: 5, p50Ms: 10, p95Ms: 15, maxMs: 20, sampleDigest: 'd'.repeat(64), rawSamples: [], diskBytes: 0, postCasePeakRssBytes: 100 * 1024 * 1024 },
+    { id: 'content-root-64mib', description: '', warmup: 1, samples: 3, p50Ms: 100, p95Ms: 200, maxMs: 300, sampleDigest: 'e'.repeat(64), rawSamples: [], diskBytes: 0, postCasePeakRssBytes: 100 * 1024 * 1024 },
+    { id: 'draft-journal-2k', description: '', warmup: 1, samples: 5, p50Ms: 1, p95Ms: 2, maxMs: 3, sampleDigest: 'f'.repeat(64), rawSamples: [], diskBytes: 0, postCasePeakRssBytes: 100 * 1024 * 1024 },
+    { id: 'seal-assembler-custody', description: '', warmup: 0, samples: 1, p50Ms: 1000, p95Ms: 2000, maxMs: 3000, sampleDigest: 'g'.repeat(64), rawSamples: [], diskBytes: 0, postCasePeakRssBytes: 100 * 1024 * 1024 },
+    { id: 'authorized-projection-500-issues', description: '', warmup: 3, samples: 10, p50Ms: 10, p95Ms: 20, maxMs: 30, sampleDigest: 'h'.repeat(64), rawSamples: [], diskBytes: 0, postCasePeakRssBytes: 100 * 1024 * 1024 },
   ];
 }
 
@@ -214,6 +219,64 @@ describe('single scaling boundary (P1-2)', () => {
 });
 
 /* -------------------------------------------------------------------------- */
+/* Task D: integrated case definitions (pure projection + outline diagnostics) */
+/* -------------------------------------------------------------------------- */
+
+/** A stub adapter so tests can inspect the case definitions without a real task. */
+function stubAdapter(): IntegratedBenchmarkCasesV1 {
+  return {
+    runAuthorizedProjection500Issues: async () => 0.4,
+    runSealAssemblerCustody64MiB: async () => 1000,
+    runBatchRecovery: async () => 800,
+    runIndexedSlotRead: async () => 4,
+    runOwnerOutlineCold: async () => 42,
+    runOwnerOutlineHot: async () => 18,
+  };
+}
+
+describe('integratedScaleCaseDefinitions (Task D calibration)', () => {
+  it('gates the authorized-projection-500-issues case with warmup >= 3 and samples >= 10', () => {
+    const cases = integratedScaleCaseDefinitions(25, scaledLimits(25), stubAdapter());
+    const projection = cases.find((entry) => entry.id === 'authorized-projection-500-issues');
+    expect(projection).toBeDefined();
+    // The p95 must be over REAL samples, not a single accidental sample.
+    expect(projection?.warmup).toBeGreaterThanOrEqual(3);
+    expect(projection?.samples).toBeGreaterThanOrEqual(10);
+  });
+
+  it('emits the owner-outline-cold and owner-outline-hot diagnostic cases', () => {
+    const cases = integratedScaleCaseDefinitions(25, scaledLimits(25), stubAdapter());
+    const ids = cases.map((entry) => entry.id);
+    for (const id of REQUIRED_DIAGNOSTIC_CASE_IDS) {
+      expect(ids).toContain(id);
+    }
+  });
+
+  it('FAILS a report missing a required diagnostic case (a regression that drops them cannot silently pass)', () => {
+    const report = reportFor(50, 100 * 1024 * 1024);
+    report.results = report.results.filter((result) => result.id !== 'owner-outline-hot');
+    const verdict = evaluateScaleReport(report, BOUNDS);
+    expect(verdict.passed).toBe(false);
+    expect(verdict.violations).toContain('missing diagnostic case owner-outline-hot');
+    // The bound cases stay the frozen six; the outline diagnostics carry no bound.
+    expect(REQUIRED_DIAGNOSTIC_CASE_IDS).not.toContain('indexed-slot-read');
+  });
+
+  it('does NOT gate any outline diagnostic timing on a bound (only emission is required)', () => {
+    const report = reportFor(50, 100 * 1024 * 1024);
+    // A slow outline (even 10 s) must NOT fail the bound verdict.
+    report.results = report.results.map((result) =>
+      result.id === 'owner-outline-cold' || result.id === 'owner-outline-hot'
+        ? { ...result, maxMs: 10_000, p95Ms: 9_000 }
+        : result,
+    );
+    const verdict = evaluateScaleReport(report, BOUNDS);
+    expect(verdict.passed).toBe(true);
+    expect(verdict.violations).toEqual([]);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
 /* P2: exact evidence schema validation                                        */
 /* -------------------------------------------------------------------------- */
 
@@ -252,6 +315,28 @@ function validPerScaleResults(): Array<Record<string, unknown>> {
       scale: 25,
       results: [
         {
+          id: 'owner-outline-cold',
+          description: 'owner outline cold (first listSlots) @ 25%',
+          warmup: 0,
+          samples: 1,
+          p50Ms: 42.0,
+          p95Ms: 42.0,
+          maxMs: 42.0,
+          sampleDigest: 'a'.repeat(64),
+          postCasePeakRssBytes: 300 * 1024 * 1024,
+        },
+        {
+          id: 'owner-outline-hot',
+          description: 'owner outline hot (warm listSlots) @ 25%',
+          warmup: 1,
+          samples: 5,
+          p50Ms: 18.0,
+          p95Ms: 22.0,
+          maxMs: 24.0,
+          sampleDigest: 'b'.repeat(64),
+          postCasePeakRssBytes: 300 * 1024 * 1024,
+        },
+        {
           id: 'indexed-slot-read',
           description: 'indexed slot read (real projection) @ 25%',
           warmup: 3,
@@ -260,6 +345,7 @@ function validPerScaleResults(): Array<Record<string, unknown>> {
           p95Ms: 5.4,
           maxMs: 5.4,
           sampleDigest: 'c'.repeat(64),
+          postCasePeakRssBytes: 300 * 1024 * 1024,
         },
         {
           id: 'tree-match-10k',
@@ -270,6 +356,51 @@ function validPerScaleResults(): Array<Record<string, unknown>> {
           p95Ms: 1.26,
           maxMs: 1.26,
           sampleDigest: 'd'.repeat(64),
+          postCasePeakRssBytes: 300 * 1024 * 1024,
+        },
+        {
+          id: 'content-root-64mib',
+          description: '16 MiB content root @ 25%',
+          warmup: 1,
+          samples: 3,
+          p50Ms: 100,
+          p95Ms: 120,
+          maxMs: 130,
+          sampleDigest: 'e'.repeat(64),
+          postCasePeakRssBytes: 300 * 1024 * 1024,
+        },
+        {
+          id: 'draft-journal-2k',
+          description: '2k-change Draft overlay @ 25%',
+          warmup: 1,
+          samples: 5,
+          p50Ms: 1,
+          p95Ms: 2,
+          maxMs: 3,
+          sampleDigest: 'f'.repeat(64),
+          postCasePeakRssBytes: 300 * 1024 * 1024,
+        },
+        {
+          id: 'seal-assembler-custody',
+          description: '16 MiB real Seal @ 25%',
+          warmup: 0,
+          samples: 1,
+          p50Ms: 1000,
+          p95Ms: 1000,
+          maxMs: 1000,
+          sampleDigest: '9a'.repeat(32),
+          postCasePeakRssBytes: 300 * 1024 * 1024,
+        },
+        {
+          id: 'authorized-projection-500-issues',
+          description: '500-issue PURE verdict projection @ 25%',
+          warmup: 3,
+          samples: 10,
+          p50Ms: 0.4,
+          p95Ms: 0.5,
+          maxMs: 0.6,
+          sampleDigest: '8b'.repeat(32),
+          postCasePeakRssBytes: 300 * 1024 * 1024,
         },
       ],
       peakRssBytes: 300 * 1024 * 1024,
@@ -292,6 +423,26 @@ function validSuccessEvidence(): Record<string, unknown> {
     diskBytes: 17_000_000,
     cases: [
       {
+        id: 'owner-outline-cold',
+        rawSampleDigest: 'a'.repeat(64),
+        samples: 1,
+        warmup: 0,
+        p50Ms: 42.0,
+        p95Ms: 42.0,
+        maxMs: 42.0,
+        postCasePeakRssBytes: 300 * 1024 * 1024,
+      },
+      {
+        id: 'owner-outline-hot',
+        rawSampleDigest: 'b'.repeat(64),
+        samples: 5,
+        warmup: 1,
+        p50Ms: 18.0,
+        p95Ms: 22.0,
+        maxMs: 24.0,
+        postCasePeakRssBytes: 300 * 1024 * 1024,
+      },
+      {
         id: 'indexed-slot-read',
         rawSampleDigest: 'c'.repeat(64),
         samples: 10,
@@ -299,6 +450,7 @@ function validSuccessEvidence(): Record<string, unknown> {
         p50Ms: 4.2,
         p95Ms: 5.4,
         maxMs: 5.4,
+        postCasePeakRssBytes: 300 * 1024 * 1024,
       },
       {
         id: 'tree-match-10k',
@@ -308,6 +460,47 @@ function validSuccessEvidence(): Record<string, unknown> {
         p50Ms: 1.07,
         p95Ms: 1.26,
         maxMs: 1.26,
+        postCasePeakRssBytes: 300 * 1024 * 1024,
+      },
+      {
+        id: 'content-root-64mib',
+        rawSampleDigest: 'e'.repeat(64),
+        samples: 3,
+        warmup: 1,
+        p50Ms: 100,
+        p95Ms: 120,
+        maxMs: 130,
+        postCasePeakRssBytes: 300 * 1024 * 1024,
+      },
+      {
+        id: 'draft-journal-2k',
+        rawSampleDigest: 'f'.repeat(64),
+        samples: 5,
+        warmup: 1,
+        p50Ms: 1,
+        p95Ms: 2,
+        maxMs: 3,
+        postCasePeakRssBytes: 300 * 1024 * 1024,
+      },
+      {
+        id: 'seal-assembler-custody',
+        rawSampleDigest: '9a'.repeat(32),
+        samples: 1,
+        warmup: 0,
+        p50Ms: 1000,
+        p95Ms: 1000,
+        maxMs: 1000,
+        postCasePeakRssBytes: 300 * 1024 * 1024,
+      },
+      {
+        id: 'authorized-projection-500-issues',
+        rawSampleDigest: '8b'.repeat(32),
+        samples: 10,
+        warmup: 3,
+        p50Ms: 0.4,
+        p95Ms: 0.5,
+        maxMs: 0.6,
+        postCasePeakRssBytes: 300 * 1024 * 1024,
       },
     ],
     candidatePercentage: 25,
@@ -353,6 +546,37 @@ describe('validateProfileEvidence (P2)', () => {
     expect(() => validateProfileEvidence(evidence)).toThrow(
       /candidatePercentage must be null or one of 100, 75, 50, 25/,
     );
+  });
+
+  it('rejects a success evidence whose cases dropped a required diagnostic (diagnostic-dropped)', () => {
+    const evidence = validSuccessEvidence();
+    (evidence.cases as Array<Record<string, unknown>>) = (evidence.cases as Array<Record<string, unknown>>).filter(
+      (entry) => entry.id !== 'owner-outline-cold',
+    );
+    expect(() => validateProfileEvidence(evidence)).toThrow(/evidence.cases missing required case 'owner-outline-cold'/);
+  });
+
+  it('rejects a success evidence missing a required bound case', () => {
+    const evidence = validSuccessEvidence();
+    (evidence.cases as Array<Record<string, unknown>>) = (evidence.cases as Array<Record<string, unknown>>).filter(
+      (entry) => entry.id !== 'authorized-projection-500-issues',
+    );
+    expect(() => validateProfileEvidence(evidence)).toThrow(
+      /evidence.cases missing required case 'authorized-projection-500-issues'/,
+    );
+  });
+
+  it('rejects a per-scale case with a wrong-type postCasePeakRssBytes', () => {
+    const evidence = validSuccessEvidence();
+    const results = (evidence.perScaleResults as Array<{ results: Array<Record<string, unknown>> }>)[0]!.results;
+    results[0]!.postCasePeakRssBytes = 'huge';
+    expect(() => validateProfileEvidence(evidence)).toThrow(/postCasePeakRssBytes must be a non-negative safe integer/);
+  });
+
+  it('rejects a success case missing the required postCasePeakRssBytes diagnostic field', () => {
+    const evidence = validSuccessEvidence();
+    delete (evidence.cases as Array<Record<string, unknown>>)[0]!.postCasePeakRssBytes;
+    expect(() => validateProfileEvidence(evidence)).toThrow(/postCasePeakRssBytes/);
   });
 });
 

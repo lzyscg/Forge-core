@@ -2008,6 +2008,8 @@ artifact:       ARTIFACT_SCHEMA_MISMATCH, ARTIFACT_INTEGRITY_FAILED, PUBLISH_FAI
 
 后续 dev plan 必须先对最坏 Grammar/Schema、10k 槽遍历、最大 Draft、最大 validator 注册/target fanout/aggregate Gate、同 Attempt 重复 validation/Seal、500 issues、全量 Seal 和崩溃恢复做 CPU、wall-clock、内存、响应与磁盘基准，再冻结实际部署 profile；模板只能声明更小值。
 
+**基准口径澄清（Task D，2026-08-11）：** `issueProjectionMaxMs`（250 ms）这一冻结 bound 只测量**纯授权 verdict projection**——即对 500 个 issue 的 `StructuredVerdictV1` 调用 `projectStructuredVerdict`（全可见性）的单次操作。owner outline 的 cold/hot（`owner-outline-cold` / `owner-outline-hot`）是**诊断测量**，用于把 projection 的 N+1 成本（投影构建、generation index 读取、presence-root 读取、逐槽 NDJSON 读取）与纯 projection 分开呈现；这两个诊断 case 不设 bound，仅要求被测量并记录。任何一处数值 bound（25/2000/2000/2000/250/30000 ms 与 512 MiB peak RSS）都不因本澄清而改变。
+
 ---
 
 ## 26. 已接受决策记录

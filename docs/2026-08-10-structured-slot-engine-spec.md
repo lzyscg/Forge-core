@@ -788,6 +788,8 @@ Agent subject 只使用当前 Grant 绑定的 AccessProfile；v1 本地单用户
 10. 只读 API exact schema、cursor 失效、Agent Grant 与本地 `task_owner` 两种授权投影、HTTP/Mock/stub Gateway 完整契约和 UI basic/structured 双模式通过；
 11. production capability 在前置 acceptance 时仍 disabled；从 clean committed source 只生成 final profile JSON、profile/release evidence 与 manifest，证据完成后由唯一步骤启用，再以 production default 跑 `npm run check`、`npm test`、`npm run build`、`npm run e2e` 与 structured acceptance 全绿。
 
+**基准口径澄清（Task D，2026-08-11，不改变任何冻结数值）：** `issueProjectionMaxMs`（250 ms）bound 只测量**纯授权 verdict projection**——对 500 个 issue 的 `StructuredVerdictV1` 调用 `projectStructuredVerdict`（全可见性）的单次操作（`authorized-projection-500-issues` case，warmup ≥ 3 / samples ≥ 10，p95 判定）。owner outline 的 cold/hot（`owner-outline-cold` / `owner-outline-hot`）是诊断测量，把 projection N+1 成本与纯 projection 分开记录；它们不设 bound，仅要求被测量并记录在 per-scale results 与 evidence 中。每条 case 的 `postCasePeakRssBytes` 记录该 case 之后的累计 child peak RSS，用于定位哪个 case 推高了整档峰值；整档 child peak RSS 仍为 512 MiB 的权威门禁。
+
 ---
 
 ## 17. 规格维护
