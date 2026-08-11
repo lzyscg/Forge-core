@@ -42,7 +42,7 @@ import type { StructuredSlotPrivateStore } from '../../storage/structured-slot-p
 import type { TaskEvent } from '../../storage/task-events';
 import {
   AttemptMeter,
-  type AttemptPrechargeResult,
+  type AttemptTerminalFailure,
   type SlotToolCallContext,
 } from './attempt-meter';
 import type { StructuredSlotDraftService } from './draft-service';
@@ -119,10 +119,36 @@ export const RESOURCE_LIMIT_EXCEEDED = 'RESOURCE_LIMIT_EXCEEDED';
  * `(toolCallId, canonicalArgsHash)` key and checks the composite signal. It
  * NEVER charges, and a missing precharge (meter bypass) fails closed.
  */
+/**
+ * The consume-only precharge outcome (spec §5 / O06). On `ok` the adapter MUST
+ * use the returned `prechargedArgsHash` as the effective metering key: the raw
+ * pre-validation seam keyed the precharge by the RAW model args, which Pi 0.82
+ * may COERCE during validation (e.g. `123` → `"123"` for a String schema), so
+ * the validated hash can differ from the precharged hash. Threading the
+ * precharged hash through the service context + result record keeps the meter
+ * and the private journal keyed consistently (single charge, free exact
+ * replay, no spurious NOT_PRECHARGED).
+ */
+export type SlotToolConsumeResult =
+  | { status: 'ok'; replayed: boolean; prechargedArgsHash: string }
+  | { status: 'closed'; failure: AttemptTerminalFailure }
+  | { status: 'aborted' }
+  | { status: 'not_precharged' };
+
+/**
+ * The consume-only precharge gate (spec §5 / O06): verifies the raw
+ * pre-validation seam already persisted a charge for the toolCallId and checks
+ * the composite signal. It NEVER charges. Because Pi 0.82 coerces raw args
+ * during TypeBox validation, the validated hash may differ from the precharged
+ * hash, so the gate resolves the precharge by toolCallId (preferring an exact
+ * hash match, then the most recent pending precharge for the id) and returns
+ * the PRE-CHARGED hash for the adapter to thread onward. A missing precharge
+ * (meter bypass) fails closed.
+ */
 export async function consumeSlotToolPrecharge(
   meter: AttemptMeter,
   ctx: SlotToolCallContext,
-): Promise<AttemptPrechargeResult> {
+): Promise<SlotToolConsumeResult> {
   if (meter.signal.aborted) {
     // A scheduler stop aborts the composite without minting a terminal; a
     // resource/deadline closure mints one. Only the latter surfaces the
@@ -132,18 +158,28 @@ export async function consumeSlotToolPrecharge(
     }
     return { status: 'aborted' };
   }
-  const record = meter.toolCalls.find(
-    (candidate) =>
-      candidate.toolCallId === ctx.toolCallId &&
-      candidate.canonicalArgsHash === ctx.canonicalArgsHash,
-  );
-  if (record === undefined) {
+  const forId = meter.toolCalls.filter((candidate) => candidate.toolCallId === ctx.toolCallId);
+  if (forId.length === 0) {
     return { status: 'not_precharged' };
   }
-  if (record.result !== null) {
-    return { status: 'ok', replayed: true };
+  // Exact key match first: a recorded exact replay is free, a pending exact
+  // precharge is the current call's charge.
+  const exact = forId.find((candidate) => candidate.canonicalArgsHash === ctx.canonicalArgsHash);
+  if (exact !== undefined) {
+    return exact.result !== null
+      ? { status: 'ok', replayed: true, prechargedArgsHash: exact.canonicalArgsHash }
+      : { status: 'ok', replayed: false, prechargedArgsHash: exact.canonicalArgsHash };
   }
-  return { status: 'ok', replayed: false };
+  // Coercion-tolerant fallback: the raw seam keyed the precharge by the RAW
+  // args hash, which can differ from the validated hash. Resolve by the most
+  // recent pending (unrecorded) precharge for this id.
+  const pending = [...forId].reverse().find((candidate) => candidate.result === null);
+  if (pending !== undefined) {
+    return { status: 'ok', replayed: false, prechargedArgsHash: pending.canonicalArgsHash };
+  }
+  // Every record for this id is a recorded result with a DIFFERENT validated
+  // hash and no pending precharge: there is nothing to consume (meter bypass).
+  return { status: 'not_precharged' };
 }
 
 /** The seal completion dispatch state (design §11.3 matrix). */
@@ -267,7 +303,7 @@ function slotRejected(code: string, name: string, reason: string): SlotToolResul
   };
 }
 
-function rejectedResultForCharge(status: Extract<AttemptPrechargeResult, { status: 'closed' | 'aborted' | 'not_precharged' }>, name: string): SlotToolResult {
+function rejectedResultForCharge(status: Extract<SlotToolConsumeResult, { status: 'closed' | 'aborted' | 'not_precharged' }>, name: string): SlotToolResult {
   if (status.status === 'closed') {
     return slotRejected(RESOURCE_LIMIT_EXCEEDED, name, status.failure.message);
   }
@@ -299,7 +335,7 @@ function serializeSlotRead(slot: JsonValue, name: string, limitBytes: number): S
 
 /** Structure tool-signature gate: consume precharge + private-journal replay/conflict. */
 type StructureGateResult =
-  | { kind: 'ok' }
+  | { kind: 'ok'; prechargedArgsHash: string }
   | { kind: 'replay'; result: JsonValue }
   | { kind: 'reject'; code: string; reason: string };
 
@@ -314,21 +350,22 @@ async function structureGate(
   if (precharge.status !== 'ok') {
     return { kind: 'reject', code: rejectedCode(precharge), reason: '' };
   }
+  const prechargedArgsHash = precharge.prechargedArgsHash;
   if (ctx.store === undefined || ctx.events === undefined) {
     return { kind: 'reject', code: NOT_PRECHARGED, reason: 'the structure tool adapter is not wired' };
   }
   const view = await ctx.store.readProposal(proposalId, await ctx.events());
   const matching = view.toolRecords.find((record) => record.toolCallId === toolCallId);
   if (matching !== undefined) {
-    if (matching.argsHash === canonicalArgsHash) {
+    if (matching.argsHash === prechargedArgsHash) {
       return { kind: 'replay', result: matching.result };
     }
     return { kind: 'reject', code: 'IDEMPOTENCY_CONFLICT', reason: 'the same toolCallId was already used with different arguments' };
   }
-  return { kind: 'ok' };
+  return { kind: 'ok', prechargedArgsHash };
 }
 
-function rejectedCode(precharge: Extract<AttemptPrechargeResult, { status: 'closed' | 'aborted' | 'not_precharged' }>): string {
+function rejectedCode(precharge: Extract<SlotToolConsumeResult, { status: 'closed' | 'aborted' | 'not_precharged' }>): string {
   if (precharge.status === 'closed') return RESOURCE_LIMIT_EXCEEDED;
   if (precharge.status === 'aborted') return ATTEMPT_ABORTED;
   return NOT_PRECHARGED;
@@ -414,16 +451,19 @@ function structureToolDefinition(
       const tc = toolCallContext(toolCallId, name, rawParams);
       const grant = ctx.grant as Extract<SlotSessionGrantV1, { kind: 'structure' }>;
       if (name === 'get_structure_contract') {
-        // Pure declarative projection read; consume + record handled here.
+        // Pure declarative projection read; consume + record handled here. The
+        // consume resolves the PRE-CHARGED hash (raw args) so the record lands
+        // on the same key the raw seam charged.
         const precharge = await consumeSlotToolPrecharge(ctx.meter, tc);
         if (precharge.status !== 'ok') return rejectedResultForCharge(precharge, name);
         if (ctx.store === undefined || ctx.events === undefined) {
           return slotRejected(NOT_PRECHARGED, name, 'the structure tool adapter is not wired');
         }
-        const replay = await replayProposalRecord(ctx, proposalId, tc);
+        const effTc: SlotToolCallContext = { ...tc, canonicalArgsHash: precharge.prechargedArgsHash };
+        const replay = await replayProposalRecord(ctx, proposalId, effTc);
         if (replay !== null) return replay;
         const result = service.getContract(grant);
-        await structureRecord(ctx, proposalId, tc.toolCallId, tc.canonicalArgsHash, tc.toolName, result as unknown as JsonValue);
+        await structureRecord(ctx, proposalId, effTc.toolCallId, effTc.canonicalArgsHash, effTc.toolName, result as unknown as JsonValue);
         return result.ok
           ? slotAccepted(result.contract as unknown as JsonValue, name)
           : serializeOpFailure(result.code, name, result.reason);
@@ -434,11 +474,12 @@ function structureToolDefinition(
       }
       if (gate.kind === 'replay') return slotAccepted(gate.result, name);
       const result = await structureOperation(service, grant, name, rawParams, ctx);
+      const prechargedArgsHash = gate.prechargedArgsHash;
       if (result.ok) {
-        await structureRecord(ctx, proposalId, tc.toolCallId, tc.canonicalArgsHash, tc.toolName, result.result as unknown as JsonValue);
+        await structureRecord(ctx, proposalId, tc.toolCallId, prechargedArgsHash, tc.toolName, result.result as unknown as JsonValue);
         return slotAccepted(result.result, name);
       }
-      await structureRecord(ctx, proposalId, tc.toolCallId, tc.canonicalArgsHash, tc.toolName, result.failure as unknown as JsonValue);
+      await structureRecord(ctx, proposalId, tc.toolCallId, prechargedArgsHash, tc.toolName, result.failure as unknown as JsonValue);
       return serializeOpFailure(result.failure.code, name, result.failure.reason);
     },
   };
@@ -533,7 +574,14 @@ function fillToolDefinition(
     executionMode: 'sequential' as const,
     execute: async (toolCallId: string, rawParams: Static<TSchema>): Promise<SlotToolResult> => {
       const tc = toolCallContext(toolCallId, name, rawParams);
-      const result = await fillOperation(service, grant, name, rawParams, tc, limitBytes);
+      // Consume resolves the PRE-CHARGED hash (raw args; Pi may coerce the
+      // validated params) and threads it into the service context so the
+      // draft-service consume + record land on the SAME key the raw seam
+      // charged — single charge, free exact replay, no spurious rejection.
+      const consume = await consumeSlotToolPrecharge(ctx.meter, tc);
+      if (consume.status !== 'ok') return rejectedResultForCharge(consume, name);
+      const effTc: SlotToolCallContext = { ...tc, canonicalArgsHash: consume.prechargedArgsHash };
+      const result = await fillOperation(service, grant, name, rawParams, effTc, limitBytes);
       return result.ok ? slotAccepted(result.result, name) : serializeOpFailure(result.failure.code, name, result.failure.reason);
     },
   };
@@ -625,12 +673,18 @@ function createSealTools(ctx: StructuredSlotToolContext, limitBytes: number): To
       const tc = toolCallContext(toolCallId, 'request_seal', rawParams);
       const precharge = await consumeSlotToolPrecharge(ctx.meter, tc);
       if (precharge.status !== 'ok') return rejectedResultForCharge(precharge, 'request_seal');
-      const result = await ctx.seal!.requestSeal(grant, tc);
+      const effTc: SlotToolCallContext = { ...tc, canonicalArgsHash: precharge.prechargedArgsHash };
+      // Exact replay returns the RECORDED result — the Seal Gate is NEVER re-run
+      // (it is authoritative/expensive and must not re-consume validator budget
+      // or re-derive a possibly different verdict).
+      const replay = consumeReplay(ctx.meter, effTc);
+      if (replay !== null) return replay;
+      const result = await ctx.seal!.requestSeal(grant, effTc);
       if (result.ok) {
-        await ctx.meter.recordToolResult({ toolCallId: tc.toolCallId, canonicalArgsHash: tc.canonicalArgsHash, result: result.receipt as unknown as JsonValue });
+        await ctx.meter.recordToolResult({ toolCallId: effTc.toolCallId, canonicalArgsHash: effTc.canonicalArgsHash, result: result.receipt as unknown as JsonValue });
         return slotAccepted(result.receipt as unknown as JsonValue, 'request_seal');
       }
-      await ctx.meter.recordToolResult({ toolCallId: tc.toolCallId, canonicalArgsHash: tc.canonicalArgsHash, result: { ok: false, code: result.code, reason: result.reason } as unknown as JsonValue });
+      await ctx.meter.recordToolResult({ toolCallId: effTc.toolCallId, canonicalArgsHash: effTc.canonicalArgsHash, result: { ok: false, code: result.code, reason: result.reason } as unknown as JsonValue });
       return serializeOpFailure(result.code, 'request_seal', result.reason);
     },
   });
@@ -664,7 +718,8 @@ function sealReadTool(
       const tc = toolCallContext(toolCallId, name, rawParams);
       const precharge = await consumeSlotToolPrecharge(ctx.meter, tc);
       if (precharge.status !== 'ok') return rejectedResultForCharge(precharge, name);
-      const replay = await consumeReplay(ctx.meter, tc);
+      const effTc: SlotToolCallContext = { ...tc, canonicalArgsHash: precharge.prechargedArgsHash };
+      const replay = consumeReplay(ctx.meter, effTc);
       if (replay !== null) return replay;
       const subject = { kind: 'agent' as const, grant };
       if (name === 'list_slots') {
@@ -676,7 +731,7 @@ function sealReadTool(
         const list = await projection.listSlots(subject, cursor.cursor, params.limit ?? 64);
         if (!list.ok) return serializeOpFailure(list.code, name, list.reason);
         const result = { ok: true, entries: list.entries, nextCursor: list.nextCursor === null ? null : stringifyCursor(list.nextCursor) } as unknown as JsonValue;
-        await ctx.meter.recordToolResult({ toolCallId: tc.toolCallId, canonicalArgsHash: tc.canonicalArgsHash, result });
+        await ctx.meter.recordToolResult({ toolCallId: effTc.toolCallId, canonicalArgsHash: effTc.canonicalArgsHash, result });
         return slotAccepted(result, name);
       }
       const params = rawParams as { slotId: string };
@@ -685,7 +740,7 @@ function sealReadTool(
       const serialized = serializeSlotRead(read.slot as unknown as JsonValue, name, limitBytes);
       if (!serialized.details.accepted) return serialized;
       const result = { ok: true, slot: read.slot as unknown as JsonValue } as unknown as JsonValue;
-      await ctx.meter.recordToolResult({ toolCallId: tc.toolCallId, canonicalArgsHash: tc.canonicalArgsHash, result });
+      await ctx.meter.recordToolResult({ toolCallId: effTc.toolCallId, canonicalArgsHash: effTc.canonicalArgsHash, result });
       return slotAccepted(result, name);
     },
   };

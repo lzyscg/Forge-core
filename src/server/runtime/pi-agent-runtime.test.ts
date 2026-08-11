@@ -58,6 +58,7 @@ import { AttemptMeter } from './structured-slot/attempt-meter';
 import {
   RESOURCE_LIMIT_EXCEEDED,
   SLOT_TOOL_NAME_SET,
+  consumeSlotToolPrecharge,
 } from './structured-slot/tool-factory';
 
 const tempRoots: string[] = [];
@@ -1317,11 +1318,26 @@ async function createCharAgent(options: {
     executionMode: 'sequential' as const,
     execute: async (toolCallId: string, params: unknown): Promise<unknown> => {
       executed.push({ toolCallId, params });
-      // The tool path records the result for eligible exact replay (the raw
-      // seam already charged the key exactly once).
-      await meter.recordToolResult({
+      // Mirror the real tool path: consume the raw precharge (resolving the
+      // PRE-CHARGED hash, since Pi 0.82 may coerce the validated params) and
+      // record the result on that same key for eligible exact replay.
+      const consume = await consumeSlotToolPrecharge(meter, {
         toolCallId,
         canonicalArgsHash: canonicalJsonSha256(params),
+        toolName: 'read_slot',
+      });
+      if (consume.status !== 'ok') {
+        const code =
+          consume.status === 'closed'
+            ? RESOURCE_LIMIT_EXCEEDED
+            : consume.status === 'aborted'
+              ? 'ATTEMPT_ABORTED'
+              : 'NOT_PRECHARGED';
+        return { content: [{ type: 'text', text: 'rejected ' + consume.status }], details: { accepted: false, code } };
+      }
+      await meter.recordToolResult({
+        toolCallId,
+        canonicalArgsHash: consume.prechargedArgsHash,
         result: { ok: true },
       });
       return { content: [{ type: 'text', text: 'ok' }], details: { accepted: true } };
@@ -1448,6 +1464,24 @@ describe('Task 14 Step 1 — real locked Pi 0.82 Agent loop pre-validation prech
     await harness.agent.prompt('hello');
     expect(harness.executed).toEqual([{ toolCallId: 'tc-ok', params: { slotId: 'a' } }]);
     expect(harness.meter.usage.slotToolCalls).toBe(1);
+  });
+
+  it('a schema-invalid-but-COERCIBLE call (slotId: 123 -> "123") is precharged once, executes, and is NOT spurious-rejected', async () => {
+    // Pi 0.82 coerces 123 -> "123" for a String schema. The raw seam precharges
+    // hash({slotId:123}) BEFORE validation; the execute sees hash({slotId:"123"}).
+    // The consume must resolve the precharge by toolCallId so the call is NOT
+    // spurious-rejected and the single precharge is reused (no double charge).
+    const harness = await createCharAgent({
+      responses: [
+        { content: [toolCallBlock('read_slot', { slotId: 123 }, 'tc-coerced')] },
+        { content: [{ type: 'text', text: 'final' }] },
+      ],
+    });
+    await harness.agent.prompt('hello');
+    // Execute ran with the COERCED params and consumed the existing precharge.
+    expect(harness.executed).toEqual([{ toolCallId: 'tc-coerced', params: { slotId: '123' } }]);
+    expect(harness.meter.usage.slotToolCalls).toBe(1);
+    expect(harness.meter.toolCalls).toHaveLength(1);
   });
 
   it('exact cached replay is free: a recorded key replays without a new charge', async () => {

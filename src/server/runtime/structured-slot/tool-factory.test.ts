@@ -584,6 +584,28 @@ describe('Step 2 — progressive disclosure (design §10.6)', () => {
     expect(harness.meter.usage.slotToolCalls).toBe(1);
   });
 
+  it('a coerced call (raw "5" precharged, validated 5 executed) is NOT spurious-rejected and charges exactly once', async () => {
+    // Pi 0.82 coerces raw args during TypeBox validation, so the raw seam
+    // precharges hash(raw) while the execute sees hash(validated) — the consume
+    // must resolve the precharge by toolCallId (Finding 1 fix) so a legitimately
+    // precharged, schema-valid-after-coercion call is neither spurious-rejected
+    // (NOT_PRECHARGED) nor double-charged.
+    const harness = await makeFillHarness();
+    const tools = createStructuredSlotToolDefinitions(harness.context);
+    const rawHash = canonicalJsonSha256({ limit: '5' });
+    const charge = await harness.meter.prechargeRawTool({
+      toolCallId: 'tc-coerce-list',
+      canonicalArgsHash: rawHash,
+      toolName: 'list_slots',
+    });
+    expect(charge.status).toBe('ok');
+    const result = await executeTool(tools, 'list_slots', 'tc-coerce-list', { limit: 5 });
+    expect(result.accepted).toBe(true);
+    expect(result.code).toBeUndefined();
+    expect(result.text).toContain('t1');
+    expect(harness.meter.usage.slotToolCalls).toBe(1);
+  });
+
   it('read_slot returns ONE complete authorized content under the draft overlay', async () => {
     const harness = await makeFillHarness();
     const tools = createStructuredSlotToolDefinitions(harness.context);
@@ -760,6 +782,109 @@ describe('Step 2b — structure tool execute paths (consume + record + serialize
     expect(second.accepted).toBe(false);
     expect(second.code).toBe('IDEMPOTENCY_CONFLICT');
     expect(harness.meter.usage.slotToolCalls).toBe(2);
+  });
+});
+
+describe('Step 2c — seal execute: request_seal replay (Finding 2 fix)', () => {
+  it('an exact replay of a passed request_seal returns the recorded result and NEVER re-runs the Seal Gate', async () => {
+    const { paths, dataRoot } = makeTempCorePaths('forge-core-tf-seal-');
+    tempRoots.push(dataRoot);
+    mkdirSync(paths.taskRoot(TASK), { recursive: true });
+    const store = new StructuredSlotPrivateStore(paths, TASK);
+    const meter = await AttemptMeter.create({ turnId: TURN, privateStore: store, limits: makeLimits() });
+    let gateRuns = 0;
+    const grant: SlotSessionGrantV1 = {
+      grantId: 'grant-seal',
+      kind: 'seal',
+      caseId: TASK,
+      turnId: TURN,
+      agentId: AGENT,
+      snapshotHash: SNAPSHOT,
+      capabilities: ['request_seal'],
+      accessProfileId: 'seal-profile',
+      scaffoldId: SC,
+      baseRevision: REV,
+      readableSlotIds: ['t1'],
+      writableSlotIds: [],
+      draftId: null,
+    };
+    const context: StructuredSlotToolContext = {
+      turnId: TURN,
+      sessionKind: 'seal',
+      grant,
+      state: null,
+      meter,
+      seal: {
+        dispatch: { status: 'passed', declaredDispatches: ['publish_artifact'] },
+        requestSeal: async () => {
+          gateRuns += 1;
+          return { ok: true, receipt: { kind: 'seal', status: 'passed', issueSummary: { errors: 0, warnings: 0 } } };
+        },
+      },
+    };
+    const tools = createStructuredSlotToolDefinitions(context);
+    const params = {};
+    // Fresh call: precharge + gate runs once + result recorded.
+    await meter.prechargeRawTool({ toolCallId: 'tc-seal', canonicalArgsHash: canonicalJsonSha256(params), toolName: 'request_seal' });
+    const first = await executeTool(tools, 'request_seal', 'tc-seal', params);
+    expect(first.accepted).toBe(true);
+    expect(first.text).toContain('passed');
+    expect(gateRuns).toBe(1);
+    expect(meter.usage.slotToolCalls).toBe(1);
+    // Exact replay: the raw seam sees the recorded result (free), and the tool
+    // returns it WITHOUT re-running the authoritative/expensive Seal Gate.
+    const replayCharge = await meter.prechargeRawTool({ toolCallId: 'tc-seal', canonicalArgsHash: canonicalJsonSha256(params), toolName: 'request_seal' });
+    expect(replayCharge.status).toBe('ok');
+    if (replayCharge.status !== 'ok') throw new Error('expected ok');
+    expect(replayCharge.replayed).toBe(true);
+    const second = await executeTool(tools, 'request_seal', 'tc-seal', params);
+    expect(second.accepted).toBe(true);
+    expect(second.text).toContain('passed');
+    expect(gateRuns).toBe(1);
+    expect(meter.usage.slotToolCalls).toBe(1);
+  });
+
+  it('a FRESH request_seal call still runs the Seal Gate', async () => {
+    const { paths, dataRoot } = makeTempCorePaths('forge-core-tf-seal2-');
+    tempRoots.push(dataRoot);
+    mkdirSync(paths.taskRoot(TASK), { recursive: true });
+    const store = new StructuredSlotPrivateStore(paths, TASK);
+    const meter = await AttemptMeter.create({ turnId: TURN, privateStore: store, limits: makeLimits() });
+    let gateRuns = 0;
+    const grant: SlotSessionGrantV1 = {
+      grantId: 'grant-seal',
+      kind: 'seal',
+      caseId: TASK,
+      turnId: TURN,
+      agentId: AGENT,
+      snapshotHash: SNAPSHOT,
+      capabilities: ['request_seal'],
+      accessProfileId: 'seal-profile',
+      scaffoldId: SC,
+      baseRevision: REV,
+      readableSlotIds: ['t1'],
+      writableSlotIds: [],
+      draftId: null,
+    };
+    const context: StructuredSlotToolContext = {
+      turnId: TURN,
+      sessionKind: 'seal',
+      grant,
+      state: null,
+      meter,
+      seal: {
+        dispatch: { status: 'passed', declaredDispatches: ['publish_artifact'] },
+        requestSeal: async () => {
+          gateRuns += 1;
+          return { ok: true, receipt: { kind: 'seal', status: 'passed', issueSummary: { errors: 0, warnings: 0 } } };
+        },
+      },
+    };
+    const tools = createStructuredSlotToolDefinitions(context);
+    await meter.prechargeRawTool({ toolCallId: 'tc-seal-fresh', canonicalArgsHash: canonicalJsonSha256({}), toolName: 'request_seal' });
+    const result = await executeTool(tools, 'request_seal', 'tc-seal-fresh', {});
+    expect(result.accepted).toBe(true);
+    expect(gateRuns).toBe(1);
   });
 });
 
