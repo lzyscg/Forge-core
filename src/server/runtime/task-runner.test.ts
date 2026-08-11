@@ -1811,6 +1811,62 @@ describe('TaskRunner structured v3 runNext (Task 17)', () => {
     expect(terminals).toHaveLength(1);
     expect(terminals[0]).toMatchObject({ status: 'waiting_human', reason: 'human_request' });
   });
+
+  it('seal turn starts, builds its session and closes the attempt (no dangling started)', async () => {
+    const h = await structuredRunnerHarness();
+    // Seed an active unsealed scaffold (generation + content blobs + events) so
+    // the seal grant can bind to it.
+    const blobStore = new StructuredSlotBlobStore(h.paths, h.taskId);
+    const manifest = await blobStore.putGeneration({
+      generationId: 'gen-1',
+      scaffoldId: 'scaffold-1',
+      slots: [
+        { slotId: 'r', scaffoldId: 'scaffold-1', parentSlotId: null, order: 0, typeId: 'document', spec: {}, contentPresence: 'unset' },
+        { slotId: 't1', scaffoldId: 'scaffold-1', parentSlotId: 'r', order: 1, typeId: 'title', spec: {}, contentPresence: 'unset' },
+      ],
+    });
+    const contentRef = await blobStore.putContentRevision({ r: 'unset', t1: 'unset' });
+    await h.events.append(h.taskId, {
+      id: 'gen-committed',
+      at: new Date().toISOString(),
+      type: 'structured_scaffold_generation_committed',
+      scaffoldId: 'scaffold-1',
+      generationId: 'gen-1',
+      supersedesGenerationId: null,
+      rootSlotId: 'r',
+      slotCount: 2,
+      maxDepth: 1,
+      structure: manifest.structure,
+      content: contentRef,
+      contentRevision: 0,
+      proposalId: 'p-1',
+    });
+    await seedStructuredInput(h, 'in-seal', 'seal', 'seal the scaffold');
+    // The seal turn abandons to human — this exercises the full seal session
+    // build (seal grant + SealService + dispatch guard) WITHOUT running the
+    // expensive seal gate, and proves the turn no longer fails with
+    // SCAFFOLD_NOT_ACTIVE.
+    h.fake.setScript('seal', [
+      {
+        kind: 'result',
+        publicText: 'need human before seal',
+        actions: [{ type: 'request_human_input', question: 'confirm seal' }],
+      },
+    ]);
+
+    const result = await h.runner.runNext(h.taskId, h.controller.signal);
+    expect(result.waitingHuman).toBe(true);
+    expect(result.committed).toBe(true);
+
+    const events = await committedEvents(h);
+    const turnId = deriveTurnId('in-seal', 1);
+    const started = events.find((e) => e.type === 'structured_slot_attempt_started' && e.turnId === turnId);
+    expect(started).toMatchObject({ sessionKind: 'seal', attemptEpoch: 1, turnId });
+    // The attempt is closed — no dangling started-without-terminal.
+    const terminals = events.filter((e) => e.type === 'structured_slot_attempt_terminal');
+    expect(terminals).toHaveLength(1);
+    expect(terminals[0]).toMatchObject({ status: 'waiting_human', reason: 'human_request', turnId });
+  });
 });
 
 describe('TaskRunner structured resource-limit closure (Task 17, spec §7.6/N04)', () => {

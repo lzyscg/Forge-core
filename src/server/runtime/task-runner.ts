@@ -1176,11 +1176,13 @@ ${checklist}`;
     ): Promise<CommittedEvent[]> =>
       this.events.appendBatch(taskId, commitId, batch, { expectedLastSequence });
 
-    // Resolve the active scaffold BEFORE the fill start batch so draft_opened
-    // binds the real generation/revision (design O01).
-    const activeScaffold = sessionKind === 'fill' ? this.resolveActiveScaffold(events) : null;
-    if (sessionKind === 'fill' && activeScaffold === null) {
-      throw RuntimeFailure.permanent('SCAFFOLD_NOT_ACTIVE', '填充回合需要 active scaffold。');
+    // Resolve the active scaffold BEFORE the fill/seal start batch so
+    // draft_opened (fill) and the seal grant bind the real generation/revision
+    // (design O01). Structure has no scaffold yet and must NOT require one.
+    const activeScaffold =
+      sessionKind === 'fill' || sessionKind === 'seal' ? this.resolveActiveScaffold(events) : null;
+    if (activeScaffold === null && (sessionKind === 'fill' || sessionKind === 'seal')) {
+      throw RuntimeFailure.permanent('SCAFFOLD_NOT_ACTIVE', '填充/封存回合需要 active scaffold。');
     }
 
     // 1) CAS-allocate the attempt BEFORE any private object/Grant creation
@@ -1194,7 +1196,7 @@ ${checklist}`;
       events: await readEvents(),
       readEvents,
       appendBatch,
-      ...(activeScaffold !== null
+      ...(sessionKind === 'fill' && activeScaffold !== null
         ? {
             draftContext: {
               scaffoldId: activeScaffold.scaffoldId,

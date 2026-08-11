@@ -1320,11 +1320,16 @@ export class TaskScheduler {
         requests.push(event);
       }
     }
+    // Newest-first: the FIRST request that has NO committed answer batch is the
+    // one this answer addresses — a new commit proceeds ('none'). Only a
+    // request that ALREADY has a committed batch replays/conflicts. This
+    // anchors the check to the pending request so a later question can never be
+    // mistaken for a replay of an earlier one (deadlock-free, spec §11.5).
     for (let index = requests.length - 1; index >= 0; index -= 1) {
       const request = requests[index];
       const committed = await this.#service.events.readBatchByCommitId(taskId, `answer-${request.id}`);
       if (committed === null) {
-        continue;
+        return 'none';
       }
       const answered = committed.find((entry) => entry.event.type === 'human_answered');
       if (

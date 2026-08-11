@@ -241,7 +241,14 @@ export class TaskStore {
         historicalSnapshot: true,
         runtimeEnvironment: this.runtimeEnvironment,
       });
-    } catch {
+    } catch (error) {
+      // A structured snapshot whose host runtime is unavailable must surface
+      // the SAME `TEMPLATE_RUNTIME_UNAVAILABLE` the Loader/Catalog use — never
+      // masquerade as corruption (design O05). Only genuine snapshot damage is
+      // TASK_CORRUPTED.
+      if (error instanceof TemplateError && error.code === TEMPLATE_ERROR_CODES.TEMPLATE_RUNTIME_UNAVAILABLE) {
+        throw error;
+      }
       throw new StorageError(
         STORAGE_ERROR_CODES.TASK_CORRUPTED,
         '任务快照缺失或不可用。',

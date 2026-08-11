@@ -420,4 +420,23 @@ describe('TaskStore structured mode (Task 5, spec §5 / O05)', () => {
       code: 'TEMPLATE_NOT_FOUND',
     });
   });
+
+  it('propagates TEMPLATE_RUNTIME_UNAVAILABLE when reopening a structured snapshot under a disabled runtime', async () => {
+    // Freeze a structured task under an ENABLED runtime, then reopen the SAME
+    // roots with the checked-in DISABLED default — the historical snapshot's
+    // readFrozenTemplate must surface TEMPLATE_RUNTIME_UNAVAILABLE (design
+    // O05), never TASK_CORRUPTED.
+    const { paths, catalog, templateId } = await catalogWithStructured({
+      runtimeEnvironment: createTestRuntimeEnvironment(),
+    });
+    const enabledStore = new TaskStore(paths, catalog);
+    const task = await enabledStore.create(structuredRequest(templateId));
+
+    const disabledCatalog = new TemplateCatalog(paths);
+    await disabledCatalog.initialize();
+    const disabledStore = new TaskStore(paths, disabledCatalog);
+    await expect(disabledStore.readFrozenTemplate(task.id)).rejects.toMatchObject({
+      code: 'TEMPLATE_RUNTIME_UNAVAILABLE',
+    });
+  });
 });

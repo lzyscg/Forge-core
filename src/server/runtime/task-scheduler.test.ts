@@ -1943,6 +1943,50 @@ describe('TaskScheduler atomic structured human answer (Task 17, spec §11.5)', 
     expect(freshStarted?.attemptEpoch).toBe(1);
     expect(freshStarted?.turnId).toBe(deriveTurnId('hr-2-input', 1));
   });
+
+  it('after a re-request, a second answer commits for the NEW question (no replay deadlock)', async () => {
+    const h = await createStructuredSchedulerHarness();
+    // Question A answered; the run re-requests human (question B) afterwards.
+    await seedStructuredHumanRequest(h, 'hr-a', 'structure', 'which shape?');
+    await h.scheduler.answer(h.taskId, 'answer for A');
+    await seedStructuredHumanRequest(h, 'hr-b', 'structure', 'now which body?');
+
+    // A different text for B must COMMIT for B (anchored to the pending
+    // request), never conflict against A's older committed batch.
+    const summary = await h.scheduler.answer(h.taskId, 'answer for B');
+    void summary;
+    const committed = await h.service.events.read(h.taskId);
+    expect(
+      committed.some((e) => e.event.type === 'human_answered' && e.event.id === 'hr-b-answered'),
+    ).toBe(true);
+    expect(committed.some((e) => e.event.type === 'agent_input' && e.event.id === 'hr-b-input')).toBe(true);
+    const batchB = await h.service.events.readBatchByCommitId(h.taskId, 'answer-hr-b');
+    expect(batchB).not.toBeNull();
+    expect(batchB?.map((entry) => entry.event.type).sort()).toEqual(['agent_input', 'human_answered']);
+
+    // The fresh B input starts its own epoch 1 (its confirmed node carries
+    // attemptCount 1; the answer batch itself never allocates an attempt, so
+    // the runner derives epoch 1 when it processes the input).
+    const bInput = committed.find(
+      (entry) => entry.event.type === 'agent_input' && entry.event.id === 'hr-b-input',
+    );
+    expect(bInput).toBeDefined();
+    expect(bInput?.event.type === 'agent_input' && bInput.event.node.attemptCount).toBe(1);
+    expect(
+      committed.some(
+        (e) =>
+          e.event.type === 'structured_slot_attempt_started' &&
+          e.event.inputNodeId === 'hr-b-input',
+      ),
+    ).toBe(false);
+
+    // The SAME text for B replays B's committed success; a different text now
+    // conflicts against B (the first B answer is never overwritten).
+    await expect(h.scheduler.answer(h.taskId, 'answer for B')).resolves.toBeDefined();
+    await expect(h.scheduler.answer(h.taskId, 'answer for B changed')).rejects.toMatchObject({
+      code: 'IDEMPOTENCY_CONFLICT',
+    });
+  });
 });
 
 describe('TaskScheduler structured stop and recovery (Task 17, design §11.5)', () => {
