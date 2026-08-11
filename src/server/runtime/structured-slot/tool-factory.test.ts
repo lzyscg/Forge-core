@@ -644,6 +644,55 @@ describe('Step 2 — progressive disclosure (design §10.6)', () => {
     expect(harness.meter.usage.slotToolCalls).toBe(1);
   });
 
+  it('a coerced call replayed EXACTLY is free: same raw call twice, usage stays 1, no spurious rejection', async () => {
+    // Residual Finding 1: on replay the raw seam re-precharges the SAME raw key,
+    // which prechargeRawTool returns as replayed WITHOUT adding a pending entry.
+    // The consume must resolve by the raw seam's current precharge so the
+    // coerced validated params still find their recorded result (no spurious
+    // NOT_PRECHARGED, no double charge).
+    const harness = await makeFillHarness();
+    const tools = createStructuredSlotToolDefinitions(harness.context);
+    const rawHash = canonicalJsonSha256({ limit: '5' });
+    await harness.meter.prechargeRawTool({ toolCallId: 'tc-coerce-rep', canonicalArgsHash: rawHash, toolName: 'list_slots' });
+    const first = await executeTool(tools, 'list_slots', 'tc-coerce-rep', { limit: 5 });
+    expect(first.accepted).toBe(true);
+    expect(harness.meter.usage.slotToolCalls).toBe(1);
+    const replayCharge = await harness.meter.prechargeRawTool({ toolCallId: 'tc-coerce-rep', canonicalArgsHash: rawHash, toolName: 'list_slots' });
+    expect(replayCharge.status).toBe('ok');
+    if (replayCharge.status !== 'ok') throw new Error('expected ok');
+    expect(replayCharge.replayed).toBe(true);
+    const second = await executeTool(tools, 'list_slots', 'tc-coerce-rep', { limit: 5 });
+    expect(second.accepted).toBe(true);
+    expect(second.code).toBeUndefined();
+    expect(harness.meter.usage.slotToolCalls).toBe(1);
+  });
+
+  it('a coerced replay does NOT consume an orphaned pending precharge from an earlier failed call', async () => {
+    // Residual Finding 1 (orphan hazard): a pending precharge from an earlier
+    // schema-invalid/truncated call on the SAME toolCallId must never be
+    // consumed by a later coerced replay — the replay resolves by the raw
+    // seam's current precharge (the recorded key), not by any pending entry.
+    const harness = await makeFillHarness();
+    const tools = createStructuredSlotToolDefinitions(harness.context);
+    const rawHash = canonicalJsonSha256({ limit: '5' });
+    // Failed call: precharges but never executes (orphaned pending record).
+    await harness.meter.prechargeRawTool({ toolCallId: 'tc-orphan', canonicalArgsHash: canonicalJsonSha256({ limit: 'bad' }), toolName: 'list_slots' });
+    // Successful coerced call on the SAME toolCallId.
+    await harness.meter.prechargeRawTool({ toolCallId: 'tc-orphan', canonicalArgsHash: rawHash, toolName: 'list_slots' });
+    const first = await executeTool(tools, 'list_slots', 'tc-orphan', { limit: 5 });
+    expect(first.accepted).toBe(true);
+    expect(harness.meter.usage.slotToolCalls).toBe(2); // orphan + successful
+    // Coerced replay: must return the recorded result, NOT consume the orphan.
+    const replayCharge = await harness.meter.prechargeRawTool({ toolCallId: 'tc-orphan', canonicalArgsHash: rawHash, toolName: 'list_slots' });
+    expect(replayCharge.status).toBe('ok');
+    if (replayCharge.status !== 'ok') throw new Error('expected ok');
+    expect(replayCharge.replayed).toBe(true);
+    const second = await executeTool(tools, 'list_slots', 'tc-orphan', { limit: 5 });
+    expect(second.accepted).toBe(true);
+    expect(second.code).toBeUndefined();
+    expect(harness.meter.usage.slotToolCalls).toBe(2); // replay is free
+  });
+
   it('same toolCallId with changed args is IDEMPOTENCY_CONFLICT and counts', async () => {
     const harness = await makeFillHarness();
     const tools = createStructuredSlotToolDefinitions(harness.context);

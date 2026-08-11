@@ -138,12 +138,17 @@ export type SlotToolConsumeResult =
 /**
  * The consume-only precharge gate (spec §5 / O06): verifies the raw
  * pre-validation seam already persisted a charge for the toolCallId and checks
- * the composite signal. It NEVER charges. Because Pi 0.82 coerces raw args
- * during TypeBox validation, the validated hash may differ from the precharged
- * hash, so the gate resolves the precharge by toolCallId (preferring an exact
- * hash match, then the most recent pending precharge for the id) and returns
- * the PRE-CHARGED hash for the adapter to thread onward. A missing precharge
- * (meter bypass) fails closed.
+ * the composite signal. It NEVER charges.
+ *
+ * Pi 0.82 coerces raw args during TypeBox validation (e.g. `123` → `"123"`),
+ * so the validated hash can differ from the RAW hash the raw seam precharged.
+ * The gate therefore resolves the current call's charge by the raw seam's most
+ * recent precharge (`meter.lastPrecharged`): that key is the exact precharge
+ * whether it is still pending (fresh call), already recorded (exact replay —
+ * the raw seam re-precharged a recorded key without creating a pending entry),
+ * or shares the toolCallId with an ORPHANED pending precharge from an earlier
+ * schema-invalid/truncated call (the orphan is never consumed). A missing
+ * precharge (meter bypass) fails closed.
  */
 export async function consumeSlotToolPrecharge(
   meter: AttemptMeter,
@@ -158,27 +163,31 @@ export async function consumeSlotToolPrecharge(
     }
     return { status: 'aborted' };
   }
-  const forId = meter.toolCalls.filter((candidate) => candidate.toolCallId === ctx.toolCallId);
-  if (forId.length === 0) {
-    return { status: 'not_precharged' };
+  const last = meter.lastPrecharged;
+  if (last !== null && last.toolCallId === ctx.toolCallId) {
+    const entry = meter.toolCalls.find(
+      (candidate) =>
+        candidate.toolCallId === last.toolCallId &&
+        candidate.canonicalArgsHash === last.canonicalArgsHash,
+    );
+    if (entry !== undefined) {
+      return entry.result !== null
+        ? { status: 'ok', replayed: true, prechargedArgsHash: last.canonicalArgsHash }
+        : { status: 'ok', replayed: false, prechargedArgsHash: last.canonicalArgsHash };
+    }
   }
-  // Exact key match first: a recorded exact replay is free, a pending exact
-  // precharge is the current call's charge.
-  const exact = forId.find((candidate) => candidate.canonicalArgsHash === ctx.canonicalArgsHash);
+  // No recorded current precharge: fall back to an exact key match (e.g. a
+  // direct service call whose precharge is the exact validated key).
+  const exact = meter.toolCalls.find(
+    (candidate) =>
+      candidate.toolCallId === ctx.toolCallId &&
+      candidate.canonicalArgsHash === ctx.canonicalArgsHash,
+  );
   if (exact !== undefined) {
     return exact.result !== null
       ? { status: 'ok', replayed: true, prechargedArgsHash: exact.canonicalArgsHash }
       : { status: 'ok', replayed: false, prechargedArgsHash: exact.canonicalArgsHash };
   }
-  // Coercion-tolerant fallback: the raw seam keyed the precharge by the RAW
-  // args hash, which can differ from the validated hash. Resolve by the most
-  // recent pending (unrecorded) precharge for this id.
-  const pending = [...forId].reverse().find((candidate) => candidate.result === null);
-  if (pending !== undefined) {
-    return { status: 'ok', replayed: false, prechargedArgsHash: pending.canonicalArgsHash };
-  }
-  // Every record for this id is a recorded result with a DIFFERENT validated
-  // hash and no pending precharge: there is nothing to consume (meter bypass).
   return { status: 'not_precharged' };
 }
 

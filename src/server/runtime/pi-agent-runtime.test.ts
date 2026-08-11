@@ -1484,6 +1484,26 @@ describe('Task 14 Step 1 — real locked Pi 0.82 Agent loop pre-validation prech
     expect(harness.meter.toolCalls).toHaveLength(1);
   });
 
+  it('a COERCED call replayed exactly in the real loop is free: usage stays 1, no spurious NOT_PRECHARGED', async () => {
+    // Residual Finding 1: the same coerced call issued twice. Call 2 re-precharges
+    // the SAME raw key, which prechargeRawTool returns as replayed WITHOUT a
+    // pending entry; the execute's validated hash differs from the raw hash, so
+    // the consume must resolve by the raw seam's current precharge to replay the
+    // recorded result (no spurious rejection, no double charge).
+    const harness = await createCharAgent({
+      responses: [
+        { content: [toolCallBlock('read_slot', { slotId: 123 }, 'tc-coerce-rep')] },
+        { content: [toolCallBlock('read_slot', { slotId: 123 }, 'tc-coerce-rep')] },
+        { content: [{ type: 'text', text: 'final' }] },
+      ],
+    });
+    await harness.agent.prompt('hello');
+    expect(harness.executed).toHaveLength(2);
+    expect(harness.executed[1]).toEqual({ toolCallId: 'tc-coerce-rep', params: { slotId: '123' } });
+    expect(harness.meter.usage.slotToolCalls).toBe(1);
+    expect(harness.meter.toolCalls).toHaveLength(1);
+  });
+
   it('exact cached replay is free: a recorded key replays without a new charge', async () => {
     const harness = await createCharAgent({
       responses: [

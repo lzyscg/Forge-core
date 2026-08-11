@@ -323,6 +323,16 @@ export class AttemptMeter {
 
   private deadlineHandle: unknown = null;
 
+  /**
+   * The most recently precharged key (in-memory transient, never persisted).
+   * The Pi raw pre-validation seam precharges immediately before each execute,
+   * so the consume-only tool adapter can resolve the CURRENT call's precharge
+   * by this key even when Pi 0.82 coerced the validated args (raw hash !=
+   * validated hash) and even when an orphaned pending precharge from an earlier
+   * failed call shares the same toolCallId.
+   */
+  private lastPrechargedKey: { toolCallId: string; canonicalArgsHash: string } | null = null;
+
   private constructor(options: AttemptMeterOptions, snapshot: AttemptMeterSnapshotV1) {
     this.turnId = snapshot.turnId;
     this.startedAtMs = snapshot.startedAtMs;
@@ -373,6 +383,17 @@ export class AttemptMeter {
     return this.toolCallsInternal;
   }
 
+  /**
+   * The key of the MOST RECENT `prechargeRawTool` call (in-memory, not
+   * persisted). For the sequential Pi loop this is always the current
+   * in-flight tool call's precharge, so the consume-only adapter can resolve
+   * the precharge exactly (Task 14), tolerating SDK argument coercion and
+   * orphaned pending precharges from earlier failed calls.
+   */
+  get lastPrecharged(): { toolCallId: string; canonicalArgsHash: string } | null {
+    return this.lastPrechargedKey;
+  }
+
   /** Removes the scheduler listener and pending deadline timer. */
   dispose(): void {
     this.clearTimeoutFn(this.deadlineHandle);
@@ -397,6 +418,9 @@ export class AttemptMeter {
     if (this.closed) {
       return { status: 'closed', failure: this.terminalInternal! };
     }
+    // The current call's precharge key (in-memory); the consume-only adapter
+    // resolves the tool call's charge by this (Task 14).
+    this.lastPrechargedKey = { toolCallId: input.toolCallId, canonicalArgsHash: input.canonicalArgsHash };
     const record = this.toolCallsInternal.find(
       (candidate) =>
         candidate.toolCallId === input.toolCallId &&
