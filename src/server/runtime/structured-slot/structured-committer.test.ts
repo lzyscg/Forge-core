@@ -1373,6 +1373,48 @@ describe('prepareStructuredCommit — seal success (Task 16)', () => {
     expect(await h.artifactStore.list(h.taskId)).toEqual([]);
   });
 
+  it('rejects submit_final_artifact the turn did NOT declare, even for a template final submitter; publish still commits', async () => {
+    const h = await structuredHarness();
+    await h.seedInput();
+    await seedGeneration(h);
+    const { turnId } = await startSealAttempt(h);
+    const candidate = await formSealCandidate(h, turnId);
+
+    // The turn contract declared ONLY publish_artifact. The agent IS a template
+    // final submitter (contextBase finalSubmitters = [AGENT_ONE]) — the frozen
+    // declared dispatch set must still gate the commit at the authority boundary.
+    const context: StructuredCommitContext = {
+      ...contextBase(h, turnId),
+      sessionKind: 'seal',
+      structureCandidate: null,
+      mergeCandidate: null,
+      sealDispatch: { status: 'passed', declaredDispatches: ['publish_artifact'], candidate },
+      publicText: 'sealed',
+      currentAgent: makeAgent(AGENT_ONE, 'Agent One', V3_SEAL_CONTRACT),
+      declaredRoutes: SEAL_ROUTES,
+    };
+
+    const before = await h.readEvents();
+    await expect(
+      prepareStructuredCommit(context, { type: 'submit_final_artifact' }),
+    ).rejects.toThrow(/DISPATCH_NOT_ALLOWED/);
+    // Nothing was written: no task completion, no artifact, no sealed event.
+    expect(await h.readEvents()).toEqual(before);
+    expect(await h.artifactStore.list(h.taskId)).toEqual([]);
+    const beforeEvents = before.map((entry) => entry.event);
+    expect(beforeEvents.some((event) => event.type === 'final_submission_accepted')).toBe(false);
+
+    // The publish path on the SAME turn (still active) commits normally.
+    const prepared = await prepareStructuredCommit(context, { type: 'publish_artifact' });
+    expect(prepared.kind).toBe('seal_publish');
+    expect(prepared.taskCompleted).toBe(false);
+    expect(prepared.publishedVersions).toEqual([1]);
+    const all = (await h.readEvents()).map((entry) => entry.event);
+    expect(all.filter((event) => event.type === 'artifact_published')).toHaveLength(1);
+    expect(all.filter((event) => event.type === 'structured_scaffold_sealed')).toHaveLength(1);
+    expect(all.filter((event) => event.type === 'final_submission_accepted')).toHaveLength(0);
+  });
+
   it('a publish without a passed seal candidate fails closed and writes nothing', async () => {
     const h = await structuredHarness();
     await h.seedInput();

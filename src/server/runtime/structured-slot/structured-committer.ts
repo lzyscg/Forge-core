@@ -696,6 +696,16 @@ async function buildSealSuccessBatch(
     );
   }
   const candidate = context.sealDispatch.candidate;
+  const declaredAction = kind === 'seal_publish' ? 'publish_artifact' : 'submit_final_artifact';
+  if (!context.sealDispatch.declaredDispatches.includes(declaredAction)) {
+    // The batch builder is the final authority boundary: the turn's frozen
+    // declared dispatch set is enforced here even if an upstream path failed to
+    // (design L01). Never commit a dispatch the turn did not declare.
+    throw fail(
+      STRUCTURED_COMMIT_ERROR_CODES.DISPATCH_NOT_ALLOWED,
+      '该 dispatch 不在 turn 冻结的 declaredDispatches 之内。',
+    );
+  }
   if (kind === 'seal_final' && !context.finalSubmitters.includes(context.currentAgent.id)) {
     throw fail(
       STRUCTURED_COMMIT_ERROR_CODES.ROUTE_NOT_ALLOWED,
@@ -1114,10 +1124,17 @@ function determineCandidateKind(
     }
   }
   if (action.type === 'publish_artifact' || action.type === 'submit_final_artifact') {
-    if (context.sessionKind !== 'seal' || context.sealDispatch.status !== 'passed') {
+    if (
+      context.sessionKind !== 'seal' ||
+      context.sealDispatch.status !== 'passed' ||
+      !context.sealDispatch.declaredDispatches.includes(action.type)
+    ) {
+      // The frozen turn declared dispatch set is enforced HERE at the authority
+      // boundary, not only by the upstream tool guard (design L01): a passed
+      // seal may only publish/final-submit actions the turn contract declared.
       throw fail(
         STRUCTURED_COMMIT_ERROR_CODES.DISPATCH_NOT_ALLOWED,
-        'publish/final 提交只允许在 passed Seal 之后。',
+        'publish/final 提交只允许在 passed Seal 且 turn 冻结的 declaredDispatches 之内。',
       );
     }
     return action.type === 'publish_artifact' ? 'seal_publish' : 'seal_final';
