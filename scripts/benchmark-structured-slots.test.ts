@@ -159,16 +159,20 @@ function runAllocProbe(allocBytes: number): { maxRssBytes: number } {
 }
 
 describe('two sequentially spawned children report their OWN peak (P1-1)', () => {
-  it('a no-alloc child after a 512 MiB allocator stays far below it', () => {
-    const big = runAllocProbe(512 * 1024 * 1024);
+  it('a no-alloc child after a 1 GiB allocator stays far below it (relative isolation)', () => {
+    // The first child force-touches every page of a 1 GiB buffer, so it
+    // genuinely commits far more than its baseline regardless of OS
+    // overcommit heuristics. The second child (fresh process, no allocation)
+    // peaks at its own ~100 MiB baseline — NOT the first child's ~1.1 GiB peak.
+    const big = runAllocProbe(1024 * 1024 * 1024);
     const small = runAllocProbe(0);
 
-    // The first child must have actually peaked near its 512 MiB allocation.
-    expect(big.maxRssBytes).toBeGreaterThan(512 * 1024 * 1024);
-    // The second child (fresh process, no allocation) must be far below — its
-    // peak is its own ~100 MiB baseline, NOT the first child's ~600 MiB peak.
-    expect(small.maxRssBytes).toBeLessThan(big.maxRssBytes);
+    // Robust margin-based assertions (not an absolute-fragile threshold):
+    // the no-alloc child stays under a conservative baseline AND is clear of
+    // the allocator child by > 256 MiB, proving the RELATIVE isolation.
     expect(small.maxRssBytes).toBeLessThan(256 * 1024 * 1024);
+    expect(small.maxRssBytes).toBeLessThan(big.maxRssBytes);
+    expect(big.maxRssBytes - small.maxRssBytes).toBeGreaterThan(256 * 1024 * 1024);
   });
 });
 

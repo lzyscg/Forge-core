@@ -1338,7 +1338,16 @@ async function runIntegratedScale(args: CliArgs): Promise<void> {
 async function runAllocProbe(args: CliArgs): Promise<void> {
   const bytes = args.allocBytes ?? 0;
   if (bytes > 0) {
-    const buffer = Buffer.alloc(bytes, 1);
+    const buffer = Buffer.allocUnsafe(bytes);
+    // Force-touch every page so the allocation RELIABLY commits physical
+    // memory. On overcommit-friendly hosts `Buffer.alloc(bytes, fill)` can
+    // leave pages lazy/uncommitted, so the OS high-water mark would under-
+    // report the peak; writing a byte into every 4 KiB page (the smallest
+    // common page size, so any larger page is also touched) commits them all.
+    const pageSize = 4 * 1024;
+    for (let offset = 0; offset < bytes; offset += pageSize) {
+      buffer[offset] = 0x5a;
+    }
     if (buffer.length !== bytes) throw new Error('BENCHMARK_ALLOC_PROBE_FAILED');
     // Keep the allocation alive briefly so the OS high-water mark reflects it.
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
