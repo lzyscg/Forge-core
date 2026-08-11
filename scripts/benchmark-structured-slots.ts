@@ -45,6 +45,7 @@ import { join, resolve, dirname, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
 import { canonicalJsonSha256, canonicalJsonBytesAndSha256 } from '../src/server/structured-slots/canonical-json';
+import { QUALIFICATION_GENERATED_OUTPUTS, isQualificationGeneratedOutput } from './structured-qualification-outputs';
 import { compileSlotSchemaV1 } from '../src/server/structured-slots/slot-schema';
 import {
   compileLayoutGrammarV1,
@@ -102,12 +103,7 @@ class BenchmarkError extends Error {
 }
 
 /** Generated-output allowlist the integrated qualification may leave dirty. */
-const GENERATED_OUTPUT_ALLOWLIST = new Set([
-  'src/server/structured-slots/platform-profile-v1.json',
-  'src/server/structured-slots/runtime-capability-v1.json',
-  'docs/evidence/structured-slot-platform-profile-v1.json',
-  'docs/evidence/structured-slot-release-v1.json',
-]);
+const GENERATED_OUTPUT_ALLOWLIST = new Set<string>(QUALIFICATION_GENERATED_OUTPUTS);
 
 interface CliArgs {
   mode: 'primitive-smoke' | 'integrated-qualify' | 'integrated-scale' | 'alloc-probe';
@@ -906,12 +902,18 @@ function assertRunnerMatchesReference(): { runnerId: string; runnerVersion: stri
   };
 }
 
-/** SHA-256 over the sorted (relative path, sha256) of every git-tracked file. */
+/** SHA-256 over the sorted (relative path, sha256) of every git-tracked file
+ * EXCEPT the generated qualification outputs (final profile, capability
+ * manifest, profile/release evidence) — derived products certified by their
+ * own digests in the one-way chain; excluding them keeps the source digest
+ * stable across integrated-qualify -> qualify -> promote.
+ */
 function cleanSourceDigest(): string {
   const files = execFileSync('git', ['ls-files'], { cwd: repoRoot(), encoding: 'utf8' })
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
+    .filter((line) => !isQualificationGeneratedOutput(line))
     .sort();
   const entries: Record<string, string> = {};
   for (const file of files) {

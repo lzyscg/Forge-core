@@ -26,6 +26,7 @@ import {
   STRUCTURED_SLOT_PROFILE_CANDIDATE,
 } from '../src/server/structured-slots/platform-profile';
 import type { StructuredSlotLimitsV1 } from '../src/shared/structured-slots';
+import { QUALIFICATION_GENERATED_OUTPUTS, isQualificationGeneratedOutput } from './structured-qualification-outputs';
 import {
   RELEASE_FINAL_PROFILE_PATH,
   RELEASE_PI_PREFLIGHT_CHARACTERIZATION,
@@ -573,5 +574,63 @@ describe('runPromoteCapability (P1-3 fail-closed promotion)', () => {
     expect(() => runPromoteCapability(path, promotePaths(ws), { porcelain: () => [] })).toThrow(
       /required ABI list 与当前 manifest 不一致/,
     );
+  });
+});
+
+/* ------------------------------------------------------------------------ */
+/* cleanSourceDigest: excludes the generated qualification outputs           */
+/* ------------------------------------------------------------------------ */
+
+describe('cleanSourceDigest (generated-output exclusion)', () => {
+  const workspaceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+  const manifestPath = join(workspaceRoot, 'src/server/structured-slots/runtime-capability-v1.json');
+  const profilePath = join(workspaceRoot, 'src/server/structured-slots/platform-profile-v1.json');
+
+  it('is deterministic for the same tree', () => {
+    expect(cleanSourceDigest()).toBe(cleanSourceDigest());
+  });
+
+  it('is stable across the generated-output flip (manifest enabled + profile final do not change it)', () => {
+    // Snapshot the current generated files, then temporarily write clearly
+    // different content and assert the SOURCE digest is unchanged (the four
+    // generated qualification products are excluded; they are certified by
+    // their own digests). Restore in finally.
+    const manifestBefore = readFileSync(manifestPath, 'utf8');
+    const profileBefore = readFileSync(profilePath, 'utf8');
+    try {
+      const before = cleanSourceDigest();
+      writeFileSync(manifestPath, `${JSON.stringify({ version: 1, status: 'disabled' }, null, 2)}\n`, 'utf8');
+      writeFileSync(profilePath, `${JSON.stringify({ version: 1, status: 'provisional' }, null, 2)}\n`, 'utf8');
+      const after = cleanSourceDigest();
+      expect(after).toBe(before);
+    } finally {
+      writeFileSync(manifestPath, manifestBefore, 'utf8');
+      writeFileSync(profilePath, profileBefore, 'utf8');
+    }
+  });
+
+  it('classifies exactly the four generated outputs as excluded', () => {
+    for (const path of QUALIFICATION_GENERATED_OUTPUTS) {
+      expect(isQualificationGeneratedOutput(path)).toBe(true);
+    }
+    expect(isQualificationGeneratedOutput('src/server/core-service.ts')).toBe(false);
+    expect(isQualificationGeneratedOutput('src/server/structured-slots/canonical-json.ts')).toBe(false);
+    expect(isQualificationGeneratedOutput('package.json')).toBe(false);
+  });
+
+  it('changes when a non-generated tracked source file changes', () => {
+    // Temporarily modify a NON-generated tracked file (a scripts/ helper not
+    // imported by this test) and assert the digest changes, proving the source
+    // digest still certifies real source (the exclusion is exact, not broad).
+    const target = join(workspaceRoot, 'scripts/smoke-long-form-hub.ts');
+    const before = readFileSync(target, 'utf8');
+    try {
+      const d0 = cleanSourceDigest();
+      writeFileSync(target, `${before}\n// source-digest test probe\n`, 'utf8');
+      const d1 = cleanSourceDigest();
+      expect(d1).not.toBe(d0);
+    } finally {
+      writeFileSync(target, before, 'utf8');
+    }
   });
 });

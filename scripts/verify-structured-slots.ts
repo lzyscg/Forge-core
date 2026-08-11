@@ -44,6 +44,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { canonicalJsonSha256 } from '../src/server/structured-slots/canonical-json';
+import { QUALIFICATION_GENERATED_OUTPUTS, isQualificationGeneratedOutput } from './structured-qualification-outputs';
 import {
   loadStructuredPlatformProfile,
   profileCanonicalDigest,
@@ -140,12 +141,18 @@ export function gitCommit(): string {
   return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: WORKSPACE_ROOT, encoding: 'utf8' }).trim();
 }
 
-/** SHA-256 over the sorted (relative path, sha256) of every git-tracked file. */
+/** SHA-256 over the sorted (relative path, sha256) of every git-tracked file
+ * EXCEPT the generated qualification outputs (final profile, capability
+ * manifest, profile/release evidence) — those are derived products certified
+ * by their own digests in the one-way chain and do not change across the
+ * qualification, so the source digest stays stable before/after promotion.
+ */
 export function cleanSourceDigest(): string {
   const files = execFileSync('git', ['ls-files'], { cwd: WORKSPACE_ROOT, encoding: 'utf8' })
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
+    .filter((line) => !isQualificationGeneratedOutput(line))
     .sort();
   const entries: Record<string, string> = {};
   for (const file of files) {
@@ -438,12 +445,7 @@ export function runPromoteCapability(
   }
 
   // 5. Dirty/untracked allowlist: exactly the four generated files.
-  const allowed = new Set<string>([
-    'src/server/structured-slots/platform-profile-v1.json',
-    'src/server/structured-slots/runtime-capability-v1.json',
-    'docs/evidence/structured-slot-platform-profile-v1.json',
-    'docs/evidence/structured-slot-release-v1.json',
-  ]);
+  const allowed = new Set<string>(QUALIFICATION_GENERATED_OUTPUTS);
   const offenders = (deps.porcelain ?? porcelain)().filter((path) => !allowed.has(path));
   if (offenders.length > 0) {
     throw new VerifyError(`dirty/untracked tree outside the generated-output allowlist: ${offenders.join(', ')}`);
