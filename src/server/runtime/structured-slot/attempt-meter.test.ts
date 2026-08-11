@@ -234,6 +234,26 @@ describe('AttemptMeter — validation accounting', () => {
       expect(over.failure.cause).toBe('validation_limit');
     }
   });
+
+  it('persists and reloads fractional validator aggregates (ns/1e6) without failing the snapshot parser', async () => {
+    const { privateStore } = await meterHarness();
+    const opts = {
+      turnId: 'input-1-t1',
+      privateStore,
+      limits: attemptLimits({ maxValidatorInvocationsPerAttempt: 100, maxAggregateValidatorCpuMsPerAttempt: 1000 }),
+    };
+    const meter = await AttemptMeter.create(opts);
+    // The writer records aggregates from monotonic clocks, which may be
+    // fractional (ms derived from ns/1e6). The parser must accept them.
+    const run = { invocations: 1, cpuMs: 12.5, wallMs: 20.25, outputBytes: 100.5 };
+    expect((await meter.recordValidationUsage(run)).status).toBe('ok');
+    // A re-created meter reads the snapshot: fractional aggregates round-trip.
+    const second = await AttemptMeter.create(opts);
+    expect(second.usage.validatorCpuMs).toBe(12.5);
+    expect(second.usage.validatorWallClockMs).toBe(20.25);
+    expect(second.usage.validatorOutputBytes).toBe(100.5);
+    expect(second.usage.validatorInvocations).toBe(1);
+  });
 });
 
 describe('AttemptMeter — composite abort signal', () => {

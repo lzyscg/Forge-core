@@ -869,6 +869,12 @@ async function buildTerminalBatch(
   }
   switch (kind) {
     case 'runtime_failure':
+      // The committed `retryable` flag is DISPLAY-ONLY: the scheduler's
+      // auto-retry decision is driven by the RunNextResult.retryable this
+      // committer returns to the coordinator, not by this event field. A
+      // transient structured failure (e.g. a resource closure) may therefore
+      // read `retryable: false` here while the scheduler still retries via its
+      // own result plumbing — never derive scheduling behavior from this flag.
       events.push({
         id: `${context.turnId}-failed`,
         at,

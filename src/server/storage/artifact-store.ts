@@ -181,7 +181,7 @@ const META_FILE = 'meta.json';
 const CUSTODY_BOOKKEEPING = new Set([META_FILE, CUSTODY_MANIFEST_FILE, CUSTODY_SEAL_RECORD_FILE]);
 
 /** File names a publish/annotate may never claim (reserved). */
-const RESERVED_FILE_NAMES = new Set([META_FILE]);
+const RESERVED_FILE_NAMES = new Set([META_FILE, CUSTODY_MANIFEST_FILE, CUSTODY_SEAL_RECORD_FILE]);
 
 function invalidInput(message: string, action: string): StorageError {
   return new StorageError(STORAGE_ERROR_CODES.INVALID_INPUT, message, null, action);

@@ -48,4 +48,3 @@ module.exports = {
     return [{ routeId: 'document-md', content: lines.join('\n') + '\n' }];
   },
 };
-

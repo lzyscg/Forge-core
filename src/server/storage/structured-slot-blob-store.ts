@@ -295,16 +295,22 @@ export class StructuredSlotBlobStore {
     // Idempotent promotion (design §18.3/G05): a manifest already committed for
     // this generationId is the SAME content-addressed generation — concurrent
     // committers promoting the identical generation reuse it instead of
-    // failing on the second write. A differing digest is corruption.
+    // failing on the second write. A DIFFERENT digest is corruption: the same
+    // generationId must never silently resolve to two different layouts, so
+    // fail closed instead of falling through to the old manifest.
     const manifestPath = this.paths.taskStructuredGenerationManifestFile(this.taskId, generationId);
+    let existingManifest: GenerationManifestV1 | null = null;
     try {
       const existingRaw = await readFile(manifestPath, 'utf8');
-      const existing = parseVersioned<GenerationManifestV1>(existingRaw, 'generation manifest');
-      if (existing.structure.sha256 === structure.sha256) {
-        return existing;
-      }
+      existingManifest = parseVersioned<GenerationManifestV1>(existingRaw, 'generation manifest');
     } catch {
       // No manifest yet (or torn residue): fall through and promote.
+    }
+    if (existingManifest !== null) {
+      if (existingManifest.structure.sha256 === structure.sha256) {
+        return existingManifest;
+      }
+      throw corrupt(`generation '${generationId}' 已存在结构摘要不同的 manifest。`);
     }
 
     const slotsNdjson = `${lines.join('\n')}\n`;
@@ -344,12 +350,17 @@ export class StructuredSlotBlobStore {
       if ((error as StorageError).code !== STORAGE_ERROR_CODES.FILE_EXISTS) {
         throw error;
       }
-      // A concurrent committer won the manifest write with the SAME content;
-      // return its committed manifest.
-      return parseVersioned<GenerationManifestV1>(
+      // A concurrent committer won the manifest write first. Reuse it only when
+      // it carries the SAME structure digest; a different digest is corruption
+      // (the same generationId must never resolve to two different layouts).
+      const concurrent = parseVersioned<GenerationManifestV1>(
         await readFile(manifestPath, 'utf8'),
         'generation manifest',
       );
+      if (concurrent.structure.sha256 !== structure.sha256) {
+        throw corrupt(`generation '${generationId}' 已存在结构摘要不同的 manifest。`);
+      }
+      return concurrent;
     }
     return manifest;
   }

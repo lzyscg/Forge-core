@@ -219,13 +219,23 @@ function parseSnapshot(raw: JsonObject, turnId: string): AttemptMeterSnapshotV1 
   if (!isPlainObject(usageRaw)) {
     throw snapshotInvalid('attempt meter 快照 usage 无效。');
   }
+  // Read/write contract (FIX_NEEDS_DOCUMENTATION): the writer records validator
+  // aggregates from monotonic clocks and byte lengths, which may be FRACTIONAL
+  // (cpuMs/wallMs derived from ns/1e6). Counts (slotToolCalls, validationRuns,
+  // validatorInvocations) are always integers, but the three aggregate values
+  // are parsed as any finite non-negative number to match the writer. A
+  // mid-attempt meter re-load across a process restart is unreachable today
+  // (attempts are abandoned on restart with a new turnId, so the meter is
+  // re-created over a fresh turn) — this persisted round-trip contract is the
+  // invariant that must hold; anything not a finite non-negative number still
+  // fails closed as METER_SNAPSHOT_INVALID.
   const usage = {
     slotToolCalls: nonNegativeInt(usageRaw.slotToolCalls, 'usage.slotToolCalls'),
     validationRuns: nonNegativeInt(usageRaw.validationRuns, 'usage.validationRuns'),
     validatorInvocations: nonNegativeInt(usageRaw.validatorInvocations, 'usage.validatorInvocations'),
-    validatorCpuMs: nonNegativeInt(usageRaw.validatorCpuMs, 'usage.validatorCpuMs'),
-    validatorWallClockMs: nonNegativeInt(usageRaw.validatorWallClockMs, 'usage.validatorWallClockMs'),
-    validatorOutputBytes: nonNegativeInt(usageRaw.validatorOutputBytes, 'usage.validatorOutputBytes'),
+    validatorCpuMs: nonNegativeFinite(usageRaw.validatorCpuMs, 'usage.validatorCpuMs'),
+    validatorWallClockMs: nonNegativeFinite(usageRaw.validatorWallClockMs, 'usage.validatorWallClockMs'),
+    validatorOutputBytes: nonNegativeFinite(usageRaw.validatorOutputBytes, 'usage.validatorOutputBytes'),
   };
   let terminal: AttemptTerminalFailure | null = null;
   if (raw.terminal !== null && raw.terminal !== undefined) {
@@ -246,6 +256,19 @@ function parseSnapshot(raw: JsonObject, turnId: string): AttemptMeterSnapshotV1 
 
 function nonNegativeInt(value: unknown, where: string): number {
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw snapshotInvalid(`attempt meter 快照 ${where} 无效。`);
+  }
+  return value;
+}
+
+/**
+ * Non-negative FINITE number (may be fractional). The validator aggregates
+ * (cpuMs / wallMs / outputBytes) are recorded by the writer from monotonic
+ * clocks and byte lengths, which can be fractional (e.g. ns/1e6); the parser
+ * must accept them to match the writer (see parseSnapshot read/write contract).
+ */
+function nonNegativeFinite(value: unknown, where: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
     throw snapshotInvalid(`attempt meter 快照 ${where} 无效。`);
   }
   return value;

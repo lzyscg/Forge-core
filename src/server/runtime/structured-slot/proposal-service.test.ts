@@ -328,6 +328,32 @@ describe('put_structure_proposal — storage boundary (design §9.3)', () => {
     }
   });
 
+  it('fails with PROPOSAL_LIMIT_EXCEEDED (never a RangeError) on an extremely deep tree', async () => {
+    const { service, grant, store } = makeHarness(makeContract({ maxTreeDepth: 8 }));
+    await store.materializeProposal(TURN, PROPOSAL);
+    // A chain far deeper than maxTreeDepth: without the in-walk short-circuit
+    // the unbounded recursion would overflow the stack with a raw RangeError
+    // before the post-walk bound could fire.
+    let tree = node('n-deep', 'quote');
+    for (let i = 0; i < 100_000; i += 1) tree = node(`n${i}`, 'quote', {}, [tree]);
+    const result = await service.putProposal(grant, tree);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe('PROPOSAL_LIMIT_EXCEEDED');
+      expect(result.issues?.some((i) => i.code === 'RESOURCE_LIMIT_EXCEEDED')).toBe(true);
+    }
+  });
+
+  it('accepts a deep-but-within-bound tree', async () => {
+    const { service, grant, store } = makeHarness(makeContract({ maxTreeDepth: 8 }));
+    await store.materializeProposal(TURN, PROPOSAL);
+    // A chain of exactly maxTreeDepth (root = 1, deepest = 8) is legal.
+    let tree = node('n8', 'quote');
+    for (let i = 7; i >= 1; i -= 1) tree = node(`n${i}`, 'quote', {}, [tree]);
+    const result = await service.putProposal(grant, tree);
+    expect(result.ok).toBe(true);
+  });
+
   it('rejects a tree with more nodes than maxSlots', async () => {
     const { service, grant, store } = makeHarness(makeContract({ maxSlots: 8 }));
     await store.materializeProposal(TURN, PROPOSAL);

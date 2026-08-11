@@ -182,6 +182,24 @@ describe('ArtifactStore — v7 publish', () => {
     }
     expect(readdirSync(paths.taskArtifactsRoot(taskId))).toEqual([]);
   });
+
+  it('reserves the custody bookkeeping names so a template file can never collide', async () => {
+    for (const reserved of ['meta.json', 'manifest.json', 'seal-record.json']) {
+      await expect(store.publish(taskId, proposal('x', reserved))).rejects.toMatchObject({
+        code: 'INVALID_INPUT',
+      });
+      await expect(
+        store.annotate(taskId, {
+          version: 1,
+          file: reserved,
+          content: 'x',
+          turnId: 'turn-1',
+          nodeId: 'turn-1-result',
+        }),
+      ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    }
+    expect(readdirSync(paths.taskArtifactsRoot(taskId))).toEqual([]);
+  });
 });
 
 describe('ArtifactStore — v7 annotate', () => {

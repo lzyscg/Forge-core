@@ -218,6 +218,22 @@ describe('StructuredSlotBlobStore indexed generations', () => {
     ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
   });
 
+  it('fails closed when the same generationId is put with different bytes', async () => {
+    const { store } = makeStore();
+    const generationId = 'gen-dup';
+    const first = await store.putGeneration({ generationId, scaffoldId: 'scaffold-1', slots: makeSlotChain(3) });
+    // A second put of the same generationId with DIFFERENT canonical bytes
+    // addresses a different structure digest: idempotency must fail closed as
+    // TASK_CORRUPTED, never silently fall through to the old manifest.
+    const different = makeSlotChain(3).map((slot) => ({ ...slot, spec: { level: 99 } }));
+    await expect(
+      store.putGeneration({ generationId, scaffoldId: 'scaffold-1', slots: different }),
+    ).rejects.toMatchObject({ code: 'TASK_CORRUPTED' });
+    // The committed manifest is unchanged — the first generation still reads.
+    expect((await store.getGenerationIndex(generationId)).slotCount).toBe(3);
+    expect(first.structure.sha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+
   it('computes maxDepth for a valid deep tree without overflowing', async () => {
     const { store } = makeStore();
     const deep = makeSlotChain(5000);
@@ -266,4 +282,3 @@ describe('StructuredSlotBlobStore content revisions', () => {
     await expect(store.readEffectiveContent(first)).rejects.toMatchObject({ code: 'TASK_CORRUPTED' });
   });
 });
-

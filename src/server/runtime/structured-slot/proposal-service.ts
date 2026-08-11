@@ -291,7 +291,33 @@ function assertStorageSafeTree(tree: ProposalNode, limits: StructuredSlotLimitsV
   let totalSpecBytes = 0;
 
   const walk = (node: ProposalNode, depth: number, instancePath: string): ProposalFailure | null => {
+    // Short-circuit INSIDE the walk BEFORE recursing further (FIX_BEFORE_HANDOFF):
+    // an over-deep / over-large proposal tree must fail with the stable
+    // PROPOSAL_LIMIT_EXCEEDED, never a raw RangeError from the unbounded
+    // recursion that the post-walk bounds would otherwise never reach.
+    if (depth > limits.structure.maxTreeDepth) {
+      return fail(
+        'PROPOSAL_LIMIT_EXCEEDED',
+        `tree depth ${depth} exceeds maxTreeDepth ${limits.structure.maxTreeDepth}`,
+        {
+          issues: [
+            makeStructuredIssue('RESOURCE_LIMIT_EXCEEDED', 'structure', { kind: 'operation' }, { limit: 'maxTreeDepth', depth }),
+          ],
+        },
+      );
+    }
     nodes += 1;
+    if (nodes > limits.structure.maxSlots) {
+      return fail(
+        'PROPOSAL_LIMIT_EXCEEDED',
+        `tree has ${nodes} nodes, exceeding maxSlots ${limits.structure.maxSlots}`,
+        {
+          issues: [
+            makeStructuredIssue('RESOURCE_LIMIT_EXCEEDED', 'structure', { kind: 'operation' }, { limit: 'maxSlots', nodes }),
+          ],
+        },
+      );
+    }
     maxDepth = Math.max(maxDepth, depth);
     if (!isPlainObject(node)) {
       return fail('PROPOSAL_MALFORMED', 'every proposal node must be a plain object');
@@ -407,8 +433,29 @@ function runStructureGate(contract: FrozenStructuredSlotContractV1, tree: Propos
   const issues: StructuredIssueV1[] = [];
   const typeById = new Map(contract.slotTypes.map((type) => [type.id, type]));
   const seen = new Set<string>();
+  let nodes = 0;
 
-  const walk = (node: ProposalNode, instancePath: string): void => {
+  const walk = (node: ProposalNode, instancePath: string, depth: number): void => {
+    // Short-circuit INSIDE the walk BEFORE recursing further (FIX_BEFORE_HANDOFF):
+    // an over-deep / over-large proposal tree must surface the stable
+    // RESOURCE_LIMIT_EXCEEDED issue, never a raw RangeError from the unbounded
+    // recursion. (The storage boundary already rejects such trees at put time;
+    // this guard protects validate/submit against any over-limit tree that
+    // predates that check.)
+    if (depth > contract.limits.structure.maxTreeDepth || nodes >= contract.limits.structure.maxSlots) {
+      issues.push(
+        makeStructuredIssue(
+          'RESOURCE_LIMIT_EXCEEDED',
+          'structure',
+          { kind: 'operation' },
+          depth > contract.limits.structure.maxTreeDepth
+            ? { limit: 'maxTreeDepth', depth }
+            : { limit: 'maxSlots', nodes },
+        ),
+      );
+      return;
+    }
+    nodes += 1;
     if (seen.has(node.clientKey)) {
       issues.push(
         makeStructuredIssue('PROPOSAL_CLIENT_KEY_DUPLICATE', 'structure', proposalLoc(node, instancePath, 'node'), {}),
@@ -443,11 +490,11 @@ function runStructureGate(contract: FrozenStructuredSlotContractV1, tree: Propos
     }
 
     for (let i = 0; i < node.children.length; i += 1) {
-      walk(node.children[i], childPath(instancePath, i));
+      walk(node.children[i], childPath(instancePath, i), depth + 1);
     }
   };
 
-  walk(tree, '');
+  walk(tree, '', 1);
   issues.sort((a, b) => {
     if (a.phase !== b.phase) return a.phase < b.phase ? -1 : 1;
     if (a.code !== b.code) return a.code < b.code ? -1 : 1;
