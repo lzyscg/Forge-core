@@ -8,9 +8,7 @@
  * `{ pass, issues }` verdict. This fixture performs no business checks and
  * always passes; it exists to exercise contract compilation, resource
  * hashing and the resource manifest. The sandbox ABI conformance shape is
- * pinned by the runtime sandbox task: the sandbox exposes
- * `module.exports.<exportName>`, so the implementation must be an object
- * whose `validate` method is the ABI entry point.
+ * pinned by the runtime sandbox task.
  *
  * @param {unknown} envelope Read-only canonical JSON input envelope.
  * @returns {{ pass: boolean, issues: unknown[] }} Narrow verdict.

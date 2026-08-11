@@ -297,8 +297,12 @@ function buildSlotInstances(
       spec: node.spec,
       contentPresence: 'unset',
     });
+    // The parent of every child is THIS node — not the last pushed slot, which
+    // after a completed sibling subtree is the previous sibling (design §9.1:
+    // the generation preserves the proposal tree's parent/child shape).
+    const currentSlotId = slots[slots.length - 1]!.slotId;
     for (let i = 0; i < node.children.length; i += 1) {
-      walk(node.children[i], childPath(instancePath, i), slots[slots.length - 1]!.slotId, i);
+      walk(node.children[i], childPath(instancePath, i), currentSlotId, i);
     }
   };
   walk(candidate.normalizedTree, '', null, 0);

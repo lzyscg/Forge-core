@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url';
 import type { LiveTurn } from '../shared/contracts';
 import { CoreService } from './core-service';
 import { makeTempCorePaths, disposeAllTestRoots } from './test-support';
-import { createTestRuntimeEnvironment } from './structured-slots/runtime-capability';
+import { createDisabledRuntimeEnvironment, createTestRuntimeEnvironment } from './structured-slots/runtime-capability';
 import { FakeAgentRuntime } from './runtime/fake-agent-runtime';
 import {
   createDeferred,
@@ -196,9 +196,15 @@ async function createStructuredService(options: {
   const paths = options.paths ?? makeTempCorePaths('forge-core-structured-live-').paths;
   const templateDir = join(paths.templateRoot, STRUCTURED_TEMPLATE_ID);
   cpSync(structuredValidFixtureDir(), templateDir, { recursive: true });
+  // Explicit environment fixtures only — never the checked-in production
+  // manifest (spec §15: only the release command may assert the checked-in
+  // phase), so this identical source passes before AND after promotion.
+  const runtimeEnvironment = options.enabled
+    ? createTestRuntimeEnvironment()
+    : createDisabledRuntimeEnvironment();
   const service = new CoreService(paths, {
     runtime: options.runtime ?? new FakeAgentRuntime(),
-    ...(options.enabled ? { runtimeEnvironment: createTestRuntimeEnvironment() } : {}),
+    runtimeEnvironment,
   });
   await service.initialize();
   return { service, paths };

@@ -57,3 +57,37 @@ TaskScheduler（全局单槽生命周期循环）
 ## 依赖方向
 
 `src/shared`（契约，零依赖）← `src/server/storage` ← `src/server/template` ← `src/server/runtime` ← `src/server/api`；`src/client` 通过 `ForgeCoreGateway` 单向依赖 HTTP API，不反向引用 server。
+
+## 结构槽引擎（structured_slots 模式，v1）
+
+模板可选的第二种生产模式（`productionMode: structured_slots`），与既有 `basic` 并存，设计基准 `docs/2026-08-10-structured-slot-engine-spec.md`。核心不变量 1/3/4/6/8/10 仍适用；结构化「结构/布局/计量/校验/封存」由平台确定性接管，模型只管内容。
+
+### 纯领域层边界
+- `src/shared`（契约，零依赖）← `src/server/structured-slots`（canonical JSON、Slot Schema、LayoutGrammar、issues——纯领域，无存储/运行时依赖）← 存储原语（CorePaths、atomic-file、EventStore batch 文件、structured-slot stores）← 模板编译器（contract/hash/pipeline typestate）← 应用适配 ← 运行时（Attempt/coordinator、Grant、Slot Tool、Gate、Assembler、Committer）。
+
+### 模式分叉
+- `productionMode: basic | structured_slots`：basic 出现 slots/contract.yaml 或 v3 回合契约立即 `TEMPLATE_INVALID` 拒绝；structured 需要匹配的 enabled 运行时环境，在 Loader/TemplateCatalog、cache reopen、task snapshot 创建与 Scheduler（start/resume/retry/answer）同源复核，就绪缺失一律 `TEMPLATE_RUNTIME_UNAVAILABLE`，无环境变量/fallback 绕过。
+
+### EventStore batch 文件
+- `appendBatch` 一次原子写单个 `<first>-<last>-<commitId>.batch.json` 信封；legacy 单事件文件（`<seq>-<eventId>.json`）保持可读、basic `append()` 不变；reader 平铺两者为无空洞、无重复的 `CommittedEvent[]`。
+
+### structured task 目录
+- `tasks/<taskId>/structured-slots/{blobs,generations,content-revisions,proposals,drafts,attempts,custody}`：Proposal/Draft 私有 journal + checkpoint（不进主投影、无 lifecycle 终态）；generation `slots.ndjson` + `index.json`（单槽只读索引 + 对应行）；content revision 内容寻址（值单独 blob，merge 复用未变化部分）。
+
+### Attempt / raw Pi meter 边界
+- 锁定 Pi 0.82；raw `tool_execution_start` pre-validation seam 在 SDK TypeBox 校验**之前**对封闭 Slot Tool 名按 `(toolCallId, canonicalArgsHash)` 持久化 precharge；execute 只消费既有 precharge、不重复计费；schema-invalid/未授权/截断/改参均先达入口；所有 Slot Tool sequential。
+
+### 本地 task_owner 只读投影（spec §14/O07）
+- v1 本地单用户；UI/API 主体固定为内建 `task_owner` 完整只读审计视图；Agent 主体只用 Grant/AccessProfile；`task_owner` 永不看到私有 Proposal/Draft、Grant、实现源码与宿主路径。
+
+### Seal custody
+- stage/verify → unreferenced promote → 单一原子 TaskEvent batch（promote 先于 batch，batch 是唯一可见点）；内容身份 = task + scaffoldId + revision + snapshotHash + assembler digest + canonical input；缺文件/hash 不符 → `ARTIFACT_INTEGRITY_FAILED`（永不吸回槽内容）。
+
+### provisional/final profile 协议（spec §5）
+- checked-in 精确 profile JSON，identity `forge-structured-runtime/v1`；`provisional`（evidenceDigest=null，仅供 disabled build/测试）→ `final`（引用 integrated reference benchmark 证据 digest）；capability manifest 默认 `disabled`；生产启用需两阶段 clean-tree 协议；单向摘要链：clean source/reference runner → profile evidence → final profile → release evidence → capability manifest。
+
+### 只读 UI
+- 「结构」抽屉：树形大纲、type/spec/content、issue 定位、merge/Seal 审计、sealed artifact 链接；无任何写 API。
+
+### Task 19 收尾状态
+- final profile 冻结 + capability 启用以 reference-runner 基准通过为前提；本文档撰写时**未**声明 qualification 通过（capability 保持 `disabled`、profile 保持 `provisional`）。最终证据落点：`docs/evidence/structured-slot-platform-profile-v1.json`（profile 基准证据）与 `docs/evidence/structured-slot-release-v1.json`（release 证据）。未新增生产 story 模板（仅平台中立 fixture `src/server/template/__fixtures__/structured-valid/`）。

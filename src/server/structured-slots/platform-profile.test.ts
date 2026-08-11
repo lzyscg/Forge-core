@@ -13,23 +13,21 @@
  * check (design §7.6 three-layer model): a template limit above the profile
  * is `SLOTS_CONTRACT_INVALID`.
  */
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { StructuredSlotLimitsV1 } from '../../shared/structured-slots';
 import { canonicalJsonSha256 } from './canonical-json';
 import {
   PLATFORM_PROFILE_INVALID,
   SLOTS_CONTRACT_INVALID,
-  STRUCTURED_SLOT_PLATFORM_PROFILE_V1,
   STRUCTURED_SLOT_PROFILE_CANDIDATE,
   assertTemplateLimitsWithinProfile,
   loadStructuredPlatformProfile,
   profileCanonicalDigest,
   validateStructuredPlatformProfileFile,
 } from './platform-profile';
-
-const PROFILE_PATH = fileURLToPath(new URL('platform-profile-v1.json', import.meta.url));
 
 /** Deep copy of the candidate so a test can mutate one axis. */
 function candidate(): StructuredSlotLimitsV1 {
@@ -271,29 +269,39 @@ describe('assertTemplateLimitsWithinProfile — template <= platform ceiling', (
   });
 });
 
-describe('STRUCTURED_SLOT_PLATFORM_PROFILE_V1 — checked-in provisional', () => {
-  it('loads an exact provisional profile with null evidence digest', () => {
-    expect(STRUCTURED_SLOT_PLATFORM_PROFILE_V1.status).toBe('provisional');
-    expect(STRUCTURED_SLOT_PLATFORM_PROFILE_V1.identity).toBe('forge-structured-runtime/v1');
-    expect(STRUCTURED_SLOT_PLATFORM_PROFILE_V1.evidenceDigest).toBeNull();
-    expect(STRUCTURED_SLOT_PLATFORM_PROFILE_V1.limits).toEqual(STRUCTURED_SLOT_PROFILE_CANDIDATE);
-  });
-
-  it('matches the exact checked-in JSON file on disk', () => {
-    const raw = JSON.parse(readFileSync(PROFILE_PATH, 'utf8')) as unknown;
-    expect(validateStructuredPlatformProfileFile(raw)).toEqual(STRUCTURED_SLOT_PLATFORM_PROFILE_V1);
+describe('profile file round-trip and digest (Task 19 pure fixtures)', () => {
+  it('validates an explicit provisional file and canonical-digests it', () => {
+    const file = provisionalFile();
+    const profile = validateStructuredPlatformProfileFile(file);
+    expect(profile.status).toBe('provisional');
+    expect(profile.evidenceDigest).toBeNull();
+    expect(profileCanonicalDigest(profile)).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it('produces a stable 64-hex canonical digest that hashes the whole exact file', () => {
-    const digest = profileCanonicalDigest(STRUCTURED_SLOT_PLATFORM_PROFILE_V1);
+    const raw = provisionalFile();
+    const profile = validateStructuredPlatformProfileFile(raw);
+    const digest = profileCanonicalDigest(profile);
     expect(digest).toMatch(/^[0-9a-f]{64}$/);
-    const raw = JSON.parse(readFileSync(PROFILE_PATH, 'utf8'));
     expect(canonicalJsonSha256(raw)).toBe(digest);
   });
 
-  it('loadStructuredPlatformProfile reads the checked-in file identically', () => {
-    const loaded = loadStructuredPlatformProfile(PROFILE_PATH);
-    expect(loaded).toEqual(STRUCTURED_SLOT_PLATFORM_PROFILE_V1);
-    expect(profileCanonicalDigest(loaded)).toBe(profileCanonicalDigest(STRUCTURED_SLOT_PLATFORM_PROFILE_V1));
+  it('loads an explicit provisional file identically through loadStructuredPlatformProfile', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'forge-core-profile-'));
+    const path = join(dir, 'profile.json');
+    writeFileSync(path, JSON.stringify(provisionalFile()), 'utf8');
+    const loaded = loadStructuredPlatformProfile(path);
+    expect(loaded).toEqual(validateStructuredPlatformProfileFile(provisionalFile()));
+    expect(profileCanonicalDigest(loaded)).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('round-trips an explicit final-shaped file with a 64-hex evidence digest', () => {
+    const smaller = candidate();
+    smaller.structure.maxSlots = 500;
+    smaller.draft.maxChangedSlots = 100;
+    const profile = validateStructuredPlatformProfileFile(finalFile(smaller, 'f'.repeat(64)));
+    expect(profile.status).toBe('final');
+    expect(profile.evidenceDigest).toBe('f'.repeat(64));
+    expect(profileCanonicalDigest(profile)).toMatch(/^[0-9a-f]{64}$/);
   });
 });

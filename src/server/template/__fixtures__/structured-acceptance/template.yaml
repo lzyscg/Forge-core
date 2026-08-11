@@ -1,0 +1,13 @@
+# Platform-neutral structured output fixture (data only).
+# Generic "output document" language; no business story vocabulary (iron rule 1).
+name: Structured Output Template
+description: Neutral structured document production pipeline fixture.
+inputFields:
+  - id: source-text
+    label: Source Text
+    kind: textarea
+    required: true
+    description: The source material for the output document.
+finalArtifact:
+  name: output
+  format: markdown

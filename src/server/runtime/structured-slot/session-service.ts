@@ -25,7 +25,7 @@
  *
  * This module carries zero business vocabulary (iron rule 1).
  */
-import type { FillSessionGrantV1, StructureSessionGrantV1 } from '../../../shared/structured-slots';
+import type { FillSessionGrantV1, JsonValue, StructureSessionGrantV1 } from '../../../shared/structured-slots';
 import type { ForgeAction } from '../forge-actions';
 import type {
   DraftLifecycle,
@@ -328,6 +328,32 @@ export function createStructuredSlotDataSource(options: {
   blobStore: StructuredSlotBlobStore;
   events: () => Promise<readonly TaskEvent[]>;
 }): StructuredSlotDataSource {
+  // The committed content revision overlay, cached per (generation, revision)
+  // so every slot read in one projection never re-reads the whole content
+  // root (design §7.1: reading one slot must not deserialize the full
+  // scaffold). A revision or generation change invalidates the cache (fail
+  // closed: the projection re-reads the authoritative content root).
+  let cachedGeneration: string | null = null;
+  let cachedRevision = -1;
+  let cachedEffective: Record<string, { presence: 'unset' | 'set'; content?: unknown }> | null = null;
+
+  async function effectiveFor(
+    generationId: string,
+    revision: number,
+  ): Promise<Record<string, { presence: 'unset' | 'set'; content?: unknown }> | null> {
+    const state = projectStructuredSlotState(await options.events());
+    if (state.generationId !== generationId || state.contentRevision !== revision || state.content === null) {
+      return null;
+    }
+    if (cachedGeneration === generationId && cachedRevision === revision && cachedEffective !== null) {
+      return cachedEffective;
+    }
+    cachedGeneration = generationId;
+    cachedRevision = revision;
+    cachedEffective = await options.blobStore.readEffectiveContent(state.content);
+    return cachedEffective;
+  }
+
   return {
     async getActiveGeneration() {
       const state = projectStructuredSlotState(await options.events());
@@ -341,15 +367,29 @@ export function createStructuredSlotDataSource(options: {
     async getGenerationIndex(generationId: string) {
       return options.blobStore.getGenerationIndex(generationId);
     },
+    // The committed content revision is the authority for presence/content:
+    // the base generation record always carries `unset`, so a slot read must
+    // overlay the current revision (spec §14: both the Agent and task_owner
+    // projections read the EFFECTIVE formal scaffold).
     async getSlot(generationId: string, slotId: string) {
-      return options.blobStore.readSlot(generationId, slotId);
+      const slot = await options.blobStore.readSlot(generationId, slotId);
+      if (slot === null) return null;
+      const state = projectStructuredSlotState(await options.events());
+      const revision = state.contentRevision ?? 0;
+      const effective = await effectiveFor(generationId, revision);
+      const entry = effective?.[slotId];
+      if (entry === undefined) return slot;
+      return {
+        ...slot,
+        contentPresence: entry.presence,
+        ...(entry.presence === 'set' && entry.content !== undefined
+          ? { content: entry.content as JsonValue }
+          : { content: undefined }),
+      };
     },
     async getContentPresence(generationId: string, revision: number) {
-      const state = projectStructuredSlotState(await options.events());
-      if (state.generationId !== generationId || state.contentRevision !== revision || state.content === null) {
-        return {};
-      }
-      const effective = await options.blobStore.readEffectiveContent(state.content);
+      const effective = await effectiveFor(generationId, revision);
+      if (effective === null) return {};
       const presence: Record<string, 'unset' | 'set'> = {};
       for (const [id, entry] of Object.entries(effective)) {
         presence[id] = entry.presence;

@@ -1,21 +1,20 @@
 // @vitest-environment node
 /**
- * Runtime capability gate tests (Task 5 Step 7, red first).
+ * Runtime capability gate tests (Task 5 Step 7, red first; Task 19 converts
+ * the checked-in-phase pins into pure fixtures).
  *
- * The checked-in `runtime-capability-v1.json` production manifest must start
- * `disabled` with no final profile; the module exposes one immutable
- * `StructuredRuntimeEnvironmentV1 { capability, profile }`. Dependency
- * injection flows through constructor/options only — never an environment
- * variable fallback. Tests inject a matching enabled capability + provisional
- * test profile; no test may flip the checked-in manifest to enabled.
+ * The structured runtime capability is carried by an exact checked-in manifest
+ * (`runtime-capability-v1.json`). Task 9 starts it `disabled` with no final
+ * profile; only the Task 19 release command may flip it to `enabled`. The unit
+ * tests here NEVER assert the current checked-in phase (spec §15: only the
+ * release command may) — they run against EXPLICIT disabled/enabled fixtures
+ * (`createDisabledRuntimeEnvironment` / `createTestRuntimeEnvironment`) so the
+ * identical test source passes before AND after the production promotion.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   CANDIDATE_PROFILE_LIMITS_V1,
-  createProductionRuntimeEnvironment,
+  createDisabledRuntimeEnvironment,
   createRuntimeEnvironment,
   createTestRuntimeEnvironment,
   isStructuredRuntimeEnabled,
@@ -23,8 +22,6 @@ import {
   validateRuntimeCapability,
   validatePlatformProfile,
 } from './runtime-capability';
-
-const MANIFEST_PATH = fileURLToPath(new URL('runtime-capability-v1.json', import.meta.url));
 
 /** An enabled capability matching a provisional test profile. */
 function enabledCapability() {
@@ -38,30 +35,39 @@ function enabledCapability() {
   } as const;
 }
 
-describe('runtime-capability — checked-in production manifest', () => {
-  it('starts disabled with no final profile', () => {
-    const raw = JSON.parse(readFileSync(MANIFEST_PATH, 'utf8')) as Record<string, unknown>;
-    expect(raw.version).toBe(1);
-    expect(raw.status).toBe('disabled');
-    expect(raw.profileIdentity).toBeNull();
-    expect(raw.profileDigest).toBeNull();
-    expect(raw.evidenceDigest).toBeNull();
-    expect(Array.isArray(raw.requiredAbis)).toBe(true);
+/** An explicit disabled capability (never reads the checked-in manifest). */
+function disabledCapability() {
+  return {
+    version: 1 as const,
+    status: 'disabled' as const,
+    profileIdentity: null,
+    profileDigest: null,
+    evidenceDigest: null,
+    requiredAbis: ['forge-validator/v1', 'forge-assembler/v1'],
+  } as const;
+}
+
+describe('runtime-capability — explicit disabled fixture (Task 19)', () => {
+  it('builds an explicit disabled environment with a null profile', () => {
+    const env = createDisabledRuntimeEnvironment();
+    expect(env.capability.status).toBe('disabled');
+    expect(env.capability.profileIdentity).toBeNull();
+    expect(env.capability.profileDigest).toBeNull();
+    expect(env.capability.evidenceDigest).toBeNull();
+    expect(env.profile).toBeNull();
+    expect(env.capability.requiredAbis).toEqual(['forge-validator/v1', 'forge-assembler/v1']);
+    expect(Object.isFrozen(env)).toBe(true);
   });
 
-  it('validates the exact manifest shape', () => {
-    const raw = JSON.parse(readFileSync(MANIFEST_PATH, 'utf8'));
-    const capability = validateRuntimeCapability(raw);
+  it('validates an explicit disabled manifest shape', () => {
+    const capability = validateRuntimeCapability(disabledCapability());
     expect(capability.status).toBe('disabled');
     expect(capability.requiredAbis).toEqual(['forge-validator/v1', 'forge-assembler/v1']);
   });
 
-  it('builds the production environment disabled with a null profile', () => {
-    const env = createProductionRuntimeEnvironment();
-    expect(env.capability.status).toBe('disabled');
-    expect(env.capability.profileIdentity).toBeNull();
-    expect(env.capability.profileDigest).toBeNull();
-    expect(env.profile).toBeNull();
+  it('keeps a disabled capability with a null profile as a valid environment', () => {
+    const env = createDisabledRuntimeEnvironment();
+    expect(() => createRuntimeEnvironment(env.capability, null)).not.toThrow();
   });
 });
 
@@ -129,7 +135,7 @@ describe('runtime-capability — validation and injection', () => {
   });
 
   it('keeps a disabled capability with a null profile as a valid environment', () => {
-    const env = createProductionRuntimeEnvironment();
+    const env = createDisabledRuntimeEnvironment();
     expect(() => createRuntimeEnvironment(env.capability, null)).not.toThrow();
   });
 });
@@ -173,8 +179,8 @@ describe('runtime-capability — production capability validator rejects provisi
 });
 
 describe('runtime-capability — readiness predicate and enabled injection (Task 17)', () => {
-  it('treats the disabled production default as not runnable', () => {
-    const env = createProductionRuntimeEnvironment();
+  it('treats an explicit disabled environment as not runnable', () => {
+    const env = createDisabledRuntimeEnvironment();
     expect(isStructuredRuntimeEnabled(env)).toBe(false);
     expect(isStructuredRuntimeEnabled(undefined)).toBe(false);
   });

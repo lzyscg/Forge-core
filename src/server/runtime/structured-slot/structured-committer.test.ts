@@ -637,7 +637,10 @@ describe('prepareStructuredCommit — structure generation batch', () => {
       generationId: GEN,
       supersedesGenerationId: null,
       slotCount: 3,
-      maxDepth: 2,
+      // PROPOSAL_TREE is document → [title, body] (two siblings at depth 1):
+      // the generation preserves the proposal's parent/child shape, so the
+      // depth is 1 — never the buggy nested document → title → body.
+      maxDepth: 1,
       contentRevision: 0,
       proposalId,
     });

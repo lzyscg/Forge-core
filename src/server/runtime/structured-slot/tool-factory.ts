@@ -30,6 +30,7 @@
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { Type, type Static, type TSchema } from 'typebox';
 import { canonicalJsonBytes, canonicalJsonSha256 } from '../../structured-slots/canonical-json';
+import { STORAGE_ERROR_CODES, StorageError } from '../../storage/atomic-file';
 import type {
   JsonValue,
   SealRecord,
@@ -434,8 +435,23 @@ async function structureRecord(
   result: JsonValue,
 ): Promise<void> {
   if (ctx.store === undefined) return;
-  await ctx.store.recordProposalTool(proposalId, toolCallId, canonicalArgsHash, result);
+  // The meter record is the metering truth and MUST happen for every executed
+  // structure tool (exact-replay keying). It comes first so a journal-record
+  // failure can never drop it.
   await ctx.meter.recordToolResult({ toolCallId, canonicalArgsHash, result });
+  try {
+    await ctx.store.recordProposalTool(proposalId, toolCallId, canonicalArgsHash, result);
+  } catch (error) {
+    // A `submit_structure_proposal` tool result lands AFTER the candidate
+    // freezes, which LOCKS the proposal (spec §9.1: candidate ⇒ no more writes).
+    // The store rejects the post-lock journal write; the submit itself is
+    // already idempotent via submitProposal's candidate replay (design §22.2),
+    // so the journal tool record is best-effort. Any OTHER storage failure is
+    // still surfaced (fail closed).
+    if (!(error instanceof StorageError) || error.code !== STORAGE_ERROR_CODES.INVALID_INPUT) {
+      throw error;
+    }
+  }
 }
 
 function toolCallContext(toolCallId: string, toolName: string, params: unknown): SlotToolCallContext {

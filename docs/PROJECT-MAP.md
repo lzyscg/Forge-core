@@ -18,13 +18,21 @@ src/server/            文件后端 + 调度
                        action-buffer / forge-actions / annotate-verdict / progress-guard /
                        pi-tool-factory / workspace-tools / skill-service / live-store / retry-policy /
                        fake-agent-runtime / workspace-store / test-support
-  storage/             core-paths / event-store(追加) / artifact-store(版本目录) / task-store /
-                       task-projector / trace-store / task-events / atomic-file
-  template/            模板加载/校验/最后有效缓存（template-loader/validator/schema/catalog/cache）
-  api/                 REST 路由（templates / tasks / trace / skill-content / DELETE）
+  runtime/structured-slot/
+                       structured_slots 运行时（attempt-coordinator / attempt-meter / proposal-service /
+                       draft-service / grant-service / seal-service / projection-service /
+                       session-service / structured-committer / tool-factory / validation-engine / evaluator-runner）
+  structured-slots/    结构槽纯领域层（canonical-json / slot-schema / layout-grammar / issues /
+                       platform-profile / runtime-capability）
+  storage/             core-paths / event-store(追加+batch) / artifact-store(版本目录) / task-store /
+                       task-projector / trace-store / task-events / atomic-file /
+                       structured-slot-blob-store / structured-slot-private-store / structured-slot-state
+  template/            模板加载/校验/最后有效缓存（template-loader/validator/schema/catalog/cache）/
+                       结构槽 contract/typestate 编译（structured-slot-contract / structured-pipeline-validator）
+  api/                 REST 路由（templates / tasks / trace / skill-content / structured-slots 只读 / DELETE）
 templates/             long-form-hub（总控中枢，v7 主模板）、zhihu-single-chapter（v2 升级保留）
 e2e/                   Playwright 门禁（runtime-loop / product-flow / process-trace / recovery…）
-scripts/               verify-* / probe:pi / acceptance-* / write-final-evidence
+scripts/               verify-* / probe:pi / acceptance-* / write-final-evidence / benchmark-structured-slots
 docs/                  见 README「docs 索引」
 ```
 
@@ -58,13 +66,17 @@ main.ts → createForgeCoreServer
 | `forge-actions` | 9 动作注册表 + 形状/禁键校验 | `validateForgeAction`, `FORGE_ACTION_LIMITS` |
 | `annotate-verdict` | annotate frontmatter verdict 共享校验 | `parseAnnotateVerdict` |
 | `progress-guard` | 无进展纯函数 | `evaluateProgress`, `PROGRESS_POLICY` |
-| `EventStore` | 追加事件（validate + normalizeLegacyEvent） | `append`, `read` |
-| `ArtifactStore` | 版本目录 + 事件权威版本号 + cross-check | `publish`, `annotate`, `read`, `claimStagedVersion` |
+| `EventStore` | 追加事件（validate + normalizeLegacyEvent）+ 结构化原子 batch | `append`, `read`, `appendBatch`, `readBatchByCommitId` |
+| `ArtifactStore` | 版本目录 + 事件权威版本号 + cross-check + 结构化 custody | `publish`, `annotate`, `read`, `claimStagedVersion`, `stagePreparedVersion`, `promotePreparedVersion` |
 | `TaskProjector` | 事件折叠 → TaskWorkspace | `projectTask`（nodes/routes/artifacts/status） |
 | `TraceStore` | 展示用回合过程（无 raw thinking） | `appendTurnTrace`, `readTurnTrace` |
 | `PiAgentRuntime` | 约束 Pi 适配（9 工具 + 阶段机） | `run`（会话/流式/trace） |
 | `pi-tool-factory` | 9 工具定义 + annotate frontmatter 工具层校验 | `createForgeToolDefinitions` |
-| `TemplateCatalog/Loader/Validator` | 模板加载/校验/缓存/哈希 | `loadTemplateDirectory`, `validatePipelineFile` |
+| `TemplateCatalog/Loader/Validator` | 模板加载/校验/缓存/哈希 + 模式分叉（basic 拒 slots/v3，structured 需 enabled 环境） | `loadTemplateDirectory`, `validatePipelineFile`, `resolveStructuredSlots` |
+| `structured-slots/`（纯领域） | canonical JSON / Slot Schema / LayoutGrammar / issues / profile / capability（零存储、零运行时依赖） | `canonicalJsonSha256`, `compileSlotSchemaV1`, `compileLayoutGrammarV1`, `loadStructuredPlatformProfile` |
+| `runtime/structured-slot/` | structured_slots 运行时：Attempt 协调与计量、Grant、Proposal/Draft 会话、Seal/Assembler、授权投影、原子提交、Slot Tool、validator/Assembler 沙箱 | `attempt-coordinator`, `attempt-meter`, `proposal-service`, `draft-service`, `grant-service`, `seal-service`, `projection-service`, `session-service`, `structured-committer`, `tool-factory`, `validation-engine`, `evaluator-runner` |
+| `structured-slot-routes` | 只读 REST（contract/tree/slot/issues/seal，TypeBox exact schema + cursor） | `GET /api/tasks/:taskId/structured-slots/{contract,tree,slots/:slotId,issues,seal}` |
+| `TaskWorkspace.structuredSlotsSummary` | 可选结构化摘要（mode/scaffold/generation/revision/status/计数），basic 不输出，不嵌 content/树/Grant/私有 Draft | `StructuredSlotsSummaryV1` |
 
 ## 数据目录
 
@@ -76,6 +88,7 @@ data/tasks/<taskId>/
   artifacts/vNNN/       版本目录（content.md|txt / revision.md / review.md / meta.json）
   traces/<turnId>.json  展示用回合过程（phase + 公开文本 + tool 步骤）
   workspaces/<agentId>/ Agent 私有草稿
+  structured-slots/     结构槽子树（blobs / generations / content-revisions / proposals / drafts / attempts / custody）
 ```
 
 ## 测试门禁
@@ -89,5 +102,7 @@ data/tasks/<taskId>/
 | 后端验证 | `npm run verify:backend` | gateway-contracts + server-modules + http-persistence |
 | 运行时验证 | `npm run verify:runtime` | runtime-modules + e2e-runtime-loop + recovery + pi-boundary（真实 probe） |
 | 真实验收 | `npm run acceptance:real` | 真实 Provider 端到端（直接使用提交的 `templates/`） |
+| 结构化离线验收 | `npm run verify:structured-slots` | 离线证据命令：确定性结构槽验收/qualify/promote（平台中立 fixture + 脚本化 Agent 运行时）；不写产品证据（区别于 verify:backend/verify:runtime） |
+| 结构化基准 | `npm run benchmark:structured-slots` | 离线基准：`--mode primitive-smoke`；`--mode integrated-qualify`（需 `--profile/--evidence/--adapter`）保留给 Task 19，产出 evidence 并改写 provisional profile |
 
 **测试纪律**：跨层语义测试（`task-runner.test.ts` 的 v7 input assembly / v7 forward path）直接断言下一个 Agent 实际收到的 `AgentTurnInput.inputText`，而不只验证事件字段。

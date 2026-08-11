@@ -3,6 +3,29 @@
 > 整晚自主开发日志。按 dev-plan 8 Phase 推进,每 Phase TDD + 全绿 + 本地 commit。
 > 设计基准：v7 定稿（`docs/2026-08-06-artifact-version-directory.md`）。
 
+## 结构槽引擎 v1 — 上线门禁与验收（Task 19）
+
+（进行中；验收命令与文档已就位，final profile 冻结 + capability 启用 gated 于 reference-runner 基准结果，撰写本文档时**尚未**声明通过；capability 保持 `disabled`、profile 保持 `provisional`）
+
+### 做了什么
+- **离线验收/qualify/promote 命令**：`npm run verify:structured-slots`（offline 证据命令，不写产品证据）承载结构槽 acceptance/qualify/promote；配套 `npm run benchmark:structured-slots`（`--mode primitive-smoke`；`--mode integrated-qualify` 经 `--profile/--evidence` 直接装配真实 Task 10/16 集成适配器）。
+- **确定性端到端结构化验收**：在平台中立 fixture（`src/server/template/__fixtures__/structured-valid/`）上以脚本化 Agent 运行时跑完整链路：structure → fill → no-op fill → Seal 可靠失败 → rework fill → Seal publish → v2 final submit（post-seal submitter 为 v2 契约提交 sealed artifact）。
+- **崩溃/重放验收用例**：Attempt start/terminal batch 全有或全无、fill journal 两侧崩溃可由事件修复、EventStore batch 崩溃点/commitId pre-read/replay/conflict、Seal custody batch 前/后崩溃与 orphan 复用/清理、hash 损坏检测。
+- **安全/源码扫描**：validator/Assembler sandbox 逃逸、timeout/memory/output/aggregate/Attempt limits fail closed、acceptance secret 扫描。
+- **集成 reference benchmark**：`scripts/benchmark-structured-slots.ts` 的 `--mode integrated-qualify` 承载三项集成用例（500-issue 授权投影、64 MiB 真实 Seal/Assembler/custody、batch recovery），并实现可复现证据纪律（runner 身份预检、clean-source 守卫、生成物 allowlist）。
+- **两阶段 clean-tree 协议文档化**（spec §15）：Step 5 检查点 commit 保持 capability `disabled` + profile `provisional`；之后仅允许生成物（final profile / profile evidence / release evidence / capability manifest）落地。
+
+### 关键决策
+- 验收为离线证据命令而非产品证据写入方：`verify:structured-slots`/`benchmark:structured-slots` 与 `verify:backend`/`verify:runtime` 的产品证据职责分离。
+- 最终证据路径固定：`docs/evidence/structured-slot-platform-profile-v1.json`（profile 基准证据）与 `docs/evidence/structured-slot-release-v1.json`（release 证据）；final profile `evidenceDigest` 引用前者、capability 引用后者。
+- **未新增生产 story 模板**：`templates/` 保持 basic；结构槽只存在平台中立 fixture（`src/server/template/__fixtures__/structured-valid/`），验收不依赖业务故事词汇。
+
+### 问题与解决
+- （撰写时点）integrated-qualify 尚未产出 final profile 与 release evidence；禁止在无基准证据时改写 checked-in profile/capability，冻结与启用以 reference-runner 通过结果为唯一前提。
+
+### 已知局限与后续跟进
+- final profile 冻结 + production capability enable 是剩余步骤；启用后需以 production default 再跑 `npm run check`、`npm test`、`npm run build`、`npm run e2e` 与 structured acceptance 全绿（spec §16.11）。
+
 ## 语义审计修复（plan 2026-08-07，Phase A-E）
 
 （已完成；check 0 错、单测 1149/1149、e2e 44/44、build、verify:backend/runtime 全绿）

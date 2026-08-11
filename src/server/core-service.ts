@@ -337,6 +337,21 @@ export class CoreService {
     // runtime builds its per-turn structured slot context (tool set, meter,
     // dispatch guard) from the runner's coordinator-built session bundle.
     structuredSlotSeam.createContext = (input) => this.runner.createStructuredSlotContext(input);
+    // Structural wiring (Task 19): a custom/scripted runtime exposing
+    // `setStructuredSlotProvider` receives the SAME per-turn structured slot
+    // context provider the Pi adapter gets — the identical sealed coordinator/
+    // session bundle, never a second default (design O05). The check stays
+    // structural so this module never imports the concrete runtime.
+    const structuredProviderTarget = this.runtime as Partial<{
+      setStructuredSlotProvider?: (
+        provider: (input: AgentTurnInput) => Promise<StructuredSlotRuntimeContext | null>,
+      ) => void;
+    }>;
+    if (typeof structuredProviderTarget.setStructuredSlotProvider === 'function') {
+      structuredProviderTarget.setStructuredSlotProvider((input) =>
+        this.runner.createStructuredSlotContext(input),
+      );
+    }
     this.scheduler = new TaskScheduler({
       service: this,
       runner: this.runner,

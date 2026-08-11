@@ -19,7 +19,10 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { CorePaths } from '../storage/core-paths';
-import { createTestRuntimeEnvironment } from '../structured-slots/runtime-capability';
+import {
+  createDisabledRuntimeEnvironment,
+  createTestRuntimeEnvironment,
+} from '../structured-slots/runtime-capability';
 import { TemplateCatalog } from './template-catalog';
 
 const tempRoots: string[] = [];
@@ -348,8 +351,11 @@ describe('TemplateCatalog structured readiness gate (Task 5, spec §5 / O05)', (
   }
 
   it('does not expose a runnable structured template while disabled', async () => {
-    // Production default environment: disabled capability + null profile.
-    const { catalog } = await structuredCatalog();
+    // Explicit disabled fixture: never reads the checked-in production manifest
+    // (spec §15 — only the release command may assert the checked-in phase).
+    const { catalog } = await structuredCatalog({
+      runtimeEnvironment: createDisabledRuntimeEnvironment(),
+    });
     expect(catalog.get('structured-gated')).toBeUndefined();
     expect(catalog.getFrozen('structured-gated')).toBeUndefined();
     expect(catalog.getDiagnostic('structured-gated')?.code).toBe('TEMPLATE_RUNTIME_UNAVAILABLE');
@@ -389,7 +395,11 @@ describe('TemplateCatalog structured readiness gate (Task 5, spec §5 / O05)', (
     });
     // Break the source so a restarted disabled catalog would boot from cache.
     rmSync(paths.templateSource('structured-gated'), { recursive: true, force: true });
-    const restarted = new TemplateCatalog(paths); // production default (disabled)
+    // Explicit disabled fixture: a cache reopen under a disabled runtime keeps
+    // the availability diagnostic and never exposes the structured template.
+    const restarted = new TemplateCatalog(paths, {
+      runtimeEnvironment: createDisabledRuntimeEnvironment(),
+    });
     await restarted.initialize();
     expect(restarted.get('structured-gated')).toBeUndefined();
     expect(restarted.getDiagnostic('structured-gated')?.code).toBe('TEMPLATE_RUNTIME_UNAVAILABLE');

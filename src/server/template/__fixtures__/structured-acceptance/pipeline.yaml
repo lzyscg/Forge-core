@@ -1,0 +1,36 @@
+# Platform-neutral structured pipeline (data only).
+# Production mode routes: structure -> fill -> seal -> v2 submitter, with one
+# seal rework edge (seal_gate_failed -> send_message) back to the v3 fill node.
+productionMode: structured_slots
+agents:
+  - structure
+  - fill
+  - seal
+  - submitter
+routes:
+  - from: structure
+    to: fill
+    kind: message
+    label: propose structure
+  - from: fill
+    to: seal
+    kind: message
+    label: submit draft
+  - from: seal
+    to: submitter
+    kind: artifact
+    label: publish output
+  - from: seal
+    to: fill
+    kind: message
+    label: seal rework
+artifactSchema:
+  files:
+    - name: document.md
+      required: true
+      producer: seal
+      extract: content
+      phase: create
+finalOutput:
+  submitters:
+    - submitter

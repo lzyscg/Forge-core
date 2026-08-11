@@ -248,3 +248,22 @@ export function createTestRuntimeEnvironment(): StructuredRuntimeEnvironmentV1 {
   });
   return createRuntimeEnvironment(capability, profile);
 }
+
+/**
+ * Test/dev-only convenience (Task 19): builds an EXPLICIT disabled environment
+ * with a null profile. This is a PURE fixture — it never reads the checked-in
+ * production manifest, so the identical test source passes before AND after the
+ * Task 19 production promotion (spec §15 two-phase protocol). Only the release
+ * command may assert the current checked-in phase.
+ */
+export function createDisabledRuntimeEnvironment(): StructuredRuntimeEnvironmentV1 {
+  const capability = validateRuntimeCapability({
+    version: 1,
+    status: 'disabled',
+    profileIdentity: null,
+    profileDigest: null,
+    evidenceDigest: null,
+    requiredAbis: [...REQUIRED_ABIS],
+  });
+  return createRuntimeEnvironment(capability, null);
+}

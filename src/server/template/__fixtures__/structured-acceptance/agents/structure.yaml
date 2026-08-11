@@ -1,0 +1,25 @@
+id: structure
+name: Structure Agent
+description: Creates the initial slot scaffold structure from the request.
+model: configured/structure-model
+systemPrompt: |
+  You are the structure agent. Create the initial slot scaffold structure
+  from the provided source text.
+turnContract:
+  version: 3
+  slotSession:
+    kind: structure
+    accessProfile: null
+    capabilities:
+      - read_structure_contract
+      - write_structure_proposal
+      - submit_structure_proposal
+    completion: structure_commit_candidate_created
+  dispatch:
+    allowedActions: [send_message]
+    targets:
+      send_message: [fill]
+slotCapabilities:
+  - read_structure_contract
+  - write_structure_proposal
+  - submit_structure_proposal

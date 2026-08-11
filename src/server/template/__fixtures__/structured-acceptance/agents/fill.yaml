@@ -1,0 +1,27 @@
+id: fill
+name: Fill Agent
+description: Fills slot content against the active scaffold.
+model: configured/fill-model
+systemPrompt: |
+  You are the fill agent. Fill the visible slots of the active scaffold with
+  draft content.
+turnContract:
+  version: 3
+  slotSession:
+    kind: fill
+    accessProfile: editor
+    capabilities:
+      - read_slot_spec
+      - read_slot_content
+      - write_draft_content
+      - submit_draft
+    completion: merge_candidate_created
+  dispatch:
+    allowedActions: [send_message]
+    targets:
+      send_message: [seal]
+slotCapabilities:
+  - read_slot_spec
+  - read_slot_content
+  - write_draft_content
+  - submit_draft
