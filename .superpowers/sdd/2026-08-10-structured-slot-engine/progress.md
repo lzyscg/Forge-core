@@ -1056,3 +1056,16 @@ HEAD 复核：5cfbfe0（当前 HEAD 与已知一致），工作树仅未跟踪�
 
 - Flaky-test fix dispatched: implementer ad865ed0575d457f7 (opus-tier) — make the api.integration recovery test deterministic (await/poll the detached resume to a settled legitimate non-terminal state; complete the allowed set running|interrupted|retryable_failure; NOT terminal/corrupt; no scheduler/runner/production change; no skip/.only).
 
+
+## Post-promotion phase-pinned test conversion (Task 19 Step 1/9 surfaced)
+
+- With the checked-in manifest now ENABLED + profile FINAL (promotion succeeded), 4 tests that pinned the CHECKED-IN phase fail under `npm test`:
+  1. src/server/api/structured-slot-routes.test.ts "surfaces a stable TEMPLATE_RUNTIME_UNAVAILABLE for a disabled runtime" — constructs CoreService with the production default (now enabled) → must inject createDisabledRuntimeEnvironment() explicitly.
+  2. src/server/storage/task-store.test.ts ×2 — "maps a gated structured template to TEMPLATE_RUNTIME_UNAVAILABLE" + "propagates TEMPLATE_RUNTIME_UNAVAILABLE when reopening a structured snapshot under a disabled runtime" — reopen steps rely on the checked-in disabled default → must inject createDisabledRuntimeEnvironment() explicitly.
+  3. scripts/verify-structured-slots.test.ts promote happy-path — the isolated temp-workspace promote test now fails; must be made phase-independent.
+- This is the plan's Task 19 Step 1/Step 9 requirement: unit tests must be explicit disabled/enabled fixture tests, identical source passes before AND after promotion. Owner: harness. Fix by explicit environment injection, not by weakening.
+- IMPORTANT: qualification already succeeded and the manifest is ENABLED — this test conversion is a post-promotion cleanup to keep `npm test` green under the enabled default; the release evidence's sourceTreeDigest must match HEAD, so commit the test fix and re-verify.
+
+
+- Phase-pinned test conversion dispatched: implementer a61922af1c0b2504d (opus-tier) — inject explicit disabled/enabled fixtures in structured-slot-routes + task-store (2) + verify-structured-slots promote happy-path; keep manifest enabled + profile final; no assertion weakening; full-suite 3× deterministic green + check + diff-check.
+
