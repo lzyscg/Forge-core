@@ -337,13 +337,18 @@ export function createStructuredSlotDataSource(options: {
   blobStore: StructuredSlotBlobStore;
   events: () => Promise<readonly TaskEvent[]>;
 }): StructuredSlotDataSource {
-  // Cached event-derived structured state. Events are append-only and the
-  // data source's methods only surface the active generation/revision/content,
-  // so within one projection operation the cached state is stable. Re-projecting
-  // re-parses the whole event list, so the cache keeps `getSlot`/
-  // `getContentPresence` from re-projecting per slot. A requested
-  // generation/revision that does not match the cached state triggers ONE
-  // refresh before failing closed (see `stateFor`/`stateForGeneration`).
+  // Cached event-derived structured state. Re-projecting re-parses the whole
+  // event list, so the cache keeps `getSlot` from re-projecting per slot.
+  // `getActiveGeneration`/`getContentPresence` are OPERATION BOUNDARIES: the
+  // projection service calls them once per `listSlots`/`readSlot`/`readSlots`
+  // (via `resolveView`), so they recompute the projected state from events on
+  // every call — a long-lived source therefore surfaces a new generation or a
+  // content-advancing merge immediately, and the projection fails `GRANT_STALE`
+  // for a grant pinned to an old revision. `getSlot` serves the slot record +
+  // the presence overlay from the cached state WITHOUT re-reading events:
+  // every projection operation re-establishes the view (getActiveGeneration)
+  // first, pinning the current revision, and events do not change within a
+  // single-process read.
   let cachedState: ReturnType<typeof projectStructuredSlotState> | null = null;
 
   // Cached presence map per content-root digest (the root is immutable).
@@ -357,44 +362,12 @@ export function createStructuredSlotDataSource(options: {
     return state;
   }
 
-  /** The current authoritative state, re-projected only when the tail changed. */
+  /** The last operation's projected state; events do not change within a read. */
   async function currentState(): Promise<ReturnType<typeof projectStructuredSlotState>> {
     if (cachedState !== null) {
       return cachedState;
     }
     return refreshState();
-  }
-
-  /**
-   * State for a requested (generation, revision). If the cached state does not
-   * match, re-fetch events once (a new event may have advanced the active
-   * generation/revision) before failing closed.
-   */
-  async function stateFor(generationId: string, revision: number): Promise<ReturnType<typeof projectStructuredSlotState> | null> {
-    let state = await currentState();
-    if (state.generationId === generationId && state.contentRevision === revision) {
-      return state;
-    }
-    // The cached state does not describe this (generation, revision): refresh
-    // once, then fail closed if the request is still not the active one.
-    state = await refreshState();
-    if (state.generationId === generationId && state.contentRevision === revision) {
-      return state;
-    }
-    return null;
-  }
-
-  /** State for a requested generation (any revision). */
-  async function stateForGeneration(generationId: string): Promise<ReturnType<typeof projectStructuredSlotState> | null> {
-    let state = await currentState();
-    if (state.generationId === generationId) {
-      return state;
-    }
-    state = await refreshState();
-    if (state.generationId === generationId) {
-      return state;
-    }
-    return null;
   }
 
   /** Presence map of the active content root, cached by digest. */
@@ -410,8 +383,10 @@ export function createStructuredSlotDataSource(options: {
   }
 
   return {
+    // Operation boundary: recompute the projected state on every call so a
+    // long-lived source never serves a stale active generation/revision.
     async getActiveGeneration() {
-      const state = await currentState();
+      const state = await refreshState();
       if (state.generationId === null) return null;
       return {
         scaffoldId: state.scaffoldId as string,
@@ -425,10 +400,11 @@ export function createStructuredSlotDataSource(options: {
     // The committed content revision is the authority for presence/content:
     // the base generation record always carries `unset`, so a slot read must
     // overlay the current revision (spec §14: both the Agent and task_owner
-    // projections read the EFFECTIVE formal scaffold).
+    // projections read the EFFECTIVE formal scaffold). Per-slot reads serve the
+    // cached (operation-pinned) state — no per-slot event read.
     async getSlot(generationId: string, slotId: string, opts?: { withContent?: boolean }) {
-      const state = await stateForGeneration(generationId);
-      if (state === null) {
+      const state = await currentState();
+      if (state.generationId !== generationId) {
         return null;
       }
       const slot = await options.blobStore.readSlot(generationId, slotId);
@@ -460,12 +436,14 @@ export function createStructuredSlotDataSource(options: {
       const presence = await presenceFor(state);
       return { ...slot, contentPresence: presence[slotId] ?? slot.contentPresence };
     },
+    // Operation boundary: recompute + validate, and return a defensive copy so
+    // a runtime caller can never corrupt the cached presence map.
     async getContentPresence(generationId: string, revision: number) {
-      const state = await stateFor(generationId, revision);
-      if (state === null || state.content === null) {
+      const state = await refreshState();
+      if (state.generationId !== generationId || state.contentRevision !== revision || state.content === null) {
         return {};
       }
-      return presenceFor(state);
+      return { ...(await presenceFor(state)) };
     },
   };
 }

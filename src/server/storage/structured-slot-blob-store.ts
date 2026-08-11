@@ -508,6 +508,9 @@ export class StructuredSlotBlobStore {
     index?: GenerationIndexV1,
   ): Promise<SlotInstance[]> {
     const resolvedIndex = index ?? (await this.readGenerationIndex(generationId));
+    if (resolvedIndex.generationId !== generationId) {
+      throw corrupt('generation 索引与请求的 generationId 不一致。');
+    }
     const slotsPath = this.paths.taskStructuredGenerationSlotsFile(this.taskId, generationId);
     let handle: Awaited<ReturnType<typeof open>> | null = null;
     try {

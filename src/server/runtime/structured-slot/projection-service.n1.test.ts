@@ -19,7 +19,7 @@
  */
 import { mkdirSync } from 'node:fs';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { JsonObject, StructuredBlobRefV1 } from '../../../shared/structured-slots';
+import type { FillSessionGrantV1, JsonObject, StructuredBlobRefV1 } from '../../../shared/structured-slots';
 import type { FrozenStructuredSlotContractV1 } from '../../template/structured-slot-contract';
 import { EventStore } from '../../storage/event-store';
 import {
@@ -230,6 +230,113 @@ describe('projection N+1 — outline reads metadata + presence only (Task C)', (
     // The whole operation re-projects the event list at most twice (cold +
     // possible refresh) — never once per slot.
     expect(eventsCalls).toBeLessThanOrEqual(2);
+  });
+
+  it('a long-lived source surfaces a post-merge revision; getSlot never serves wrong-revision content; a stale grant fails GRANT_STALE', async () => {
+    const { paths } = makeTempCorePaths('forge-core-n1-merge-');
+    const taskId = 'task-n1-merge';
+    mkdirSync(paths.taskRoot(taskId), { recursive: true });
+    const blobStore = new StructuredSlotBlobStore(paths, taskId);
+    const eventStore = new EventStore(paths);
+    const generationId = 'gen-1';
+    const scaffoldId = 'scaffold-1';
+    const slots: SlotInstance[] = [
+      { slotId: 'r', scaffoldId, parentSlotId: null, order: 0, typeId: 'document', spec: {}, contentPresence: 'unset' },
+      { slotId: 't1', scaffoldId, parentSlotId: 'r', order: 1, typeId: 'title', spec: {}, contentPresence: 'unset' },
+      { slotId: 'b1', scaffoldId, parentSlotId: 'r', order: 2, typeId: 'body', spec: {}, contentPresence: 'unset' },
+    ];
+    const manifest = await blobStore.putGeneration({ generationId, scaffoldId, slots });
+    const titleV0 = await blobStore.putContentValue('title');
+    const rootV0 = await blobStore.putContentRevision({ r: 'unset', t1: titleV0.sha256, b1: 'unset' });
+    await eventStore.append(taskId, {
+      id: 'gen-committed',
+      at: new Date().toISOString(),
+      type: 'structured_scaffold_generation_committed',
+      scaffoldId,
+      generationId,
+      supersedesGenerationId: null,
+      rootSlotId: 'r',
+      slotCount: 3,
+      maxDepth: 1,
+      structure: manifest.structure,
+      content: rootV0,
+      contentRevision: 0,
+      proposalId: 'p-1',
+    });
+
+    const source = createStructuredSlotDataSource({
+      blobStore,
+      events: async () => (await eventStore.read(taskId)).map((entry) => entry.event),
+    });
+    const projection = new StructuredSlotProjectionService({
+      contract: minimalContract(),
+      source,
+      signer: createTaskLocalCursorSigner(taskId),
+    });
+
+    // Revision 0 view: active generation at rev 0; a content-level t1 read
+    // returns the base value.
+    expect(await source.getActiveGeneration()).toEqual({ scaffoldId, generationId, contentRevision: 0 });
+    const before = await source.getSlot(generationId, 't1', { withContent: true });
+    expect(before?.content).toBe('title');
+
+    // Commit a merge on the SAME task: contentRevision advances to 1 with a
+    // new content root (t1 changed, b1 filled). The source is long-lived.
+    const titleV1 = await blobStore.putContentValue('new title');
+    const bodyV1 = await blobStore.putContentValue('body');
+    const rootV1 = await blobStore.putContentRevision({ r: 'unset', t1: titleV1.sha256, b1: bodyV1.sha256 });
+    await eventStore.append(taskId, {
+      id: 'merge-1',
+      at: new Date().toISOString(),
+      type: 'structured_fill_draft_terminal',
+      draftId: 'draft-1',
+      turnId: 'turn-1',
+      status: 'merged',
+      baseRevision: 0,
+      resultRevision: 1,
+      changeCount: 2,
+      content: rootV1,
+    });
+
+    // A FRESH getActiveGeneration sees the new revision (no stale cache).
+    expect(await source.getActiveGeneration()).toEqual({ scaffoldId, generationId, contentRevision: 1 });
+    // getContentPresence returns the NEW presence, and returns a defensive
+    // copy (mutating it cannot corrupt the cached map).
+    const presence = await source.getContentPresence(generationId, 1);
+    expect(presence).toEqual({ r: 'unset', t1: 'set', b1: 'set' });
+    // A runtime caller mutating the copy must not corrupt the cached map.
+    (presence as Record<string, 'unset' | 'set'>).t1 = 'unset';
+    expect(await source.getContentPresence(generationId, 1)).toEqual({ r: 'unset', t1: 'set', b1: 'set' });
+
+    // getSlot resolves through the CURRENT (post-merge) presence — never
+    // wrong-revision content.
+    const afterT1 = await source.getSlot(generationId, 't1', { withContent: true });
+    expect(afterT1?.content).toBe('new title');
+    const afterB1 = await source.getSlot(generationId, 'b1', { withContent: true });
+    expect(afterB1?.content).toBe('body');
+
+    // A fresh projection operation with a grant pinned to the OLD baseRevision
+    // fails GRANT_STALE — the projection-level fail-closed still holds.
+    const staleGrant: FillSessionGrantV1 = {
+      grantId: 'grant-stale',
+      kind: 'fill',
+      caseId: taskId,
+      turnId: 'turn-2',
+      agentId: 'agent-1',
+      snapshotHash: 'snapshot-1',
+      capabilities: ['read_slot_spec', 'read_slot_content'],
+      accessProfileId: 'fill',
+      scaffoldId,
+      baseRevision: 0,
+      readableSlotIds: ['t1', 'b1'],
+      writableSlotIds: ['t1', 'b1'],
+      draftId: 'draft-2',
+    };
+    const listResult = await projection.listSlots({ kind: 'agent', grant: staleGrant }, null, 10);
+    expect(listResult.ok).toBe(false);
+    if (!listResult.ok) {
+      expect(listResult.code).toBe('GRANT_STALE');
+    }
   });
 });
 

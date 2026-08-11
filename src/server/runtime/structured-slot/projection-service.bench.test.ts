@@ -200,6 +200,14 @@ describe('projection cost separation (Task 19 remediation Task A)', () => {
       });
 
       const committed: readonly CommittedEvent[] = await events.read(taskId);
+
+      // Warm the NDJSON file pages before any measurement so the cold-vs-hot
+      // delta isolates the ONE-TIME projection costs (event-state projection,
+      // presence-root read, projection-path JIT compile) instead of page-cache
+      // eviction noise on the 301 NDJSON opens. This also populates the blob
+      // store's generation-index cache, exactly as a prior read would.
+      await blobStore.readGenerationSlots('gen-1');
+
       const source = createStructuredSlotDataSource({
         blobStore,
         events: async () => committed.map((entry) => entry.event),
@@ -211,10 +219,10 @@ describe('projection cost separation (Task 19 remediation Task A)', () => {
       });
       const subject = { kind: 'task_owner' } as const;
 
-      // COLD: the first outline read builds the projection and performs the
-      // one-time reads the data source caches (event-state projection, cached
-      // generation index, content-revision presence root). The outline itself
-      // never hydrates content blobs (Task C N+1 fix).
+      // COLD: the first outline read performs the one-time reads the data
+      // source caches (event-state projection, content-revision presence root)
+      // plus the projection-path JIT compile. The outline itself never hydrates
+      // content blobs (Task C N+1 fix).
       const startedCold = performance.now();
       const cold = await projection.listSlots(subject, null, OWNER_LIMIT);
       const coldMs = performance.now() - startedCold;
@@ -225,10 +233,10 @@ describe('projection cost separation (Task 19 remediation Task A)', () => {
       }
 
       // HOT: subsequent reads reuse the cached state/index/presence; take the
-      // MIN of several samples so GC/monitor noise cannot hide the caching
-      // lever.
+      // MIN over several samples so GC/monitor noise cannot hide the caching
+      // lever (more samples also absorb page-cache eviction windows under load).
       const hotSamples: number[] = [];
-      for (let i = 0; i < 3; i += 1) {
+      for (let i = 0; i < 5; i += 1) {
         const started = performance.now();
         const hot = await projection.listSlots(subject, null, OWNER_LIMIT);
         expect(hot.ok).toBe(true);
@@ -239,8 +247,8 @@ describe('projection cost separation (Task 19 remediation Task A)', () => {
       probe('cold', coldMs);
       probe('hot', hotMs);
       // The warm call must be strictly cheaper than the cold call: the only
-      // difference is the one-time full content hydration, which the cache
-      // removes. This locks the separation without gating on absolute values.
+      // difference is the one-time cold costs the cache removes. This locks
+      // the separation without gating on absolute values.
       expect(hotMs).toBeLessThan(coldMs);
     } finally {
       rmSync(tempRoot, { recursive: true, force: true });

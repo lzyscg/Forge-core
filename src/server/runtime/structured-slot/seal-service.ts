@@ -403,7 +403,9 @@ export class StructuredSlotSealService implements SealToolOperations {
         typeId: slot.typeId,
         spec: slot.spec,
         contentPresence: presence,
-        content: presence === 'set' ? (entry?.content ?? slot.content ?? null) : null,
+        // Presence-based: a set JSON-null value is content (null), never a
+        // fall-through to the base record's stale revision-0 value.
+        content: presence === 'set' ? (entry?.content ?? null) : null,
       });
     }
     return slots;
