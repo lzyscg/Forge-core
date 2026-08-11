@@ -541,6 +541,9 @@ export class StructuredSlotDraftService {
     let contentRevisionDigest: string | null = null;
     if (changedSlotIds.length > 0) {
       contentRevisionDigest = await this.stageContentRoot(active as ActiveScaffoldState, view.overlay);
+      if (contentRevisionDigest === null) {
+        return fail('SCAFFOLD_NOT_ACTIVE', 'the active content root is missing; cannot stage a merge root');
+      }
     }
 
     const candidate: MergeCommitCandidate = {
@@ -772,24 +775,44 @@ export class StructuredSlotDraftService {
   }
 
   /** Full scaffold with the overlay applied (Merge Gate input). */
+  /**
+   * Full scaffold with the overlay applied (Merge Gate input).
+   *
+   * The AUTHORITATIVE base content at the draft's base revision is the content
+   * root at the ACTIVE revision (`readEffectiveContent(active.content)`), NOT
+   * the generation's slot records — those are frozen at generation commit
+   * (revision 0) and go stale after any prior merge on the same generation.
+   * Reads (Task 10 projection) resolve base presence through the content root
+   * at `grant.baseRevision`, so the gate MUST run on the same committed base,
+   * or it validates subtree/scaffold invariants against revision-0-era content.
+   * The slot records still supply the immutable structural fields; the content
+   * root supplies presence/content, then the draft overlay is merged on top.
+   */
   private async buildEffectiveSlots(
     active: ActiveScaffoldState,
     overlay: ReadonlyMap<string, DraftOverlayEntry>,
   ): Promise<GateSlotInput[] | null> {
+    if (active.content === null) {
+      // Fail closed: no authoritative base to gate against (unreachable for a
+      // valid active scaffold, which always has a committed content root).
+      return null;
+    }
+    const base = await this.blobStore.readEffectiveContent(active.content);
     const index = await this.blobStore.getGenerationIndex(active.generationId);
     const slots: GateSlotInput[] = [];
     for (const slotId of index.documentOrder) {
       const slot = await this.blobStore.readSlot(active.generationId, slotId);
       if (slot === null) return null;
       const overlayEntry = overlay.get(slotId);
-      const presence = overlayEntry?.presence ?? slot.contentPresence;
+      const baseEntry = base[slotId];
+      const basePresence: 'unset' | 'set' = baseEntry?.presence ?? slot.contentPresence;
+      const baseContent = baseEntry?.presence === 'set' ? baseEntry.content : null;
+      const presence = overlayEntry?.presence ?? basePresence;
       const content = overlayEntry !== undefined
         ? overlayEntry.presence === 'set'
           ? overlayEntry.content
           : null
-        : slot.contentPresence === 'set'
-          ? (slot.content ?? null)
-          : null;
+        : baseContent;
       slots.push({
         slotId,
         parentSlotId: slot.parentSlotId,
@@ -827,16 +850,17 @@ export class StructuredSlotDraftService {
    * Stages the NEW content root (base mappings + overlay) as a content-addressed
    * blob WITHOUT promoting authority (design §18.3 G05 / Task 15 promotes).
    * Unreferenced until the committer references it; identical base values reuse
-   * their existing digests.
+   * their existing digests. Returns null when the active content root is missing
+   * (fail closed — it must never silently drop unchanged slots).
    */
   private async stageContentRoot(
     active: ActiveScaffoldState,
     overlay: ReadonlyMap<string, DraftOverlayEntry>,
-  ): Promise<string> {
-    let base: Record<string, EffectiveContentEntry> = {};
-    if (active.content !== null) {
-      base = await this.blobStore.readEffectiveContent(active.content);
+  ): Promise<string | null> {
+    if (active.content === null) {
+      return null;
     }
+    const base = await this.blobStore.readEffectiveContent(active.content);
     const mappings: Record<string, 'unset' | string> = {};
     for (const [slotId, entry] of Object.entries(base)) {
       mappings[slotId] = entry.presence === 'set' ? (await this.blobStore.putContentValue(entry.content)).sha256 : 'unset';

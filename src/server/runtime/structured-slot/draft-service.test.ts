@@ -215,6 +215,27 @@ function rejectingSource(rejected: string[]): string {
 const REJECT_ALL_SOURCE =
   'module.exports = { validate() { return { pass: false, issues: [{ stage: "content", evidence: "always", scope: "x" }] }; } };';
 
+/**
+ * A subtree-scope validator that reads the UNCHANGED `t1` slot's content from
+ * its envelope tree (present on the root target's subtree) and rejects when it
+ * does not equal the POST-MERGE committed value `merged-title`. With the gate
+ * fed revision-0-era generation records the base reads `base-title` and the
+ * gate fails; with the authoritative active content root it reads
+ * `merged-title` and passes.
+ */
+const MERGED_BASE_CHECK_SOURCE = [
+  'module.exports = { validate(input) {',
+  '  var t1 = null;',
+  '  for (var i = 0; i < input.tree.length; i++) {',
+  '    if (input.tree[i].slotId === "t1") { t1 = input.tree[i]; break; }',
+  '  }',
+  '  if (t1 !== null && t1.content !== "merged-title") {',
+  '    return { pass: false, issues: [{ stage: "content", evidence: "stale base: " + t1.content, scope: "v" }] };',
+  '  }',
+  '  return { pass: true, issues: [] };',
+  '} };',
+].join('\n');
+
 const SLOTS: SlotInstance[] = [
   { slotId: 'r', scaffoldId: SC, parentSlotId: null, order: 0, typeId: 'document', spec: {}, contentPresence: 'unset' },
   { slotId: 't1', scaffoldId: SC, parentSlotId: 'r', order: 1, typeId: 'title', spec: { purpose: 'head' }, contentPresence: 'set', content: 'base-title' },
@@ -235,6 +256,9 @@ async function makeHarness(options: {
   validators?: ValidatorRegistrationV1[];
   sources?: Record<string, string>;
   materializeDraft?: boolean;
+  /** When set, a PRIOR merged fill on the same generation advances the active
+   *  content revision to 1 and the new draft opens at baseRevision 1. */
+  priorMergedTitle?: string;
 } = {}): Promise<Harness> {
   const { paths, dataRoot } = makeTempCorePaths('forge-core-draft-');
   tempRoots.push(dataRoot);
@@ -250,6 +274,7 @@ async function makeHarness(options: {
   const store = new StructuredSlotPrivateStore(paths, TASK);
   const blobStore = new StructuredSlotBlobStore(paths, TASK);
   const events: TaskEvent[] = [];
+  const revision = options.priorMergedTitle !== undefined ? 1 : REV;
 
   const manifest = await blobStore.putGeneration({ generationId: GEN, scaffoldId: SC, slots: [...SLOTS] });
   const baseTitle = await blobStore.putContentValue('base-title');
@@ -269,6 +294,52 @@ async function makeHarness(options: {
       contentRevision: 0,
       proposalId: 'proposal-1',
     }),
+  );
+
+  // A prior merged fill on the SAME generation: the generation slot records
+  // stay at revision-0-era content, but the committed content root advances.
+  if (options.priorMergedTitle !== undefined) {
+    const mergedTitle = await blobStore.putContentValue(options.priorMergedTitle);
+    const mergedRoot = await blobStore.putContentRevision({ r: 'unset', t1: mergedTitle.sha256, b1: 'unset' });
+    events.push(
+      makeTaskEvent({
+        type: 'structured_slot_attempt_started',
+        inputNodeId: 'in-0',
+        agentId: AGENT,
+        attemptEpoch: 1,
+        turnId: 'turn-0',
+        sessionKind: 'fill',
+      }),
+      makeTaskEvent({
+        type: 'structured_fill_draft_opened',
+        draftId: 'draft-0',
+        turnId: 'turn-0',
+        scaffoldId: SC,
+        generationId: GEN,
+        baseRevision: 0,
+      }),
+      makeTaskEvent({
+        type: 'structured_fill_draft_terminal',
+        draftId: 'draft-0',
+        turnId: 'turn-0',
+        status: 'merged',
+        baseRevision: 0,
+        resultRevision: 1,
+        changeCount: 1,
+        content: mergedRoot,
+      }),
+      makeTaskEvent({
+        type: 'structured_slot_attempt_terminal',
+        inputNodeId: 'in-0',
+        attemptEpoch: 1,
+        turnId: 'turn-0',
+        status: 'committed',
+        reason: 'completion_dispatch',
+      }),
+    );
+  }
+
+  events.push(
     makeTaskEvent({
       type: 'structured_slot_attempt_started',
       inputNodeId: 'in-1',
@@ -283,17 +354,17 @@ async function makeHarness(options: {
       turnId: TURN,
       scaffoldId: SC,
       generationId: GEN,
-      baseRevision: 0,
+      baseRevision: revision,
     }),
   );
 
   const materializeDraft = options.materializeDraft ?? true;
   if (materializeDraft) {
-    await store.materializeDraft(TURN, DRAFT, { scaffoldId: SC, generationId: GEN, baseRevision: 0 });
+    await store.materializeDraft(TURN, DRAFT, { scaffoldId: SC, generationId: GEN, baseRevision: revision });
   }
 
   const grantService = new StructuredSlotGrantService({ taskId: TASK, snapshotHash: SNAPSHOT, contract });
-  const active: ActiveScaffoldV1 = { scaffoldId: SC, generationId: GEN, contentRevision: REV };
+  const active: ActiveScaffoldV1 = { scaffoldId: SC, generationId: GEN, contentRevision: revision };
   const index = await blobStore.getGenerationIndex(GEN);
   const presence: Record<string, 'unset' | 'set'> = { r: 'unset', t1: 'set', b1: 'unset' };
   const resolved = grantService.resolveFillGrant({
@@ -307,7 +378,7 @@ async function makeHarness(options: {
     activeScaffold: active,
     generationIndex: index,
     contentPresence: presence,
-    baseRevision: REV,
+    baseRevision: revision,
     draftId: DRAFT,
     grantId: 'grant-fill',
   });
@@ -719,6 +790,41 @@ describe('Step 3 — Merge Gate', () => {
     expect(out.candidate.changeCount).toBe(1);
     expect(out.candidate.contentRevisionDigest).toMatch(/^[0-9a-f]{64}$/);
     expect(out.candidate.normalizedChanges).toEqual([{ slotId: 'b1', presence: 'set', content: 'final' }]);
+  });
+
+  it('gates a baseRevision >= 1 draft against the committed content at the ACTIVE revision, not the revision-0 generation records', async () => {
+    const subtree = makeValidator({ id: 'base-check', scope: 'subtree', path: 'slots/validators/base-check.cjs' });
+    const h = await makeHarness({
+      validators: [subtree],
+      sources: { 'slots/validators/base-check.cjs': MERGED_BASE_CHECK_SOURCE },
+      priorMergedTitle: 'merged-title',
+    });
+    // The draft is bound to baseRevision 1 after the prior merged fill.
+    expect(h.grant.baseRevision).toBe(1);
+
+    // Write a NEW body slot on top of the post-merge base.
+    await h.service.replaceContent(h.grant, ctx('w1', 'h1'), [{ slotId: 'b1', content: 'new-body' }]);
+    const out = await h.service.submitDraft(h.grant, ctx('s1', 'h2', 'submit_draft'));
+    // The unchanged t1 must read as the merged committed value ('merged-title'),
+    // not the revision-0 era generation record ('base-title') — otherwise the
+    // subtree validator rejects and the gate fails.
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.candidate.baseRevision).toBe(1);
+    expect(out.candidate.resultRevision).toBe(2);
+    expect(out.candidate.changeCount).toBe(1);
+    expect(out.candidate.normalizedChanges).toEqual([{ slotId: 'b1', presence: 'set', content: 'new-body' }]);
+
+    // The staged content root preserves the merged base for unchanged t1 and
+    // carries the new overlay value for b1 (mirrors readEffectiveContent).
+    const staged = await h.blobStore.readEffectiveContent({
+      version: 1,
+      kind: 'content_revision',
+      sha256: out.candidate.contentRevisionDigest as string,
+      byteLength: 0,
+    });
+    expect(staged.t1).toEqual({ presence: 'set', content: 'merged-title' });
+    expect(staged.b1).toEqual({ presence: 'set', content: 'new-body' });
   });
 
   it('no-op submit freezes a changeCount-0 candidate with no revision bump and no content root', async () => {
