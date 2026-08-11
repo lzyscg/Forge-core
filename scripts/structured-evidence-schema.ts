@@ -286,8 +286,11 @@ export function validateProfileEvidence(value: unknown): void {
     validateEvidenceCase(cases[i], `evidence.cases[${i}]`);
   }
   const candidatePercentage = value['candidatePercentage'];
-  if (candidatePercentage !== null && typeof candidatePercentage !== 'number') {
-    invalid('evidence.candidatePercentage must be null or a number');
+  if (
+    candidatePercentage !== null &&
+    (typeof candidatePercentage !== 'number' || ![100, 75, 50, 25].includes(candidatePercentage))
+  ) {
+    invalid('evidence.candidatePercentage must be null or one of 100, 75, 50, 25');
   }
   requireString(value['selectionReason'], 'evidence.selectionReason');
   validateLimits(value['frozenLimits'], 'evidence.frozenLimits');
@@ -314,17 +317,21 @@ const FAILURE_EVIDENCE_FIELDS = [
 ] as const;
 
 /**
- * Exact-validates the HONEST-FAILURE evidence shape (outcome
- * 'no_scale_passed'). Throws `STRUCTURED_EVIDENCE_INVALID: ...` on any
- * violation. The failure evidence is still written to the plan's evidence path
- * so failure evidence is never lost.
+ * Exact-validates the FAILURE evidence shapes: the honest
+ * `no_scale_passed` outcome AND the `child_failed` outcome (written when a
+ * per-scale child process fails mid-run, so the evidence file always reflects
+ * the latest attempt and is never lost). Throws
+ * `STRUCTURED_EVIDENCE_INVALID: ...` on any violation. The failure evidence is
+ * still written to the plan's evidence path.
  */
 export function validateProfileEvidenceFailure(value: unknown): void {
   if (!isPlainObject(value)) invalid('failure evidence must be a plain object');
   rejectUnknownFields(value, FAILURE_EVIDENCE_FIELDS, 'failure evidence');
   if (value['schemaVersion'] !== 1) invalid('failure evidence.schemaVersion must be 1');
   if (value['mode'] !== 'integrated-qualify') invalid('failure evidence.mode must be "integrated-qualify"');
-  if (value['outcome'] !== 'no_scale_passed') invalid('failure evidence.outcome must be "no_scale_passed"');
+  if (value['outcome'] !== 'no_scale_passed' && value['outcome'] !== 'child_failed') {
+    invalid('failure evidence.outcome must be "no_scale_passed" or "child_failed"');
+  }
   validateRunner(value['runner']);
   validateEvidenceFacts(value);
   validateBounds(value['bounds']);

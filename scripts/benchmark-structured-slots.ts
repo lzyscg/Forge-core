@@ -41,7 +41,7 @@ import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { cpus, tmpdir, totalmem } from 'node:os';
-import { join, resolve, dirname } from 'node:path';
+import { join, resolve, dirname, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
 import { canonicalJson, canonicalJsonSha256 } from '../src/server/structured-slots/canonical-json';
@@ -356,24 +356,59 @@ export interface IntegratedScaleReport {
 }
 
 /**
+ * The required bound cases a scale report must contain. A report missing any of
+ * these must FAIL — defaulting a missing case's timing to 0 would be a false
+ * pass (a child that threw mid-case exits non-zero today, but the guard makes
+ * the verdict robust against a truncated report).
+ */
+export const REQUIRED_BOUND_CASE_IDS: readonly string[] = [
+  'indexed-slot-read',
+  'tree-match-10k',
+  'content-root-64mib',
+  'draft-journal-2k',
+  'seal-assembler-custody',
+  'authorized-projection-500-issues',
+];
+
+/**
  * Pure per-scale verdict: judges ONE scale report against the frozen bounds
  * using ONLY that report's own peak RSS and case timings. A prior scale's
- * higher peak can never influence this verdict (P1-1 regression target).
+ * higher peak can never influence this verdict (P1-1 regression target). A
+ * report missing any required bound case FAILS with a `missing case <id>`
+ * violation instead of silently passing on a defaulted 0 timing.
  */
 export function evaluateScaleReport(
   report: IntegratedScaleReport,
   bounds: ScaleBounds,
 ): { violations: string[]; passed: boolean } {
   const byId = new Map(report.results.map((result) => [result.id, result]));
+  const violations: string[] = [];
+  for (const id of REQUIRED_BOUND_CASE_IDS) {
+    if (!byId.has(id)) violations.push(`missing case ${id}`);
+  }
   const p95 = (id: string): number => byId.get(id)?.p95Ms ?? 0;
   const max = (id: string): number => byId.get(id)?.maxMs ?? 0;
-  const violations: string[] = [];
-  if (p95('indexed-slot-read') > bounds.indexedSlotP95Ms) violations.push('indexed-slot-read p95');
-  if (max('tree-match-10k') > bounds.treeMatch10kMaxMs) violations.push('tree-match-10k');
-  if (max('content-root-64mib') > bounds.contentRootMaxMs) violations.push('content-root-64mib');
-  if (max('draft-journal-2k') > bounds.draftMaxMs) violations.push('draft-journal-2k');
-  if (max('seal-assembler-custody') > bounds.sealMaxMs) violations.push('seal-assembler-custody');
-  if (p95('authorized-projection-500-issues') > bounds.issueProjectionMaxMs) {
+  // Timing bounds are only meaningful for a case that is present; a missing
+  // case is already flagged above and must not be silently accepted.
+  if (byId.has('indexed-slot-read') && p95('indexed-slot-read') > bounds.indexedSlotP95Ms) {
+    violations.push('indexed-slot-read p95');
+  }
+  if (byId.has('tree-match-10k') && max('tree-match-10k') > bounds.treeMatch10kMaxMs) {
+    violations.push('tree-match-10k');
+  }
+  if (byId.has('content-root-64mib') && max('content-root-64mib') > bounds.contentRootMaxMs) {
+    violations.push('content-root-64mib');
+  }
+  if (byId.has('draft-journal-2k') && max('draft-journal-2k') > bounds.draftMaxMs) {
+    violations.push('draft-journal-2k');
+  }
+  if (byId.has('seal-assembler-custody') && max('seal-assembler-custody') > bounds.sealMaxMs) {
+    violations.push('seal-assembler-custody');
+  }
+  if (
+    byId.has('authorized-projection-500-issues') &&
+    p95('authorized-projection-500-issues') > bounds.issueProjectionMaxMs
+  ) {
     violations.push('authorized-projection-500-issues');
   }
   if (report.peakRssBytes > bounds.peakRssBytes) {
@@ -946,6 +981,30 @@ export interface IntegratedBenchmarkEvidenceV1 {
   perScaleResults?: Array<Record<string, unknown>>;
 }
 
+/**
+ * Exact-validates and writes a failure evidence file to the plan's evidence
+ * path. Used for the honest `no_scale_passed` outcome AND for the
+ * `child_failed` outcome so the evidence file always reflects the latest
+ * attempt and is never lost.
+ */
+function writeFailureEvidence(
+  evidencePath: string,
+  failureEvidence: Record<string, unknown>,
+): void {
+  try {
+    validateProfileEvidenceFailure(failureEvidence);
+  } catch (error) {
+    throw new BenchmarkError(
+      BENCHMARK_EVIDENCE_INVALID,
+      error instanceof Error ? error.message : String(error),
+      3,
+    );
+  }
+  mkdirSync(dirname(evidencePath), { recursive: true });
+  writeFileSync(evidencePath, `${JSON.stringify(failureEvidence, null, 2)}\n`, 'utf8');
+  process.stdout.write(`[benchmark] 失败证据已写入 ${evidencePath}\n`);
+}
+
 async function runIntegratedQualify(args: CliArgs): Promise<never> {
   if (args.profile === undefined || args.evidence === undefined) {
     throw new BenchmarkError(BENCHMARK_USAGE, 'integrated-qualify requires --profile and --evidence', 2);
@@ -1001,7 +1060,7 @@ async function runIntegratedQualify(args: CliArgs): Promise<never> {
     const child = spawnSync(
       process.execPath,
       [tsxCli, scriptPath, '--mode', 'integrated-scale', '--scale', String(percentage), '--adapter', adapterPath],
-      { cwd: repoRoot(), encoding: 'utf8', timeout: 600_000 },
+      { cwd: repoRoot(), encoding: 'utf8', timeout: 600_000, maxBuffer: 64 * 1024 * 1024 },
     );
     const report = parseIntegratedScaleResult(child.stdout ?? '', percentage);
     if (child.status !== 0 || report === null) {
@@ -1011,6 +1070,18 @@ async function runIntegratedQualify(args: CliArgs): Promise<never> {
         .filter((line) => line.length > 0)
         .slice(-5)
         .join(' | ');
+      // Write a distinct `child_failed` failure evidence BEFORE aborting so the
+      // evidence file always reflects the latest attempt and is never lost.
+      writeFailureEvidence(evidencePath, {
+        schemaVersion: 1,
+        mode: 'integrated-qualify',
+        outcome: 'child_failed',
+        runner,
+        ...evidenceFacts,
+        bounds: BOUNDS,
+        perScaleResults,
+        selectionReason: `scale ${percentage}% child failed (exit ${child.status ?? 'err'}); per-scale results recorded so far: ${perScaleResults.length}`,
+      });
       throw new BenchmarkError(
         BENCHMARK_CHILD_FAILED,
         `child for scale ${percentage}% exited ${child.status ?? 'err'} with ${
@@ -1052,7 +1123,7 @@ async function runIntegratedQualify(args: CliArgs): Promise<never> {
     // written, no release evidence, no capability enable. The measurements are
     // recorded for a future qualifying host — the failure evidence is exact-
     // validated and written to the plan's evidence path so it is never lost.
-    const failureEvidence = {
+    writeFailureEvidence(evidencePath, {
       schemaVersion: 1,
       mode: 'integrated-qualify',
       outcome: 'no_scale_passed',
@@ -1061,18 +1132,7 @@ async function runIntegratedQualify(args: CliArgs): Promise<never> {
       bounds: BOUNDS,
       perScaleResults,
       selectionReason: 'no 100/75/50/25% scale of the candidate axes satisfied every acceptance bound',
-    };
-    try {
-      validateProfileEvidenceFailure(failureEvidence);
-    } catch (error) {
-      throw new BenchmarkError(
-        BENCHMARK_EVIDENCE_INVALID,
-        error instanceof Error ? error.message : String(error),
-        3,
-      );
-    }
-    mkdirSync(dirname(evidencePath), { recursive: true });
-    writeFileSync(evidencePath, `${JSON.stringify(failureEvidence, null, 2)}\n`, 'utf8');
+    });
     process.stdout.write(`[benchmark] 无任何 scale 通过；失败证据已写入 ${evidencePath}\n`);
     throw new BenchmarkError(
       BENCHMARK_INTEGRATED_BOUNDS,
@@ -1183,14 +1243,16 @@ async function runIntegratedScale(args: CliArgs): Promise<void> {
   const taskId = `bench-integrated-${percentage}`;
 
   // Import the real Task 10/16 integrated adapter (no stubs) from the path the
-  // orchestrator passed (resolved relative to the repo root in the parent).
-  // Under jsdom/web transform mode vite rewrites a variable dynamic import into
-  // `__vite__injectQuery(...)` and prepends a `/@vite/client` import; the
-  // shebang-less top of this file keeps that output parseable when tests import
-  // this module, and the `@vite-ignore` comment suppresses vite's static-
-  // analysis warning. At runtime (tsx/node, ssr transform) this stays a plain
-  // `import(adapterPath)`.
-  const { createIntegratedBenchmarkAdapter } = await import(/* @vite-ignore */ args.adapter);
+  // orchestrator passed (an absolute path resolved relative to the repo root in
+  // the parent; a relative path is resolved here too so direct child invocations
+  // are robust). Under jsdom/web transform mode vite rewrites a variable dynamic
+  // import into `__vite__injectQuery(...)` and prepends a `/@vite/client`
+  // import; the shebang-less top of this file keeps that output parseable when
+  // tests import this module, and the `@vite-ignore` comment suppresses vite's
+  // static-analysis warning. At runtime (tsx/node, ssr transform) this stays a
+  // plain `import(adapterPath)`.
+  const adapterPath = isAbsolute(args.adapter) ? args.adapter : resolve(repoRoot(), args.adapter);
+  const { createIntegratedBenchmarkAdapter } = await import(/* @vite-ignore */ adapterPath);
   const adapter = await createIntegratedBenchmarkAdapter({ paths, taskId, limits });
 
   const scaleState = { peakRssBytes: 0, diskBytes: 0 };
@@ -1214,7 +1276,7 @@ async function runIntegratedScale(args: CliArgs): Promise<void> {
     },
     {
       id: 'seal-assembler-custody',
-      description: `64 MiB real Seal/Assembler/custody (Task 16) @ ${percentage}%`,
+      description: `${Math.round(limits.payload.maxScaffoldPayloadBytes / (1024 * 1024))} MiB real Seal/Assembler/custody (Task 16) @ ${percentage}%`,
       warmup: 0,
       samples: 1,
       unit: async () => adapter.runSealAssemblerCustody64MiB(),

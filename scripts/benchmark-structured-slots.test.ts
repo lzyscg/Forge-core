@@ -106,6 +106,30 @@ describe('evaluateScaleReport per-scale RSS isolation (P1-1)', () => {
     expect(verdict.passed).toBe(false);
     expect(verdict.violations).toContain('tree-match-10k');
   });
+
+  it('FAILS a report missing one required case with a missing-case violation (no false pass)', () => {
+    const report = reportFor(50, 100 * 1024 * 1024);
+    report.results = report.results.filter((result) => result.id !== 'seal-assembler-custody');
+    const verdict = evaluateScaleReport(report, BOUNDS);
+    expect(verdict.passed).toBe(false);
+    expect(verdict.violations).toContain('missing case seal-assembler-custody');
+  });
+
+  it('lists every missing required case in one verdict', () => {
+    const report = reportFor(50, 100 * 1024 * 1024);
+    report.results = report.results.filter((result) => result.id === 'indexed-slot-read');
+    const verdict = evaluateScaleReport(report, BOUNDS);
+    expect(verdict.passed).toBe(false);
+    for (const id of [
+      'tree-match-10k',
+      'content-root-64mib',
+      'draft-journal-2k',
+      'seal-assembler-custody',
+      'authorized-projection-500-issues',
+    ]) {
+      expect(verdict.violations).toContain(`missing case ${id}`);
+    }
+  });
 });
 
 /* -------------------------------------------------------------------------- */
@@ -318,6 +342,14 @@ describe('validateProfileEvidence (P2)', () => {
     delete evidence.frozenLimits;
     expect(() => validateProfileEvidence(evidence)).toThrow(/frozenLimits/);
   });
+
+  it('rejects a candidatePercentage outside the enumerated {100, 75, 50, 25} scales', () => {
+    const evidence = validSuccessEvidence();
+    evidence.candidatePercentage = 33;
+    expect(() => validateProfileEvidence(evidence)).toThrow(
+      /candidatePercentage must be null or one of 100, 75, 50, 25/,
+    );
+  });
 });
 
 describe('validateProfileEvidenceFailure (P2)', () => {
@@ -341,6 +373,16 @@ describe('validateProfileEvidenceFailure (P2)', () => {
 
   it('accepts the exact honest-failure shape', () => {
     expect(() => validateProfileEvidenceFailure(validFailureEvidence())).not.toThrow();
+  });
+
+  it('accepts the child_failed shape (mid-loop child failure evidence is never lost)', () => {
+    expect(() =>
+      validateProfileEvidenceFailure({
+        ...validFailureEvidence(),
+        outcome: 'child_failed',
+        selectionReason: 'scale 100% child failed; per-scale results recorded so far: 0',
+      }),
+    ).not.toThrow();
   });
 
   it('rejects an unknown field', () => {
