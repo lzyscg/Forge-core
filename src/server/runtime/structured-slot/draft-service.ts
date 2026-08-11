@@ -852,12 +852,13 @@ export class StructuredSlotDraftService {
     }
     const base = await this.blobStore.readEffectiveContent(active.content);
     const index = await this.blobStore.getGenerationIndex(active.generationId);
+    // Task C N+1 fix: open slots.ndjson once for the whole scaffold instead of
+    // re-opening it per slot; content is already fully hydrated above.
+    const records = await this.blobStore.readGenerationSlots(active.generationId, index);
     const slots: GateSlotInput[] = [];
-    for (const slotId of index.documentOrder) {
-      const slot = await this.blobStore.readSlot(active.generationId, slotId);
-      if (slot === null) return null;
-      const overlayEntry = overlay.get(slotId);
-      const baseEntry = base[slotId];
+    for (const slot of records) {
+      const overlayEntry = overlay.get(slot.slotId);
+      const baseEntry = base[slot.slotId];
       const basePresence: 'unset' | 'set' = baseEntry?.presence ?? slot.contentPresence;
       const baseContent = baseEntry?.presence === 'set' ? baseEntry.content : null;
       const presence = overlayEntry?.presence ?? basePresence;
@@ -867,7 +868,7 @@ export class StructuredSlotDraftService {
           : null
         : baseContent;
       slots.push({
-        slotId,
+        slotId: slot.slotId,
         parentSlotId: slot.parentSlotId,
         order: slot.order,
         typeId: slot.typeId,

@@ -14,10 +14,11 @@
  *   rely on this separation.
  * - COLD vs HOT: a real generation (301 slots) committed through the blob
  *   store, then the FIRST `task_owner` outline read (cold: projection build +
- *   index read + full content hydration) vs the SECOND read (hot: hydrated
- *   content cached). Asserts the warm call is strictly cheaper than the cold
- *   call — the caching/separation is the lever — WITHOUT gating on absolute
- *   values (they change with Task C).
+ *   one-time index read + presence root read + per-slot NDJSON opens) vs the
+ *   SECOND read (hot: cached state/index/presence reused). Asserts the warm
+ *   call is strictly cheaper than the cold call — the caching/separation is
+ *   the lever — WITHOUT gating on absolute values (they change with Task C).
+ *   The outline never hydrates content blobs (Task C N+1 fix).
  *
  * All measurements are emitted as machine-readable
  * `{event:'projection-probe', phase:'pure'|'cold'|'hot', wallMs}` lines so the
@@ -210,8 +211,10 @@ describe('projection cost separation (Task 19 remediation Task A)', () => {
       });
       const subject = { kind: 'task_owner' } as const;
 
-      // COLD: the first outline read builds the projection and hydrates the full
-      // content root + every content blob exactly once.
+      // COLD: the first outline read builds the projection and performs the
+      // one-time reads the data source caches (event-state projection, cached
+      // generation index, content-revision presence root). The outline itself
+      // never hydrates content blobs (Task C N+1 fix).
       const startedCold = performance.now();
       const cold = await projection.listSlots(subject, null, OWNER_LIMIT);
       const coldMs = performance.now() - startedCold;
@@ -221,8 +224,9 @@ describe('projection cost separation (Task 19 remediation Task A)', () => {
         expect(cold.entries.every((entry) => !entry.shell)).toBe(true);
       }
 
-      // HOT: subsequent reads reuse the hydrated content cache; take the MIN of
-      // several samples so GC/monitor noise cannot hide the caching lever.
+      // HOT: subsequent reads reuse the cached state/index/presence; take the
+      // MIN of several samples so GC/monitor noise cannot hide the caching
+      // lever.
       const hotSamples: number[] = [];
       for (let i = 0; i < 3; i += 1) {
         const started = performance.now();

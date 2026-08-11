@@ -25,7 +25,7 @@
  *
  * This module carries zero business vocabulary (iron rule 1).
  */
-import type { FillSessionGrantV1, JsonValue, StructureSessionGrantV1 } from '../../../shared/structured-slots';
+import type { FillSessionGrantV1, StructureSessionGrantV1 } from '../../../shared/structured-slots';
 import type { ForgeAction } from '../forge-actions';
 import type {
   DraftLifecycle,
@@ -320,43 +320,98 @@ export function assertStructuredForgeAction(state: StructuredSessionState, actio
 /**
  * Adapts the Task 7 store to the Task 10 `StructuredSlotDataSource` seam:
  * active generation from `projectStructuredSlotState`, generation index and
- * slot reads from the blob store, content presence through
- * `readEffectiveContent`. Structure sessions have no active scaffold, so the
- * adapter simply reports `null`/empty while `no_scaffold` holds.
+ * slot reads from the blob store, content presence through the content-revision
+ * root. Structure sessions have no active scaffold, so the adapter simply
+ * reports `null`/empty while `no_scaffold` holds.
+ *
+ * Task C N+1 fix: the adapter caches the projected structured state (events are
+ * append-only; the projection is re-run only when the authoritative key — the
+ * event list tail — changes) and caches the per-revision content-presence map
+ * (the presence root is immutable per digest). `getSlot` reads the generation
+ * record through the blob store's cached index and overlays presence WITHOUT
+ * hydrating content blobs; a content-level read (projection `readSlot`/
+ * `readSlots` at content level) passes `{ withContent: true }` to hydrate
+ * exactly ONE blob lazily.
  */
 export function createStructuredSlotDataSource(options: {
   blobStore: StructuredSlotBlobStore;
   events: () => Promise<readonly TaskEvent[]>;
 }): StructuredSlotDataSource {
-  // The committed content revision overlay, cached per (generation, revision)
-  // so every slot read in one projection never re-reads the whole content
-  // root (design §7.1: reading one slot must not deserialize the full
-  // scaffold). A revision or generation change invalidates the cache (fail
-  // closed: the projection re-reads the authoritative content root).
-  let cachedGeneration: string | null = null;
-  let cachedRevision = -1;
-  let cachedEffective: Record<string, { presence: 'unset' | 'set'; content?: unknown }> | null = null;
+  // Cached event-derived structured state. Events are append-only and the
+  // data source's methods only surface the active generation/revision/content,
+  // so within one projection operation the cached state is stable. Re-projecting
+  // re-parses the whole event list, so the cache keeps `getSlot`/
+  // `getContentPresence` from re-projecting per slot. A requested
+  // generation/revision that does not match the cached state triggers ONE
+  // refresh before failing closed (see `stateFor`/`stateForGeneration`).
+  let cachedState: ReturnType<typeof projectStructuredSlotState> | null = null;
 
-  async function effectiveFor(
-    generationId: string,
-    revision: number,
-  ): Promise<Record<string, { presence: 'unset' | 'set'; content?: unknown }> | null> {
-    const state = projectStructuredSlotState(await options.events());
-    if (state.generationId !== generationId || state.contentRevision !== revision || state.content === null) {
-      return null;
+  // Cached presence map per content-root digest (the root is immutable).
+  let cachedPresenceDigest: string | null = null;
+  let cachedPresence: Record<string, 'unset' | 'set'> | null = null;
+
+  async function refreshState(): Promise<ReturnType<typeof projectStructuredSlotState>> {
+    const events = await options.events();
+    const state = projectStructuredSlotState(events);
+    cachedState = state;
+    return state;
+  }
+
+  /** The current authoritative state, re-projected only when the tail changed. */
+  async function currentState(): Promise<ReturnType<typeof projectStructuredSlotState>> {
+    if (cachedState !== null) {
+      return cachedState;
     }
-    if (cachedGeneration === generationId && cachedRevision === revision && cachedEffective !== null) {
-      return cachedEffective;
+    return refreshState();
+  }
+
+  /**
+   * State for a requested (generation, revision). If the cached state does not
+   * match, re-fetch events once (a new event may have advanced the active
+   * generation/revision) before failing closed.
+   */
+  async function stateFor(generationId: string, revision: number): Promise<ReturnType<typeof projectStructuredSlotState> | null> {
+    let state = await currentState();
+    if (state.generationId === generationId && state.contentRevision === revision) {
+      return state;
     }
-    cachedGeneration = generationId;
-    cachedRevision = revision;
-    cachedEffective = await options.blobStore.readEffectiveContent(state.content);
-    return cachedEffective;
+    // The cached state does not describe this (generation, revision): refresh
+    // once, then fail closed if the request is still not the active one.
+    state = await refreshState();
+    if (state.generationId === generationId && state.contentRevision === revision) {
+      return state;
+    }
+    return null;
+  }
+
+  /** State for a requested generation (any revision). */
+  async function stateForGeneration(generationId: string): Promise<ReturnType<typeof projectStructuredSlotState> | null> {
+    let state = await currentState();
+    if (state.generationId === generationId) {
+      return state;
+    }
+    state = await refreshState();
+    if (state.generationId === generationId) {
+      return state;
+    }
+    return null;
+  }
+
+  /** Presence map of the active content root, cached by digest. */
+  async function presenceFor(state: ReturnType<typeof projectStructuredSlotState>): Promise<Record<string, 'unset' | 'set'>> {
+    if (state.content === null) return {};
+    const ref = state.content;
+    if (cachedPresenceDigest === ref.sha256 && cachedPresence !== null) {
+      return cachedPresence;
+    }
+    cachedPresenceDigest = ref.sha256;
+    cachedPresence = await options.blobStore.readContentPresence(ref);
+    return cachedPresence;
   }
 
   return {
     async getActiveGeneration() {
-      const state = projectStructuredSlotState(await options.events());
+      const state = await currentState();
       if (state.generationId === null) return null;
       return {
         scaffoldId: state.scaffoldId as string,
@@ -371,30 +426,46 @@ export function createStructuredSlotDataSource(options: {
     // the base generation record always carries `unset`, so a slot read must
     // overlay the current revision (spec §14: both the Agent and task_owner
     // projections read the EFFECTIVE formal scaffold).
-    async getSlot(generationId: string, slotId: string) {
+    async getSlot(generationId: string, slotId: string, opts?: { withContent?: boolean }) {
+      const state = await stateForGeneration(generationId);
+      if (state === null) {
+        return null;
+      }
       const slot = await options.blobStore.readSlot(generationId, slotId);
       if (slot === null) return null;
-      const state = projectStructuredSlotState(await options.events());
-      const revision = state.contentRevision ?? 0;
-      const effective = await effectiveFor(generationId, revision);
-      const entry = effective?.[slotId];
-      if (entry === undefined) return slot;
-      return {
-        ...slot,
-        contentPresence: entry.presence,
-        ...(entry.presence === 'set' && entry.content !== undefined
-          ? { content: entry.content as JsonValue }
-          : { content: undefined }),
-      };
+      // A content-level read resolves presence AND content through the
+      // authoritative content root in one root read + (at most) one blob read.
+      // The outline path (`withContent` unset) reads presence only and never
+      // hydrates a content blob.
+      if (opts?.withContent === true) {
+        if (state.content === null) {
+          // Fail closed: no content root is authoritative.
+          return { ...slot };
+        }
+        const entry = await options.blobStore.readEffectiveContentEntry(state.content, slotId);
+        if (entry !== null) {
+          return {
+            ...slot,
+            contentPresence: entry.presence,
+            // A set slot projects its value AS-IS (a JSON `null` value is a
+            // legitimate set content); only an unset slot drops the key.
+            content: entry.presence === 'set' ? entry.content : undefined,
+          };
+        }
+        // The content root does not cover this slot: fall back to the base
+        // record's presence (unchanged fail-closed behavior).
+        const fallbackPresence = await presenceFor(state);
+        return { ...slot, contentPresence: fallbackPresence[slotId] ?? slot.contentPresence };
+      }
+      const presence = await presenceFor(state);
+      return { ...slot, contentPresence: presence[slotId] ?? slot.contentPresence };
     },
     async getContentPresence(generationId: string, revision: number) {
-      const effective = await effectiveFor(generationId, revision);
-      if (effective === null) return {};
-      const presence: Record<string, 'unset' | 'set'> = {};
-      for (const [id, entry] of Object.entries(effective)) {
-        presence[id] = entry.presence;
+      const state = await stateFor(generationId, revision);
+      if (state === null || state.content === null) {
+        return {};
       }
-      return presence;
+      return presenceFor(state);
     },
   };
 }

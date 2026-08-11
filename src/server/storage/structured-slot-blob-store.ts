@@ -47,6 +47,50 @@ import type { StructuredBlobKind } from './task-events';
  */
 const ROOT_PARENT_KEY = '';
 
+/**
+ * Bounded concurrency for bulk content-blob hydration (Task C N+1 fix). Full
+ * scaffold reads (Seal/Assembler/draft gate) hydrate many content blobs; an
+ * unbounded `Promise.all` over thousands of blobs would fan out too wide.
+ */
+const CONTENT_HYDRATION_CONCURRENCY = 16;
+
+/**
+ * Runs `fn` over `items` with at most `limit` in-flight promises, preserving
+ * input order. The shared bounded-concurrency primitive behind every bulk
+ * blob-store read (content hydration, batch generation reads).
+ */
+export async function mapLimit<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  async function worker(): Promise<void> {
+    for (;;) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= items.length) return;
+      results[index] = await fn(items[index] as T, index);
+    }
+  }
+  const active = Math.max(1, Math.min(limit, items.length));
+  await Promise.all(Array.from({ length: active }, () => worker()));
+  return results;
+}
+
+/** Optional instrumentation seam (Task C N+1 tests count reads/opens). */
+export interface StructuredSlotBlobStoreInstrumentation {
+  /** A content/generation blob was read and hash-verified. */
+  onBlobRead?: (digest: string) => void;
+  /** `index.json` was actually read from disk (not served from cache). */
+  onIndexRead?: (generationId: string) => void;
+  /** `slots.ndjson` was opened for reads (per open, not per slot range). */
+  onSlotsFileOpen?: (generationId: string) => void;
+  /** A content-revision root file was read from disk. */
+  onContentRootRead?: (digest: string) => void;
+}
+
 /** One slot to read back through the index (spec §4.1). */
 export type { SlotInstance };
 
@@ -191,6 +235,26 @@ function parseVersioned<T extends { version: number }>(
 }
 
 /**
+ * Recursively freezes a parsed generation index so the cached copy can never
+ * be mutated by a caller. The index is a plain tree of objects/arrays/strings/
+ * numbers (no cycles), so a depth-first freeze terminates.
+ */
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === 'object') {
+    if (Array.isArray(value)) {
+      for (const item of value) deepFreeze(item);
+      Object.freeze(value);
+    } else {
+      for (const key of Object.keys(value as Record<string, unknown>)) {
+        deepFreeze((value as Record<string, unknown>)[key]);
+      }
+      Object.freeze(value);
+    }
+  }
+  return value;
+}
+
+/**
  * Content-addressed idempotent write: an existing identical target file is a
  * committed reuse, never an error (concurrent committers promoting the same
  * immutable object must not fail on the second writer).
@@ -210,9 +274,33 @@ export class StructuredSlotBlobStore {
 
   private readonly taskId: string;
 
-  constructor(paths: CorePaths, taskId: string) {
+  private readonly instrumentation?: StructuredSlotBlobStoreInstrumentation;
+
+  /**
+   * Immutable GenerationIndex cache per generationId (Task C N+1 fix). A
+   * committed generation never changes, so `getGenerationIndex`/`readSlot`
+   * must not re-read + re-parse `index.json` on every call. The parsed index
+   * is deep-frozen before caching so callers cannot mutate the shared copy.
+   */
+  private readonly indexCache = new Map<string, GenerationIndexV1>();
+
+  constructor(
+    paths: CorePaths,
+    taskId: string,
+    instrumentation?: StructuredSlotBlobStoreInstrumentation,
+  ) {
     this.paths = paths;
     this.taskId = taskId;
+    this.instrumentation = instrumentation;
+  }
+
+  /** Drops the cached index for one (or all) generations. */
+  evictGenerationIndex(generationId?: string): void {
+    if (generationId === undefined) {
+      this.indexCache.clear();
+      return;
+    }
+    this.indexCache.delete(generationId);
   }
 
   /**
@@ -237,6 +325,7 @@ export class StructuredSlotBlobStore {
 
   /** Reads a blob and re-verifies its bytes against the path digest. */
   async readBlob(sha256: string): Promise<Buffer> {
+    this.instrumentation?.onBlobRead?.(sha256);
     let bytes: Buffer;
     try {
       bytes = await readFile(this.paths.taskStructuredBlobFile(this.taskId, sha256));
@@ -369,7 +458,9 @@ export class StructuredSlotBlobStore {
   /**
    * Public accessor for a generation's index (Task 12 seam adaptation for the
    * Task 10 `StructuredSlotDataSource`). Reads and validates only `index.json`;
-   * it never deserializes the scaffold records.
+   * it never deserializes the scaffold records. The parsed index is cached per
+   * generation (generations are immutable once committed), so repeated reads
+   * cost no disk I/O or re-parse.
    */
   async getGenerationIndex(generationId: string): Promise<GenerationIndexV1> {
     return this.readGenerationIndex(generationId);
@@ -395,32 +486,43 @@ export class StructuredSlotBlobStore {
     let handle: Awaited<ReturnType<typeof open>> | null = null;
     try {
       handle = await open(slotsPath, 'r');
+      this.instrumentation?.onSlotsFileOpen?.(generationId);
       const fileSize = (await handle.stat()).size;
-      if (entry.offset < 0 || entry.length < 1 || entry.offset + entry.length > fileSize) {
-        throw corrupt('generation 索引记录超出 slots 文件边界。');
+      return await this.readSlotRecord(handle, fileSize, entry, slotId, trace);
+    } finally {
+      if (handle !== null) {
+        await handle.close().catch(() => undefined);
       }
-      trace?.onRangeRead?.({ offset: entry.offset, length: entry.length });
-      const buffer = Buffer.alloc(entry.length);
-      const { bytesRead } = await handle.read(buffer, 0, entry.length, entry.offset);
-      if (bytesRead !== entry.length) {
-        throw corrupt('generation 槽读取不完整。');
+    }
+  }
+
+  /**
+   * Reads EVERY slot record of a generation through one NDJSON file open
+   * (Task C N+1 fix): the Seal/full-scaffold path must not re-open
+   * `slots.ndjson` per slot. Reuses the caller's index when supplied; the
+   * per-record integrity checks (canonical line, index-consistent slotId,
+   * bounds) are exactly the same as `readSlot` — nothing is weakened.
+   */
+  async readGenerationSlots(
+    generationId: string,
+    index?: GenerationIndexV1,
+  ): Promise<SlotInstance[]> {
+    const resolvedIndex = index ?? (await this.readGenerationIndex(generationId));
+    const slotsPath = this.paths.taskStructuredGenerationSlotsFile(this.taskId, generationId);
+    let handle: Awaited<ReturnType<typeof open>> | null = null;
+    try {
+      handle = await open(slotsPath, 'r');
+      this.instrumentation?.onSlotsFileOpen?.(generationId);
+      const fileSize = (await handle.stat()).size;
+      const out: SlotInstance[] = [];
+      for (const slotId of resolvedIndex.documentOrder) {
+        const entry = resolvedIndex.slots[slotId];
+        if (entry === undefined) {
+          throw corrupt('generation 索引缺少文档顺序槽记录。');
+        }
+        out.push(await this.readSlotRecord(handle, fileSize, entry, slotId));
       }
-      const line = buffer.toString('utf8').replace(/\n$/, '');
-      let record: unknown;
-      try {
-        record = JSON.parse(line);
-      } catch {
-        throw corrupt('generation 槽记录不是有效 JSON。');
-      }
-      if (!isPlainObject(record) || record.slotId !== slotId) {
-        throw corrupt('generation 槽记录与索引不一致。');
-      }
-      // The line must be the canonical serialization of the parsed record.
-      if (canonicalJson(record) !== line) {
-        throw corrupt('generation 槽记录不是规范 JSON。');
-      }
-      trace?.onLineParsed?.(record.slotId as string);
-      return record as unknown as SlotInstance;
+      return out;
     } finally {
       if (handle !== null) {
         await handle.close().catch(() => undefined);
@@ -481,32 +583,78 @@ export class StructuredSlotBlobStore {
   /**
    * Resolves a content revision root through its separate content blobs:
    * `unset` entries have no content, digest entries are read back and
-   * re-verified against their path hash.
+   * re-verified against their path hash. Hydration is bounded by
+   * `CONTENT_HYDRATION_CONCURRENCY` (never an unbounded Promise.all over
+   * thousands of blobs). Callers that need ONLY presence should use
+   * `readContentPresence` (root-only, no blob reads).
    */
   async readEffectiveContent(
     revisionRef: StructuredBlobRefV1,
   ): Promise<Record<string, EffectiveContentEntry>> {
-    let rootBytes: Buffer;
-    try {
-      rootBytes = await readFile(this.paths.taskStructuredContentRevisionFile(this.taskId, revisionRef.sha256));
-    } catch {
-      throw corrupt('引用的 content revision 缺失。');
-    }
-    const actual = createHash('sha256').update(rootBytes).digest('hex');
-    if (actual !== revisionRef.sha256) {
-      throw corrupt('content revision 内容与路径摘要不一致。');
-    }
-    const root = parseVersioned<ContentRootV1>(rootBytes.toString('utf8'), 'content revision');
+    const root = await this.readContentRoot(revisionRef);
+    const entries = Object.entries(root.mappings);
+    const hydrated = await mapLimit(
+      entries,
+      CONTENT_HYDRATION_CONCURRENCY,
+      async ([slotId, value]: [string, 'unset' | string]) => {
+        if (value === 'unset') {
+          return { slotId, entry: { presence: 'unset' as const, content: null } };
+        }
+        const blob = await this.readBlob(value);
+        return {
+          slotId,
+          entry: { presence: 'set' as const, content: JSON.parse(blob.toString('utf8')) as JsonValue },
+        };
+      },
+    );
     const out: Record<string, EffectiveContentEntry> = {};
-    for (const [slotId, value] of Object.entries(root.mappings)) {
-      if (value === 'unset') {
-        out[slotId] = { presence: 'unset', content: null };
-        continue;
-      }
-      const blob = await this.readBlob(value);
-      out[slotId] = { presence: 'set', content: JSON.parse(blob.toString('utf8')) as JsonValue };
+    for (const { slotId, entry } of hydrated) {
+      out[slotId] = entry;
     }
     return out;
+  }
+
+  /**
+   * Reads ONLY the content-revision root (verifies its hash) and returns the
+   * `slotId -> 'unset' | 'set'` presence mapping WITHOUT hydrating any content
+   * blob (Task C N+1 fix). The root is immutable per digest, so the outline
+   * path and data source cache this result.
+   */
+  async readContentPresence(revisionRef: StructuredBlobRefV1): Promise<Record<string, 'unset' | 'set'>> {
+    const root = await this.readContentRoot(revisionRef);
+    const out: Record<string, 'unset' | 'set'> = {};
+    for (const [slotId, value] of Object.entries(root.mappings)) {
+      out[slotId] = value === 'unset' ? 'unset' : 'set';
+    }
+    return out;
+  }
+
+  /**
+   * Lazy single-slot content resolution: reads the revision root, then hydrates
+   * EXACTLY ONE content blob for the requested slot. Returns null when the root
+   * does not cover the slot. `unset` slots resolve to `{ presence: 'unset',
+   * content: null }` without any blob read.
+   */
+  async readEffectiveContentEntry(
+    revisionRef: StructuredBlobRefV1,
+    slotId: string,
+  ): Promise<EffectiveContentEntry | null> {
+    const root = await this.readContentRoot(revisionRef);
+    const value = root.mappings[slotId];
+    if (value === undefined) {
+      return null;
+    }
+    if (value === 'unset') {
+      return { presence: 'unset', content: null };
+    }
+    const blob = await this.readBlob(value);
+    return { presence: 'set', content: JSON.parse(blob.toString('utf8')) as JsonValue };
+  }
+
+  /** Reads ONE content value blob by digest and parses it (hash-verified). */
+  async readContentValue(digest: string): Promise<JsonValue> {
+    const blob = await this.readBlob(digest);
+    return JSON.parse(blob.toString('utf8')) as JsonValue;
   }
 
   private async writeBlobBytes(bytes: Buffer, sha256: string): Promise<void> {
@@ -523,6 +671,11 @@ export class StructuredSlotBlobStore {
   }
 
   private async readGenerationIndex(generationId: string): Promise<GenerationIndexV1> {
+    const cached = this.indexCache.get(generationId);
+    if (cached !== undefined) {
+      return cached;
+    }
+    this.instrumentation?.onIndexRead?.(generationId);
     let raw: string;
     try {
       raw = await readFile(
@@ -536,7 +689,70 @@ export class StructuredSlotBlobStore {
     if (index.generationId !== generationId || index.slotCount !== index.documentOrder.length) {
       throw corrupt('generation index 与自身不一致。');
     }
-    return index;
+    const frozen = deepFreeze(index);
+    this.indexCache.set(generationId, frozen);
+    return frozen;
+  }
+
+  /**
+   * Reads + hash-verifies the content-revision root. The root is immutable per
+   * digest; all content-revision reads funnel through here so the presence and
+   * hydration paths share one integrity check.
+   */
+  private async readContentRoot(revisionRef: StructuredBlobRefV1): Promise<ContentRootV1> {
+    this.instrumentation?.onContentRootRead?.(revisionRef.sha256);
+    let rootBytes: Buffer;
+    try {
+      rootBytes = await readFile(this.paths.taskStructuredContentRevisionFile(this.taskId, revisionRef.sha256));
+    } catch {
+      throw corrupt('引用的 content revision 缺失。');
+    }
+    const actual = createHash('sha256').update(rootBytes).digest('hex');
+    if (actual !== revisionRef.sha256) {
+      throw corrupt('content revision 内容与路径摘要不一致。');
+    }
+    return parseVersioned<ContentRootV1>(rootBytes.toString('utf8'), 'content revision');
+  }
+
+  /**
+   * One slot record from an already-open NDJSON handle: bounds check, single
+   * byte-range read, JSON parse, index-consistent slotId, canonical
+   * re-serialization. Shared by `readSlot` (one open) and `readGenerationSlots`
+   * (one open for the whole generation) so the integrity discipline is
+   * identical on both paths.
+   */
+  private async readSlotRecord(
+    handle: Awaited<ReturnType<typeof open>>,
+    fileSize: number,
+    entry: { offset: number; length: number },
+    slotId: string,
+    trace?: SlotReadTrace,
+  ): Promise<SlotInstance> {
+    if (entry.offset < 0 || entry.length < 1 || entry.offset + entry.length > fileSize) {
+      throw corrupt('generation 索引记录超出 slots 文件边界。');
+    }
+    trace?.onRangeRead?.({ offset: entry.offset, length: entry.length });
+    const buffer = Buffer.alloc(entry.length);
+    const { bytesRead } = await handle.read(buffer, 0, entry.length, entry.offset);
+    if (bytesRead !== entry.length) {
+      throw corrupt('generation 槽读取不完整。');
+    }
+    const line = buffer.toString('utf8').replace(/\n$/, '');
+    let record: unknown;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      throw corrupt('generation 槽记录不是有效 JSON。');
+    }
+    if (!isPlainObject(record) || record.slotId !== slotId) {
+      throw corrupt('generation 槽记录与索引不一致。');
+    }
+    // The line must be the canonical serialization of the parsed record.
+    if (canonicalJson(record) !== line) {
+      throw corrupt('generation 槽记录不是规范 JSON。');
+    }
+    trace?.onLineParsed?.(record.slotId as string);
+    return record as unknown as SlotInstance;
   }
 
   /**

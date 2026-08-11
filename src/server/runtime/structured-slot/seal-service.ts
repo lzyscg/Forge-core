@@ -387,15 +387,14 @@ export class StructuredSlotSealService implements SealToolOperations {
     generationId: string,
     contentRef: NonNullable<ReturnType<typeof projectStructuredSlotState>['content']>,
   ): Promise<GateSlotInput[]> {
+    // Task C N+1 fix: read the index ONCE and open slots.ndjson ONCE (the batch
+    // read reuses the caller's index); content hydration is bounded-concurrency.
     const index = await this.blobStore.getGenerationIndex(generationId);
     const effective = await this.blobStore.readEffectiveContent(contentRef);
+    const records = await this.blobStore.readGenerationSlots(generationId, index);
     const slots: GateSlotInput[] = [];
-    for (const slotId of index.documentOrder) {
-      const slot = await this.blobStore.readSlot(generationId, slotId);
-      if (slot === null) {
-        continue;
-      }
-      const entry = effective[slotId];
+    for (const slot of records) {
+      const entry = effective[slot.slotId];
       const presence: 'unset' | 'set' = entry?.presence ?? slot.contentPresence;
       slots.push({
         slotId: slot.slotId,

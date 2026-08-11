@@ -61,11 +61,17 @@ export interface DraftContentOverlayV1 {
 /**
  * Formal scaffold data the projection reads. Provided by the runtime from the
  * Task 7 blob store + event-derived state; tests inject an in-memory fake.
+ *
+ * `getSlot`'s optional `{ withContent: true }` requests lazy single-slot content
+ * hydration: the outline (`listSlots`) and ancestor shells never pass it, so
+ * they read metadata + presence only. Content-level reads (`readSlot` /
+ * `readSlots` at content level, outside the draft overlay) pass it to hydrate
+ * exactly ONE content blob.
  */
 export interface StructuredSlotDataSource {
   getActiveGeneration(): Promise<{ scaffoldId: string; generationId: string; contentRevision: number } | null>;
   getGenerationIndex(generationId: string): Promise<GenerationIndexV1>;
-  getSlot(generationId: string, slotId: string): Promise<SlotInstance | null>;
+  getSlot(generationId: string, slotId: string, options?: { withContent?: boolean }): Promise<SlotInstance | null>;
   getContentPresence(generationId: string, revision: number): Promise<Readonly<Record<string, 'unset' | 'set'>>>;
 }
 
@@ -360,16 +366,19 @@ export class StructuredSlotProjectionService {
     if (!isView(view)) return view;
     if (view.subjectKind === 'owner') {
       if (view.index === null) return notVisible();
-      const slot = await this.source.getSlot(view.index.generationId, slotId);
+      const slot = await this.source.getSlot(view.index.generationId, slotId, { withContent: true });
       if (slot === null) return notVisible();
       const ancestors = await this.ancestorShells(view.index, slot);
       return { ok: true, slot: this.buildReadProjection(slot, 'content', ancestors, null) };
     }
     const visible = visibleSlotSet(view.scope);
     if (!visible.has(slotId)) return notVisible();
-    const slot = await this.source.getSlot(view.index.generationId, slotId);
-    if (slot === null) return notVisible();
     const level = effectiveLevel(slotId, view.scope, view.capabilities);
+    // A content-level read hydrates exactly ONE content blob lazily; the draft
+    // overlay (when it covers the slot) supplies the effective value instead.
+    const needsContent = level === 'content' && overlay?.[slotId] === undefined;
+    const slot = await this.source.getSlot(view.index.generationId, slotId, { withContent: needsContent });
+    if (slot === null) return notVisible();
     const ancestors = await this.ancestorShells(view.index, slot);
     return { ok: true, slot: this.buildReadProjection(slot, level, ancestors, overlay ?? null) };
   }
@@ -390,7 +399,7 @@ export class StructuredSlotProjectionService {
       if (view.index === null) return notVisible();
       const slots: SlotReadProjectionV1[] = [];
       for (const slotId of slotIds) {
-        const slot = await this.source.getSlot(view.index.generationId, slotId);
+        const slot = await this.source.getSlot(view.index.generationId, slotId, { withContent: true });
         if (slot === null) return notVisible();
         slots.push(this.buildReadProjection(slot, 'content', await this.ancestorShells(view.index, slot), null));
       }
@@ -402,9 +411,12 @@ export class StructuredSlotProjectionService {
     }
     const slots: SlotReadProjectionV1[] = [];
     for (const slotId of slotIds) {
-      const slot = await this.source.getSlot(view.index.generationId, slotId);
-      if (slot === null) return notVisible();
       const level = effectiveLevel(slotId, view.scope, view.capabilities);
+      // Content-level reads hydrate exactly ONE blob lazily; the draft overlay
+      // (when it covers the slot) supplies the effective value instead.
+      const needsContent = level === 'content' && overlay?.[slotId] === undefined;
+      const slot = await this.source.getSlot(view.index.generationId, slotId, { withContent: needsContent });
+      if (slot === null) return notVisible();
       slots.push(this.buildReadProjection(slot, level, await this.ancestorShells(view.index, slot), overlay ?? null));
     }
     return { ok: true, slots };
