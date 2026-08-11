@@ -1133,7 +1133,7 @@ async function runIntegratedQualify(args: CliArgs): Promise<never> {
       perScaleResults,
       selectionReason: 'no 100/75/50/25% scale of the candidate axes satisfied every acceptance bound',
     });
-    process.stdout.write(`[benchmark] 无任何 scale 通过；失败证据已写入 ${evidencePath}\n`);
+    process.stdout.write(`[benchmark] 无任何 scale 通过\n`);
     throw new BenchmarkError(
       BENCHMARK_INTEGRATED_BOUNDS,
       `no scale passed every bound; per-scale results recorded in ${args.evidence}`,
