@@ -15,7 +15,9 @@
  * - `runOwnerOutlineCold` / `runOwnerOutlineHot` are the DIAGNOSTIC owner
  *   outline cases over the real task; cold is the FIRST listSlots (projection
  *   build + index read + presence root + per-slot NDJSON), hot is a SUBSEQUENT
- *   cached one. Asserted here that hot is strictly cheaper than cold.
+ *   cached one. The cache boundary is pinned by deterministic I/O counters;
+ *   wall-clock values remain diagnostics and are not ordered under parallel
+ *   test-runner / GC noise.
  *
  * This is a test-only file; it changes no production behavior.
  */
@@ -100,7 +102,7 @@ describe('integrated benchmark adapter Task D split', () => {
     }
   }, 60_000);
 
-  it('a warm owner outline is strictly cheaper than the cold first projection (diagnostics)', async () => {
+  it('a warm owner outline reuses the cold projection index and presence caches (diagnostics)', async () => {
     const tempRoot = mkdtempSync(join(tmpdir(), 'forge-integrated-adapter-test-'));
     try {
       const paths = CorePaths.create({ dataRoot: tempRoot, templateRoot: join(tempRoot, 'templates') });
@@ -127,19 +129,20 @@ describe('integrated benchmark adapter Task D split', () => {
       expect(counters.slotsOpens).toBeGreaterThan(0);
       expect(counters.blobReads).toBe(0);
 
-      // Hot samples reuse the cached projection service, data source, generation
-      // index and presence root. Take the MIN so GC/monitor noise cannot hide
-      // the caching lever.
-      let hotMin = Infinity;
+      const coldIndexReads = counters.indexReads;
+      const coldContentRootReads = counters.contentRootReads;
+
+      // Hot samples reuse the cached projection service, data source,
+      // generation index and presence root. Wall time is diagnostic only:
+      // under full-suite parallel load a cached call may still be slower due
+      // to scheduling or GC. The load-bearing regression lock is that no hot
+      // call performs another index or content-root read.
       for (let i = 0; i < 3; i += 1) {
-        hotMin = Math.min(hotMin, await adapter.runOwnerOutlineHot());
+        expect(await adapter.runOwnerOutlineHot()).toBeGreaterThanOrEqual(0);
       }
-      expect(hotMin).toBeLessThan(coldMs);
       // The cached index/presence means the hot path performs no re-reads.
-      const hotIndexReads = counters.indexReads;
-      const hotContentRootReads = counters.contentRootReads;
-      expect(hotIndexReads).toBe(1); // only the cold read
-      expect(hotContentRootReads).toBe(1); // only the cold read
+      expect(counters.indexReads).toBe(coldIndexReads);
+      expect(counters.contentRootReads).toBe(coldContentRootReads);
     } finally {
       rmSync(tempRoot, { recursive: true, force: true });
     }
