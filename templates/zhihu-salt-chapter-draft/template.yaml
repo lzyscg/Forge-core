@@ -1,0 +1,23 @@
+name: 知乎盐选单章正文（结构槽）
+description: >-
+  使用结构化槽位生产一章可交付的知乎盐选短故事正文。模板只定义章节结构、
+  槽位类型和 Markdown 交付边界，具体故事内容由输入包和 Agent 生成。
+inputFields:
+  - id: chapter_packet
+    label: 当前章节执行包
+    description: 当前章节的目标、人物状态、因果变化、信息边界和写作约束。
+    kind: textarea
+    required: true
+  - id: previous_draft
+    label: 前一版正文（可选）
+    description: 用于定向修订；没有修订任务时可留空。
+    kind: textarea
+    required: false
+  - id: repair_order
+    label: 修订指令（可选）
+    description: 只描述需要修复的具体问题，不把整章改写要求藏在这里。
+    kind: textarea
+    required: false
+finalArtifact:
+  name: chapter.md
+  format: markdown

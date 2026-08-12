@@ -1,0 +1,33 @@
+productionMode: structured_slots
+agents:
+  - structure
+  - fill
+  - seal
+  - submitter
+routes:
+  - from: structure
+    to: fill
+    kind: message
+    label: 槽树已建立，开始填充
+  - from: fill
+    to: seal
+    kind: message
+    label: 草稿已提交，开始校验
+  - from: seal
+    to: fill
+    kind: message
+    label: 校验发现问题，定向返工
+  - from: seal
+    to: submitter
+    kind: artifact
+    label: 校验通过，交付 Markdown
+artifactSchema:
+  files:
+    - name: chapter.md
+      required: true
+      producer: seal
+      extract: content
+      phase: create
+finalOutput:
+  submitters:
+    - submitter

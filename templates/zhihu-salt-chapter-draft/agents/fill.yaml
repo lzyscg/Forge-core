@@ -1,0 +1,33 @@
+id: fill
+name: 章节正文填空 Agent
+description: 在槽树草稿副本中按槽位规格渐进式写入章节正文。
+model: configured/zhihu-chapter-fill
+systemPromptFile: prompts/fill-system.md
+skills:
+  - id: chapter-drafting
+    name: 知乎盐选单章写作 Skill
+    description: 章节正文的动作、因果、人物情绪和压缩检查。
+    contentPath: skills/chapter-drafting/SKILL.md
+    sectionsPath: skills/chapter-drafting/references
+turnContract:
+  version: 3
+  slotSession:
+    kind: fill
+    accessProfile: editor
+    capabilities:
+      - read_slot_spec
+      - read_slot_content
+      - write_draft_content
+      - submit_draft
+    completion: merge_candidate_created
+  dispatch:
+    allowedActions:
+      - send_message
+    targets:
+      send_message:
+        - seal
+slotCapabilities:
+  - read_slot_spec
+  - read_slot_content
+  - write_draft_content
+  - submit_draft

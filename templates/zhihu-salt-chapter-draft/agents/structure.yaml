@@ -1,0 +1,31 @@
+id: structure
+name: 章节结构编排 Agent
+description: 根据章节执行包建立合法的 chapter 槽树和每个槽的写作规格。
+model: configured/zhihu-chapter-structure
+systemPromptFile: prompts/structure-system.md
+skills:
+  - id: chapter-drafting
+    name: 知乎盐选单章写作 Skill
+    description: 章节焦点、动作骨架、因果和信息连续性的渐进式写作约束。
+    contentPath: skills/chapter-drafting/SKILL.md
+    sectionsPath: skills/chapter-drafting/references
+turnContract:
+  version: 3
+  slotSession:
+    kind: structure
+    accessProfile: null
+    capabilities:
+      - read_structure_contract
+      - write_structure_proposal
+      - submit_structure_proposal
+    completion: structure_commit_candidate_created
+  dispatch:
+    allowedActions:
+      - send_message
+    targets:
+      send_message:
+        - fill
+slotCapabilities:
+  - read_structure_contract
+  - write_structure_proposal
+  - submit_structure_proposal

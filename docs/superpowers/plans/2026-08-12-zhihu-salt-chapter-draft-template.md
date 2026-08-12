@@ -27,7 +27,7 @@ Files to create:
 - templates/zhihu-salt-chapter-draft/agents/{structure,fill,seal,submitter}.yaml
 - templates/zhihu-salt-chapter-draft/prompts/{structure,fill,seal,submitter}-system.md
 - templates/zhihu-salt-chapter-draft/skills/chapter-drafting/SKILL.md
-- templates/zhihu-salt-chapter-draft/skills/chapter-drafting/sections/01-focus-contract.md through 08-targeted-repair.md
+- templates/zhihu-salt-chapter-draft/skills/chapter-drafting/references/01-focus-contract.md through 08-targeted-repair.md
 
 Use productionMode structured_slots and agents structure, fill, seal, submitter. Routes are structure→fill message, fill→seal message, seal→fill message for rework, and seal→submitter artifact. The artifact schema declares chapter.md produced by seal. Structure declares read_structure_contract, write_structure_proposal, submit_structure_proposal. Fill declares read_slot_spec, read_slot_content, write_draft_content, submit_draft. Seal declares request_seal and failureDispatch seal_gate_failed→send_message. Submitter is a v2 submit_final_artifact node.
 
@@ -48,11 +48,11 @@ Commit:
 Files to create:
 
 - templates/zhihu-salt-chapter-draft/slots/contract.yaml
-- templates/zhihu-salt-chapter-draft/slots/validators/validate.js
-- templates/zhihu-salt-chapter-draft/slots/assembler/render.js
+- templates/zhihu-salt-chapter-draft/slots/validators/validate.cjs
+- templates/zhihu-salt-chapter-draft/slots/assembler/render.cjs
 - src/server/template/zhihu-salt-chapter-draft-template.test.ts
 
-The root slot is chapter with ordered children title, opening, one-to-sixteen scene_block slots, emotional_closure, and chapter_end. All leaf content is required non-empty string content with bounded lengths; chapter has forbidden content. Define an editor access profile and one blocking merge-and-seal validator. Define one assembler route chapter-md→chapter.md.
+The root slot is chapter with ordered children title, opening, one-to-sixteen scene_block slots, emotional_closure, and chapter_end. All leaf content is required non-empty string content with bounded lengths; chapter has forbidden content. Define an editor access profile and one blocking `seal` validator, so partial drafts can be merged and only the final Seal Gate rejects missing content. Define one assembler route chapter-md→chapter.md.
 
 The focused test copies the package into a temporary template root, loads it with createTestRuntimeEnvironment(), and asserts productionMode, root type, assembler route, and phases:
 
@@ -75,9 +75,9 @@ Commit:
 
 ### Task 3: Add the real scheduler acceptance flow
 
-Modify src/server/template/zhihu-salt-chapter-draft-template.test.ts.
+Add src/server/template/zhihu-salt-chapter-draft.runtime.acceptance.test.ts alongside the focused package test.
 
-Use the existing structured-slot-template.acceptance.test.ts harness pattern with a scripted AgentRuntime. Propose chapter → title + opening + scene_block + emotional_closure + chapter_end. First fill leaves chapter_end empty and must receive a blocking Seal failure. Second fill completes the tree and must pass.
+Use the existing structured-slot-template.acceptance.test.ts harness pattern with a scripted AgentRuntime. Propose chapter → title + opening + scene_block + emotional_closure + chapter_end. First fill leaves chapter_end empty and must receive a blocking Seal failure. Second fill completes the tree and must pass. The package validator runs at the Seal trigger, so progressive filling remains possible while the final gate stays blocking.
 
 Assert one scaffold generation, two merged fill draft terminals, one Seal failure receipt followed by one sealed event, one final_submission_accepted event, and final chapter.md containing title and scene text while not containing raw input keys. Assert no generated qualification files change.
 

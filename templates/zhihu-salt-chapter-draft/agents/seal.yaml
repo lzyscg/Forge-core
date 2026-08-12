@@ -1,0 +1,33 @@
+id: seal
+name: 章节校验与装配 Agent
+description: 运行结构槽校验并将通过的槽树装配为 chapter.md。
+model: configured/zhihu-chapter-seal
+systemPromptFile: prompts/seal-system.md
+skills:
+  - id: chapter-drafting
+    name: 知乎盐选单章写作 Skill
+    description: 章节级的因果、人物、信息连续性和压缩复核。
+    contentPath: skills/chapter-drafting/SKILL.md
+    sectionsPath: skills/chapter-drafting/references
+turnContract:
+  version: 3
+  slotSession:
+    kind: seal
+    accessProfile: editor
+    capabilities:
+      - request_seal
+    completion: seal_candidate_created
+    failureDispatch:
+      when: seal_gate_failed
+      action: send_message
+  dispatch:
+    allowedActions:
+      - send_message
+      - publish_artifact
+    targets:
+      send_message:
+        - fill
+      publish_artifact:
+        - submitter
+slotCapabilities:
+  - request_seal
