@@ -313,6 +313,8 @@ function validPerScaleResults(): Array<Record<string, unknown>> {
   const passing = {
       scale: 25,
       results: [
+        { id: 'schema-compile', description: 'schema', warmup: 1, samples: 8, p50Ms: 1, p95Ms: 2, maxMs: 2, sampleDigest: '1'.repeat(64), postCasePeakRssBytes: 300 * 1024 * 1024 },
+        { id: 'grammar-compile', description: 'grammar', warmup: 1, samples: 8, p50Ms: 1, p95Ms: 2, maxMs: 2, sampleDigest: '2'.repeat(64), postCasePeakRssBytes: 300 * 1024 * 1024 },
         {
           id: 'owner-outline-cold',
           description: 'owner outline cold (first listSlots) @ 25%',
@@ -379,6 +381,7 @@ function validPerScaleResults(): Array<Record<string, unknown>> {
           sampleDigest: 'f'.repeat(64),
           postCasePeakRssBytes: 300 * 1024 * 1024,
         },
+        { id: 'validator-fanout-10k', description: 'fanout', warmup: 0, samples: 1, p50Ms: 10, p95Ms: 10, maxMs: 10, sampleDigest: '3'.repeat(64), postCasePeakRssBytes: 300 * 1024 * 1024 },
         {
           id: 'seal-assembler-custody',
           description: '16 MiB real Seal @ 25%',
@@ -401,6 +404,7 @@ function validPerScaleResults(): Array<Record<string, unknown>> {
           sampleDigest: '8b'.repeat(32),
           postCasePeakRssBytes: 300 * 1024 * 1024,
         },
+        { id: 'batch-recovery', description: 'recovery', warmup: 0, samples: 1, p50Ms: 10, p95Ms: 10, maxMs: 10, sampleDigest: '4'.repeat(64), postCasePeakRssBytes: 300 * 1024 * 1024 },
       ],
       peakRssBytes: 300 * 1024 * 1024,
       diskBytes: 17_000_000,
@@ -422,11 +426,13 @@ function validSuccessEvidence(): Record<string, unknown> {
     mode: 'integrated-qualify',
     runner: validRunner(),
     ...validFacts(),
-    warmupCount: 10,
-    sampleCount: 40,
+    warmupCount: 12,
+    sampleCount: 58,
     peakRssBytes: 300 * 1024 * 1024,
     diskBytes: 17_000_000,
     cases: [
+      { id: 'schema-compile', rawSampleDigest: '1'.repeat(64), samples: 8, warmup: 1, p50Ms: 1, p95Ms: 2, maxMs: 2, postCasePeakRssBytes: 300 * 1024 * 1024 },
+      { id: 'grammar-compile', rawSampleDigest: '2'.repeat(64), samples: 8, warmup: 1, p50Ms: 1, p95Ms: 2, maxMs: 2, postCasePeakRssBytes: 300 * 1024 * 1024 },
       {
         id: 'owner-outline-cold',
         rawSampleDigest: 'a'.repeat(64),
@@ -487,6 +493,7 @@ function validSuccessEvidence(): Record<string, unknown> {
         maxMs: 3,
         postCasePeakRssBytes: 300 * 1024 * 1024,
       },
+      { id: 'validator-fanout-10k', rawSampleDigest: '3'.repeat(64), samples: 1, warmup: 0, p50Ms: 10, p95Ms: 10, maxMs: 10, postCasePeakRssBytes: 300 * 1024 * 1024 },
       {
         id: 'seal-assembler-custody',
         rawSampleDigest: '9a'.repeat(32),
@@ -507,6 +514,7 @@ function validSuccessEvidence(): Record<string, unknown> {
         maxMs: 0.6,
         postCasePeakRssBytes: 300 * 1024 * 1024,
       },
+      { id: 'batch-recovery', rawSampleDigest: '4'.repeat(64), samples: 1, warmup: 0, p50Ms: 10, p95Ms: 10, maxMs: 10, postCasePeakRssBytes: 300 * 1024 * 1024 },
     ],
     candidatePercentage: 25,
     selectionReason: 'greatest passing scale 25%',
@@ -569,6 +577,20 @@ describe('validateProfileEvidence (P2)', () => {
     expect(() => validateProfileEvidence(evidence)).toThrow(
       /evidence.cases missing required case 'authorized-projection-500-issues'/,
     );
+  });
+
+  it('rejects missing validator fanout / batch recovery and zero-sample protocol tampering', () => {
+    for (const id of ['validator-fanout-10k', 'batch-recovery']) {
+      const evidence = validSuccessEvidence();
+      evidence.cases = (evidence.cases as Array<Record<string, unknown>>).filter((entry) => entry.id !== id);
+      expect(() => validateProfileEvidence(evidence)).toThrow(new RegExp(`missing required case '${id}'`));
+    }
+    const zero = validSuccessEvidence();
+    (zero.cases as Array<Record<string, unknown>>).find((entry) => entry.id === 'authorized-projection-500-issues')!.samples = 0;
+    expect(() => validateProfileEvidence(zero)).toThrow(/exact warmup=3 and samples=10/);
+    const cold = validSuccessEvidence();
+    (cold.cases as Array<Record<string, unknown>>).find((entry) => entry.id === 'owner-outline-cold')!.warmup = 1;
+    expect(() => validateProfileEvidence(cold)).toThrow(/exact warmup=0 and samples=1/);
   });
 
   it('rejects a per-scale case with a wrong-type postCasePeakRssBytes', () => {

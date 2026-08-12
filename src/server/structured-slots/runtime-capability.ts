@@ -30,6 +30,13 @@ import {
 } from './platform-profile';
 import type { StructuredPlatformProfileFileV1 } from './platform-profile';
 import { canonicalJsonSha256 } from './canonical-json';
+import {
+  RELEASE_FINAL_PROFILE_PATH,
+  RELEASE_PI_PREFLIGHT_CHARACTERIZATION,
+  RELEASE_PROFILE_EVIDENCE_PATH,
+  validateProfileEvidence,
+  validateReleaseEvidence,
+} from './structured-evidence-schema';
 
 /** Versioned runtime capability manifest (spec §5). */
 export interface StructuredRuntimeCapabilityV1 {
@@ -54,6 +61,7 @@ export interface StructuredRuntimeEnvironmentV1 {
 export { STRUCTURED_SLOT_PROFILE_CANDIDATE as CANDIDATE_PROFILE_LIMITS_V1 } from './platform-profile';
 
 const REQUIRED_ABIS = ['forge-validator/v1', 'forge-assembler/v1'] as const;
+const REQUIRED_RELEASE_GATES = ['typecheck','unit-tests','build','e2e','structured-acceptance','forge-pi-slot-preflight'] as const;
 const CAPABILITY_FIELDS = ['version', 'status', 'profileIdentity', 'profileDigest', 'evidenceDigest', 'requiredAbis'] as const;
 
 function invalid(reason: string): never {
@@ -260,13 +268,14 @@ export function createProductionRuntimeEnvironment(
   if (capability.profileDigest !== profileCanonicalDigest(profile)) {
     invalid('capability.profileDigest does not match the checked-in profile file');
   }
-  const evidence = JSON.parse(readFileSync(files.profileEvidenceFile ?? productionEvidencePath('structured-slot-platform-profile-v1.json'), 'utf8')) as unknown;
+  const evidence = JSON.parse(readFileSync(files.profileEvidenceFile ?? productionEvidencePath('structured-slot-platform-profile-v1.json'), 'utf8')) as Record<string, unknown>;
+  try { validateProfileEvidence(evidence); } catch (error) { invalid(`profile evidence invalid: ${error instanceof Error ? error.message : String(error)}`); }
   if (profile.evidenceDigest !== canonicalJsonSha256(evidence)) invalid('final profile evidenceDigest does not match profile evidence');
   const release = JSON.parse(readFileSync(files.releaseEvidenceFile ?? productionEvidencePath('structured-slot-release-v1.json'), 'utf8')) as unknown;
   if (!isPlainObject(release)) invalid('release evidence must be a plain object');
-  const releaseFields = ['schemaVersion', 'gate', 'mode', 'checkpointCommit', 'sourceTreeDigest', 'packageLockSha256', 'profileEvidencePath', 'profileEvidenceDigest', 'finalProfilePath', 'finalProfileDigest', 'requiredAbis', 'piPreflightCharacterization', 'gates', 'observedAt'];
-  rejectUnknownFields(release, releaseFields, 'release evidence');
-  if (release['schemaVersion'] !== 1 || release['gate'] !== 'verify:structured-slots' || release['mode'] !== 'qualify') invalid('release evidence identity is invalid');
+  try { validateReleaseEvidence(release, REQUIRED_RELEASE_GATES); } catch (error) { invalid(`release evidence invalid: ${error instanceof Error ? error.message : String(error)}`); }
+  if (release['checkpointCommit'] !== evidence['gitCommit'] || release['sourceTreeDigest'] !== evidence['sourceTreeDigest'] || release['packageLockSha256'] !== evidence['packageLockSha256']) invalid('release evidence source facts do not match profile evidence');
+  if (release['profileEvidencePath'] !== RELEASE_PROFILE_EVIDENCE_PATH || release['finalProfilePath'] !== RELEASE_FINAL_PROFILE_PATH || release['piPreflightCharacterization'] !== RELEASE_PI_PREFLIGHT_CHARACTERIZATION) invalid('release evidence frozen references are invalid');
   if (release['profileEvidenceDigest'] !== profile.evidenceDigest) invalid('release evidence profileEvidenceDigest does not match final profile');
   if (release['finalProfileDigest'] !== profileCanonicalDigest(profile)) invalid('release evidence finalProfileDigest does not match final profile');
   if (canonicalJsonSha256(release) !== capability.evidenceDigest) invalid('capability.evidenceDigest does not match release evidence');

@@ -13,6 +13,9 @@
  */
 import { describe, expect, it } from 'vitest';
 import { resolve } from 'node:path';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   CANDIDATE_PROFILE_LIMITS_V1,
   createDisabledRuntimeEnvironment,
@@ -23,8 +26,10 @@ import {
   validateRuntimeCapability,
   validatePlatformProfile,
   productionEvidencePath,
+  createProductionRuntimeEnvironment,
 } from './runtime-capability';
 import { profileCanonicalDigest } from './platform-profile';
+import { canonicalJsonSha256 } from './canonical-json';
 
 function provisionalProfile() {
   return {
@@ -87,6 +92,27 @@ describe('runtime-capability — explicit disabled fixture (Task 19)', () => {
   it('keeps a disabled capability with a null profile as a valid environment', () => {
     const env = createDisabledRuntimeEnvironment();
     expect(() => createRuntimeEnvironment(env.capability, null)).not.toThrow();
+  });
+});
+
+describe('runtime-capability — production evidence chain', () => {
+  it('rejects hash-consistent but structurally empty profile/release evidence', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'forge-runtime-evidence-'));
+    try {
+      const evidence = {};
+      const evidenceDigest = canonicalJsonSha256(evidence);
+      const profile = { version: 1, status: 'final', identity: 'forge-structured-runtime/v1', limits: CANDIDATE_PROFILE_LIMITS_V1, evidenceDigest };
+      const release = {};
+      const manifest = { version: 1, status: 'enabled', profileIdentity: 'forge-structured-runtime/v1', profileDigest: profileCanonicalDigest(validatePlatformProfile(profile)), evidenceDigest: canonicalJsonSha256(release), requiredAbis: ['forge-validator/v1', 'forge-assembler/v1'] };
+      const paths = { manifestFile: join(dir, 'manifest.json'), profileFile: join(dir, 'profile.json'), profileEvidenceFile: join(dir, 'profile-evidence.json'), releaseEvidenceFile: join(dir, 'release.json') };
+      writeFileSync(paths.manifestFile, JSON.stringify(manifest));
+      writeFileSync(paths.profileFile, JSON.stringify(profile));
+      writeFileSync(paths.profileEvidenceFile, JSON.stringify(evidence));
+      writeFileSync(paths.releaseEvidenceFile, JSON.stringify(release));
+      expect(() => createProductionRuntimeEnvironment(paths)).toThrow(/profile evidence invalid/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

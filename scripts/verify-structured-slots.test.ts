@@ -35,6 +35,7 @@ import {
   validateProfileEvidenceFailure,
   validateReleaseEvidence,
   scaledQualificationLimits,
+  REQUIRED_EVIDENCE_CASE_IDS,
 } from './structured-evidence-schema';
 import {
   cleanSourceDigest,
@@ -76,16 +77,15 @@ const BOUNDS: Record<string, number> = {
  * frozen bound cases + the two owner-outline diagnostics the benchmark is
  * required to emit).
  */
-const REQUIRED_SUCCESS_CASE_IDS: readonly string[] = [
-  'indexed-slot-read',
-  'tree-match-10k',
-  'content-root-64mib',
-  'draft-journal-2k',
-  'seal-assembler-custody',
-  'authorized-projection-500-issues',
-  'owner-outline-cold',
-  'owner-outline-hot',
-];
+const REQUIRED_SUCCESS_CASE_IDS = REQUIRED_EVIDENCE_CASE_IDS;
+const SAMPLE_PROTOCOL: Record<string, { warmup: number; samples: number }> = {
+  'schema-compile': { warmup: 1, samples: 8 }, 'grammar-compile': { warmup: 1, samples: 8 },
+  'tree-match-10k': { warmup: 1, samples: 5 }, 'content-root-64mib': { warmup: 1, samples: 3 },
+  'draft-journal-2k': { warmup: 1, samples: 5 }, 'validator-fanout-10k': { warmup: 0, samples: 1 },
+  'owner-outline-cold': { warmup: 0, samples: 1 }, 'owner-outline-hot': { warmup: 1, samples: 5 },
+  'authorized-projection-500-issues': { warmup: 3, samples: 10 }, 'seal-assembler-custody': { warmup: 0, samples: 1 },
+  'batch-recovery': { warmup: 0, samples: 1 }, 'indexed-slot-read': { warmup: 3, samples: 10 },
+};
 
 const tempDirs: string[] = [];
 
@@ -125,12 +125,12 @@ function validSuccessEvidence(): Record<string, unknown> {
   const selectedResults = REQUIRED_SUCCESS_CASE_IDS.map((id, index) => ({
     id,
     description: `${id} @ 25%`,
-    warmup: 3,
-    samples: 10,
+    warmup: SAMPLE_PROTOCOL[id]!.warmup,
+    samples: SAMPLE_PROTOCOL[id]!.samples,
     p50Ms: 4.2,
     p95Ms: 5.4,
     maxMs: 5.4,
-    sampleDigest: ['a'.repeat(64), 'b'.repeat(64), 'c'.repeat(64), 'd'.repeat(64), 'e'.repeat(64), 'f'.repeat(64), '9a'.repeat(32), '8b'.repeat(32)][index]!,
+    sampleDigest: index.toString(16).padStart(2, '0').repeat(32),
     postCasePeakRssBytes: 300 * 1024 * 1024,
   }));
   return {
@@ -143,8 +143,8 @@ function validSuccessEvidence(): Record<string, unknown> {
     dependencyVersions: DEPS,
     peakRssBytes: 300 * 1024 * 1024,
     diskBytes: 17_000_000,
-    warmupCount: 24,
-    sampleCount: 80,
+    warmupCount: 12,
+    sampleCount: 58,
     cases: selectedResults.map(({ description: _description, sampleDigest, ...entry }) => ({ ...entry, rawSampleDigest: sampleDigest })),
     candidatePercentage: 25,
     selectionReason: 'greatest passing scale 25%',
