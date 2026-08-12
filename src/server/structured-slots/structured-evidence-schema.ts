@@ -150,7 +150,7 @@ export const REQUIRED_EVIDENCE_CASE_IDS: readonly string[] = [
   'indexed-slot-read',
 ] as const;
 
-const CASE_SAMPLE_PROTOCOL: Readonly<Record<string, { warmup: number; samples: number }>> = {
+export const CASE_SAMPLE_PROTOCOL: Readonly<Record<string, { warmup: number; samples: number }>> = {
   'schema-compile': { warmup: 1, samples: 8 },
   'grammar-compile': { warmup: 1, samples: 8 },
   'tree-match-10k': { warmup: 1, samples: 5 },
@@ -432,6 +432,14 @@ export function validateProfileEvidence(value: unknown): void {
   for (let i = 0; i < STRUCTURED_QUALIFICATION_SCALES.length; i += 1) {
     const entry = perScale[i]!;
     if (entry['scale'] !== STRUCTURED_QUALIFICATION_SCALES[i]) invalid('evidence.perScaleResults scales must be ordered 100/75/50/25');
+    const scaleResults = entry['results'] as Array<Record<string, unknown>>;
+    const scaleCaseIds = new Set(scaleResults.map((result) => result['id'] as string));
+    if (scaleResults.length !== REQUIRED_EVIDENCE_CASE_IDS.length) {
+      invalid(`scale ${String(entry['scale'])} must contain all frozen qualification cases`);
+    }
+    for (const id of REQUIRED_EVIDENCE_CASE_IDS) {
+      if (!scaleCaseIds.has(id)) invalid(`scale ${String(entry['scale'])} missing required case '${id}'`);
+    }
     const recomputed = recomputeViolations(entry);
     if (canonicalJsonSha256(entry['violations']) !== canonicalJsonSha256(recomputed)) invalid(`scale ${String(entry['scale'])} violations do not match frozen-bound recomputation`);
     if (entry['passed'] !== (recomputed.length === 0)) invalid(`scale ${String(entry['scale'])} passed does not match frozen-bound recomputation`);

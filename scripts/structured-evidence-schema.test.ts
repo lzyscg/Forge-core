@@ -5,11 +5,8 @@
  * The evidence schema stayed at `schemaVersion: 1` with ADDITIVE fields: every
  * success evidence `cases` entry and every per-scale result case now carries a
  * required `postCasePeakRssBytes` (the cumulative child peak AFTER that case),
- * and the success `cases` array must contain ALL required integrated case ids —
- * the six frozen bound cases PLUS the two owner-outline diagnostics
- * (`owner-outline-cold` / `owner-outline-hot`) the benchmark is required to
- * emit. The outline diagnostics carry NO bound; only their emission is
- * required.
+ * and the success `cases` array must contain all twelve frozen integrated case
+ * ids using the exact benchmark sampling protocol.
  *
  * Positive tests prove a valid extended evidence (success + failure) passes;
  * negative tests prove a diagnostic-dropped / missing-required-case /
@@ -19,6 +16,8 @@ import { describe, expect, it } from 'vitest';
 import type { StructuredSlotLimitsV1 } from '../src/shared/structured-slots';
 import { scaledLimits } from './benchmark-structured-slots';
 import {
+  CASE_SAMPLE_PROTOCOL,
+  REQUIRED_EVIDENCE_CASE_IDS,
   validateProfileEvidence,
   validateProfileEvidenceFailure,
 } from './structured-evidence-schema';
@@ -46,34 +45,19 @@ const BOUNDS: Record<string, number> = {
   peakRssBytes: 512 * 1024 * 1024,
 };
 
-const REQUIRED_CASE_IDS: readonly string[] = [
-  'indexed-slot-read',
-  'tree-match-10k',
-  'content-root-64mib',
-  'draft-journal-2k',
-  'seal-assembler-custody',
-  'authorized-projection-500-issues',
-  'owner-outline-cold',
-  'owner-outline-hot',
-];
+const REQUIRED_CASE_IDS = REQUIRED_EVIDENCE_CASE_IDS;
 
-const HEX_DIGESTS: readonly string[] = [
-  'a'.repeat(64),
-  'b'.repeat(64),
-  'c'.repeat(64),
-  'd'.repeat(64),
-  'e'.repeat(64),
-  'f'.repeat(64),
-  '9a'.repeat(32),
-  '8b'.repeat(32),
-];
+const HEX_DIGESTS: readonly string[] = REQUIRED_CASE_IDS.map((_, index) =>
+  (index + 1).toString(16).padStart(2, '0').repeat(32),
+);
 
 function perScaleCase(id: string, index: number): Record<string, unknown> {
+  const protocol = CASE_SAMPLE_PROTOCOL[id]!;
   return {
     id,
     description: `${id} @ 25%`,
-    warmup: id === 'authorized-projection-500-issues' || id === 'indexed-slot-read' ? 3 : 1,
-    samples: id === 'owner-outline-cold' ? 1 : 5,
+    warmup: protocol.warmup,
+    samples: protocol.samples,
     p50Ms: 4.2,
     p95Ms: 5.4,
     maxMs: 5.4,
@@ -83,11 +67,12 @@ function perScaleCase(id: string, index: number): Record<string, unknown> {
 }
 
 function evidenceCase(id: string, index: number): Record<string, unknown> {
+  const protocol = CASE_SAMPLE_PROTOCOL[id]!;
   return {
     id,
     rawSampleDigest: HEX_DIGESTS[index]!,
-    samples: id === 'owner-outline-cold' ? 1 : 5,
-    warmup: id === 'authorized-projection-500-issues' || id === 'indexed-slot-read' ? 3 : 1,
+    samples: protocol.samples,
+    warmup: protocol.warmup,
     p50Ms: 4.2,
     p95Ms: 5.4,
     maxMs: 5.4,
@@ -101,8 +86,8 @@ function validSuccessEvidence(): Record<string, unknown> {
     mode: 'integrated-qualify',
     runner: RUNNER,
     ...FACTS,
-    warmupCount: 20,
-    sampleCount: 40,
+    warmupCount: 12,
+    sampleCount: 58,
     peakRssBytes: 300 * 1024 * 1024,
     diskBytes: 17_000_000,
     cases: REQUIRED_CASE_IDS.map((id, index) => evidenceCase(id, index)),
@@ -111,6 +96,14 @@ function validSuccessEvidence(): Record<string, unknown> {
     frozenLimits: scaledLimits(25) as unknown as StructuredSlotLimitsV1,
     bounds: BOUNDS,
     perScaleResults: [
+      ...[100, 75, 50].map((scale) => ({
+        scale,
+        results: REQUIRED_CASE_IDS.map((id, index) => perScaleCase(id, index)),
+        peakRssBytes: 600 * 1024 * 1024,
+        diskBytes: 17_000_000,
+        violations: [`peak RSS ${600 * 1024 * 1024} > ${512 * 1024 * 1024}`],
+        passed: false,
+      })),
       {
         scale: 25,
         results: REQUIRED_CASE_IDS.map((id, index) => perScaleCase(id, index)),
@@ -200,5 +193,21 @@ describe('extended profile evidence schema (Task D)', () => {
     const evidence = validSuccessEvidence();
     (evidence.perScaleResults as Array<Record<string, unknown>>)[0]!.stray = 1;
     expect(() => validateProfileEvidence(evidence)).toThrow(/unknown field 'stray'/);
+  });
+
+  it('rejects a SUCCESS evidence whose failed scale omits a frozen case', () => {
+    const evidence = validSuccessEvidence();
+    const failedScale = (evidence.perScaleResults as Array<{
+      results: Array<Record<string, unknown>>;
+      violations: string[];
+    }>)[0]!;
+    failedScale.results = failedScale.results.filter((entry) => entry.id !== 'validator-fanout-10k');
+    failedScale.violations = [
+      'missing diagnostic case validator-fanout-10k',
+      `peak RSS ${600 * 1024 * 1024} > ${512 * 1024 * 1024}`,
+    ];
+    expect(() => validateProfileEvidence(evidence)).toThrow(
+      /scale 100 must contain all frozen qualification cases/,
+    );
   });
 });
