@@ -147,6 +147,12 @@ describe('ActionBuffer phase gate (spec §4.1/§5.3)', () => {
     expect(buffer.phase).toBe('production');
   });
 
+  it('allows a structured Seal publish dispatch without finish_production', () => {
+    const buffer = new ActionBuffer('turn-structured-seal', { allowPublishWithoutFinish: true });
+    expect(() => buffer.propose(publishPackage())).not.toThrow();
+    expect(buffer.phase).toBe('dispatched');
+  });
+
   it('dispatches operate actions directly from production without sealing', () => {
     const sendBuffer = new ActionBuffer('turn-1');
     sendBuffer.propose(sendMessageProposal());

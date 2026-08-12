@@ -1,7 +1,7 @@
 id: seal
 name: 章节校验与装配 Agent
 description: 运行结构槽校验并将通过的槽树装配为 chapter.md。
-model: configured/zhihu-chapter-seal
+model: opencode/claude-haiku-4-5
 systemPromptFile: prompts/seal-system.md
 skills:
   - id: chapter-drafting

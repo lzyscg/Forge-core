@@ -1636,6 +1636,47 @@ describe('Task 14 Step 7 — structured runtime integration', () => {
     expect(harness.session.promptCalls.some((p) => p.text === correctivePrompt)).toBe(true);
   });
 
+  it('accepts a structured dispatch when the provider emits no separate public text', async () => {
+    const { paths, dataRoot } = makeTempCorePaths('forge-core-pi-structured-empty-text-');
+    tempRoots.push(dataRoot);
+    mkdirSync(paths.taskRoot('task-empty-text'), { recursive: true });
+    const store = new StructuredSlotPrivateStore(paths, 'task-empty-text');
+    const meter = await AttemptMeter.create({
+      turnId: 'turn-empty-text',
+      privateStore: store,
+      limits: charLimits(),
+    });
+    const harness = createPiHarness({
+      coreCwd: tempCwd(),
+      script: [
+        {
+          toolCalls: [{ name: 'send_message', args: { targetAgentId: 'agent-beta', summary: '结构已完成' } }],
+          text: '',
+        },
+      ],
+      structuredSlot: {
+        createContext: async () => ({
+          sessionKind: 'structure' as const,
+          turnId: 'turn-empty-text',
+          meter,
+          toolDefinitions: [],
+          beforePropose: () => ({ ok: true as const }),
+          correctivePrompt: '请完成结构并发送交接动作。',
+        }),
+      },
+    });
+
+    const result = await harness.runtime.run(
+      sampleTurnInput({ slotSession: { sessionKind: 'structure', turnId: 'turn-empty-text', signal: meter.signal } }),
+      freshSignal(),
+    );
+
+    expect(result.publicText).toBe('');
+    expect(result.actions).toEqual([
+      sendMessageProposal({ summary: '结构已完成' }),
+    ]);
+  });
+
   it('the structured runtime context is created exactly once per turn (compaction never recreates it)', async () => {
     const { paths, dataRoot } = makeTempCorePaths('forge-core-pi-once-');
     tempRoots.push(dataRoot);

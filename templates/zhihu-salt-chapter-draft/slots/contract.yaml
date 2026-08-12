@@ -14,6 +14,9 @@ slotTypes:
     specSchema:
       type: object
       additionalProperties: false
+      properties:
+        purpose: { type: string, minLength: 1, maxLength: 500 }
+        connective_requirement: { type: string, minLength: 1, maxLength: 500 }
     content:
       presence: required
       schema:
@@ -26,6 +29,11 @@ slotTypes:
     specSchema:
       type: object
       additionalProperties: false
+      properties:
+        action_to_advance: { type: string, minLength: 1, maxLength: 1000 }
+        character_state: { type: string, minLength: 1, maxLength: 1000 }
+        connective_requirement: { type: string, minLength: 1, maxLength: 1000 }
+        purpose: { type: string, minLength: 1, maxLength: 1000 }
     content:
       presence: required
       schema:
@@ -38,6 +46,12 @@ slotTypes:
     specSchema:
       type: object
       additionalProperties: false
+      properties:
+        action_to_advance: { type: string, minLength: 1, maxLength: 1000 }
+        character_state: { type: string, minLength: 1, maxLength: 1000 }
+        connective_requirement: { type: string, minLength: 1, maxLength: 1000 }
+        information_not_to_reveal: { type: string, minLength: 1, maxLength: 1000 }
+        purpose: { type: string, minLength: 1, maxLength: 1000 }
     content:
       presence: required
       schema:
@@ -50,6 +64,9 @@ slotTypes:
     specSchema:
       type: object
       additionalProperties: false
+      properties:
+        purpose: { type: string, minLength: 1, maxLength: 1000 }
+        tone: { type: string, minLength: 1, maxLength: 500 }
     content:
       presence: required
       schema:
@@ -62,6 +79,10 @@ slotTypes:
     specSchema:
       type: object
       additionalProperties: false
+      properties:
+        concrete_unresolved_element: { type: string, minLength: 1, maxLength: 1000 }
+        purpose: { type: string, minLength: 1, maxLength: 1000 }
+        suspended_momentum: { type: string, minLength: 1, maxLength: 1000 }
     content:
       presence: required
       schema:

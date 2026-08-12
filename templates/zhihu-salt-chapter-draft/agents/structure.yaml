@@ -1,7 +1,7 @@
 id: structure
 name: 章节结构编排 Agent
 description: 根据章节执行包建立合法的 chapter 槽树和每个槽的写作规格。
-model: configured/zhihu-chapter-structure
+model: opencode/claude-haiku-4-5
 systemPromptFile: prompts/structure-system.md
 skills:
   - id: chapter-drafting

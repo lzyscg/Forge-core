@@ -49,6 +49,7 @@ describe('zhihu-salt-chapter-draft template package', () => {
       producer: 'seal',
       extract: 'content',
     });
+    expect(frozen.agents.every((agent) => agent.model === 'opencode/claude-haiku-4-5')).toBe(true);
   });
 
   it('validates the chapter tree and assembles ordered Markdown', () => {
@@ -95,5 +96,32 @@ describe('zhihu-salt-chapter-draft template package', () => {
     ]) {
       expect(readFileSync(join(templateRoot, 'skills/chapter-drafting/references', file), 'utf8').length).toBeGreaterThan(100);
     }
+  });
+
+  it('freezes a one-dispatch completion protocol for every production agent', () => {
+    const structure = readFileSync(join(templateRoot, 'prompts/structure-system.md'), 'utf8');
+    const fill = readFileSync(join(templateRoot, 'prompts/fill-system.md'), 'utf8');
+    const seal = readFileSync(join(templateRoot, 'prompts/seal-system.md'), 'utf8');
+    const submitter = readFileSync(join(templateRoot, 'prompts/submitter-system.md'), 'utf8');
+
+    expect(structure).toContain('整个回合只能有一个 dispatch 动作');
+    expect(structure).toContain('submit_structure_proposal');
+    expect(structure).toContain('send_message');
+    expect(structure).toContain('不要调用 finish_production');
+    expect(structure).toContain('不要调用 load_skill');
+    expect(structure).toContain('优先只建立一个 scene_block');
+    expect(fill).toContain('整个回合只能有一个 dispatch 动作');
+    expect(fill).toContain('submit_draft');
+    expect(fill).toContain('不要调用 finish_production');
+    expect(fill).toContain('不要调用 load_skill');
+    expect(seal).toContain('整个回合只能有一个 dispatch 动作');
+    expect(seal).toContain('request_seal');
+    expect(seal).toContain('publish_artifact');
+    expect(seal).toContain('不要调用 send_message');
+    expect(seal).toContain('不要调用 load_skill');
+    expect(submitter).toContain('整个回合只能有一个 dispatch 动作');
+    expect(submitter).toContain('submit_final_artifact');
+    expect(submitter).toContain('不要调用 send_message');
+    expect(submitter).toContain('只调用一次 submit_final_artifact');
   });
 });

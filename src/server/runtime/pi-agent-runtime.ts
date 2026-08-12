@@ -718,7 +718,12 @@ export class PiAgentRuntime implements AgentRuntime {
     };
     runAbortSignal.addEventListener('abort', onAbort, { once: true });
 
-    const buffer = new ActionBuffer(input.turnId);
+    const buffer = new ActionBuffer(input.turnId, {
+      // A structured Seal Gate has already formed the immutable candidate;
+      // its declared publish dispatch is an operate action, not the basic
+      // production `finish_production` flow.
+      allowPublishWithoutFinish: input.slotSession?.sessionKind === 'seal',
+    });
     // Display-only live-preview sink (plan C): patches are memory-bound and
     // never reach storage; a throwing sink can never break the Turn.
     const onLive = options?.onLive;
@@ -968,7 +973,12 @@ export class PiAgentRuntime implements AgentRuntime {
         );
       }
       const publicText = extractPublicText(lastAssistant);
-      if (publicText.length === 0) {
+      // A structured turn may complete entirely through its closed tools and
+      // one legal dispatch. Providers commonly finish that tool-call message
+      // without a separate public text block. The dispatch itself is the
+      // observable turn result; basic turns retain the stricter text
+      // requirement so a silent ordinary model response still fails closed.
+      if (publicText.length === 0 && structuredCtx === null) {
         throw RuntimeFailure.transient(
           PI_RUNTIME_ERROR_CODES.PROVIDER_NO_RESPONSE,
           'the provider returned no public assistant text',

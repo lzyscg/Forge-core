@@ -1,7 +1,7 @@
 id: fill
 name: 章节正文填空 Agent
 description: 在槽树草稿副本中按槽位规格渐进式写入章节正文。
-model: configured/zhihu-chapter-fill
+model: opencode/claude-haiku-4-5
 systemPromptFile: prompts/fill-system.md
 skills:
   - id: chapter-drafting

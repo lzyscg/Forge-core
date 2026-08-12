@@ -1,7 +1,7 @@
 id: submitter
 name: 章节交付 Agent
 description: 接收 sealed chapter.md 并提交最终 Markdown 产物。
-model: configured/zhihu-chapter-submit
+model: opencode/claude-haiku-4-5
 systemPromptFile: prompts/submitter-system.md
 turnContract:
   version: 2

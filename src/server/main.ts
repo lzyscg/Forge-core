@@ -35,8 +35,6 @@ import { CorePaths } from './storage/core-paths';
 import type { AgentRuntime } from './runtime/agent-runtime';
 import { FakeAgentRuntime } from './runtime/fake-agent-runtime';
 import { loadFakeScriptsFromFile } from './runtime/fake-script-file';
-import { PiAgentRuntime } from './runtime/pi-agent-runtime';
-import { WorkspaceStore } from './runtime/workspace-store';
 
 function requireEnv(name: string, value: string | undefined): string {
   if (value === undefined || value.trim() === '') {
@@ -77,7 +75,7 @@ function resolveRuntimeKind(raw: string | undefined): 'fake' | 'pi' {
 }
 
 /** Builds the runtime selected by FORGE_CORE_RUNTIME (default: Pi). */
-function buildRuntime(kind: 'fake' | 'pi', paths: CorePaths): AgentRuntime {
+function buildRuntime(kind: 'fake', _paths: CorePaths): AgentRuntime {
   if (kind === 'fake') {
     const scriptFile = process.env.FORGE_CORE_FAKE_SCRIPTS;
     if (scriptFile === undefined || scriptFile.trim() === '') {
@@ -95,10 +93,7 @@ function buildRuntime(kind: 'fake' | 'pi', paths: CorePaths): AgentRuntime {
       process.exit(1);
     }
   }
-  return new PiAgentRuntime({
-    coreCwd: paths.dataRoot,
-    workspaces: new WorkspaceStore(paths),
-  });
+  throw new Error('forge-core: unreachable runtime kind');
 }
 
 async function main(): Promise<void> {
@@ -141,7 +136,7 @@ async function main(): Promise<void> {
   // entry point; the server receives it pre-initialized.
   const paths = CorePaths.create({ dataRoot, templateRoot });
   const coreService = new CoreService(paths, {
-    runtime: buildRuntime(runtimeKind, paths),
+    ...(runtimeKind === 'fake' ? { runtime: buildRuntime('fake', paths) } : {}),
     ...(acceptanceStopAfterCommit !== undefined ? { acceptanceStopAfterCommit } : {}),
   });
   serviceHolder.service = coreService;

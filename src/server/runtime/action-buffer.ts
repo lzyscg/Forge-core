@@ -108,9 +108,25 @@ export class ActionBuffer {
 
   readonly #beforePropose: ActionBufferBeforePropose | null;
 
-  constructor(turnId: string, options?: { beforePropose?: ActionBufferBeforePropose }) {
+  /**
+   * Structured Seal turns already have a sealed candidate after `request_seal`.
+   * Their declared `publish_artifact` dispatch therefore starts directly from
+   * the operate phase; it must not be forced through the basic v2
+   * `finish_production` transition.  The structured dispatch guard remains the
+   * authority for candidate/route validity before this buffer sees the action.
+   */
+  readonly #allowPublishWithoutFinish: boolean;
+
+  constructor(
+    turnId: string,
+    options?: {
+      beforePropose?: ActionBufferBeforePropose;
+      allowPublishWithoutFinish?: boolean;
+    },
+  ) {
     this.turnId = turnId;
     this.#beforePropose = options?.beforePropose ?? null;
+    this.#allowPublishWithoutFinish = options?.allowPublishWithoutFinish ?? false;
   }
 
   get state(): ActionBufferState {
@@ -242,7 +258,7 @@ export class ActionBuffer {
     }
     if (this.#phase === 'production') {
       if (DISPATCH_ACTION_TYPES.has(type)) {
-        if (type === 'publish_artifact') {
+        if (type === 'publish_artifact' && !this.#allowPublishWithoutFinish) {
           // publish requires a sealed package (production turn).
           throw new ActionBufferError(
             ACTION_BUFFER_ERROR_CODES.PHASE_PUBLISH_WITHOUT_FINISH_INVALID,

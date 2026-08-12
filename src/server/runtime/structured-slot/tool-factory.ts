@@ -334,6 +334,8 @@ export interface StructuredSlotToolContext {
   seal?: SealToolOperations;
   /** Projection service for the seal read tools. */
   projectionService?: StructuredSlotProjectionService;
+  /** Refreshes the same-turn dispatch guard after a candidate is frozen. */
+  onCandidateCreated?: () => void;
   /** Single-call read response limit in bytes (defaults to the platform cap). */
   readResponseLimitBytes?: number;
 }
@@ -607,6 +609,7 @@ async function structureOperation(
         return { ok: false, failure: { code: NOT_PRECHARGED, reason: 'the structure submit context is not wired' } };
       }
       const result: SubmitProposalResult = await service.submitProposal(grant, ctx.submitStructureContext);
+      if (result.ok) ctx.onCandidateCreated?.();
       return result.ok
         ? { ok: true, result: { ok: true, receipt: result.receipt, verdict: result.verdict } }
         : { ok: false, failure: result };
@@ -651,7 +654,7 @@ function fillToolDefinition(
       const consume = await consumeSlotToolPrecharge(ctx.meter, tc);
       if (consume.status !== 'ok') return rejectedResultForCharge(consume, name);
       const effTc: SlotToolCallContext = { ...tc, canonicalArgsHash: consume.prechargedArgsHash };
-      const result = await fillOperation(service, grant, name, rawParams, effTc, limitBytes);
+      const result = await fillOperation(service, grant, name, rawParams, effTc, limitBytes, ctx.onCandidateCreated);
       return result.ok ? slotAccepted(result.result, name) : serializeOpFailure(result.failure.code, name, result.failure.reason);
     },
   };
@@ -668,6 +671,7 @@ async function fillOperation(
   rawParams: Static<TSchema>,
   tc: SlotToolCallContext,
   limitBytes: number,
+  onCandidateCreated?: () => void,
 ): Promise<FillOperationResult> {
   switch (name) {
     case 'list_slots': {
@@ -715,6 +719,7 @@ async function fillOperation(
     case 'submit_draft': {
       const submitted = await service.submitDraft(grant, tc);
       if (!submitted.ok) return { ok: false, failure: submitted };
+      onCandidateCreated?.();
       return { ok: true, result: { ok: true, receipt: submitted.receipt, verdict: submitted.verdict } };
     }
     case 'get_draft_status': {

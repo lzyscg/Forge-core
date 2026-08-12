@@ -1867,19 +1867,38 @@ ${checklist}`;
       draftId,
       seal,
     } = options;
+    let currentState = state;
+    toolCtx.onCandidateCreated = () => {
+      if (currentState === null) return;
+      if (sessionKind === 'structure' && currentState.sessionKind === 'structure') {
+        currentState = {
+          ...currentState,
+          candidate: {} as never,
+          completion: 'structure_commit_candidate_created',
+          locked: true,
+        };
+      } else if (sessionKind === 'fill' && currentState.sessionKind === 'fill') {
+        currentState = {
+          ...currentState,
+          candidate: {} as never,
+          completion: 'merge_candidate_created',
+          locked: true,
+        };
+      }
+    };
     const toolDefinitions = createStructuredSlotToolDefinitions(toolCtx);
     const beforePropose =
       sessionKind === 'seal' && seal !== undefined
         ? (action: ForgeAction) => assertSealDispatchAction(seal.dispatch, action)
         : (action: ForgeAction) => {
-            if (state === null) {
+            if (currentState === null) {
               return {
                 ok: false as const,
                 code: 'STRUCTURE_ACTION_NOT_ALLOWED',
                 reason: 'no structured session state',
               };
             }
-            return assertStructuredForgeAction(state, action);
+            return assertStructuredForgeAction(currentState, action);
           };
     const correctivePrompt =
       sessionKind === 'seal'

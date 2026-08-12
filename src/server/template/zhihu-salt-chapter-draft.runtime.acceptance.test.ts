@@ -69,7 +69,7 @@ class ScriptedStructuredRuntime implements AgentRuntime {
       if (precharge.status !== 'ok') throw new Error(`${step.tool} precharge ${precharge.status}`);
       let result: unknown;
       try {
-      result = await (definition.execute as (id: string, params: unknown) => Promise<unknown>)(
+        result = await (definition.execute as (id: string, params: unknown) => Promise<unknown>)(
           toolCallId,
           params,
         );
