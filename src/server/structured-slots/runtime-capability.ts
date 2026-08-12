@@ -208,9 +208,9 @@ function productionProfilePath(): string {
   }
 }
 
-function productionEvidencePath(file: string): string {
+export function productionEvidencePath(file: string): string {
   try {
-    return fileURLToPath(new URL(`../../../../docs/evidence/${file}`, import.meta.url));
+    return fileURLToPath(new URL(`../../../docs/evidence/${file}`, import.meta.url));
   } catch {
     return resolve(process.cwd(), 'docs', 'evidence', file);
   }

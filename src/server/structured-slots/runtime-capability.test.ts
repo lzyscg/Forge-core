@@ -12,6 +12,7 @@
  * identical test source passes before AND after the production promotion.
  */
 import { describe, expect, it } from 'vitest';
+import { resolve } from 'node:path';
 import {
   CANDIDATE_PROFILE_LIMITS_V1,
   createDisabledRuntimeEnvironment,
@@ -21,6 +22,7 @@ import {
   validateProductionProfile,
   validateRuntimeCapability,
   validatePlatformProfile,
+  productionEvidencePath,
 } from './runtime-capability';
 import { profileCanonicalDigest } from './platform-profile';
 
@@ -60,6 +62,11 @@ function disabledCapability() {
 }
 
 describe('runtime-capability — explicit disabled fixture (Task 19)', () => {
+  it('resolves production evidence inside this repository docs/evidence directory', () => {
+    expect(productionEvidencePath('structured-slot-release-v1.json')).toBe(
+      resolve(process.cwd(), 'docs/evidence/structured-slot-release-v1.json'),
+    );
+  });
   it('builds an explicit disabled environment with a null profile', () => {
     const env = createDisabledRuntimeEnvironment();
     expect(env.capability.status).toBe('disabled');
