@@ -18,7 +18,7 @@
  * the reference-runner benchmark evidence (design §25.13 / O08), never by
  * casually measured numbers.
  */
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -217,10 +217,16 @@ function productionProfilePath(): string {
 }
 
 export function productionEvidencePath(file: string): string {
+  const workspaceCandidate = resolve(process.cwd(), 'docs', 'evidence', file);
   try {
-    return fileURLToPath(new URL(`../../../docs/evidence/${file}`, import.meta.url));
+    const moduleCandidate = fileURLToPath(new URL(`../../../docs/evidence/${file}`, import.meta.url));
+    // Vite/Vitest may rewrite import.meta.url to the importing client module,
+    // yielding a syntactically valid but nonexistent `/docs/...` path. Only
+    // prefer the module-relative candidate when it really exists; otherwise
+    // use the repository cwd used by tsx, Vitest and production launch scripts.
+    return existsSync(moduleCandidate) ? moduleCandidate : workspaceCandidate;
   } catch {
-    return resolve(process.cwd(), 'docs', 'evidence', file);
+    return workspaceCandidate;
   }
 }
 

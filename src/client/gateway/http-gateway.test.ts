@@ -9,12 +9,14 @@
  */
 import type { Mock } from 'vitest';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { resolve } from 'node:path';
 import type { TaskStatus, TaskSummary, TaskWorkspace, TemplateDetail } from '../../shared/contracts';
 import {
   disposeAllTestRoots,
   makeTaskEvent,
   startHttpGatewayFixture,
 } from '../../server/test-support';
+import { productionEvidencePath } from '../../server/structured-slots/runtime-capability';
 import { runForgeCoreGatewayContract } from './forge-core-gateway.contract';
 import { resolveForgeCoreMode } from './gateway-mode';
 import { createHttpGateway } from './http-gateway';
@@ -97,6 +99,12 @@ function workspaceUrlFor(baseUrl: string, taskId: string): string {
 }
 
 describe('createHttpGateway', () => {
+  it('resolves enabled production evidence inside the repository from a Vitest HTTP worker', () => {
+    expect(productionEvidencePath('structured-slot-platform-profile-v1.json')).toBe(
+      resolve(process.cwd(), 'docs/evidence/structured-slot-platform-profile-v1.json'),
+    );
+  });
+
   it('uses relative /api URLs and same-origin credentials by default', async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     vi.stubGlobal(
