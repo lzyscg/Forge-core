@@ -582,31 +582,28 @@ describe('runPromoteCapability (P1-3 fail-closed promotion)', () => {
 /* ------------------------------------------------------------------------ */
 
 describe('cleanSourceDigest (generated-output exclusion)', () => {
-  const workspaceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-  const manifestPath = join(workspaceRoot, 'src/server/structured-slots/runtime-capability-v1.json');
-  const profilePath = join(workspaceRoot, 'src/server/structured-slots/platform-profile-v1.json');
-
   it('is deterministic for the same tree', () => {
     expect(cleanSourceDigest()).toBe(cleanSourceDigest());
   });
 
   it('is stable across the generated-output flip (manifest enabled + profile final do not change it)', () => {
-    // Snapshot the current generated files, then temporarily write clearly
-    // different content and assert the SOURCE digest is unchanged (the four
-    // generated qualification products are excluded; they are certified by
-    // their own digests). Restore in finally.
-    const manifestBefore = readFileSync(manifestPath, 'utf8');
-    const profileBefore = readFileSync(profilePath, 'utf8');
-    try {
-      const before = cleanSourceDigest();
-      writeFileSync(manifestPath, `${JSON.stringify({ version: 1, status: 'disabled' }, null, 2)}\n`, 'utf8');
-      writeFileSync(profilePath, `${JSON.stringify({ version: 1, status: 'provisional' }, null, 2)}\n`, 'utf8');
-      const after = cleanSourceDigest();
-      expect(after).toBe(before);
-    } finally {
-      writeFileSync(manifestPath, manifestBefore, 'utf8');
-      writeFileSync(profilePath, profileBefore, 'utf8');
-    }
+    // Use an in-memory tracked-tree fixture. Never mutate the checked-in
+    // profile/manifest: Vitest runs files in parallel and a child process may
+    // legitimately load those exact-validated products at the same time.
+    const trackedFiles = [
+      'src/server/core-service.ts',
+      ...QUALIFICATION_GENERATED_OUTPUTS,
+    ];
+    const source = 'stable product source';
+    const before = cleanSourceDigest({
+      trackedFiles,
+      readTrackedFile: (path) => (path === 'src/server/core-service.ts' ? source : `before:${path}`),
+    });
+    const after = cleanSourceDigest({
+      trackedFiles,
+      readTrackedFile: (path) => (path === 'src/server/core-service.ts' ? source : `after:${path}`),
+    });
+    expect(after).toBe(before);
   });
 
   it('classifies exactly the four generated outputs as excluded', () => {
@@ -619,18 +616,15 @@ describe('cleanSourceDigest (generated-output exclusion)', () => {
   });
 
   it('changes when a non-generated tracked source file changes', () => {
-    // Temporarily modify a NON-generated tracked file (a scripts/ helper not
-    // imported by this test) and assert the digest changes, proving the source
-    // digest still certifies real source (the exclusion is exact, not broad).
-    const target = join(workspaceRoot, 'scripts/smoke-long-form-hub.ts');
-    const before = readFileSync(target, 'utf8');
-    try {
-      const d0 = cleanSourceDigest();
-      writeFileSync(target, `${before}\n// source-digest test probe\n`, 'utf8');
-      const d1 = cleanSourceDigest();
-      expect(d1).not.toBe(d0);
-    } finally {
-      writeFileSync(target, before, 'utf8');
-    }
+    const trackedFiles = ['src/server/core-service.ts', ...QUALIFICATION_GENERATED_OUTPUTS];
+    const d0 = cleanSourceDigest({
+      trackedFiles,
+      readTrackedFile: (path) => (path === 'src/server/core-service.ts' ? 'source-v1' : `generated:${path}`),
+    });
+    const d1 = cleanSourceDigest({
+      trackedFiles,
+      readTrackedFile: (path) => (path === 'src/server/core-service.ts' ? 'source-v2' : `generated:${path}`),
+    });
+    expect(d1).not.toBe(d0);
   });
 });

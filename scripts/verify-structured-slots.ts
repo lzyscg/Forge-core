@@ -147,16 +147,26 @@ export function gitCommit(): string {
  * by their own digests in the one-way chain and do not change across the
  * qualification, so the source digest stays stable before/after promotion.
  */
-export function cleanSourceDigest(): string {
-  const files = execFileSync('git', ['ls-files'], { cwd: WORKSPACE_ROOT, encoding: 'utf8' })
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
+export interface CleanSourceDigestDeps {
+  trackedFiles?: readonly string[];
+  readTrackedFile?: (relativePath: string) => Buffer | string;
+}
+
+export function cleanSourceDigest(deps: CleanSourceDigestDeps = {}): string {
+  const trackedFiles =
+    deps.trackedFiles ??
+    execFileSync('git', ['ls-files'], { cwd: WORKSPACE_ROOT, encoding: 'utf8' })
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+  const readTrackedFile =
+    deps.readTrackedFile ?? ((relativePath: string): Buffer => readFileSync(resolve(WORKSPACE_ROOT, relativePath)));
+  const files = [...trackedFiles]
     .filter((line) => !isQualificationGeneratedOutput(line))
     .sort();
   const entries: Record<string, string> = {};
   for (const file of files) {
-    entries[file] = sha256Hex(readFileSync(resolve(WORKSPACE_ROOT, file)));
+    entries[file] = sha256Hex(readTrackedFile(file));
   }
   return canonicalJsonSha256(entries);
 }
