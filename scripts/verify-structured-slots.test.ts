@@ -34,6 +34,7 @@ import {
   validateProfileEvidence,
   validateProfileEvidenceFailure,
   validateReleaseEvidence,
+  scaledQualificationLimits,
 } from './structured-evidence-schema';
 import {
   cleanSourceDigest,
@@ -121,6 +122,17 @@ function zeroGates(): Array<Record<string, unknown>> {
 }
 
 function validSuccessEvidence(): Record<string, unknown> {
+  const selectedResults = REQUIRED_SUCCESS_CASE_IDS.map((id, index) => ({
+    id,
+    description: `${id} @ 25%`,
+    warmup: 3,
+    samples: 10,
+    p50Ms: 4.2,
+    p95Ms: 5.4,
+    maxMs: 5.4,
+    sampleDigest: ['a'.repeat(64), 'b'.repeat(64), 'c'.repeat(64), 'd'.repeat(64), 'e'.repeat(64), 'f'.repeat(64), '9a'.repeat(32), '8b'.repeat(32)][index]!,
+    postCasePeakRssBytes: 300 * 1024 * 1024,
+  }));
   return {
     schemaVersion: 1,
     mode: 'integrated-qualify',
@@ -129,46 +141,16 @@ function validSuccessEvidence(): Record<string, unknown> {
     sourceTreeDigest: REAL_SOURCE_DIGEST,
     packageLockSha256: REAL_LOCK_SHA,
     dependencyVersions: DEPS,
-    warmupCount: 3,
-    sampleCount: 10,
     peakRssBytes: 300 * 1024 * 1024,
     diskBytes: 17_000_000,
-    cases: REQUIRED_SUCCESS_CASE_IDS.map((id, index) => ({
-      id,
-      rawSampleDigest: ['a'.repeat(64), 'b'.repeat(64), 'c'.repeat(64), 'd'.repeat(64), 'e'.repeat(64), 'f'.repeat(64), '9a'.repeat(32), '8b'.repeat(32)][index]!,
-      samples: 10,
-      warmup: 3,
-      p50Ms: 4.2,
-      p95Ms: 5.4,
-      maxMs: 5.4,
-      postCasePeakRssBytes: 300 * 1024 * 1024,
-    })),
+    warmupCount: 24,
+    sampleCount: 80,
+    cases: selectedResults.map(({ description: _description, sampleDigest, ...entry }) => ({ ...entry, rawSampleDigest: sampleDigest })),
     candidatePercentage: 25,
     selectionReason: 'greatest passing scale 25%',
-    frozenLimits: STRUCTURED_SLOT_PROFILE_CANDIDATE as StructuredSlotLimitsV1,
+    frozenLimits: scaledQualificationLimits(25),
     bounds: BOUNDS,
-    perScaleResults: [
-      {
-        scale: 25,
-        results: [
-          {
-            id: 'indexed-slot-read',
-            description: 'indexed slot read (real projection) @ 25%',
-            warmup: 3,
-            samples: 10,
-            p50Ms: 4.2,
-            p95Ms: 5.4,
-            maxMs: 5.4,
-            sampleDigest: 'c'.repeat(64),
-            postCasePeakRssBytes: 300 * 1024 * 1024,
-          },
-        ],
-        peakRssBytes: 300 * 1024 * 1024,
-        diskBytes: 17_000_000,
-        violations: [],
-        passed: true,
-      },
-    ],
+    perScaleResults: [100, 75, 50].map((scale) => ({ scale, results: selectedResults, peakRssBytes: 600 * 1024 * 1024, diskBytes: 17_000_000, violations: [`peak RSS ${600 * 1024 * 1024} > ${512 * 1024 * 1024}`], passed: false })).concat({ scale: 25, results: selectedResults, peakRssBytes: 300 * 1024 * 1024, diskBytes: 17_000_000, violations: [], passed: true }),
   };
 }
 
@@ -239,7 +221,7 @@ function createWorkspace(evidenceObj: Record<string, unknown> = validSuccessEvid
     version: 1,
     status: 'final',
     identity: 'forge-structured-runtime/v1',
-    limits: STRUCTURED_SLOT_PROFILE_CANDIDATE,
+    limits: (evidenceObj.frozenLimits ?? scaledQualificationLimits(25)) as StructuredSlotLimitsV1,
     evidenceDigest,
   };
   writeFileSync(profilePath, `${JSON.stringify(finalProfile, null, 2)}\n`, 'utf8');
@@ -574,6 +556,22 @@ describe('runPromoteCapability (P1-3 fail-closed promotion)', () => {
     expect(() => runPromoteCapability(path, promotePaths(ws), { porcelain: () => [] })).toThrow(
       /required ABI list 与当前 manifest 不一致/,
     );
+  });
+
+  it('rejects tampered success evidence facts and semantic verdicts before enabling', () => {
+    for (const mutate of [
+      (e: Record<string, unknown>) => { e.gitCommit = 'f'.repeat(40); },
+      (e: Record<string, unknown>) => { e.sourceTreeDigest = 'f'.repeat(64); },
+      (e: Record<string, unknown>) => { e.packageLockSha256 = 'f'.repeat(64); },
+      (e: Record<string, unknown>) => { ((e.bounds as Record<string, number>).peakRssBytes) = Number.MAX_SAFE_INTEGER; },
+    ]) {
+      const evidence = validSuccessEvidence();
+      mutate(evidence);
+      const ws = createWorkspace(evidence);
+      const path = writeRelease(ws, validReleaseEvidence(ws));
+      expect(() => runPromoteCapability(path, promotePaths(ws), { porcelain: () => [] })).toThrow();
+      expect(JSON.parse(readFileSync(ws.manifestPath, 'utf8')).status).toBe('disabled');
+    }
   });
 });
 

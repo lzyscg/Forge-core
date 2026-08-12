@@ -310,8 +310,7 @@ function validBounds(): Record<string, number> {
 }
 
 function validPerScaleResults(): Array<Record<string, unknown>> {
-  return [
-    {
+  const passing = {
       scale: 25,
       results: [
         {
@@ -407,8 +406,14 @@ function validPerScaleResults(): Array<Record<string, unknown>> {
       diskBytes: 17_000_000,
       violations: [],
       passed: true,
-    },
-  ];
+    };
+  return [100, 75, 50].map((scale) => ({
+    ...passing,
+    scale,
+    peakRssBytes: 600 * 1024 * 1024,
+    violations: [`peak RSS ${600 * 1024 * 1024} > ${512 * 1024 * 1024}`],
+    passed: false,
+  })).concat(passing);
 }
 
 function validSuccessEvidence(): Record<string, unknown> {
@@ -417,8 +422,8 @@ function validSuccessEvidence(): Record<string, unknown> {
     mode: 'integrated-qualify',
     runner: validRunner(),
     ...validFacts(),
-    warmupCount: 13,
-    sampleCount: 42,
+    warmupCount: 10,
+    sampleCount: 40,
     peakRssBytes: 300 * 1024 * 1024,
     diskBytes: 17_000_000,
     cases: [
@@ -577,6 +582,36 @@ describe('validateProfileEvidence (P2)', () => {
     const evidence = validSuccessEvidence();
     delete (evidence.cases as Array<Record<string, unknown>>)[0]!.postCasePeakRssBytes;
     expect(() => validateProfileEvidence(evidence)).toThrow(/postCasePeakRssBytes/);
+  });
+
+  it('rejects forged bounds, passed verdicts, candidate scale and frozen limits', () => {
+    const forgedBounds = validSuccessEvidence();
+    (forgedBounds.bounds as Record<string, number>).peakRssBytes = Number.MAX_SAFE_INTEGER;
+    expect(() => validateProfileEvidence(forgedBounds)).toThrow(/frozen Task 19 bounds/);
+
+    const forgedVerdict = validSuccessEvidence();
+    const scale100 = (forgedVerdict.perScaleResults as Array<Record<string, unknown>>)[0]!;
+    scale100.passed = true;
+    scale100.violations = [];
+    expect(() => validateProfileEvidence(forgedVerdict)).toThrow(/violations do not match|passed does not match/);
+
+    const forgedCandidate = validSuccessEvidence();
+    forgedCandidate.candidatePercentage = 100;
+    expect(() => validateProfileEvidence(forgedCandidate)).toThrow(/greatest passing scale/);
+
+    const forgedLimits = validSuccessEvidence();
+    forgedLimits.frozenLimits = scaledLimits(100);
+    expect(() => validateProfileEvidence(forgedLimits)).toThrow(/frozenLimits/);
+  });
+
+  it('rejects duplicate cases and top-level selected-scale drift', () => {
+    const duplicate = validSuccessEvidence();
+    (duplicate.cases as Array<Record<string, unknown>>).push({ ...(duplicate.cases as Array<Record<string, unknown>>)[0]! });
+    expect(() => validateProfileEvidence(duplicate)).toThrow(/duplicate case/);
+
+    const drift = validSuccessEvidence();
+    (drift.cases as Array<Record<string, unknown>>)[0]!.p95Ms = 99;
+    expect(() => validateProfileEvidence(drift)).toThrow(/does not match selected scale/);
   });
 });
 

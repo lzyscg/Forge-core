@@ -29,6 +29,7 @@ import {
   validateStructuredPlatformProfileFile,
 } from './platform-profile';
 import type { StructuredPlatformProfileFileV1 } from './platform-profile';
+import { canonicalJsonSha256 } from './canonical-json';
 
 /** Versioned runtime capability manifest (spec §5). */
 export interface StructuredRuntimeCapabilityV1 {
@@ -53,6 +54,7 @@ export interface StructuredRuntimeEnvironmentV1 {
 export { STRUCTURED_SLOT_PROFILE_CANDIDATE as CANDIDATE_PROFILE_LIMITS_V1 } from './platform-profile';
 
 const REQUIRED_ABIS = ['forge-validator/v1', 'forge-assembler/v1'] as const;
+const CAPABILITY_FIELDS = ['version', 'status', 'profileIdentity', 'profileDigest', 'evidenceDigest', 'requiredAbis'] as const;
 
 function invalid(reason: string): never {
   throw new Error(`RUNTIME_CAPABILITY_INVALID: ${reason}`);
@@ -62,6 +64,12 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const proto = Object.getPrototypeOf(value);
   return proto === Object.prototype || proto === null;
+}
+
+function rejectUnknownFields(value: Record<string, unknown>, known: readonly string[], where: string): void {
+  for (const key of Object.keys(value)) {
+    if (!known.includes(key)) invalid(`unknown field '${key}' at ${where}`);
+  }
 }
 
 function nonNullStringArray(value: unknown, where: string): string[] {
@@ -88,6 +96,7 @@ function optionalDigest(value: unknown, where: string): string | null {
 /** Exact shape validation of the capability manifest (spec §5). */
 export function validateRuntimeCapability(value: unknown): StructuredRuntimeCapabilityV1 {
   if (!isPlainObject(value)) invalid('capability must be a plain object');
+  rejectUnknownFields(value, CAPABILITY_FIELDS, 'capability');
   if (value['version'] !== 1) invalid('capability.version must be 1');
   const status = value['status'];
   if (status !== 'disabled' && status !== 'enabled') invalid('capability.status must be disabled|enabled');
@@ -98,6 +107,15 @@ export function validateRuntimeCapability(value: unknown): StructuredRuntimeCapa
   const profileDigest = optionalDigest(value['profileDigest'], 'capability.profileDigest');
   const evidenceDigest = optionalDigest(value['evidenceDigest'], 'capability.evidenceDigest');
   const requiredAbis = nonNullStringArray(value['requiredAbis'], 'capability.requiredAbis');
+  if (requiredAbis.length !== REQUIRED_ABIS.length || requiredAbis.some((abi, index) => abi !== REQUIRED_ABIS[index])) {
+    invalid(`capability.requiredAbis must exactly equal ${REQUIRED_ABIS.join(',')}`);
+  }
+  if (status === 'disabled' && (profileIdentity !== null || profileDigest !== null || evidenceDigest !== null)) {
+    invalid('a disabled capability must carry null profileIdentity/profileDigest/evidenceDigest');
+  }
+  if (status === 'enabled' && (profileIdentity !== PROFILE_IDENTITY || profileDigest === null || evidenceDigest === null)) {
+    invalid('an enabled capability requires non-null profileIdentity/profileDigest/evidenceDigest');
+  }
   return Object.freeze({
     version: 1,
     status,
@@ -149,6 +167,13 @@ export function createRuntimeEnvironment(
     invalid('an enabled capability requires a matching profile');
   }
   if (
+    validatedCapability.status === 'enabled' &&
+    validatedProfile !== null &&
+    validatedCapability.profileDigest !== profileCanonicalDigest(validatedProfile)
+  ) {
+    invalid('capability.profileDigest does not match the profile');
+  }
+  if (
     validatedProfile !== null &&
     validatedCapability.profileIdentity !== null &&
     validatedCapability.profileIdentity !== validatedProfile.identity
@@ -183,6 +208,21 @@ function productionProfilePath(): string {
   }
 }
 
+function productionEvidencePath(file: string): string {
+  try {
+    return fileURLToPath(new URL(`../../../../docs/evidence/${file}`, import.meta.url));
+  } catch {
+    return resolve(process.cwd(), 'docs', 'evidence', file);
+  }
+}
+
+export interface ProductionRuntimeFiles {
+  manifestFile?: string | URL;
+  profileFile?: string | URL;
+  profileEvidenceFile?: string | URL;
+  releaseEvidenceFile?: string | URL;
+}
+
 /**
  * The production default environment: reads and validates the exact checked-in
  * manifest, which must start `disabled` with no final profile. Reads a file —
@@ -198,9 +238,13 @@ function productionProfilePath(): string {
  * inject a different path only for tests.
  */
 export function createProductionRuntimeEnvironment(
-  profileFile?: string | URL,
+  profileFileOrFiles?: string | URL | ProductionRuntimeFiles,
 ): StructuredRuntimeEnvironmentV1 {
-  const raw = JSON.parse(readFileSync(productionManifestPath(), 'utf8')) as unknown;
+  const files: ProductionRuntimeFiles =
+    typeof profileFileOrFiles === 'object' && !(profileFileOrFiles instanceof URL)
+      ? profileFileOrFiles
+      : { profileFile: profileFileOrFiles };
+  const raw = JSON.parse(readFileSync(files.manifestFile ?? productionManifestPath(), 'utf8')) as unknown;
   const capability = validateRuntimeCapability(raw);
   if (capability.status === 'disabled') {
     if (capability.profileIdentity !== null || capability.profileDigest !== null || capability.evidenceDigest !== null) {
@@ -211,11 +255,22 @@ export function createProductionRuntimeEnvironment(
   if (capability.profileIdentity !== PROFILE_IDENTITY) {
     invalid('an enabled production manifest must reference the structured runtime profile');
   }
-  const profileFileResolved = profileFile ?? productionProfilePath();
+  const profileFileResolved = files.profileFile ?? productionProfilePath();
   const profile = validateProductionProfile(loadStructuredPlatformProfile(profileFileResolved));
-  if (capability.profileDigest !== null && capability.profileDigest !== profileCanonicalDigest(profile)) {
+  if (capability.profileDigest !== profileCanonicalDigest(profile)) {
     invalid('capability.profileDigest does not match the checked-in profile file');
   }
+  const evidence = JSON.parse(readFileSync(files.profileEvidenceFile ?? productionEvidencePath('structured-slot-platform-profile-v1.json'), 'utf8')) as unknown;
+  if (profile.evidenceDigest !== canonicalJsonSha256(evidence)) invalid('final profile evidenceDigest does not match profile evidence');
+  const release = JSON.parse(readFileSync(files.releaseEvidenceFile ?? productionEvidencePath('structured-slot-release-v1.json'), 'utf8')) as unknown;
+  if (!isPlainObject(release)) invalid('release evidence must be a plain object');
+  const releaseFields = ['schemaVersion', 'gate', 'mode', 'checkpointCommit', 'sourceTreeDigest', 'packageLockSha256', 'profileEvidencePath', 'profileEvidenceDigest', 'finalProfilePath', 'finalProfileDigest', 'requiredAbis', 'piPreflightCharacterization', 'gates', 'observedAt'];
+  rejectUnknownFields(release, releaseFields, 'release evidence');
+  if (release['schemaVersion'] !== 1 || release['gate'] !== 'verify:structured-slots' || release['mode'] !== 'qualify') invalid('release evidence identity is invalid');
+  if (release['profileEvidenceDigest'] !== profile.evidenceDigest) invalid('release evidence profileEvidenceDigest does not match final profile');
+  if (release['finalProfileDigest'] !== profileCanonicalDigest(profile)) invalid('release evidence finalProfileDigest does not match final profile');
+  if (canonicalJsonSha256(release) !== capability.evidenceDigest) invalid('capability.evidenceDigest does not match release evidence');
+  if (canonicalJsonSha256(release['requiredAbis']) !== canonicalJsonSha256([...REQUIRED_ABIS])) invalid('release evidence requiredAbis is invalid');
   return Object.freeze({ capability, profile });
 }
 
@@ -244,20 +299,20 @@ export function isStructuredRuntimeEnabled(
  * use this — explicit injection only, never an implicit fallback.
  */
 export function createTestRuntimeEnvironment(): StructuredRuntimeEnvironmentV1 {
-  const capability = validateRuntimeCapability({
-    version: 1,
-    status: 'enabled',
-    profileIdentity: PROFILE_IDENTITY,
-    profileDigest: null,
-    evidenceDigest: null,
-    requiredAbis: [...REQUIRED_ABIS],
-  });
   const profile = validatePlatformProfile({
     version: 1,
     status: 'provisional',
     identity: PROFILE_IDENTITY,
     limits: STRUCTURED_SLOT_PROFILE_CANDIDATE,
     evidenceDigest: null,
+  });
+  const capability = validateRuntimeCapability({
+    version: 1,
+    status: 'enabled',
+    profileIdentity: PROFILE_IDENTITY,
+    profileDigest: profileCanonicalDigest(profile),
+    evidenceDigest: '0'.repeat(64),
+    requiredAbis: [...REQUIRED_ABIS],
   });
   return createRuntimeEnvironment(capability, profile);
 }

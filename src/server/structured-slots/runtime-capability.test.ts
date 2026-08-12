@@ -22,15 +22,27 @@ import {
   validateRuntimeCapability,
   validatePlatformProfile,
 } from './runtime-capability';
+import { profileCanonicalDigest } from './platform-profile';
+
+function provisionalProfile() {
+  return {
+    version: 1 as const,
+    status: 'provisional' as const,
+    identity: 'forge-structured-runtime/v1' as const,
+    limits: CANDIDATE_PROFILE_LIMITS_V1,
+    evidenceDigest: null,
+  };
+}
 
 /** An enabled capability matching a provisional test profile. */
 function enabledCapability() {
+  const profile = validatePlatformProfile(provisionalProfile());
   return {
     version: 1 as const,
     status: 'enabled' as const,
     profileIdentity: 'forge-structured-runtime/v1',
-    profileDigest: null,
-    evidenceDigest: null,
+    profileDigest: profileCanonicalDigest(profile),
+    evidenceDigest: '0'.repeat(64),
     requiredAbis: ['forge-validator/v1', 'forge-assembler/v1'],
   } as const;
 }
@@ -86,6 +98,19 @@ describe('runtime-capability — validation and injection', () => {
     ).toThrow();
   });
 
+  it('rejects unknown capability fields and enabled manifests with missing digests', () => {
+    expect(() => validateRuntimeCapability({ ...disabledCapability(), extra: true })).toThrow(/unknown field 'extra'/);
+    expect(() => validateRuntimeCapability({ ...enabledCapability(), profileDigest: null })).toThrow(/enabled capability requires/);
+    expect(() => validateRuntimeCapability({ ...enabledCapability(), evidenceDigest: null })).toThrow(/enabled capability requires/);
+  });
+
+  it('requires the exact ordered structured ABI list', () => {
+    expect(() => validateRuntimeCapability({ ...disabledCapability(), requiredAbis: ['x'] })).toThrow(/requiredAbis must exactly equal/);
+    expect(() => validateRuntimeCapability({ ...disabledCapability(), requiredAbis: ['forge-validator/v1'] })).toThrow(/requiredAbis must exactly equal/);
+    expect(() => validateRuntimeCapability({ ...disabledCapability(), requiredAbis: ['forge-assembler/v1', 'forge-validator/v1'] })).toThrow(/requiredAbis must exactly equal/);
+    expect(() => validateRuntimeCapability({ ...disabledCapability(), requiredAbis: ['forge-validator/v1', 'forge-assembler/v1', 'forge-assembler/v1'] })).toThrow(/requiredAbis must exactly equal/);
+  });
+
   it('rejects a profile with a final status but no evidence digest', () => {
     expect(() =>
       validatePlatformProfile({
@@ -119,19 +144,19 @@ describe('runtime-capability — validation and injection', () => {
 
   it('builds a matching enabled environment for tests', () => {
     const capability = enabledCapability();
-    const profile = {
-      version: 1 as const,
-      status: 'provisional' as const,
-      identity: 'forge-structured-runtime/v1' as const,
-      limits: CANDIDATE_PROFILE_LIMITS_V1,
-      evidenceDigest: null,
-    };
+    const profile = provisionalProfile();
     const env = createRuntimeEnvironment(capability, profile);
     expect(env.capability.status).toBe('enabled');
     expect(env.profile?.limits.structure.maxSlots).toBe(10_000);
     expect(Object.isFrozen(env)).toBe(true);
     expect(Object.isFrozen(env.capability)).toBe(true);
     expect(Object.isFrozen(env.profile)).toBe(true);
+  });
+
+  it('rejects an enabled capability whose profile digest does not match', () => {
+    expect(() => createRuntimeEnvironment({ ...enabledCapability(), profileDigest: 'f'.repeat(64) }, provisionalProfile())).toThrow(
+      /profileDigest does not match/,
+    );
   });
 
   it('keeps a disabled capability with a null profile as a valid environment', () => {

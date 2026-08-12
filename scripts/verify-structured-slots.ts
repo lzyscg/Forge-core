@@ -241,6 +241,26 @@ function loadProfileEvidence(path: string): Record<string, unknown> {
   return JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
 }
 
+function validateProfileEvidenceAgainstLive(evidence: Record<string, unknown>, profile: ReturnType<typeof loadStructuredPlatformProfile>): void {
+  try {
+    validateProfileEvidence(evidence);
+  } catch (error) {
+    throw new VerifyError(`profile evidence 语义校验失败：${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (evidence.gitCommit !== gitCommit()) throw new VerifyError('profile evidence gitCommit 与当前 HEAD 不一致');
+  if (evidence.sourceTreeDigest !== cleanSourceDigest()) throw new VerifyError('profile evidence sourceTreeDigest 与当前 source tree 不一致');
+  if (evidence.packageLockSha256 !== packageLockSha256()) throw new VerifyError('profile evidence packageLockSha256 与当前 lockfile 不一致');
+  if (canonicalJsonSha256(evidence.frozenLimits) !== canonicalJsonSha256(profile.limits)) {
+    throw new VerifyError('profile evidence frozenLimits 与 final profile limits 不一致');
+  }
+  const runner = JSON.parse(readFileSync(resolve(WORKSPACE_ROOT, 'docs/evidence/structured-slot-reference-runner-v1.json'), 'utf8')) as Record<string, unknown>;
+  const expectedRunner = { runnerId: runner.runnerId, runnerVersion: runner.runnerVersion, descriptorDigest: runner.descriptorDigest };
+  if (canonicalJsonSha256(evidence.runner) !== canonicalJsonSha256(expectedRunner)) throw new VerifyError('profile evidence runner 与 reference runner 不一致');
+  const packageJson = (name: string): Record<string, unknown> => JSON.parse(readFileSync(resolve(WORKSPACE_ROOT, 'node_modules', name, 'package.json'), 'utf8')) as Record<string, unknown>;
+  const expectedDeps = { 'isolated-vm': packageJson('isolated-vm').version, 're2-wasm': packageJson('re2-wasm').version, '@earendil-works/pi-ai': packageJson('@earendil-works/pi-ai').version };
+  if (canonicalJsonSha256(evidence.dependencyVersions) !== canonicalJsonSha256(expectedDeps)) throw new VerifyError('profile evidence dependencyVersions 与当前锁定依赖不一致');
+}
+
 function readCurrentManifest(path: string): StructuredRuntimeCapabilityV1 {
   const raw = JSON.parse(readFileSync(path, 'utf8')) as unknown;
   return validateRuntimeCapability(raw);
@@ -268,6 +288,7 @@ export function runQualify(paths: Partial<VerifyPaths> = {}, deps: QualifyDeps =
     throw new VerifyError('qualification requires a FINAL profile (integrated reference benchmark evidence)');
   }
   const evidence = loadProfileEvidence(p.profileEvidencePath);
+  validateProfileEvidenceAgainstLive(evidence, profile);
   const evidenceDigest = canonicalJsonSha256(evidence);
   if (profile.evidenceDigest !== evidenceDigest) {
     throw new VerifyError('profile evidenceDigest does not match the profile evidence file');
@@ -443,6 +464,7 @@ export function runPromoteCapability(
   if (profile.evidenceDigest !== release.profileEvidenceDigest) {
     throw new VerifyError('final profile evidenceDigest 与 release evidence 不一致');
   }
+  validateProfileEvidenceAgainstLive(evidence, profile);
 
   // 4. Required ABI list must match the current manifest.
   const manifest = readCurrentManifest(p.manifestPath);

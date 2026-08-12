@@ -19,6 +19,8 @@
  * process's own values (never a global peak folded across scales).
  */
 import type { StructuredSlotLimitsV1 } from '../src/shared/structured-slots';
+import { STRUCTURED_SLOT_PROFILE_CANDIDATE } from '../src/server/structured-slots/platform-profile';
+import { canonicalJsonSha256 } from '../src/server/structured-slots/canonical-json';
 
 export const STRUCTURED_EVIDENCE_INVALID = 'STRUCTURED_EVIDENCE_INVALID';
 
@@ -144,6 +146,55 @@ const REQUIRED_EVIDENCE_CASE_IDS: readonly string[] = [
   'owner-outline-hot',
 ] as const;
 
+export const STRUCTURED_QUALIFICATION_SCALES = [100, 75, 50, 25] as const;
+export const STRUCTURED_QUALIFICATION_BOUNDS = Object.freeze({
+  indexedSlotP95Ms: 25,
+  treeMatch10kMaxMs: 2000,
+  contentRootMaxMs: 2000,
+  draftMaxMs: 2000,
+  issueProjectionMaxMs: 250,
+  sealMaxMs: 30000,
+  peakRssBytes: 512 * 1024 * 1024,
+});
+
+export function scaledQualificationLimits(percentage: number): StructuredSlotLimitsV1 {
+  const scale = percentage / 100;
+  const scaleGroup = <T extends Record<string, number>>(group: T): T =>
+    Object.fromEntries(Object.entries(group).map(([key, value]) => [key, Math.max(1, Math.floor(value * scale))])) as T;
+  return {
+    schema: scaleGroup(STRUCTURED_SLOT_PROFILE_CANDIDATE.schema),
+    structure: scaleGroup(STRUCTURED_SLOT_PROFILE_CANDIDATE.structure),
+    payload: scaleGroup(STRUCTURED_SLOT_PROFILE_CANDIDATE.payload),
+    draft: scaleGroup(STRUCTURED_SLOT_PROFILE_CANDIDATE.draft),
+    attempt: scaleGroup(STRUCTURED_SLOT_PROFILE_CANDIDATE.attempt),
+    validation: scaleGroup(STRUCTURED_SLOT_PROFILE_CANDIDATE.validation),
+    output: scaleGroup(STRUCTURED_SLOT_PROFILE_CANDIDATE.output),
+  };
+}
+
+function recomputeViolations(entry: Record<string, unknown>): string[] {
+  const results = entry['results'] as Array<Record<string, unknown>>;
+  const byId = new Map(results.map((result) => [result['id'] as string, result]));
+  const violations: string[] = [];
+  for (const id of REQUIRED_EVIDENCE_CASE_IDS.slice(0, 6)) {
+    if (!byId.has(id)) violations.push(`missing case ${id}`);
+  }
+  for (const id of REQUIRED_EVIDENCE_CASE_IDS.slice(6)) {
+    if (!byId.has(id)) violations.push(`missing diagnostic case ${id}`);
+  }
+  const p95 = (id: string): number => (byId.get(id)?.['p95Ms'] as number | undefined) ?? 0;
+  const max = (id: string): number => (byId.get(id)?.['maxMs'] as number | undefined) ?? 0;
+  if (byId.has('indexed-slot-read') && p95('indexed-slot-read') > STRUCTURED_QUALIFICATION_BOUNDS.indexedSlotP95Ms) violations.push('indexed-slot-read p95');
+  if (byId.has('tree-match-10k') && max('tree-match-10k') > STRUCTURED_QUALIFICATION_BOUNDS.treeMatch10kMaxMs) violations.push('tree-match-10k');
+  if (byId.has('content-root-64mib') && max('content-root-64mib') > STRUCTURED_QUALIFICATION_BOUNDS.contentRootMaxMs) violations.push('content-root-64mib');
+  if (byId.has('draft-journal-2k') && max('draft-journal-2k') > STRUCTURED_QUALIFICATION_BOUNDS.draftMaxMs) violations.push('draft-journal-2k');
+  if (byId.has('seal-assembler-custody') && max('seal-assembler-custody') > STRUCTURED_QUALIFICATION_BOUNDS.sealMaxMs) violations.push('seal-assembler-custody');
+  if (byId.has('authorized-projection-500-issues') && p95('authorized-projection-500-issues') > STRUCTURED_QUALIFICATION_BOUNDS.issueProjectionMaxMs) violations.push('authorized-projection-500-issues');
+  const peak = entry['peakRssBytes'] as number;
+  if (peak > STRUCTURED_QUALIFICATION_BOUNDS.peakRssBytes) violations.push(`peak RSS ${peak} > ${STRUCTURED_QUALIFICATION_BOUNDS.peakRssBytes}`);
+  return violations;
+}
+
 /** The exact ordered field map of the frozen v1 limit groups (design §7.6). */
 const LIMIT_GROUPS: Readonly<Record<string, readonly string[]>> = {
   schema: ['maxSchemaDepth', 'maxSchemaNodes', 'maxEnumItems', 'maxPatternLength'],
@@ -241,8 +292,12 @@ function validatePerScaleResult(value: unknown): void {
   requirePositiveInt(value['scale'], 'perScaleResults entry.scale');
   const results = value['results'];
   if (!Array.isArray(results)) invalid('perScaleResults entry.results must be an array');
+  const seen = new Set<string>();
   for (let i = 0; i < results.length; i += 1) {
     validatePerScaleCase(results[i], `perScaleResults entry.results[${i}]`);
+    const id = (results[i] as Record<string, unknown>)['id'] as string;
+    if (seen.has(id)) invalid(`perScaleResults entry.results has duplicate case '${id}'`);
+    seen.add(id);
   }
   requirePositiveInt(value['peakRssBytes'], 'perScaleResults entry.peakRssBytes');
   requireNonNegativeInt(value['diskBytes'], 'perScaleResults entry.diskBytes');
@@ -314,8 +369,12 @@ export function validateProfileEvidence(value: unknown): void {
   requireNonNegativeInt(value['diskBytes'], 'evidence.diskBytes');
   const cases = value['cases'];
   if (!Array.isArray(cases)) invalid('evidence.cases must be an array');
+  const seenCaseIds = new Set<string>();
   for (let i = 0; i < cases.length; i += 1) {
     validateEvidenceCase(cases[i], `evidence.cases[${i}]`);
+    const id = (cases[i] as Record<string, unknown>)['id'] as string;
+    if (seenCaseIds.has(id)) invalid(`evidence.cases has duplicate case '${id}'`);
+    seenCaseIds.add(id);
   }
   const presentCaseIds = new Set(cases.map((entry) => (entry as Record<string, unknown>)['id']));
   for (const id of REQUIRED_EVIDENCE_CASE_IDS) {
@@ -332,6 +391,49 @@ export function validateProfileEvidence(value: unknown): void {
   validateLimits(value['frozenLimits'], 'evidence.frozenLimits');
   validateBounds(value['bounds']);
   validatePerScaleResults(value['perScaleResults']);
+
+  if (canonicalJsonSha256(value['bounds']) !== canonicalJsonSha256(STRUCTURED_QUALIFICATION_BOUNDS)) {
+    invalid('evidence.bounds must equal the frozen Task 19 bounds');
+  }
+  const perScale = value['perScaleResults'] as Array<Record<string, unknown>>;
+  if (perScale.length !== STRUCTURED_QUALIFICATION_SCALES.length) {
+    invalid('evidence.perScaleResults must contain exactly the 100/75/50/25 scales');
+  }
+  for (let i = 0; i < STRUCTURED_QUALIFICATION_SCALES.length; i += 1) {
+    const entry = perScale[i]!;
+    if (entry['scale'] !== STRUCTURED_QUALIFICATION_SCALES[i]) invalid('evidence.perScaleResults scales must be ordered 100/75/50/25');
+    const recomputed = recomputeViolations(entry);
+    if (canonicalJsonSha256(entry['violations']) !== canonicalJsonSha256(recomputed)) invalid(`scale ${String(entry['scale'])} violations do not match frozen-bound recomputation`);
+    if (entry['passed'] !== (recomputed.length === 0)) invalid(`scale ${String(entry['scale'])} passed does not match frozen-bound recomputation`);
+  }
+  const passing = perScale.filter((entry) => entry['passed'] === true).map((entry) => entry['scale'] as number);
+  if (passing.length === 0) invalid('success evidence must contain a passing scale');
+  const greatest = Math.max(...passing);
+  if (candidatePercentage !== greatest) invalid('evidence.candidatePercentage must be the greatest passing scale');
+  if (value['selectionReason'] !== `greatest passing scale ${greatest}%`) invalid('evidence.selectionReason does not match candidatePercentage');
+  if (canonicalJsonSha256(value['frozenLimits']) !== canonicalJsonSha256(scaledQualificationLimits(greatest))) {
+    invalid('evidence.frozenLimits must equal the candidate limits scaled to candidatePercentage');
+  }
+  const selected = perScale.find((entry) => entry['scale'] === greatest)!;
+  if (value['peakRssBytes'] !== selected['peakRssBytes'] || value['diskBytes'] !== selected['diskBytes']) {
+    invalid('top-level peakRssBytes/diskBytes must match the selected scale');
+  }
+  const selectedCases = selected['results'] as Array<Record<string, unknown>>;
+  const topCases = cases as Array<Record<string, unknown>>;
+  if (topCases.length !== selectedCases.length) invalid('evidence.cases must exactly mirror the selected scale results');
+  for (const selectedCase of selectedCases) {
+    const top = topCases.find((entry) => entry['id'] === selectedCase['id']);
+    if (top === undefined) invalid(`evidence.cases missing selected-scale case '${String(selectedCase['id'])}'`);
+    const expected = {
+      id: selectedCase['id'], rawSampleDigest: selectedCase['sampleDigest'], samples: selectedCase['samples'],
+      warmup: selectedCase['warmup'], p50Ms: selectedCase['p50Ms'], p95Ms: selectedCase['p95Ms'],
+      maxMs: selectedCase['maxMs'], postCasePeakRssBytes: selectedCase['postCasePeakRssBytes'],
+    };
+    if (canonicalJsonSha256(top) !== canonicalJsonSha256(expected)) invalid(`evidence.cases case '${String(selectedCase['id'])}' does not match selected scale`);
+  }
+  const expectedWarmups = selectedCases.reduce((sum, entry) => sum + (entry['warmup'] as number), 0);
+  const expectedSamples = selectedCases.reduce((sum, entry) => sum + (entry['samples'] as number), 0);
+  if (value['warmupCount'] !== expectedWarmups || value['sampleCount'] !== expectedSamples) invalid('warmupCount/sampleCount must equal selected-scale totals');
 }
 
 /* -------------------------------------------------------------------------- */
