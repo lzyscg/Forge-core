@@ -271,6 +271,7 @@ export function createProductionRuntimeEnvironment(
   const evidence = JSON.parse(readFileSync(files.profileEvidenceFile ?? productionEvidencePath('structured-slot-platform-profile-v1.json'), 'utf8')) as Record<string, unknown>;
   try { validateProfileEvidence(evidence); } catch (error) { invalid(`profile evidence invalid: ${error instanceof Error ? error.message : String(error)}`); }
   if (profile.evidenceDigest !== canonicalJsonSha256(evidence)) invalid('final profile evidenceDigest does not match profile evidence');
+  if (canonicalJsonSha256(evidence['frozenLimits']) !== canonicalJsonSha256(profile.limits)) invalid('final profile limits do not match profile evidence frozenLimits');
   const release = JSON.parse(readFileSync(files.releaseEvidenceFile ?? productionEvidencePath('structured-slot-release-v1.json'), 'utf8')) as unknown;
   if (!isPlainObject(release)) invalid('release evidence must be a plain object');
   try { validateReleaseEvidence(release, REQUIRED_RELEASE_GATES); } catch (error) { invalid(`release evidence invalid: ${error instanceof Error ? error.message : String(error)}`); }
