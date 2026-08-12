@@ -1,50 +1,50 @@
 {
   "version": 1,
-  "status": "provisional",
+  "status": "final",
   "identity": "forge-structured-runtime/v1",
   "limits": {
     "schema": {
-      "maxSchemaDepth": 16,
-      "maxSchemaNodes": 4096,
-      "maxEnumItems": 256,
-      "maxPatternLength": 512
+      "maxSchemaDepth": 4,
+      "maxSchemaNodes": 1024,
+      "maxEnumItems": 64,
+      "maxPatternLength": 128
     },
     "structure": {
-      "maxSlots": 10000,
-      "maxTreeDepth": 32,
-      "maxChildrenPerSlot": 1000
+      "maxSlots": 2500,
+      "maxTreeDepth": 8,
+      "maxChildrenPerSlot": 250
     },
     "payload": {
-      "maxSpecBytesPerSlot": 65536,
-      "maxContentBytesPerSlot": 1048576,
-      "maxScaffoldPayloadBytes": 67108864
+      "maxSpecBytesPerSlot": 16384,
+      "maxContentBytesPerSlot": 262144,
+      "maxScaffoldPayloadBytes": 16777216
     },
     "draft": {
-      "maxChangedSlots": 2000,
-      "maxDraftBytes": 16777216
+      "maxChangedSlots": 500,
+      "maxDraftBytes": 4194304
     },
     "attempt": {
-      "maxSlotToolCallsPerAttempt": 512,
-      "maxValidationRunsPerAttempt": 16,
-      "maxValidatorInvocationsPerAttempt": 40000,
-      "maxAggregateValidatorCpuMsPerAttempt": 240000,
-      "maxAggregateValidatorWallClockMsPerAttempt": 480000,
-      "maxValidatorOutputBytesPerAttempt": 16777216,
-      "maxAttemptWallClockMs": 600000
+      "maxSlotToolCallsPerAttempt": 128,
+      "maxValidationRunsPerAttempt": 4,
+      "maxValidatorInvocationsPerAttempt": 10000,
+      "maxAggregateValidatorCpuMsPerAttempt": 60000,
+      "maxAggregateValidatorWallClockMsPerAttempt": 120000,
+      "maxValidatorOutputBytesPerAttempt": 4194304,
+      "maxAttemptWallClockMs": 150000
     },
     "validation": {
-      "maxValidators": 64,
-      "maxValidatorInvocationsPerGate": 10000,
-      "maxAggregateValidatorCpuMsPerGate": 60000,
-      "maxAggregateValidatorWallClockMsPerGate": 120000,
-      "maxValidatorOutputBytesPerGate": 4194304,
-      "maxIssuesPerRun": 500
+      "maxValidators": 16,
+      "maxValidatorInvocationsPerGate": 2500,
+      "maxAggregateValidatorCpuMsPerGate": 15000,
+      "maxAggregateValidatorWallClockMsPerGate": 30000,
+      "maxValidatorOutputBytesPerGate": 1048576,
+      "maxIssuesPerRun": 125
     },
     "output": {
-      "maxArtifactFiles": 64,
-      "maxArtifactBytesPerFile": 16777216,
-      "maxTotalArtifactBytes": 67108864
+      "maxArtifactFiles": 16,
+      "maxArtifactBytesPerFile": 4194304,
+      "maxTotalArtifactBytes": 16777216
     }
   },
-  "evidenceDigest": null
+  "evidenceDigest": "f7a54fe4ec2520104c6852353ecc0a25da85e840af340bca33e86a64443802ce"
 }

@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "gate": "verify:structured-slots",
+  "mode": "qualify",
+  "checkpointCommit": "92715356ff69192dec16dd4fed8e3b068ce5c2e7",
+  "sourceTreeDigest": "511cf2de84e57f5bbb08f990c490ebbd903b0aeaeb10871a937c211010b2412e",
+  "packageLockSha256": "4b3e0b43052fffaa169e2dc624e87f970d9f8d91d8b0061951f4e2208f3d8914",
+  "profileEvidencePath": "docs/evidence/structured-slot-platform-profile-v1.json",
+  "profileEvidenceDigest": "f7a54fe4ec2520104c6852353ecc0a25da85e840af340bca33e86a64443802ce",
+  "finalProfilePath": "src/server/structured-slots/platform-profile-v1.json",
+  "finalProfileDigest": "bba457992523b1b6c9e16e91ee9ae37b843bae0fd0971736408c5459f405cae3",
+  "requiredAbis": [
+    "forge-validator/v1",
+    "forge-assembler/v1"
+  ],
+  "piPreflightCharacterization": "forge-pi-slot-preflight/v1",
+  "gates": [
+    {
+      "id": "typecheck",
+      "label": "TypeScript 类型检查",
+      "command": "npm run check",
+      "exitCode": 0
+    },
+    {
+      "id": "unit-tests",
+      "label": "单元/集成测试",
+      "command": "npm test -- --reporter=dot",
+      "exitCode": 0
+    },
+    {
+      "id": "build",
+      "label": "客户端与服务端构建",
+      "command": "npm run build",
+      "exitCode": 0
+    },
+    {
+      "id": "e2e",
+      "label": "Playwright 端到端",
+      "command": "npm run e2e",
+      "exitCode": 0
+    },
+    {
+      "id": "structured-acceptance",
+      "label": "结构化槽端到端验收（注入环境）",
+      "command": "npm run verify:structured-slots -- --acceptance-only --capability injected",
+      "exitCode": 0
+    },
+    {
+      "id": "forge-pi-slot-preflight",
+      "label": "锁定 Pi 0.82 预校验计费特征",
+      "command": "npx vitest run src/server/runtime/pi-agent-runtime.test.ts -t Task 14 Step 1",
+      "exitCode": 0
+    }
+  ],
+  "observedAt": "2026-08-12T04:38:05.561Z"
+}
