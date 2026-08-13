@@ -1,140 +1,216 @@
 # Forge Core
 
-> 给「没有上下文的 agent」的项目说明书。读完本文件应能定位任何代码、理解不变量、独立运行与测试。
+> 面向无上下文 Agent 的项目入口。本文描述当前 `main` 的产品边界、运行方式、核心不变量和后续迭代入口。
 
-Forge Core 是一个**本地、单进程**的多 Agent 内容生产产品：模板声明若干 Agent、Skill 与合法路由；运行时驱动 Agent 串行协作（写作 → 审核退回 → 返修 → 复审 → 系统独立交付），全过程在浏览器画布上可视化（回合卡、思维/工具流式预览、产物版本链）。它是「中间层接管工程、模型只管内容」的最小可行实现。
+Forge Core 是一个本地、单进程的多 Agent 内容生产系统。模板声明 Agent、Skill、路由、产物格式和质量门禁；运行时负责调度、事件持久化、版本管理、权限边界、校验与交付；模型只负责在系统授权的范围内创作内容。
 
-## 产品概览
+## 30 秒理解项目
 
-**解决的问题**：多 Agent 内容生产里，最不可控的不是「写」而是「管」——谁编排、谁审核、版本怎么管、质量谁说了算。Forge Core 把这些工程问题全部收进平台，模型只做一件事：内容创作。**中间层接管工程，模型只管内容。**
+Forge Core 不是一个让模型自由聊天的工作流脚本，也不是一个把编辑器交给 Agent 的块状文本编辑器。它是一个“模板驱动的生产运行框架”：
 
-**目标用户与使用场景**：
-- 内容生产团队：需要批量、可复现、可审计的长内容生产——长篇总控（写作→审核→返修→复审→交付）、大纲复刻（七轮工作流 + 结构门禁）、单章生产。三种形态各是一个业务模板。
-- 开发者 / 无上下文的 agent：把 Forge Core 当基础设施，用模板声明自己的多 Agent 内容管线，平台代码零改动。
-
-**核心价值主张**：
-1. **模板即产品**：一个模板 = 一条可运行的生产流水线（Agent、Skill、合法路由、质量门禁）。换模板即换产品形态。
-2. **系统兜底质量**：模型说「完成」不算数——`submit_final_artifact` 必须过系统独立门禁才交付；生产点另有结构门禁兜底。
-3. **全链路可审计**：事件只追加、产物版本只增、回合全程留 trace；过程与结果都可回溯、可重跑。
-4. **工程与内容解耦**：平台零业务词，业务语义只存在于模板；模型不碰 ID/版本/时间戳/路由等工程数据。
-5. **过程可视化 + 人工介入**：浏览器画布实时呈现回合卡/工具流式/版本链；卡住时人工可回答、可做结构化决策。
-
-**三层结构（一句话）**：`templates/` 声明（模板冻结为任务快照）→ server 运行时（单一执行槽调度、事件溯源、门禁沙箱、版本化产物）→ client 画布（可视化 + 人工介入）。
-
-## 一句话产品循环
-
-```
-创建任务(冻结模板+输入) → 写作Agent起草(可load_skill/写工作区) → publish_artifact(V1)
-→ 审核Agent退回(send_message) → 写作返修(V2) → 复审通过 → submit_final_artifact
-→ 系统独立校验后交付（模型说完成不算数）
+```text
+模板快照
+  -> Agent 按声明路由串行协作
+  -> 系统记录事件、版本、回合 trace 和校验结果
+  -> 独立门禁决定是否可以发布/提交
+  -> 浏览器展示可审计的生产过程和最终产物
 ```
 
-## 技术栈
+当前有两种运行模式：
 
-- TypeScript + React 18 + react-router 6（client，Vite 构建）
-- Node 单进程文件后端（无数据库；追加式事件文件 + 版本化产物目录）
-- Pi Agent Runtime：`@earendil-works/pi-coding-agent` / `pi-ai` 0.82（真实模型）；测试用 `FakeAgentRuntime`（脚本化，不碰 Provider）
-- 测试：Vitest（单元/组件，jsdom）、Playwright（e2e，双视口）
+- `basic`：传统的产物版本流水线，适合长篇总控、普通大纲和已有 v2 模板。
+- `structured_slots`：结构槽模式。模板定义槽位类型、槽树布局、校验器和组装器；编排 Agent 负责建立结构，填空 Agent 在草稿副本上创作，Seal/Assembler 负责确定性校验和交付。
 
-## 目录结构
+模式由模板的 `productionMode` 决定。它不是运行时猜测，也没有环境变量绕过：basic 模板不能偷偷携带结构槽契约，结构槽模板必须经过已启用的 runtime capability 检查。
 
+## 当前已经交付的能力
+
+### 基础生产引擎（basic）
+
+- 模板快照：创建任务时冻结模板、输入和版本哈希，运行期间不读取可变模板。
+- 多 Agent 串行协作：生产、审核、返修、复审、总控交付均由模板路由声明。
+- 事件溯源：事件只追加，产物版本只递增；事件和版本目录相互校验，可恢复、可审计。
+- v2-only 回合契约：历史 v1 快照只读并标记不兼容，新任务只能运行 v2 契约。
+- 系统交付门禁：`submit_final_artifact` 只有在独立校验通过后才能产生完成态；模型说“完成”不具备权威性。
+- 人工介入：无进展守卫可以停车，用户可继续、接受或停止；答案、作废和合成输入具有持久化恢复语义。
+- 文件、HTTP 和浏览器 UI：同一套 Gateway 契约支持本地 Mock、HTTP 后端和 React 画布。
+
+### 结构槽引擎 v1
+
+结构槽引擎已经接入生产模式，核心能力是平台级基础设施，不绑定某一个故事模板：
+
+- **Slot Schema**：严格定义槽 ID、类型、父子关系、内容形态和必填约束。
+- **Layout Grammar**：定义槽的排布、顺序、重复范围和最终输出顺序。
+- **结构化流水线 typestate**：`structure -> fill -> seal -> submit`；首个生产节点必须建立 scaffold，未 Seal 的内容不能进入最终产物。
+- **草稿隔离**：填空 Agent 写入自己的 Draft 副本，校验通过后才由系统合并；私有 Proposal、Draft、Grant 不进入 task_owner 的公开投影。
+- **渐进式上下文**：Agent 默认只看到当前工作槽和必要摘要，可通过授权 selector 读取前序槽位，不一次性灌入整棵树。
+- **原子持久化与恢复**：EventStore batch、attempt journal、generation index、content-addressed blob 和 custody batch 保证崩溃后可重放，避免半提交状态被误认为完成。
+- **确定性 Gate/Assembler**：validator 和 assembler 在隔离沙箱中运行，受 CPU、墙钟、内存、输出和调用次数限制；JCS canonical JSON、摘要链和内容寻址保证结果可复核。
+- **封存边界**：Seal 失败只能进入明确的返工/人工恢复路径；Seal 成功后生成最终 artifact，不能从已封存状态回写槽树。
+- **生产门禁**：集成 benchmark、全量 qualification、release evidence 和 capability promotion 是单向链条；任一证据缺失或摘要不一致都 fail closed。
+
+当前已启用的结构槽业务模板是 `zhihu-salt-chapter-draft`：它将一章知乎盐选正文表达为 `title -> opening -> scene_block* -> emotional_closure -> chapter_end`，输出单个 `chapter.md`。它只负责章节正文这一件工件；章节执行包、大纲、审核账本和全文总控由其他模板/Skill 负责，后续可以组合成更大的产品链。
+
+## 技术架构
+
+```text
+src/shared
+  契约、API schema、错误码
+      |
+src/server/storage
+  事件、产物版本、任务目录、结构槽 blob/private/state
+      |
+src/server/template
+  模板加载、哈希、缓存、basic/structured_slots 编译与 typestate 校验
+      |
+src/server/runtime
+  Pi 适配、TaskRunner、TaskScheduler、ActionBuffer、ActionCommitter、门禁
+      |
+src/server/api                 src/client
+  REST / structured-slot 只读 API  <- ForgeCoreGateway <- React UI
 ```
-src/shared/            契约（contracts.ts 冻结）、api-schemas、errors
-src/client/            五页 UI + gateway + mock（浏览器本地演示）
-  pages/               生产任务/模板/新建/模板详情/开发进度 五页
-  components/          turn-card / workspace-canvas / flow-overlay / 抽屉 / 浮窗
-  gateway/             ForgeCoreGateway 接口 + http-gateway + mock-gateway
-  mock/                浏览器本地 MockGateway + 确定性脚本(mock-simulator)
-src/server/            文件后端 + 调度
-  main.ts              入口（env 配置）
-  core-service.ts      组装编排（deleteTask/生命周期/live 缓冲）
-  runtime/             PiAgentRuntime(薄适配) / task-runner / task-scheduler
-                       / action-committer / skill-service / live-store / retry-policy
-  storage/             core-paths / event-store(追加) / artifact-store(版本)
-                       / task-store / task-projector
-  template/            模板加载/校验/最后有效缓存
-  api/                 REST 路由（/api/templates、/api/tasks、DELETE 等）
-templates/             业务模板（long-form-hub 长篇总控中枢；outline-designer 七轮大纲复刻；zhihu-single-chapter 知乎单章）
-e2e/                   Playwright 门禁
-scripts/               verify-*/probe:pi/acceptance:real/real-recovery/smoke-* 门禁与真实验证脚本
+
+结构槽内部再分成两层：
+
+```text
+纯领域：canonical-json / slot-schema / layout-grammar / issues / profile
+    -> 存储：appendBatch / blob / private journal / generation index / custody
+    -> 运行时：attempt / grant / proposal / draft / seal / projection / tool
+    -> 适配：模板 contract、Pi session、TaskScheduler、只读 API
 ```
 
-## 不变量 / 铁律（改代码前必读）
+### 模型与系统的边界
 
-1. **平台零业务词**：业务语义只存在于 `templates/` 与 mock fixture；平台代码不出现「章节/写作/审核/知乎」等词。
-2. **模型不碰工程数据**：ID/版本/时间戳/路由由系统补；模型只调九类生产动作 + 三个工作区动作。
-3. **事件只追加不覆盖**：`events/<6位序列>-<uuid>.json`；产物版本只增不改；损坏隔离不猜测。
-4. **交付由系统门禁决定**：`submit_final_artifact` 经独立校验才完成；自然语言不算数。
-5. **单一执行槽**：全进程一次只跑一个 Agent Turn；stop/abort 有界等待、stale 结果不提交。
-6. **凭据/隐藏思维链不上屏、不持久化**：live 缓冲纯内存；durable trace 只保留公开文本/工具步骤，raw provider thinking 永不落盘；`probe:pi` 报告脱敏。
-7. **Pi 约束**：内置工具/自动 Skill/自动重试全关；回合内上下文压缩开启（每 Turn 重建 fresh session，压缩不跨回合）；只暴露九个生产动作工具 + 三个工作区工具 + 两个只读工具（`read_skill_section` / `validate_artifact`）。
-8. **v2-only runnable**：当前唯一可执行回合契约是 version 2；历史 v1 快照只读、gate 为 `incompatible`，可 clone 到当前模板。
+模型可以：
 
-## 数据模型（每任务一个目录）
+- 读取模板授权的 Skill 入口或 section；
+- 读取授权的前序槽位摘要/内容；
+- 在固定目标槽的 Draft 上写内容；
+- 按模板路由发送消息、提交已封存输入或请求人工介入。
 
-```
-data/tasks/<taskId>/
-  task.json            冻结记录（templateId/templateVersion/frozenInput）
-  snapshot/            冻结模板快照（校验后拷贝，versionHash 复核）
-  events/              追加式事件（agent_input/result/attempt_failed/route_executed/
-                       artifact_published/artifact_annotated/skill_loaded/human_*/
-                       pending_inputs_superseded/final_submission_accepted…）
-  artifacts/vNNN/      版本目录：content.md|txt（正文）+ revision.md（修订）
-                       + review.md（审核意见）+ meta.json（版本只增）
-  traces/<turnId>.json 展示用回合过程（公开文本/工具步骤，无 raw thinking）
-```
+模型不能：
 
-## 关键契约
+- 自己决定 ID、版本、路由、时间戳、任务状态或完成态；
+- 直接写主事件流、artifact 目录、Grant、私有 Proposal/Draft；
+- 把未校验草稿伪装成已 Seal 产物；
+- 调用模板未声明的工具或绕过运行时 capability。
 
-- `contracts.ts`：`TaskWorkspace`/`WorkspaceNode`/`ArtifactVersion.files[].extract`/`LiveTurn`。冻结，改它要全链路同步。
-- `ForgeCoreGateway`：listTemplates/getTemplate/reloadTemplate/createTask/listTasks/getWorkspace/start/stop/resume/retry/answerHuman/submitHumanDecision/**deleteTask**/watchTask/getTurnTrace/getSkillContent/cloneTask。
-- 动作注册表九类：`load_skill/finish_production(多文件)/annotate_artifact/read_artifact_version/publish_artifact/forward_input_version/submit_final_artifact/send_message/request_human_input`；工作区三类：`write/read/list_workspace`；只读工具两个：`read_skill_section`（skill 渐进式披露）/ `validate_artifact`（门禁自检，读私有工作区产物）。
+### 当前公开动作面
 
-## 运行
+九个生产动作：
+
+`load_skill`、`finish_production`、`annotate_artifact`、`read_artifact_version`、`publish_artifact`、`forward_input_version`、`submit_final_artifact`、`send_message`、`request_human_input`。
+
+另有三个工作区动作 `write_workspace`、`read_workspace`、`list_workspace`，以及只读工具 `read_skill_section`、`validate_artifact`。结构槽工具由 Grant/AccessProfile 再收窄到当前槽位和授权 selector。
+
+## 模板目录
+
+| 模板 | 模式 | 产物/用途 | 当前定位 |
+|---|---|---|---|
+| `templates/long-form-hub` | `basic` | 长篇总控生产链 | 已有 basic 主模板 |
+| `templates/outline-designer` | `basic` | 七轮大纲/蓝图 | 已有门禁与 Skill 渐进披露 |
+| `templates/zhihu-single-chapter` | `basic` | 兼容的普通单章 | legacy/basic 保留 |
+| `templates/zhihu-salt-chapter-draft` | `structured_slots` | `chapter.md` | 当前第一个结构槽业务模板 |
+
+项目根目录的 `skills/` 是真实知乎盐选生产 Skill 资源的来源，包括：
+`zhihu-salt-chapter-packet`、`zhihu-salt-outline-designer`、`zhihu-salt-outline-drafter`、`zhihu-salt-chapter-drafter`、`zhihu-salt-production-director`。
+
+这些 Skill 不会自动变成一个“大而全”的模板。当前约定是“一套模板产出一个工件，再由多个模板组合”，每新增一个结构槽模板都要单独验证输入、槽合同、Gate、Assembler、产物和运行证据。
+
+## 本地运行
 
 ```bash
-npm install && npx playwright install chromium
-cp .env.example .env   # 填 DEEPSEEK_API_KEY（真实运行必需）
+npm install
+npx playwright install chromium
+cp .env.example .env
+```
 
-# 真实后端（HTTP 模式）
-# FORGE_CORE_TEMPLATE_ROOT 可选（默认 $PWD/templates，即提交的业务模板）
+真实 HTTP 后端：
+
+```bash
 FORGE_CORE_DATA_ROOT=$PWD/data \
-FORGE_CORE_PORT=3210 VITE_FORGE_CORE_MODE=http npm run dev   # http://127.0.0.1:3210
-
-# Mock 演示（零 token）
-npm run dev:client -- --port 3211                            # http://127.0.0.1:3211
+FORGE_CORE_PORT=3210 \
+VITE_FORGE_CORE_MODE=http \
+npm run dev
 ```
 
-## 测试 / 门禁
+打开 <http://127.0.0.1:3210/tasks>。真实模型运行需要 `.env` 中配置对应 Provider 的 API key；离线结构槽 acceptance 使用脚本化 Agent，不需要模型 token。Mock UI：
 
 ```bash
-npm run check && npm test && npm run build && npm run e2e
-npm run verify:ui && npm run verify:backend && npm run verify:runtime
-npm run probe:pi -- --provider deepseek --model deepseek-v4-flash --report /tmp/b.json
-
-# 真实 DeepSeek 全链路（需 DEEPSEEK_API_KEY；outline-designer 约 10 分钟/次）
-npm run acceptance:real && npm run acceptance:recovery
-npx tsx scripts/smoke-outline-designer.ts
+npm run dev:client -- --port 3211
 ```
 
-## 五个页面
+常用环境变量：
 
-`/tasks` 任务列表(删除/重跑) · `/tasks/:id` 生产画布(回合卡+流式+抽屉) · `/tasks/new` 新建 · `/templates[/:id]` 模板 · `/dev/progress` 开发进度(仅 URL 可达)。
+- `FORGE_CORE_DATA_ROOT`：任务事件、产物和结构槽状态目录；
+- `FORGE_CORE_TEMPLATE_ROOT`：模板根目录，默认 `$PWD/templates`；
+- `FORGE_CORE_PORT`：HTTP 端口；
+- `VITE_FORGE_CORE_MODE=http|mock`：前端 Gateway 模式。
 
-## 已完成（A–E + 平台补强 Phase 1-5）
+从 UI 使用时先进入 `/tasks`，再打开任务详情；HTTP Gateway 会在任务列表读取后维护当前任务索引。
 
-A 产品形态(Mock) · B 文件/HTTP 后端 · C Pi Runtime/调度/恢复 · D 真实 Provider 闭环 · E UI（整页布局/回合卡合并/实时流式/删除）· 平台补强：skill 渐进式披露（`read_skill_section`）、门禁执行环境（isolated-vm 沙箱 + `validate_artifact`）、回合内上下文压缩、outline-designer 模板（v2 双 Agent 七轮工作流）、真实 DeepSeek 集成验证。全部 TDD、门禁绿。后续方向：Skill 迭代对比视图（同输入跑两版 Skill 并排）。
+## 验证与生产门禁
 
-## 先读这些
+普通改动至少运行：
 
-`src/shared/contracts.ts` → `src/server/core-service.ts` → `src/server/runtime/task-scheduler.ts` → `src/server/storage/task-projector.ts` → `src/client/components/turn-card.tsx`。
+```bash
+npm run check
+npm test -- --reporter=dot
+npm run build
+npm run e2e
+```
 
-### docs 索引
+结构槽改动还要运行：
 
-- `docs/ARCHITECTURE.md` —— 当前稳定架构与核心不变量（v2-only、9 动作、事件溯源、人工介入）。
-- `docs/PROJECT-MAP.md` —— 模块地图、关键类、调用链、数据目录、测试门禁。
-- `docs/IMPLEMENTATION-LOG.md` —— 实施历史（v7 各 Phase 做了什么/关键决策/已知局限）。
-- `docs/2026-08-07-*.md` —— v7 产物版本目录制 spec/dev-plan/语义审计修复计划、outline-designer 模板计划、平台补强（skill 渐进披露 / 门禁执行环境 / 回合内压缩）spec & dev-plan。
-- `docs/STRUCTURED-SLOT-ENGINE-DESIGN.md` —— 结构槽引擎当前权威设计；后续结构槽决策统一更新在此。
-- `docs/2026-08-08-structured-slots-three-role-design.md` —— 已被上文取代的历史草案，保留问题发现与三角色思路。
-- 更早的 `docs/2026-08-0*.md` —— 历史设计与实现记录（保留作历史，不反映当前行为）。
+```bash
+# 不写生产证据，只检查离线 acceptance
+npm run verify:structured-slots -- --acceptance-only --capability injected
+npm run verify:structured-slots -- --acceptance-only --capability production
+
+# 只有在 clean checkpoint、完整 integrated benchmark 和所有 gate 均通过时，
+# 才按顺序执行 qualify -> promote；不要手工编辑 enabled manifest。
+npm run benchmark:structured-slots -- --mode integrated-qualify \
+  --profile src/server/structured-slots/platform-profile-v1.json \
+  --evidence docs/evidence/structured-slot-platform-profile-v1.json \
+  --adapter scripts/structured-integrated-benchmark-adapter.ts
+npm run verify:structured-slots -- --qualify
+npm run verify:structured-slots -- --promote-capability docs/evidence/structured-slot-release-v1.json
+npm run verify:structured-slots -- --acceptance-only --capability production
+```
+
+qualification 会将源码摘要、lockfile、依赖版本、reference runner、每档 benchmark、profile、release evidence 和 capability manifest 串成单向摘要链。文档或代码变化后，必须重新走这条链；“测试绿色”不等于可以启用生产。
+
+当前验收基线：全量 Vitest 110 个文件、2016 passed、1 skipped；结构槽 production acceptance 通过；Pi 0.82 的 characterization 只在锁定 seam 上运行。数字以最近一次实际命令输出和 evidence 为准，不要在代码外手工改报告。
+
+## 未来迭代的工作方式
+
+1. 先读本文、`docs/ONBOARDING-context.md`、`docs/ARCHITECTURE.md` 和 `docs/PROJECT-MAP.md`。
+2. 明确改动属于平台、结构槽引擎、模板、Skill 还是 UI；不要为了某个业务模板把平台基础能力特化。
+3. 先修改契约/设计和测试，再实现；新增模板优先采用独立工件边界。
+4. 保持 basic 模式、九个 ForgeAction 和既有模板回归；结构槽问题必须 fail closed。
+5. 使用独立 worktree 或明确分支；每个阶段记录命令、HEAD、证据和未解决项。
+6. 完成后重新生成 qualification evidence，最后才提交并推送；不要把临时运行数据、API key、`.env` 或 `data/` 提交进仓库。
+
+## 当前边界
+
+- v1 只支持单任务串行生产；同一生产 case 内的并行槽生产暂不实现。
+- 结构槽 UI 当前是只读审计抽屉，不是 Notion 式块编辑器；写入仍由 Agent + Draft/Seal 引擎完成。
+- 当前业务模板只覆盖知乎盐选“单章正文”这一个结构槽工件；大纲、章节包、审核和全文总控尚未合并成一个大模板。
+- 本项目是本地单进程产品，不提供远程多租户、分布式队列或云端数据库语义。
+- 真实模型效果取决于模板输入包、Skill、Provider 配置和模型本身；离线 acceptance 证明的是系统边界，不等价于文学质量评审。
+
+## 推荐阅读顺序
+
+```text
+README.md
+  -> docs/ONBOARDING-context.md
+  -> docs/ARCHITECTURE.md
+  -> docs/PROJECT-MAP.md
+  -> src/shared/contracts.ts
+  -> src/server/template/template-loader.ts
+  -> src/server/runtime/task-scheduler.ts
+  -> src/server/runtime/structured-slot/
+  -> templates/zhihu-salt-chapter-draft/
+```
+
+历史 spec、实现日志和审查记录仍保留在 `docs/`，但历史文档中的“进行中/disabled/provisional”表述只代表当时的快照，不应覆盖当前 `main` 的代码、manifest、测试和最新 evidence。

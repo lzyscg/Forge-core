@@ -1,6 +1,6 @@
 # Forge Core 项目地图
 
-> 当前稳定版（v7）模块地图、关键类、调用链、数据目录与测试门禁。配套 `docs/ARCHITECTURE.md`（不变量）。
+> 当前 `main` 的模块地图、关键类、调用链、数据目录与测试门禁。基础版本契约为 v7，结构槽引擎为 v1。配套 `docs/ARCHITECTURE.md`（不变量）。
 
 ## 目录结构
 
@@ -30,7 +30,9 @@ src/server/            文件后端 + 调度
   template/            模板加载/校验/最后有效缓存（template-loader/validator/schema/catalog/cache）/
                        结构槽 contract/typestate 编译（structured-slot-contract / structured-pipeline-validator）
   api/                 REST 路由（templates / tasks / trace / skill-content / structured-slots 只读 / DELETE）
-templates/             long-form-hub（总控中枢，v7 主模板）、zhihu-single-chapter（v2 升级保留）
+templates/             long-form-hub（basic 总控）、outline-designer（basic 大纲）、
+                       zhihu-single-chapter（basic 兼容）、zhihu-salt-chapter-draft（structured_slots 单章）
+skills/                真实知乎盐选 Skill（章节包/大纲/章节正文/总控）
 e2e/                   Playwright 门禁（runtime-loop / product-flow / process-trace / recovery…）
 scripts/               verify-* / probe:pi / acceptance-* / write-final-evidence / benchmark-structured-slots
 docs/                  见 README「docs 索引」
@@ -96,13 +98,60 @@ data/tasks/<taskId>/
 | 门禁 | 命令 | 覆盖 |
 |---|---|---|
 | 类型检查 | `npm run check` | tsc --noEmit |
-| 单元/集成 | `npm test` | Vitest（70 文件 ~1140 用例） |
-| e2e | `npm run e2e` | Playwright（44 桌面 + 10 移动截图） |
+| 单元/集成 | `npm test` | Vitest（当前基线 110 文件，2016 passed，1 skipped） |
+| e2e | `npm run e2e` | Playwright（桌面/移动双视口与恢复流程） |
 | 构建 | `npm run build` | vite + tsc server |
 | 后端验证 | `npm run verify:backend` | gateway-contracts + server-modules + http-persistence |
 | 运行时验证 | `npm run verify:runtime` | runtime-modules + e2e-runtime-loop + recovery + pi-boundary（真实 probe） |
 | 真实验收 | `npm run acceptance:real` | 真实 Provider 端到端（直接使用提交的 `templates/`） |
-| 结构化离线验收 | `npm run verify:structured-slots` | 离线证据命令：确定性结构槽验收/qualify/promote（平台中立 fixture + 脚本化 Agent 运行时）；不写产品证据（区别于 verify:backend/verify:runtime） |
-| 结构化基准 | `npm run benchmark:structured-slots` | 离线基准：`--mode primitive-smoke`；`--mode integrated-qualify`（需 `--profile/--evidence/--adapter`）保留给 Task 19，产出 evidence 并改写 provisional profile |
+| 结构化离线验收 | `npm run verify:structured-slots` | 结构槽 acceptance/qualify/promote；支持 `--capability injected|production`，生产模式使用 checked-in capability 链 |
+| 结构化集成基准 | `npm run benchmark:structured-slots` | `--mode primitive-smoke` 做快速探针；`--mode integrated-qualify --profile ... --evidence ... --adapter ...` 运行四档集成基准并冻结 final profile |
 
-**测试纪律**：跨层语义测试（`task-runner.test.ts` 的 v7 input assembly / v7 forward path）直接断言下一个 Agent 实际收到的 `AgentTurnInput.inputText`，而不只验证事件字段。
+**测试纪律**：跨层语义测试（`task-runner.test.ts` 的 v7 input assembly / v7 forward path）直接断言下一个 Agent 实际收到的 `AgentTurnInput.inputText`，而不只验证事件字段。结构槽测试还必须覆盖越权 selector、Draft 隔离、Seal 返工、batch 崩溃恢复、content-addressed custody、资源上限和 evidence fail-closed。
+
+## 结构槽关键目录
+
+```text
+src/server/structured-slots/
+  canonical-json.ts       JCS canonical JSON 与摘要
+  slot-schema.ts          槽类型/内容契约
+  layout-grammar.ts       树布局与顺序语法
+  platform-profile*.json  冻结资源 profile
+  runtime-capability*.json production capability manifest
+
+src/server/runtime/structured-slot/
+  attempt-coordinator / attempt-meter
+  grant-service / proposal-service / draft-service
+  projection-service / seal-service / structured-committer
+  validation-engine / evaluator-runner / tool-factory
+
+src/server/storage/
+  event-store.ts                 append/appendBatch 与重放
+  structured-slot-blob-store.ts  content-addressed 内容
+  structured-slot-private-store.ts Proposal/Draft/Grant 私有 journal
+  structured-slot-state.ts       generation/attempt/custody 状态
+
+templates/zhihu-salt-chapter-draft/
+  template.yaml / pipeline.yaml / slots/contract.yaml
+  agents/ / prompts/ / skills/chapter-drafting/
+```
+
+## 当前 production enable 链
+
+```text
+clean source checkpoint
+  -> benchmark integrated-qualify（四档 scale）
+  -> profile evidence + final platform profile
+  -> verify:structured-slots --qualify
+  -> verify:structured-slots --promote-capability
+  -> acceptance-only --capability production
+```
+
+四个 qualification 生成物是派生证据，不是手工配置：
+
+- `docs/evidence/structured-slot-platform-profile-v1.json`
+- `docs/evidence/structured-slot-release-v1.json`
+- `src/server/structured-slots/platform-profile-v1.json`
+- `src/server/structured-slots/runtime-capability-v1.json`
+
+任何 tracked source、template、Skill、文档或 lockfile 变化后，旧证据只能视为历史快照，必须重新生成才能再次声称 production-ready。

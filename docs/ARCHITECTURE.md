@@ -1,6 +1,6 @@
-# Forge Core 架构（当前稳定版，v7）
+# Forge Core 架构（当前 main，v7 + structured slots v1）
 
-> 状态：对齐当前磁盘代码与定稿 v7 spec（`docs/2026-08-07-artifact-version-directory-spec.md`）。
+> 状态：对齐当前磁盘代码、v7 产物版本目录制和结构槽引擎 v1（`docs/2026-08-10-structured-slot-engine-spec.md`）。当前 `main` 已包含结构槽生产模板；qualification evidence 与 capability manifest 始终必须和当前源码摘要一致。
 > 历史设计文档保留在 `docs/2026-08-0*.md`，不代表当前行为。
 
 ## 产品定位
@@ -84,10 +84,14 @@ TaskScheduler（全局单槽生命周期循环）
 - stage/verify → unreferenced promote → 单一原子 TaskEvent batch（promote 先于 batch，batch 是唯一可见点）；内容身份 = task + scaffoldId + revision + snapshotHash + assembler digest + canonical input；缺文件/hash 不符 → `ARTIFACT_INTEGRITY_FAILED`（永不吸回槽内容）。
 
 ### provisional/final profile 协议（spec §5）
-- checked-in 精确 profile JSON，identity `forge-structured-runtime/v1`；`provisional`（evidenceDigest=null，仅供 disabled build/测试）→ `final`（引用 integrated reference benchmark 证据 digest）；capability manifest 默认 `disabled`；生产启用需两阶段 clean-tree 协议；单向摘要链：clean source/reference runner → profile evidence → final profile → release evidence → capability manifest。
+- checked-in 精确 profile JSON，identity `forge-structured-runtime/v1`；`provisional`（evidenceDigest=null，仅供 disabled build/测试）→ `final`（引用 integrated reference benchmark 证据 digest）；新 checkout 默认应为 `disabled`，生产启用需两阶段 clean-tree 协议；单向摘要链：clean source/reference runner → profile evidence → final profile → release evidence → capability manifest。
+- 当前 `main` 的 checked-in manifest 是一次合法 promotion 后的 `enabled` 状态。任何代码、模板、Skill、文档或 lockfile 变更都会改变 source digest；变更后必须重新走 integrated benchmark → qualify → promote，不能沿用旧 evidence。
 
 ### 只读 UI
 - 「结构」抽屉：树形大纲、type/spec/content、issue 定位、merge/Seal 审计、sealed artifact 链接；无任何写 API。
 
-### Task 19 收尾状态
-- final profile 冻结 + capability 启用以 reference-runner 基准通过为前提；本文档撰写时**未**声明 qualification 通过（capability 保持 `disabled`、profile 保持 `provisional`）。最终证据落点：`docs/evidence/structured-slot-platform-profile-v1.json`（profile 基准证据）与 `docs/evidence/structured-slot-release-v1.json`（release 证据）。未新增生产 story 模板（仅平台中立 fixture `src/server/template/__fixtures__/structured-valid/`）。
+### 当前结构槽上线状态
+- `structured_slots` 模式已完成平台接入：模板加载、contract/typestate、Grant/selector、Draft/Proposal、Seal/Assembler、projection、原子持久化和恢复均在当前代码中。
+- 当前业务模板为 `templates/zhihu-salt-chapter-draft/`，运行链是 `structure → fill → seal → submitter`，输出 `chapter.md`。平台中立 fixture 仍保留，用于不依赖业务词的 acceptance。
+- 当前 production acceptance、完整测试和 qualification/promotion 的结果以最新命令输出与 `docs/evidence/` 为准。结构槽证据不是静态宣传材料，而是绑定 source/runner/lock/dependency/profile/release 的可验证产物。
+- 未实现的边界：同一 case 内并行槽生产、Notion 式可写块编辑器、把章节包/大纲/正文/审核/全文总控合并为一个模板。新增模板必须独立验收。

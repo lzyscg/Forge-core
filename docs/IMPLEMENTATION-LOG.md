@@ -3,9 +3,19 @@
 > 整晚自主开发日志。按 dev-plan 8 Phase 推进,每 Phase TDD + 全绿 + 本地 commit。
 > 设计基准：v7 定稿（`docs/2026-08-06-artifact-version-directory.md`）。
 
-## 结构槽引擎 v1 — 上线门禁与验收（Task 19）
+## 当前状态（2026-08-13）
 
-（进行中；验收命令与文档已就位，final profile 冻结 + capability 启用 gated 于 reference-runner 基准结果，撰写本文档时**尚未**声明通过；capability 保持 `disabled`、profile 保持 `provisional`）
+本文件后面的 Phase 条目是按时间记录的历史快照；其中早期“进行中”“capability disabled”“profile provisional”等文字不代表当前 `main`。
+
+- 当前分支是已合并的 `main`，结构槽引擎 v1、basic v7 运行时和知乎盐选单章结构槽模板均已进入主线。
+- `structured_slots` 当前由 `templates/zhihu-salt-chapter-draft/` 使用，按 `structure → fill → seal → submitter` 产出一个 `chapter.md`。
+- 当前 checked-in capability/profile 状态应以 `src/server/structured-slots/runtime-capability-v1.json`、`platform-profile-v1.json` 和最新 `docs/evidence/` 为准；它们由 benchmark → qualify → promote 单向摘要链生成，不能手工修改为 enabled。
+- 当前全量测试基线为 110 个 Vitest 文件、2016 passed、1 skipped；结构槽 injected/production acceptance 均需在源码或文档变更后重新执行。
+- 结构槽仍是串行 v1：不包含同一 case 内并行生产，也不包含 Notion 式可写块编辑器；新增故事模板必须保持一个模板一个工件并独立验收。
+
+## 结构槽引擎 v1 — 上线门禁与验收（Task 19，历史实施记录）
+
+以下条目记录门禁、benchmark、恢复和 fail-closed 设计的实施过程。最终状态以本文件顶部、当前代码和最新 evidence 为准。
 
 ### 做了什么
 - **离线验收/qualify/promote 命令**：`npm run verify:structured-slots`（offline 证据命令，不写产品证据）承载结构槽 acceptance/qualify/promote；配套 `npm run benchmark:structured-slots`（`--mode primitive-smoke`；`--mode integrated-qualify` 经 `--profile/--evidence` 直接装配真实 Task 10/16 集成适配器）。
@@ -18,13 +28,13 @@
 ### 关键决策
 - 验收为离线证据命令而非产品证据写入方：`verify:structured-slots`/`benchmark:structured-slots` 与 `verify:backend`/`verify:runtime` 的产品证据职责分离。
 - 最终证据路径固定：`docs/evidence/structured-slot-platform-profile-v1.json`（profile 基准证据）与 `docs/evidence/structured-slot-release-v1.json`（release 证据）；final profile `evidenceDigest` 引用前者、capability 引用后者。
-- **未新增生产 story 模板**：`templates/` 保持 basic；结构槽只存在平台中立 fixture（`src/server/template/__fixtures__/structured-valid/`），验收不依赖业务故事词汇。
+- **模板边界**：早期验收阶段只使用平台中立 fixture；随后新增独立的 `templates/zhihu-salt-chapter-draft/` 作为第一个真实业务结构槽模板。平台中立 fixture 仍保留，业务模板不改变平台层。
 
 ### 问题与解决
-- （撰写时点）integrated-qualify 尚未产出 final profile 与 release evidence；禁止在无基准证据时改写 checked-in profile/capability，冻结与启用以 reference-runner 通过结果为唯一前提。
+- 历史撰写时点尚未产出 final profile/release evidence；后续 recovery/qualification 已将证据链收敛为 source → profile evidence → final profile → release evidence → capability manifest。任何新源码或文档提交都必须重新验证该链。
 
 ### 已知局限与后续跟进
-- final profile 冻结 + production capability enable 是剩余步骤；启用后需以 production default 再跑 `npm run check`、`npm test`、`npm run build`、`npm run e2e` 与 structured acceptance 全绿（spec §16.11）。
+- production capability enable 后仍需以 production default 再跑 `npm run check`、`npm test`、`npm run build`、`npm run e2e` 与 structured acceptance；这些命令是后续变更的回归门禁，而不是一次性项目收尾标记。
 
 ## 语义审计修复（plan 2026-08-07，Phase A-E）
 
@@ -265,4 +275,3 @@
 - client 子代理修复 `src/client/**` 的 content→files 与 http-gateway cast；剩余 shared schema 缺口（api-schemas 仍校验 content）由我补齐。
 - sed 把 acceptance 报告键 `artifactVersions` 误改为 `inputVersions`（`artifactVersion` 子串匹配），已正名回 `artifactVersions`。
 - `StorageError.message` 是中文、`.code` 在属性上——reject 断言用 `expectInvalid` 检 `.code` 而非正则。
-
