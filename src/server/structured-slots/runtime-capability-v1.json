@@ -2,8 +2,8 @@
   "version": 1,
   "status": "enabled",
   "profileIdentity": "forge-structured-runtime/v1",
-  "profileDigest": "bba457992523b1b6c9e16e91ee9ae37b843bae0fd0971736408c5459f405cae3",
-  "evidenceDigest": "61aa6c6b7e1cbef09fb6b35d9a3608c4dc6eb90e39b61808ef03942ae972464f",
+  "profileDigest": "ed76d189c040a8b7a16bb88ed37dd02ba7717abaa0ff99e8ea3bab571d72336e",
+  "evidenceDigest": "888dbf684552298840d43a5b99781b6ae81b1efa9a8153da2d2d2eb2ed4567c4",
   "requiredAbis": [
     "forge-validator/v1",
     "forge-assembler/v1"

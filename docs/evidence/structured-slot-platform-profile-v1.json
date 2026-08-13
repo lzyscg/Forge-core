@@ -6,8 +6,8 @@
     "runnerVersion": "1.0.0",
     "descriptorDigest": "f2cc89b4e21446330cec1c715c2e6a7f20c9cb027d8854cc128529517e7fa9fc"
   },
-  "gitCommit": "92715356ff69192dec16dd4fed8e3b068ce5c2e7",
-  "sourceTreeDigest": "511cf2de84e57f5bbb08f990c490ebbd903b0aeaeb10871a937c211010b2412e",
+  "gitCommit": "c1d205d5c6ecc83617ed920ae65719af307dfd18",
+  "sourceTreeDigest": "96566a871c1c9724a836828dca6964e22a31f006b356b9807205d0ffc2f224c7",
   "packageLockSha256": "4b3e0b43052fffaa169e2dc624e87f970d9f8d91d8b0061951f4e2208f3d8914",
   "dependencyVersions": {
     "isolated-vm": "6.2.0",
@@ -16,128 +16,128 @@
   },
   "warmupCount": 12,
   "sampleCount": 58,
-  "peakRssBytes": 513867776,
+  "peakRssBytes": 514523136,
   "diskBytes": 17865746,
   "cases": [
     {
       "id": "schema-compile",
-      "rawSampleDigest": "a87397d510d747962fe779f6eb96d8e03089df4b00595b8f32f6e4b275c80735",
+      "rawSampleDigest": "297a19e884f9893df89e146c13226814769935107ac694fe107063b86573c855",
       "samples": 8,
       "warmup": 1,
-      "p50Ms": 1.83,
-      "p95Ms": 5.64,
-      "maxMs": 5.64,
-      "postCasePeakRssBytes": 132595712
+      "p50Ms": 1.65,
+      "p95Ms": 6.15,
+      "maxMs": 6.15,
+      "postCasePeakRssBytes": 130760704
     },
     {
       "id": "grammar-compile",
-      "rawSampleDigest": "c5c77138363246ac39428b7942c52a0d3bafc2c38c80848b2156bdfb2af5f520",
+      "rawSampleDigest": "669870925d2bd4b93c3d64aebfcca048faf330d9307f2c24ddcbff12e17282e5",
       "samples": 8,
       "warmup": 1,
-      "p50Ms": 0.28,
-      "p95Ms": 1.06,
-      "maxMs": 1.06,
-      "postCasePeakRssBytes": 135200768
+      "p50Ms": 0.24,
+      "p95Ms": 1.07,
+      "maxMs": 1.07,
+      "postCasePeakRssBytes": 133087232
     },
     {
       "id": "tree-match-10k",
-      "rawSampleDigest": "02bd12002acf6e7e4535dd3ab038724bc864138b2d2c9c875c2d332b5ebedf5b",
+      "rawSampleDigest": "66309501adfdea07ab2b712604d9e11a75bf88af7253dd45353068335a6f58b0",
       "samples": 5,
       "warmup": 1,
-      "p50Ms": 1.14,
-      "p95Ms": 1.32,
-      "maxMs": 1.32,
-      "postCasePeakRssBytes": 135266304
+      "p50Ms": 1.08,
+      "p95Ms": 1.16,
+      "maxMs": 1.16,
+      "postCasePeakRssBytes": 133693440
     },
     {
       "id": "content-root-64mib",
-      "rawSampleDigest": "4acd0f2c2cb03d3df05bbb61f9d52661083d8507bb48facd84e0443966b3d2d3",
+      "rawSampleDigest": "7adfdb0f4029e2587dc32bb7b0230f82a6a381584c5e642b9f46174478e1cb8b",
       "samples": 3,
       "warmup": 1,
-      "p50Ms": 51.99,
-      "p95Ms": 53.59,
-      "maxMs": 53.59,
-      "postCasePeakRssBytes": 303349760
+      "p50Ms": 47.57,
+      "p95Ms": 49.4,
+      "maxMs": 49.4,
+      "postCasePeakRssBytes": 302170112
     },
     {
       "id": "draft-journal-2k",
-      "rawSampleDigest": "b826f3b372dd198edb96f480c2b10abec7d1e746e4605fa731649347634dc3dc",
+      "rawSampleDigest": "a4ea0ff99639aacc21a49dd4b63daac0967f8a5c9eb0166629519645cbdd1847",
       "samples": 5,
       "warmup": 1,
-      "p50Ms": 1.82,
-      "p95Ms": 2.08,
-      "maxMs": 2.08,
-      "postCasePeakRssBytes": 303349760
+      "p50Ms": 1.73,
+      "p95Ms": 1.84,
+      "maxMs": 1.84,
+      "postCasePeakRssBytes": 302170112
     },
     {
       "id": "validator-fanout-10k",
-      "rawSampleDigest": "63b66131b82226e6ff3f468ad91ec182b91bc53fdfbaad07b3dffaf6db60c0a1",
+      "rawSampleDigest": "8e7b4bc0f8dcd3f1f53f2c934a8cce20c2e78f869bd4c75946e5f4bb1aada926",
       "samples": 1,
       "warmup": 0,
-      "p50Ms": 9523.42,
-      "p95Ms": 9523.42,
-      "maxMs": 9523.42,
-      "postCasePeakRssBytes": 303464448
+      "p50Ms": 9341.77,
+      "p95Ms": 9341.77,
+      "maxMs": 9341.77,
+      "postCasePeakRssBytes": 303333376
     },
     {
       "id": "owner-outline-cold",
-      "rawSampleDigest": "b42cfeea1e9028e5346e225b6560a2b3f73004961e0b1d1f1c52e488693e1775",
+      "rawSampleDigest": "976926cb7a8936b6e144c9e02e07a373403d737a0e96cdde1d2211a03d2f198e",
       "samples": 1,
       "warmup": 0,
-      "p50Ms": 131.05,
-      "p95Ms": 131.05,
-      "maxMs": 131.05,
-      "postCasePeakRssBytes": 303464448
+      "p50Ms": 132.47,
+      "p95Ms": 132.47,
+      "maxMs": 132.47,
+      "postCasePeakRssBytes": 303333376
     },
     {
       "id": "owner-outline-hot",
-      "rawSampleDigest": "1b989ddaf8d288d887de50f250a47237186d386f2138d444615b80c980d776ba",
+      "rawSampleDigest": "c4449a0d688495e54c5a7ad8dfb6df60b7f1a6d4abdc85c0c33b513f0ce988a0",
       "samples": 5,
       "warmup": 1,
-      "p50Ms": 120.26,
-      "p95Ms": 121.33,
-      "maxMs": 121.33,
-      "postCasePeakRssBytes": 303464448
+      "p50Ms": 120.71,
+      "p95Ms": 121.25,
+      "maxMs": 121.25,
+      "postCasePeakRssBytes": 303333376
     },
     {
       "id": "authorized-projection-500-issues",
-      "rawSampleDigest": "82ef4e3511144d5ad590d9069c43973e84ad6a688842cee87026f23d5fd3578e",
+      "rawSampleDigest": "b6f770662fab1140eee64984524ff0f4d582535707291629da612285f6202048",
       "samples": 10,
       "warmup": 3,
-      "p50Ms": 0.28,
-      "p95Ms": 0.44,
-      "maxMs": 0.44,
-      "postCasePeakRssBytes": 303464448
+      "p50Ms": 0.29,
+      "p95Ms": 0.67,
+      "maxMs": 0.67,
+      "postCasePeakRssBytes": 303333376
     },
     {
       "id": "seal-assembler-custody",
-      "rawSampleDigest": "d71971690dc7f301191fc9efe9039513a1a6935da4dfab134924c90e900ed1de",
+      "rawSampleDigest": "0de57f823fc7c2d9af6adde5597ffa1a4161d196ac40c220f027bff87b2961a7",
       "samples": 1,
       "warmup": 0,
-      "p50Ms": 292.46,
-      "p95Ms": 292.46,
-      "maxMs": 292.46,
-      "postCasePeakRssBytes": 495157248
+      "p50Ms": 286.85,
+      "p95Ms": 286.85,
+      "maxMs": 286.85,
+      "postCasePeakRssBytes": 495845376
     },
     {
       "id": "batch-recovery",
-      "rawSampleDigest": "3b9e501a906dbfa70cec6305d100f7c77d5d1426a1dfd1247c48eca626b8705d",
+      "rawSampleDigest": "32ddca89fd0d73179b26b67e654301c2d40d7f0ab1d9071cb4ff18455222a96b",
       "samples": 1,
       "warmup": 0,
-      "p50Ms": 791.35,
-      "p95Ms": 791.35,
-      "maxMs": 791.35,
-      "postCasePeakRssBytes": 495157248
+      "p50Ms": 824.41,
+      "p95Ms": 824.41,
+      "maxMs": 824.41,
+      "postCasePeakRssBytes": 495845376
     },
     {
       "id": "indexed-slot-read",
-      "rawSampleDigest": "1d9176acd88fec9657310b79e2fdb4cd2c577f140f0410fdc9f1f208d98e10cb",
+      "rawSampleDigest": "7f88e4c2585414cec33c00738a80699dd9d69f2af254a7f9ad808b4a5f3a8a67",
       "samples": 10,
       "warmup": 3,
-      "p50Ms": 0.75,
-      "p95Ms": 1.17,
-      "maxMs": 1.17,
-      "postCasePeakRssBytes": 495157248
+      "p50Ms": 0.64,
+      "p95Ms": 0.98,
+      "maxMs": 0.98,
+      "postCasePeakRssBytes": 495845376
     }
   ],
   "candidatePercentage": 25,
@@ -204,138 +204,138 @@
           "description": "compile a representative object schema 200x",
           "warmup": 1,
           "samples": 8,
-          "p50Ms": 1.51,
-          "p95Ms": 2.62,
-          "maxMs": 2.62,
-          "sampleDigest": "f37f48e958073931334e89e5205700768b3cc8536d52998274896c8fb3747b4f",
-          "postCasePeakRssBytes": 178388992
+          "p50Ms": 1.14,
+          "p95Ms": 2.96,
+          "maxMs": 2.96,
+          "sampleDigest": "60022adafa7638bd17887cca574f028c33c7e2c8f1ec109e80f70035b423596b",
+          "postCasePeakRssBytes": 196886528
         },
         {
           "id": "grammar-compile",
           "description": "compile the 10k-tree layout grammar 20x",
           "warmup": 1,
           "samples": 8,
-          "p50Ms": 0.22,
-          "p95Ms": 0.23,
-          "maxMs": 0.23,
-          "sampleDigest": "7c8b80966564892bb9535884d595ddc70457c655e00f77075f64b828214e9c0f",
-          "postCasePeakRssBytes": 178487296
+          "p50Ms": 0.21,
+          "p95Ms": 0.27,
+          "maxMs": 0.27,
+          "sampleDigest": "a5c9b01f8169e0a4dae4bbec231822885d3e5f68b483b35876c0eb217267ba53",
+          "postCasePeakRssBytes": 198180864
         },
         {
           "id": "tree-match-10k",
           "description": "match an 11k-node tree (1000 sections x 10 bodies) + 11k indexed slot reads",
           "warmup": 1,
           "samples": 5,
-          "p50Ms": 0.95,
-          "p95Ms": 1.83,
-          "maxMs": 1.83,
-          "sampleDigest": "60dcb38b7990551d176f29f7adc83d2ac73cac09d277161cafb4b058c1f023c6",
-          "postCasePeakRssBytes": 178520064
+          "p50Ms": 1.09,
+          "p95Ms": 2.31,
+          "maxMs": 2.31,
+          "sampleDigest": "575594a3a3b0a4e50be08f82f43667a16eddf0f7ef1ed08a9042105d30a5107f",
+          "postCasePeakRssBytes": 200294400
         },
         {
           "id": "content-root-64mib",
           "description": "write (canonical + sha256) and read back a 64 MiB content root",
           "warmup": 1,
           "samples": 3,
-          "p50Ms": 192.91,
-          "p95Ms": 208.32,
-          "maxMs": 208.32,
-          "sampleDigest": "99302cb75f78e59588e275c013455bb0d264548bed6d96c4472d6fb47d27a8ee",
-          "postCasePeakRssBytes": 716505088
+          "p50Ms": 190.7,
+          "p95Ms": 199.85,
+          "maxMs": 199.85,
+          "sampleDigest": "3d9d85dc2e86ee14ba5a3321dc1d28c5b5bb9965ea877841c10f2e46760be126",
+          "postCasePeakRssBytes": 733872128
         },
         {
           "id": "draft-journal-2k",
           "description": "write + hash a 2k-change Draft overlay and index-read all 2k entries",
           "warmup": 1,
           "samples": 5,
-          "p50Ms": 2.02,
-          "p95Ms": 2.04,
-          "maxMs": 2.04,
-          "sampleDigest": "8ef710f86b9bdbe2a264ba0f520f77eb2ae816be18d37551bc7fae7d5501cbe6",
-          "postCasePeakRssBytes": 716505088
+          "p50Ms": 1.89,
+          "p95Ms": 2.3,
+          "maxMs": 2.3,
+          "sampleDigest": "2d0f1240379a2e8262bd2014c3d64d5a088009c78fdca03f007def0eca275ec1",
+          "postCasePeakRssBytes": 733872128
         },
         {
           "id": "validator-fanout-10k",
           "description": "one seal Gate fanning out to 10k validator invocations (Task 8 engine)",
           "warmup": 0,
           "samples": 1,
-          "p50Ms": 9324.63,
-          "p95Ms": 9324.63,
-          "maxMs": 9324.63,
-          "sampleDigest": "1a5f8451023a7c35740029db521d26e9d08503f504fff391b550a9fb5de3f87e",
-          "postCasePeakRssBytes": 716505088
+          "p50Ms": 9488.69,
+          "p95Ms": 9488.69,
+          "maxMs": 9488.69,
+          "sampleDigest": "b61951bd996ff8c970391861d3085dbdddfea897b6eefb019c0aaaa7e3de2cff",
+          "postCasePeakRssBytes": 733872128
         },
         {
           "id": "owner-outline-cold",
           "description": "owner outline cold (first listSlots) @ 100% (diagnostic, no bound)",
           "warmup": 0,
           "samples": 1,
-          "p50Ms": 496,
-          "p95Ms": 496,
-          "maxMs": 496,
-          "sampleDigest": "59678b71a21ce7cfd6b32d9ae5b255a56194ba2814046ec04597943e87132c5f",
-          "postCasePeakRssBytes": 716505088
+          "p50Ms": 460.97,
+          "p95Ms": 460.97,
+          "maxMs": 460.97,
+          "sampleDigest": "09dde5e4410495d93a3970973bb8ea212ed2227b7de471ab5e695fbc0f39478e",
+          "postCasePeakRssBytes": 733872128
         },
         {
           "id": "owner-outline-hot",
           "description": "owner outline hot (warm listSlots) @ 100% (diagnostic, no bound)",
           "warmup": 1,
           "samples": 5,
-          "p50Ms": 484.91,
-          "p95Ms": 536.23,
-          "maxMs": 536.23,
-          "sampleDigest": "893e54c4d3e6ed3eefe0e9a0350548138f1a9b0cbea94414b403d085322fdfe0",
-          "postCasePeakRssBytes": 716505088
+          "p50Ms": 484.09,
+          "p95Ms": 486.45,
+          "maxMs": 486.45,
+          "sampleDigest": "52007c0d2ec99625d16bdddc983d30a440ab5e5d89649c74549bd2d1a861a34a",
+          "postCasePeakRssBytes": 733872128
         },
         {
           "id": "authorized-projection-500-issues",
           "description": "500-issue PURE authorized verdict projection (Task 10 F06) @ 100%",
           "warmup": 3,
           "samples": 10,
-          "p50Ms": 0.28,
-          "p95Ms": 0.6,
-          "maxMs": 0.6,
-          "sampleDigest": "6ed1e1776be259a53cd1aeb61d123836e6234e6bf459e15539532a01c255c002",
-          "postCasePeakRssBytes": 716505088
+          "p50Ms": 0.32,
+          "p95Ms": 0.64,
+          "maxMs": 0.64,
+          "sampleDigest": "0baedd3f8dc0a6fe8c1daaa6dad6a6e852a9b55e63cf3020960cf804fafbca7e",
+          "postCasePeakRssBytes": 733872128
         },
         {
           "id": "seal-assembler-custody",
           "description": "64 MiB real Seal/Assembler/custody (Task 16) @ 100%",
           "warmup": 0,
           "samples": 1,
-          "p50Ms": 1402.28,
-          "p95Ms": 1402.28,
-          "maxMs": 1402.28,
-          "sampleDigest": "335e6ad6017b9b9f0a37b527526dec62439bba03d6e17f02715d5d2e825f2216",
-          "postCasePeakRssBytes": 869728256
+          "p50Ms": 1271.93,
+          "p95Ms": 1271.93,
+          "maxMs": 1271.93,
+          "sampleDigest": "2700102f8f896c5e530647bd8bca80255fa9b21e5a190551cf41955063ee5bd9",
+          "postCasePeakRssBytes": 939474944
         },
         {
           "id": "batch-recovery",
           "description": "batch recovery (Task 16) @ 100%",
           "warmup": 0,
           "samples": 1,
-          "p50Ms": 777.67,
-          "p95Ms": 777.67,
-          "maxMs": 777.67,
-          "sampleDigest": "2c99b09dea8d822f529cdfd107d622d956b83f368e9f570e1ae6d9e5a4c2860a",
-          "postCasePeakRssBytes": 869728256
+          "p50Ms": 828.42,
+          "p95Ms": 828.42,
+          "maxMs": 828.42,
+          "sampleDigest": "244dfc82114da83ec24a6e062ff6c36105421af08c4e46572f3e0c889ce66cb7",
+          "postCasePeakRssBytes": 939474944
         },
         {
           "id": "indexed-slot-read",
           "description": "indexed slot read (real projection) @ 100%",
           "warmup": 3,
           "samples": 10,
-          "p50Ms": 1.95,
-          "p95Ms": 3.08,
-          "maxMs": 3.08,
-          "sampleDigest": "cb512cf72e7794ba95107297931dde24564c583e372be0d79059100a7cfa1e84",
-          "postCasePeakRssBytes": 869728256
+          "p50Ms": 2.05,
+          "p95Ms": 2.55,
+          "maxMs": 2.55,
+          "sampleDigest": "55789b8889eef0bef16eb10cca4d82fbd3a91752b9eb33818ae5d6f9bfcf4e91",
+          "postCasePeakRssBytes": 939474944
         }
       ],
-      "peakRssBytes": 944472064,
+      "peakRssBytes": 1014202368,
       "diskBytes": 71365764,
       "violations": [
-        "peak RSS 944472064 > 536870912"
+        "peak RSS 1014202368 > 536870912"
       ],
       "passed": false
     },
@@ -347,138 +347,138 @@
           "description": "compile a representative object schema 200x",
           "warmup": 1,
           "samples": 8,
-          "p50Ms": 0.93,
-          "p95Ms": 3.73,
-          "maxMs": 3.73,
-          "sampleDigest": "ec4a188aad7209a7771dd65e22676a72e33015c5561bce0dec04641348c7c3d0",
-          "postCasePeakRssBytes": 179126272
+          "p50Ms": 1.7,
+          "p95Ms": 4.34,
+          "maxMs": 4.34,
+          "sampleDigest": "6f4bbe5a14ae3053a83216a6737eecade06282a23020831ceaa6d5ccc5aea7b3",
+          "postCasePeakRssBytes": 177618944
         },
         {
           "id": "grammar-compile",
           "description": "compile the 10k-tree layout grammar 20x",
           "warmup": 1,
           "samples": 8,
-          "p50Ms": 0.21,
-          "p95Ms": 0.23,
-          "maxMs": 0.23,
-          "sampleDigest": "5bb32b9b333d72d05cd23958ea22405d7152f829b6a744df7e5554d8a5989590",
-          "postCasePeakRssBytes": 179208192
+          "p50Ms": 0.22,
+          "p95Ms": 0.24,
+          "maxMs": 0.24,
+          "sampleDigest": "bf6be5473956e516cccb140e919fd31c11b4a1610c47702d0848841cf21b2ed6",
+          "postCasePeakRssBytes": 177717248
         },
         {
           "id": "tree-match-10k",
           "description": "match an 11k-node tree (1000 sections x 10 bodies) + 11k indexed slot reads",
           "warmup": 1,
           "samples": 5,
-          "p50Ms": 0.71,
-          "p95Ms": 1.59,
-          "maxMs": 1.59,
-          "sampleDigest": "7ac300c7a0ea69cf532afc3e564153fe688cdd4c9e64e0e8aa032d8e6cf6cf61",
-          "postCasePeakRssBytes": 181092352
+          "p50Ms": 1.14,
+          "p95Ms": 1.55,
+          "maxMs": 1.55,
+          "sampleDigest": "5ecdbc40df5ac7d8a9c7c28bd91b5cd926322717f6a4c412f95bcdb9e824d0c7",
+          "postCasePeakRssBytes": 178946048
         },
         {
           "id": "content-root-64mib",
           "description": "write (canonical + sha256) and read back a 48 MiB content root",
           "warmup": 1,
           "samples": 3,
-          "p50Ms": 145.53,
-          "p95Ms": 147.26,
-          "maxMs": 147.26,
-          "sampleDigest": "8fc5efd6cd4bd6def67a79e99960c6d13b173c81a3ea3d2b134fd0ec730aebf5",
-          "postCasePeakRssBytes": 583696384
+          "p50Ms": 139.21,
+          "p95Ms": 146.88,
+          "maxMs": 146.88,
+          "sampleDigest": "9c25447f2d4193d003ac3a8bc33df2dfb5a7f436d2bceea085a2d964061c6f81",
+          "postCasePeakRssBytes": 581517312
         },
         {
           "id": "draft-journal-2k",
           "description": "write + hash a 2k-change Draft overlay and index-read all 2k entries",
           "warmup": 1,
           "samples": 5,
-          "p50Ms": 1.58,
-          "p95Ms": 1.89,
-          "maxMs": 1.89,
-          "sampleDigest": "23979211a854f8b177aa59f234f48fce6154eec6efa43cd7b2fe42fb912f1b47",
-          "postCasePeakRssBytes": 583696384
+          "p50Ms": 1.71,
+          "p95Ms": 1.75,
+          "maxMs": 1.75,
+          "sampleDigest": "c43dbe5550f108811891cc1157703c36a69c5f76be35a7de22351ed695eaa281",
+          "postCasePeakRssBytes": 581517312
         },
         {
           "id": "validator-fanout-10k",
           "description": "one seal Gate fanning out to 10k validator invocations (Task 8 engine)",
           "warmup": 0,
           "samples": 1,
-          "p50Ms": 9375.31,
-          "p95Ms": 9375.31,
-          "maxMs": 9375.31,
-          "sampleDigest": "b25738f0619141d9041b24a46119786fed21ed70b0f2cb51eb02e06cc3a04b25",
-          "postCasePeakRssBytes": 583696384
+          "p50Ms": 9450.79,
+          "p95Ms": 9450.79,
+          "maxMs": 9450.79,
+          "sampleDigest": "c1332bb04b2d665ebd672cb038fe1bb16da529191e77534882e1f53b0e2dec1b",
+          "postCasePeakRssBytes": 581517312
         },
         {
           "id": "owner-outline-cold",
           "description": "owner outline cold (first listSlots) @ 75% (diagnostic, no bound)",
           "warmup": 0,
           "samples": 1,
-          "p50Ms": 382.32,
-          "p95Ms": 382.32,
-          "maxMs": 382.32,
-          "sampleDigest": "b431275d0c4f57c8753c38753fe3e24ec0f901d8885d629581023a3fd0f5a3b0",
-          "postCasePeakRssBytes": 583696384
+          "p50Ms": 379.64,
+          "p95Ms": 379.64,
+          "maxMs": 379.64,
+          "sampleDigest": "78a58cc6fc13776bd39a932e4d3129a6f2138a3a7e405bf3c0e31349564ebab2",
+          "postCasePeakRssBytes": 581517312
         },
         {
           "id": "owner-outline-hot",
           "description": "owner outline hot (warm listSlots) @ 75% (diagnostic, no bound)",
           "warmup": 1,
           "samples": 5,
-          "p50Ms": 357.13,
-          "p95Ms": 361.6,
-          "maxMs": 361.6,
-          "sampleDigest": "6e0f521af3c20bc715505434352d4404ef83762f6cd8ffdb4c22a50185fd4b7e",
-          "postCasePeakRssBytes": 583696384
+          "p50Ms": 362.81,
+          "p95Ms": 363.93,
+          "maxMs": 363.93,
+          "sampleDigest": "0e6b2ccdb2be4622804e6391bb7da3d2a9986c556dc84a43bf231beb9e16abf0",
+          "postCasePeakRssBytes": 581517312
         },
         {
           "id": "authorized-projection-500-issues",
           "description": "500-issue PURE authorized verdict projection (Task 10 F06) @ 75%",
           "warmup": 3,
           "samples": 10,
-          "p50Ms": 0.28,
-          "p95Ms": 0.92,
-          "maxMs": 0.92,
-          "sampleDigest": "5cb27347732bc8bccdf2dceeea1660696a56142fa142b72cce9c122dde838b0f",
-          "postCasePeakRssBytes": 583696384
+          "p50Ms": 0.27,
+          "p95Ms": 0.61,
+          "maxMs": 0.61,
+          "sampleDigest": "15ad1a86aad7c783793a992f03b17a7dec11e0a78f3f5ce0f91a1052b8eac97d",
+          "postCasePeakRssBytes": 581517312
         },
         {
           "id": "seal-assembler-custody",
           "description": "48 MiB real Seal/Assembler/custody (Task 16) @ 75%",
           "warmup": 0,
           "samples": 1,
-          "p50Ms": 873.09,
-          "p95Ms": 873.09,
-          "maxMs": 873.09,
-          "sampleDigest": "c5c10dd5ca66a241948d87edf41535723359e5d08303cc5b4ee935ed8b6b0a47",
-          "postCasePeakRssBytes": 737034240
+          "p50Ms": 831.46,
+          "p95Ms": 831.46,
+          "maxMs": 831.46,
+          "sampleDigest": "ad3ef0238d065e40473caad69dc68d2bc777b1e0c90b445b0c1f6feec45f5b52",
+          "postCasePeakRssBytes": 785121280
         },
         {
           "id": "batch-recovery",
           "description": "batch recovery (Task 16) @ 75%",
           "warmup": 0,
           "samples": 1,
-          "p50Ms": 806.33,
-          "p95Ms": 806.33,
-          "maxMs": 806.33,
-          "sampleDigest": "40fefc5632b568a48e3124ce03704025176119094488ae2c6fa7af737697dcad",
-          "postCasePeakRssBytes": 737787904
+          "p50Ms": 793.23,
+          "p95Ms": 793.23,
+          "maxMs": 793.23,
+          "sampleDigest": "703fc120def2e35a729137f59c421dba949ae6d6ac8a8c17396e6415a5d5be58",
+          "postCasePeakRssBytes": 785809408
         },
         {
           "id": "indexed-slot-read",
           "description": "indexed slot read (real projection) @ 75%",
           "warmup": 3,
           "samples": 10,
-          "p50Ms": 1.53,
-          "p95Ms": 1.92,
-          "maxMs": 1.92,
-          "sampleDigest": "cad9605f48d59030468be101c8137c786fb7595cd6f6e615d4b85e54c6b993d5",
-          "postCasePeakRssBytes": 758218752
+          "p50Ms": 1.51,
+          "p95Ms": 2.26,
+          "maxMs": 2.26,
+          "sampleDigest": "19678186886aa299bdd1cc7158cc07b8e70a371d36b6ac3d2e943d83d81e9bb9",
+          "postCasePeakRssBytes": 806731776
         }
       ],
-      "peakRssBytes": 1121697792,
+      "peakRssBytes": 1199144960,
       "diskBytes": 53530746,
       "violations": [
-        "peak RSS 1121697792 > 536870912"
+        "peak RSS 1199144960 > 536870912"
       ],
       "passed": false
     },
@@ -490,138 +490,138 @@
           "description": "compile a representative object schema 200x",
           "warmup": 1,
           "samples": 8,
-          "p50Ms": 1.77,
-          "p95Ms": 3.92,
-          "maxMs": 3.92,
-          "sampleDigest": "da8bfd196c003934e37f2f57ea58d41697ff58e442f7ae77481d6d3e6f679bbb",
-          "postCasePeakRssBytes": 161480704
+          "p50Ms": 1.8,
+          "p95Ms": 2.5,
+          "maxMs": 2.5,
+          "sampleDigest": "89df1d3b35d047d436f444000fa86c0d074d2f6ca179f66759ee31c9b7640930",
+          "postCasePeakRssBytes": 159940608
         },
         {
           "id": "grammar-compile",
           "description": "compile the 10k-tree layout grammar 20x",
           "warmup": 1,
           "samples": 8,
-          "p50Ms": 0.23,
-          "p95Ms": 0.25,
-          "maxMs": 0.25,
-          "sampleDigest": "276ffb50780aa04cc14106383bf4ff417d30ab16af5ca5dcc150db6aa99dcbe0",
-          "postCasePeakRssBytes": 161595392
+          "p50Ms": 0.22,
+          "p95Ms": 0.32,
+          "maxMs": 0.32,
+          "sampleDigest": "fdaca803174ef1469f48e45d4ea8984b023e4df347c176e9790a7a098d1b6568",
+          "postCasePeakRssBytes": 160038912
         },
         {
           "id": "tree-match-10k",
           "description": "match an 11k-node tree (1000 sections x 10 bodies) + 11k indexed slot reads",
           "warmup": 1,
           "samples": 5,
-          "p50Ms": 1.09,
-          "p95Ms": 1.26,
-          "maxMs": 1.26,
-          "sampleDigest": "1e7f26360712bcca6c41ee8b41042c616d8511d4c0a659458fc1e0b5cdafe3d2",
-          "postCasePeakRssBytes": 161644544
+          "p50Ms": 1.14,
+          "p95Ms": 1.22,
+          "maxMs": 1.22,
+          "sampleDigest": "70980faecf40b03809aff9e7df4f1c6973492bc95ae3b45c1d8eae5f96e758fa",
+          "postCasePeakRssBytes": 160088064
         },
         {
           "id": "content-root-64mib",
           "description": "write (canonical + sha256) and read back a 32 MiB content root",
           "warmup": 1,
           "samples": 3,
-          "p50Ms": 102.58,
-          "p95Ms": 104.54,
-          "maxMs": 104.54,
-          "sampleDigest": "26dfb088f33a8fe83134f8b047106bd7033be42d5be14220de3089941b40a6d0",
-          "postCasePeakRssBytes": 564625408
+          "p50Ms": 104.67,
+          "p95Ms": 104.69,
+          "maxMs": 104.69,
+          "sampleDigest": "025344e217c00eb54b5d8b30712ec30c77b330d344c82e09b59026795d4b8742",
+          "postCasePeakRssBytes": 495599616
         },
         {
           "id": "draft-journal-2k",
           "description": "write + hash a 2k-change Draft overlay and index-read all 2k entries",
           "warmup": 1,
           "samples": 5,
-          "p50Ms": 1.71,
-          "p95Ms": 2.38,
-          "maxMs": 2.38,
-          "sampleDigest": "272c424aaf709ea9e6fa545d10c6fa8a0183b8321255c08b0a768865322993f3",
-          "postCasePeakRssBytes": 564625408
+          "p50Ms": 1.65,
+          "p95Ms": 1.89,
+          "maxMs": 1.89,
+          "sampleDigest": "8acd8aeba69acc92336330b7d5ea692c7d66c51443ddb9645068dbc50683744b",
+          "postCasePeakRssBytes": 495599616
         },
         {
           "id": "validator-fanout-10k",
           "description": "one seal Gate fanning out to 10k validator invocations (Task 8 engine)",
           "warmup": 0,
           "samples": 1,
-          "p50Ms": 9346.14,
-          "p95Ms": 9346.14,
-          "maxMs": 9346.14,
-          "sampleDigest": "5e6872fea0538620a3e7611ae3bf2ec3e37c00f1465c2410224d14b3d595ce20",
-          "postCasePeakRssBytes": 564625408
+          "p50Ms": 9660.92,
+          "p95Ms": 9660.92,
+          "maxMs": 9660.92,
+          "sampleDigest": "bfeb08e9118759a2eee15979218145e3369c0ee6302e76e52a58d223c827a798",
+          "postCasePeakRssBytes": 495599616
         },
         {
           "id": "owner-outline-cold",
           "description": "owner outline cold (first listSlots) @ 50% (diagnostic, no bound)",
           "warmup": 0,
           "samples": 1,
-          "p50Ms": 258.52,
-          "p95Ms": 258.52,
-          "maxMs": 258.52,
-          "sampleDigest": "afd14443abfb3e91cd25dd2cb92be59f0e593c04ac65b376f7de3fb273569673",
-          "postCasePeakRssBytes": 564625408
+          "p50Ms": 262.08,
+          "p95Ms": 262.08,
+          "maxMs": 262.08,
+          "sampleDigest": "018b2b965a3707f9483ede80b71c7b52acc9c5676e0ee0ea2d359435e0238f3a",
+          "postCasePeakRssBytes": 495599616
         },
         {
           "id": "owner-outline-hot",
           "description": "owner outline hot (warm listSlots) @ 50% (diagnostic, no bound)",
           "warmup": 1,
           "samples": 5,
-          "p50Ms": 241.86,
-          "p95Ms": 245.85,
-          "maxMs": 245.85,
-          "sampleDigest": "0ef09efd5c19d7315daf9b3f848a4cf7c66085c64f67b7f26acda6da5081232a",
-          "postCasePeakRssBytes": 564625408
+          "p50Ms": 240.79,
+          "p95Ms": 242.11,
+          "maxMs": 242.11,
+          "sampleDigest": "38d6a29a57b1355bc1e3f1a95678b09048d106a1eace65fcf4a23f3f64f55deb",
+          "postCasePeakRssBytes": 495599616
         },
         {
           "id": "authorized-projection-500-issues",
           "description": "500-issue PURE authorized verdict projection (Task 10 F06) @ 50%",
           "warmup": 3,
           "samples": 10,
-          "p50Ms": 0.3,
-          "p95Ms": 0.43,
-          "maxMs": 0.43,
-          "sampleDigest": "b4a3accc1aac84678e2151dd30b6692fc928da36e696a881dc9c6898a45a3257",
-          "postCasePeakRssBytes": 564625408
+          "p50Ms": 0.28,
+          "p95Ms": 0.44,
+          "maxMs": 0.44,
+          "sampleDigest": "a025e0f07cf29c75eb42cfac5e07ab747d2211b8cf313cc82e19546eec0d9de3",
+          "postCasePeakRssBytes": 495599616
         },
         {
           "id": "seal-assembler-custody",
           "description": "32 MiB real Seal/Assembler/custody (Task 16) @ 50%",
           "warmup": 0,
           "samples": 1,
-          "p50Ms": 544.56,
-          "p95Ms": 544.56,
-          "maxMs": 544.56,
-          "sampleDigest": "0c414fe0e6b8feac2aec1a50738a3914e462b1b4888de484814417708b72b8a3",
-          "postCasePeakRssBytes": 564625408
+          "p50Ms": 551.31,
+          "p95Ms": 551.31,
+          "maxMs": 551.31,
+          "sampleDigest": "f9540656b09d7daaf1e7a976b627b9a6d718fc13320290c1761bed63439e6511",
+          "postCasePeakRssBytes": 734314496
         },
         {
           "id": "batch-recovery",
           "description": "batch recovery (Task 16) @ 50%",
           "warmup": 0,
           "samples": 1,
-          "p50Ms": 783.45,
-          "p95Ms": 783.45,
-          "maxMs": 783.45,
-          "sampleDigest": "f8b7a567fd43a036c3d29d8dbdd143141457cf0b81a4fac218e87fbc0d2d13b6",
-          "postCasePeakRssBytes": 564625408
+          "p50Ms": 794.07,
+          "p95Ms": 794.07,
+          "maxMs": 794.07,
+          "sampleDigest": "f3449fda014d6366021d27ed433a60c48b8f7bc3cef899dd8a9193dde500d955",
+          "postCasePeakRssBytes": 734314496
         },
         {
           "id": "indexed-slot-read",
           "description": "indexed slot read (real projection) @ 50%",
           "warmup": 3,
           "samples": 10,
-          "p50Ms": 1.07,
-          "p95Ms": 1.2,
-          "maxMs": 1.2,
-          "sampleDigest": "7da02ef762e2e3c572b85fb82dfd308f7cc1aafbf7ffdbd97a810873e83f4ffe",
-          "postCasePeakRssBytes": 564625408
+          "p50Ms": 1.13,
+          "p95Ms": 1.33,
+          "maxMs": 1.33,
+          "sampleDigest": "aaa92eca591138fa08229784a9a274150946f6980265247a18b79923c57f3d34",
+          "postCasePeakRssBytes": 734314496
         }
       ],
-      "peakRssBytes": 706707456,
+      "peakRssBytes": 771276800,
       "diskBytes": 35698246,
       "violations": [
-        "peak RSS 706707456 > 536870912"
+        "peak RSS 771276800 > 536870912"
       ],
       "passed": false
     },
@@ -633,135 +633,135 @@
           "description": "compile a representative object schema 200x",
           "warmup": 1,
           "samples": 8,
-          "p50Ms": 1.83,
-          "p95Ms": 5.64,
-          "maxMs": 5.64,
-          "sampleDigest": "a87397d510d747962fe779f6eb96d8e03089df4b00595b8f32f6e4b275c80735",
-          "postCasePeakRssBytes": 132595712
+          "p50Ms": 1.65,
+          "p95Ms": 6.15,
+          "maxMs": 6.15,
+          "sampleDigest": "297a19e884f9893df89e146c13226814769935107ac694fe107063b86573c855",
+          "postCasePeakRssBytes": 130760704
         },
         {
           "id": "grammar-compile",
           "description": "compile the 10k-tree layout grammar 20x",
           "warmup": 1,
           "samples": 8,
-          "p50Ms": 0.28,
-          "p95Ms": 1.06,
-          "maxMs": 1.06,
-          "sampleDigest": "c5c77138363246ac39428b7942c52a0d3bafc2c38c80848b2156bdfb2af5f520",
-          "postCasePeakRssBytes": 135200768
+          "p50Ms": 0.24,
+          "p95Ms": 1.07,
+          "maxMs": 1.07,
+          "sampleDigest": "669870925d2bd4b93c3d64aebfcca048faf330d9307f2c24ddcbff12e17282e5",
+          "postCasePeakRssBytes": 133087232
         },
         {
           "id": "tree-match-10k",
           "description": "match an 11k-node tree (1000 sections x 10 bodies) + 11k indexed slot reads",
           "warmup": 1,
           "samples": 5,
-          "p50Ms": 1.14,
-          "p95Ms": 1.32,
-          "maxMs": 1.32,
-          "sampleDigest": "02bd12002acf6e7e4535dd3ab038724bc864138b2d2c9c875c2d332b5ebedf5b",
-          "postCasePeakRssBytes": 135266304
+          "p50Ms": 1.08,
+          "p95Ms": 1.16,
+          "maxMs": 1.16,
+          "sampleDigest": "66309501adfdea07ab2b712604d9e11a75bf88af7253dd45353068335a6f58b0",
+          "postCasePeakRssBytes": 133693440
         },
         {
           "id": "content-root-64mib",
           "description": "write (canonical + sha256) and read back a 16 MiB content root",
           "warmup": 1,
           "samples": 3,
-          "p50Ms": 51.99,
-          "p95Ms": 53.59,
-          "maxMs": 53.59,
-          "sampleDigest": "4acd0f2c2cb03d3df05bbb61f9d52661083d8507bb48facd84e0443966b3d2d3",
-          "postCasePeakRssBytes": 303349760
+          "p50Ms": 47.57,
+          "p95Ms": 49.4,
+          "maxMs": 49.4,
+          "sampleDigest": "7adfdb0f4029e2587dc32bb7b0230f82a6a381584c5e642b9f46174478e1cb8b",
+          "postCasePeakRssBytes": 302170112
         },
         {
           "id": "draft-journal-2k",
           "description": "write + hash a 2k-change Draft overlay and index-read all 2k entries",
           "warmup": 1,
           "samples": 5,
-          "p50Ms": 1.82,
-          "p95Ms": 2.08,
-          "maxMs": 2.08,
-          "sampleDigest": "b826f3b372dd198edb96f480c2b10abec7d1e746e4605fa731649347634dc3dc",
-          "postCasePeakRssBytes": 303349760
+          "p50Ms": 1.73,
+          "p95Ms": 1.84,
+          "maxMs": 1.84,
+          "sampleDigest": "a4ea0ff99639aacc21a49dd4b63daac0967f8a5c9eb0166629519645cbdd1847",
+          "postCasePeakRssBytes": 302170112
         },
         {
           "id": "validator-fanout-10k",
           "description": "one seal Gate fanning out to 10k validator invocations (Task 8 engine)",
           "warmup": 0,
           "samples": 1,
-          "p50Ms": 9523.42,
-          "p95Ms": 9523.42,
-          "maxMs": 9523.42,
-          "sampleDigest": "63b66131b82226e6ff3f468ad91ec182b91bc53fdfbaad07b3dffaf6db60c0a1",
-          "postCasePeakRssBytes": 303464448
+          "p50Ms": 9341.77,
+          "p95Ms": 9341.77,
+          "maxMs": 9341.77,
+          "sampleDigest": "8e7b4bc0f8dcd3f1f53f2c934a8cce20c2e78f869bd4c75946e5f4bb1aada926",
+          "postCasePeakRssBytes": 303333376
         },
         {
           "id": "owner-outline-cold",
           "description": "owner outline cold (first listSlots) @ 25% (diagnostic, no bound)",
           "warmup": 0,
           "samples": 1,
-          "p50Ms": 131.05,
-          "p95Ms": 131.05,
-          "maxMs": 131.05,
-          "sampleDigest": "b42cfeea1e9028e5346e225b6560a2b3f73004961e0b1d1f1c52e488693e1775",
-          "postCasePeakRssBytes": 303464448
+          "p50Ms": 132.47,
+          "p95Ms": 132.47,
+          "maxMs": 132.47,
+          "sampleDigest": "976926cb7a8936b6e144c9e02e07a373403d737a0e96cdde1d2211a03d2f198e",
+          "postCasePeakRssBytes": 303333376
         },
         {
           "id": "owner-outline-hot",
           "description": "owner outline hot (warm listSlots) @ 25% (diagnostic, no bound)",
           "warmup": 1,
           "samples": 5,
-          "p50Ms": 120.26,
-          "p95Ms": 121.33,
-          "maxMs": 121.33,
-          "sampleDigest": "1b989ddaf8d288d887de50f250a47237186d386f2138d444615b80c980d776ba",
-          "postCasePeakRssBytes": 303464448
+          "p50Ms": 120.71,
+          "p95Ms": 121.25,
+          "maxMs": 121.25,
+          "sampleDigest": "c4449a0d688495e54c5a7ad8dfb6df60b7f1a6d4abdc85c0c33b513f0ce988a0",
+          "postCasePeakRssBytes": 303333376
         },
         {
           "id": "authorized-projection-500-issues",
           "description": "500-issue PURE authorized verdict projection (Task 10 F06) @ 25%",
           "warmup": 3,
           "samples": 10,
-          "p50Ms": 0.28,
-          "p95Ms": 0.44,
-          "maxMs": 0.44,
-          "sampleDigest": "82ef4e3511144d5ad590d9069c43973e84ad6a688842cee87026f23d5fd3578e",
-          "postCasePeakRssBytes": 303464448
+          "p50Ms": 0.29,
+          "p95Ms": 0.67,
+          "maxMs": 0.67,
+          "sampleDigest": "b6f770662fab1140eee64984524ff0f4d582535707291629da612285f6202048",
+          "postCasePeakRssBytes": 303333376
         },
         {
           "id": "seal-assembler-custody",
           "description": "16 MiB real Seal/Assembler/custody (Task 16) @ 25%",
           "warmup": 0,
           "samples": 1,
-          "p50Ms": 292.46,
-          "p95Ms": 292.46,
-          "maxMs": 292.46,
-          "sampleDigest": "d71971690dc7f301191fc9efe9039513a1a6935da4dfab134924c90e900ed1de",
-          "postCasePeakRssBytes": 495157248
+          "p50Ms": 286.85,
+          "p95Ms": 286.85,
+          "maxMs": 286.85,
+          "sampleDigest": "0de57f823fc7c2d9af6adde5597ffa1a4161d196ac40c220f027bff87b2961a7",
+          "postCasePeakRssBytes": 495845376
         },
         {
           "id": "batch-recovery",
           "description": "batch recovery (Task 16) @ 25%",
           "warmup": 0,
           "samples": 1,
-          "p50Ms": 791.35,
-          "p95Ms": 791.35,
-          "maxMs": 791.35,
-          "sampleDigest": "3b9e501a906dbfa70cec6305d100f7c77d5d1426a1dfd1247c48eca626b8705d",
-          "postCasePeakRssBytes": 495157248
+          "p50Ms": 824.41,
+          "p95Ms": 824.41,
+          "maxMs": 824.41,
+          "sampleDigest": "32ddca89fd0d73179b26b67e654301c2d40d7f0ab1d9071cb4ff18455222a96b",
+          "postCasePeakRssBytes": 495845376
         },
         {
           "id": "indexed-slot-read",
           "description": "indexed slot read (real projection) @ 25%",
           "warmup": 3,
           "samples": 10,
-          "p50Ms": 0.75,
-          "p95Ms": 1.17,
-          "maxMs": 1.17,
-          "sampleDigest": "1d9176acd88fec9657310b79e2fdb4cd2c577f140f0410fdc9f1f208d98e10cb",
-          "postCasePeakRssBytes": 495157248
+          "p50Ms": 0.64,
+          "p95Ms": 0.98,
+          "maxMs": 0.98,
+          "sampleDigest": "7f88e4c2585414cec33c00738a80699dd9d69f2af254a7f9ad808b4a5f3a8a67",
+          "postCasePeakRssBytes": 495845376
         }
       ],
-      "peakRssBytes": 513867776,
+      "peakRssBytes": 514523136,
       "diskBytes": 17865746,
       "violations": [],
       "passed": true

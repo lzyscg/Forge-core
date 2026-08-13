@@ -2,13 +2,13 @@
   "schemaVersion": 1,
   "gate": "verify:structured-slots",
   "mode": "qualify",
-  "checkpointCommit": "92715356ff69192dec16dd4fed8e3b068ce5c2e7",
-  "sourceTreeDigest": "511cf2de84e57f5bbb08f990c490ebbd903b0aeaeb10871a937c211010b2412e",
+  "checkpointCommit": "c1d205d5c6ecc83617ed920ae65719af307dfd18",
+  "sourceTreeDigest": "96566a871c1c9724a836828dca6964e22a31f006b356b9807205d0ffc2f224c7",
   "packageLockSha256": "4b3e0b43052fffaa169e2dc624e87f970d9f8d91d8b0061951f4e2208f3d8914",
   "profileEvidencePath": "docs/evidence/structured-slot-platform-profile-v1.json",
-  "profileEvidenceDigest": "f7a54fe4ec2520104c6852353ecc0a25da85e840af340bca33e86a64443802ce",
+  "profileEvidenceDigest": "a936453927684389dcaf9a70cb32fdf6955f42084ada4d0a2e8a17c09f211f96",
   "finalProfilePath": "src/server/structured-slots/platform-profile-v1.json",
-  "finalProfileDigest": "bba457992523b1b6c9e16e91ee9ae37b843bae0fd0971736408c5459f405cae3",
+  "finalProfileDigest": "ed76d189c040a8b7a16bb88ed37dd02ba7717abaa0ff99e8ea3bab571d72336e",
   "requiredAbis": [
     "forge-validator/v1",
     "forge-assembler/v1"
@@ -52,5 +52,5 @@
       "exitCode": 0
     }
   ],
-  "observedAt": "2026-08-12T04:38:05.561Z"
+  "observedAt": "2026-08-13T08:06:23.548Z"
 }
