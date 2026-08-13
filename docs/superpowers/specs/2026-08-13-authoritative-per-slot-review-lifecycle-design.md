@@ -1,6 +1,6 @@
 # 结构槽权威审核、返修与系统 Seal 生命周期设计
 
-> 状态：待统一评审
+> 状态：待新一轮独立复验（本次对抗审查 5/5 轮未获批准）
 >
 > 日期：2026-08-13
 >
@@ -9,6 +9,8 @@
 > 适用范围：ForgeCore 结构槽生产模式；首个迁移目标为 `zhihu-salt-chapter-draft`
 >
 > 修订：根据统一评审意见，增加生成前 Map 预审；关系网改为平台可选；提高槽位与审核批次容量边界
+>
+> 对抗审查说明：Round 5 的问题已吸收进本文，但因本次审查达到最大轮次后仍为 `VERDICT: REVISE`，不得据此宣称设计已收敛，也不得进入实施计划。
 
 ## 1. 最终设计结论
 
@@ -82,6 +84,8 @@ review_passed =
 | MapReviewRound | 内容生成前，对 Map 候选逐节点、逐已有关系及整图观察的审核轮次 |
 | ReviewRound | 针对一个冻结基线进行的完整审核轮次 |
 | ReviewAssignment | 一次 Agent 审核会话的目标集合，分为批次审核和整树观察 |
+| WorkItem | 系统拥有的持久化可执行工作单元；把轮次/返修/Seal 决策转成可认领、可恢复的 Agent 或系统命令 |
+| AssignmentDispatch | WorkItem 对一次具体 Agent attempt 的投递记录，绑定 assignment、attempt 和冻结基线 |
 | Finding | 审核发现的结构化问题及证据；由系统管理生命周期 |
 | RepairGrant | 系统签发的返修读写授权和基线约束 |
 | Seal Gate | 系统执行的最终确定性门禁与原子发布过程 |
@@ -99,6 +103,7 @@ review_passed =
 9. **失效优先于继承。** 只有所有绑定 digest 完全匹配时才能复用旧审核；无法证明未受影响时一律重新审核。
 10. **Seal 绑定审核事实。** SealRecord 必须包含当前 Map、内容根和 review bundle 的身份，防止审核后偷换内容。
 11. **生成前先审 Map。** 系统不得为尚未 `map_approved` 的候选签发 GenerationGrant。
+12. **系统调度必须落盘。** Coordinator 的下一步决定必须原子地产生持久化 WorkItem，不能只写状态、依赖 Agent Route 或依赖进程内队列。
 
 ## 6. 选定架构
 
@@ -138,6 +143,8 @@ flowchart TD
 
 初次 Map 没有旧内容时，`B2` 直接进入生成；返修 Map 已有内容时，`B2` 才进入影响计算。这样结构错误会在昂贵的正文生成前被拦住，返修 Map 也不会绕过同一预审门禁。
 
+图中的每一条“系统规划/签发/调度”边都由下文的 WorkItem Coordinator 落成持久化工作项，不直接沿用当前由 Agent completion Route 产生下一条 `agent_input` 的机制。模板仍声明允许哪些角色承担哪些工作，但运行时的具体下一步由系统结算决定；两者不会混为“Agent 选择 Route”。
+
 没有选择“扩展现有 Seal Agent”的原因是：这会继续混合语义判断、流程编排和最终状态权力。也没有把审核设计成独立模板/独立任务，因为首版需要与当前任务的 Map、内容版本、事件账本和原子发布保持同一监管边界。
 
 ## 7. 权威边界与职责矩阵
@@ -148,6 +155,7 @@ flowchart TD
 | 生成 Agent | 活动 Map、整树已提交内容、Findings、RepairGrant | 初次内容或 Grant 内的槽位内容；扩权请求 | 改 Map、写 Grant 外槽位、写审核结论、Seal |
 | 审核 Agent | Map 候选、活动 Map、整树已提交内容、审核规则、当前 assignment | 逐 Map 节点、逐槽、逐已有关系 verdict、Finding、公开证据 | 改 Map/内容、分派返修、批准整张 Map、关闭 Finding、写整树通过、Seal |
 | Review Coordinator | 所有系统记录、事件、digest、模板策略 | Map/内容轮次、批次、记录合法化、Map 激活资格、失效计算、Finding 状态、RepairGrant、路由 | 代替 Agent 判断结构/内容语义 |
+| WorkItem Coordinator | 轮次、Grant、系统结算、冻结角色绑定、WorkItem ledger | 原子创建/认领/完成/重试 WorkItem 与 AssignmentDispatch，并产生可执行 Agent 输入或系统命令 | 让 Agent 自选下一步、在未持久化内存队列中调度、越过冻结角色绑定 |
 | Seal Gate | 当前 Map、内容、review bundle、validators、assembler | SealRecord、制品发布事件 | 接受缺失/过期审核，调用模型做语义判断 |
 | Assembler | 已满足 Seal 前置条件的冻结快照 | 候选制品字节 | 读取未提交草稿、修改审核状态 |
 | Submitter | 已 Seal 的发布制品 | 提交/交付回执 | 读取或交付未 Seal 内容 |
@@ -277,6 +285,8 @@ StructuredSessionKindV2 = structure | review_map_batch | review_map_whole
 
 v2 contract validator 强制 generator 与 reviewer 对活动任务的已提交 Map/内容具有全树读取能力；reviewer 的写集合固定为空。任一写会话的实际权限都是 `模板静态上限 ∩ 当前 assignment ∩ 当前 grant`，三个集合没有交集的对象不可写。读取全树不包含未提交 draft、私有 Grant 或其他任务数据。
 
+v2 pipeline 把“角色许可图”和“运行调度图”拆开。模板角色声明仍用于证明哪些 Agent 可以承担 structure/fill/review/map_repair/content_repair/submitter，但这些声明不是运行时 completion Route；模板不能靠某个 Agent 的输出选择 review、repair 或 Seal 分支。加载器必须验证：每类可能由系统产生的 Agent WorkItem 都有且只有一个合法角色绑定，submitter 只接受系统已发布的 artifact WorkItem，系统内部 WorkItem 不要求伪造模板 Agent。
+
 v2 使用新的封闭 capability 集合，不向 v1 的十项枚举追加字段：
 
 | Session kind | 必需 capability | 允许的终结结果 |
@@ -290,7 +300,9 @@ v2 使用新的封闭 capability 集合，不向 v1 的十项枚举追加字段�
 | `map_repair` | Map/内容/Finding 读取、`write_map_patch`、`submit_map_patch`、`request_scope_expansion` | Map commit、scope request 或 incomplete |
 | `content_repair` | Map/内容/Finding 读取、`write_slot_content`、`submit_content_draft`、`request_scope_expansion` | content commit、scope request 或 incomplete |
 
-Agent 的终结结果只提交当前工作的候选事实。下一步不是 Agent Route 决定：Map candidate commit 后由系统调度 MapReviewRound；系统只有在该轮通过时才激活候选并调度 Fill/影响计算；内容 commit 后由系统规划内容 ReviewRound；review assignment complete 后由 Coordinator 决定下一个批次、整体观察或 settlement。模板若声明从 review 直接发往 generator、orchestrator、artifact 或 Submitter 的 Agent-controlled completion edge，加载时失败。
+Agent 的终结结果只提交当前工作的候选事实。下一步不是 Agent Route 决定：Map candidate commit 后由系统调度 MapReviewRound；系统只有在该轮通过时才激活候选并调度 Fill/影响计算；内容 commit 后由系统规划内容 ReviewRound；review assignment complete 后由 Coordinator 决定下一个批次、整体观察或 settlement。上述决定与对应 WorkItem 必须在同一原子提交中产生。模板若声明从 review 直接发往 generator、orchestrator、artifact 或 Submitter 的 Agent-controlled completion edge，加载时失败。
+
+这要求 v2 调度器增加一个明确的适配层：它先读取当前 `ready` WorkItem，用 CAS 将其认领为 `leased`，再为 Agent WorkItem 物化一条带 `workItemId + assignmentId + attemptId + baseDigest` 的确认 `agent_input`；系统 WorkItem 则调用封闭的内部 command handler。Agent 结果与 WorkItem `completed/failed` 同批提交。进程崩溃后通过 lease expiry 与 ledger 恢复，不以“是否还有旧 Route 生成的 agent_input”判断任务结束。v1 任务仍只走现有 Route 驱动调度器。
 
 v2 validators 使用独立触发点：
 
@@ -469,7 +481,45 @@ AND map_activation validators 通过
 
 MapReviewBundle 包含候选、可选的当前内容基线、采用或继承的节点/关系审核、整图观察和 Finding stage 终态，其 digest 写入活动 MapSnapshot。初次编排时 contentRootDigest 为 null；已有内容的 Map 返修预审把当前内容根用作审核期间的并发保护，防止 reviewer 审的是旧内容背景。该 contentRootDigest 只要求在 MapReviewRound 结算和激活原子事务时仍匹配；激活后的授权内容修改不会让 MapReviewBundle 本身 stale，内容连续性由后续 Content Review 重新判断。`completed` 仅表示覆盖完整，`settled` 才表示系统已选择“签发 Map RepairGrant”或“激活 Map”。审核 Agent 没有 `mapPassed` 字段。
 
-### 11.4 SlotContentVersion
+### 11.4 ReviewFact 与 ReviewAdoptionRecord
+
+跨候选/跨轮继承不能直接复用绑定旧 `candidateDigest/reviewRoundId` 的提交记录。v2 将其拆成两层不可变事实：
+
+```text
+ReviewFact
+  factId
+  targetKind: map_node | map_relation | content_slot | content_relation
+  targetStableId
+  verdict
+  factOrigin: batch | whole_observation
+  adoptionEligible: boolean
+  localSubjectDigest
+  localContextDigest
+  reviewPolicyDigest
+  findingIds[]
+  evidence[]
+  reviewerAttemptId
+  recordedAt
+
+ReviewAdoptionRecord
+  adoptionId
+  roundKind: map | content
+  roundId
+  candidateId: string | null
+  mapId: string | null
+  factId
+  targetStableId
+  expectedLocalSubjectDigest
+  expectedLocalContextDigest
+  reviewPolicyDigest
+  adoptedBy: system
+```
+
+MapNode/MapRelation/Slot/Relation review 提交记录是 ReviewFact 的领域视图；其中 `candidateId/mapId/roundId/assignmentId` 只记录事实产生来源，不是跨轮复用身份。当前 round 由 Agent 新提交的 ReviewFact 通过当前 AssignmentLedgerBlob 直接参加 Gate，不再为它生成 adoption。只有历史 ReviewFact 需要由系统生成 ReviewAdoptionRecord，逐项证明稳定目标、局部 subject/context 和 policy digest 与当前候选/活动 Map 完全一致。Gate 的覆盖来源是“当前 round committed AssignmentLedger facts ∪ 当前 round ReviewAdoptionRoot 闭包”，不直接读取旧 round record；旧 candidate digest 因此既不会错误阻断合法局部继承，也不能被忽略后重放到不相干候选。整体观察没有可复用的局部事实，仍必须每轮新建。
+
+其中只有 `factOrigin: batch && adoptionEligible: true` 的历史事实可进入后续 ReviewAdoptionLedger。whole observation 追加的 reject/violated 使用 `factOrigin: whole_observation, adoptionEligible: false`，这两个字段进入 fact identity/digest；Adoption validator 对任何 whole-observation fact 或 `adoptionEligible != true` 硬拒绝，不能仅凭局部 digest 恰好未变而继承。当前 round 的整体观察事实仍可直接参与本轮 Gate。
+
+### 11.5 SlotContentVersion
 
 ```text
 slotId
@@ -483,7 +533,7 @@ committedByAttemptId
 
 系统对内容做 schema 校验、规范化和 digest 计算。任务级内容根是所有当前 `slotId -> contentDigest` 的规范化 Merkle 根，用于整树基线身份。
 
-### 11.5 SlotReviewRecord
+### 11.6 SlotReviewRecord
 
 ```text
 recordId
@@ -517,7 +567,7 @@ recordedAt
 - `reject`：存在当前有效 reject 或审核 Agent 提交的当前 blocking Finding。
 - `stale`：存在历史结论，但任一绑定 digest 已变化。
 
-### 11.6 RelationReviewRecord
+### 11.7 RelationReviewRecord
 
 ```text
 recordId
@@ -537,7 +587,7 @@ reviewerAttemptId
 
 blocking 关系的 `violated` 必须产生 blocking Finding；advisory 关系可以产生 advisory Finding，不阻断 Seal。关系记录必须绑定系统计算的全部 `requiredEvidenceSlotIds`，并绑定 Agent 额外引用的所有证据槽位，而不只绑定两个端点。`mapId` 只保留提交时的完整 Map 来源；是否仍有效由关系自身、有限上下文和证据 digest 决定，因此无关 Map 变化不会让所有关系审核一起 stale。
 
-### 11.7 Finding
+### 11.8 Finding
 
 ```text
 findingId
@@ -592,7 +642,7 @@ system_validator 来源使用相同的 stage 进度，但“验证”由冻结 v
 
 若审核 Agent 无法在三类缺陷中可靠分类，本次 assignment 视为 `review_incomplete`，由系统重试或人工升级；不增加一个含义模糊的第四类 Finding。
 
-### 11.8 FindingVerificationRecord
+### 11.9 FindingVerificationRecord
 
 ```text
 recordId
@@ -624,7 +674,7 @@ Map stage 验证绑定 `candidateId`，content stage 验证绑定活动 `mapId`�
 
 system_validator 来源的 Finding 不交给审核 Agent 作语义验证：系统在新基线上重跑同一个冻结 validator，当前 stage 通过则生成 validator verification fact 并把该 stage 投影为 verified，仍失败则回到 open；只有所有 required stage 均 verified 才投影 `verified_closed`。这样确定性规则由系统闭环，语义问题由审核 Agent 闭环。
 
-### 11.9 ReviewRound
+### 11.10 ReviewRound
 
 ```text
 reviewRoundId
@@ -654,24 +704,43 @@ planned -> reviewing_batches -> whole_tree_observation -> completed -> settled
 
 `coverage*` 是当前整树 Gate 必须覆盖的全部目标；`assignment*` 只包含本轮需要 Agent 新判断的目标。二者之差必须由 `inheritedRecordRefs` 中仍有效的记录完整覆盖，系统不允许出现既未继承也未分配的目标。
 
-### 11.10 RepairGrant
+### 11.11 WriteGrantSpec 与 GrantInstance
+
+所有 Agent 写授权都拆成“工作级 scope”和“attempt 级实例”，消除 WorkItem 创建时还没有 attempt 的循环依赖：
 
 ```text
-grantId
-kind: content | map
-repairBase:
-  kind: active_map | rejected_candidate
-  digest: string
-contentRootDigest
-findingIds[]
-readScope: full_tree
-writeSlotIds[]       # content grant only
-mapWriteScope        # map grant only
-boundAttemptId
-grantDigest
+WriteGrantSpec
+  grantSpecId
+  workItemId
+  kind: initial_structure | initial_generation | map_repair | content_repair
+  snapshotHash
+  repairBase: active_map | rejected_candidate | null
+  mapDigest: string | null
+  contentRootDigest: string | null
+  findingIds[]
+  readScope
+  writeSlotIds[] | mapWriteScope | initialStructureScope
+  specDigest
+
+GrantInstance
+  grantInstanceId
+  grantSpecDigest
+  workItemId
+  leaseEpoch
+  boundAttemptId
+  agentId
+  instanceDigest
 ```
 
-Grant 是服务端签发、不可伪造的 capability token，并与一个具体 attempt 和修订基线绑定。content Grant 的 `repairBase` 必须是活动 Map；Map Grant 可以绑定活动 Map，也可以绑定刚被预审退回的不可变 candidate。基线变化、bound attempt 结束或新 Grant 签发后，旧 Grant 失效。
+创建 Agent 写 WorkItem 的原子批次同时创建不可变 WriteGrantSpec；WorkItem 保存 `grantSpecDigest`，不保存尚不存在的 attempt-bound instance。每次 Agent WorkItem lease envelope 在生成 attemptId 后，按同一 scope 原子签发 GrantInstance，并把 instanceDigest 放入 AssignmentDispatch。GrantInstance 是服务端签发、不可伪造的 capability token；工具使用同时校验 spec、workItem、leaseEpoch、attempt、agent、snapshot 和活动基线。lease reclaim/attempt 终结会废弃旧 instance，新 lease 依据同一 WriteGrantSpec 重签新 instance；scope 不因重签改变。
+
+四类 spec 的创建边界固定如下：
+
+- `initial_structure`：`task_started + initial structure WorkItem` 批次同时创建 `kind: initial_structure` 的 WriteGrantSpec，绑定 snapshot、WorkItem 和模板允许的初始 Map proposal 上限；不要求活动 Map。proposal/journal 仍绑定 lease/attempt，reclaim 后旧 proposal 不可提交。
+- `initial_generation`：MapReview settlement 激活首个 Map 时，与 generation WorkItem 同批创建，写集合为当前全部待生成内容槽位。
+- `map_repair` / `content_repair`：相应 review settlement 与 repair WorkItem 同批创建，scope 来自 Findings、影响闭包与模板上限。
+
+initial generation/content repair spec 的 `repairBase` 必须是活动 Map；Map repair spec 可以绑定活动 Map，也可以绑定刚被预审退回的不可变 candidate。基线变化、WorkItem superseded 或 spec 被新权威决策替代时，spec 及所有 instance stale。
 
 Map repair 的 `mapWriteScope` 包含可修改/删除的 `nodeIds`、可修改/删除的 `relationIds`、允许新增节点的父容器、允许新增的 relation type，以及可执行的操作类型。初始编排可以提交完整 Map；返修编排只提交作用域内 patch，系统在 `repairBase` 指向的活动 Map 或被退回候选上应用后生成新的完整候选并做全图验证。这样初始候选预审失败时即使还没有活动 Map，也有唯一、可审计的返修基线；后续候选修订还能保留前一次合法改动。任一越界操作使整个 patch 原子拒绝。编排 Agent 如需扩大 Map 修复范围，使用与内容扩权相同的“请求—系统校验—新 Grant”协议。
 
@@ -696,7 +765,7 @@ Map 预审发现的问题只能生成 `defectClass: map` Finding。系统结算�
 - `required`：上述任一绑定变化、处于 Map Finding 影响闭包，或系统无法证明未受影响，必须重新分配给 reviewer。
 - `verification`：当前 Map repair stage 已 committed 的 Finding，必须获得绑定新候选的验证记录。
 
-候选之间只能通过不可变 record ref 继承，不能复制 `pass`；每个新候选仍必须重跑分层整图观察。初始候选没有继承来源，因此全量预审。这样既避免小修导致全树重判，也不允许编排 Agent 借远端修改绕过审核。
+候选之间只能通过系统创建的 ReviewAdoptionRecord 采纳局部 ReviewFact，不能直接引用旧 candidate-bound record，也不能复制 `pass`；每个新候选仍必须重跑分层整图观察。初始候选没有继承来源，因此全量预审。这样既避免小修导致全树重判，也不允许编排 Agent 借远端修改绕过审核。
 
 ### 12.2 内容审核轮次
 
@@ -737,11 +806,22 @@ Map 预审发现的问题只能生成 `defectClass: map` Finding。系统结算�
 
 ### 12.4 增量持久化、整轮结算
 
-审核记录逐条原子持久化。Agent 或进程中断后，系统从未完成目标继续，不重复已经合法持久化的记录。
+审核工具调用先逐条幂等写入 attempt-scoped draft journal；assignment 完成时，系统把本 assignment 的 ReviewFacts、Finding drafts 和 evidence refs 冻结成单个 AssignmentLedgerBlob，并以一条轻量引用事件原子纳入权威账本。系统继承 adoption 使用独立的 ReviewAdoptionLedgerBlob，不归属于 Agent assignment。
+
+draft journal 明确采用 fail-closed 的“整 attempt 废弃”语义：它严格绑定 `workItemId + leaseEpoch + attemptId + baseDigests`，只允许同一活动 attempt 在工具响应丢失或尚未发生 reclaim 时按 clientOperationId 幂等继续。只要 lease 被 reclaim、attempt 被 crash/timeout terminalize，旧 journal 立即 abandoned，只保留审计；新 attempt 不得读取、采纳或续写其中的 verdict，必须重新完成整个 assignment。这里不承诺跨 attempt 免重复审核。“从未完成目标继续”仅指同一 lease/attempt 的可恢复工具会话；跨 lease 的安全优先于节省调用。
 
 批次末尾 Agent 提交 `complete_review_assignment`，这只是“我已提交完”的声明。系统检查当前阶段的节点/槽位/实际关系覆盖、digest 和 Finding 约束后，才把 assignment 标记完成。相应轮次的所有批次完成前不发返修 Grant，也不激活 Map。
 
-### 12.5 分层整图/整树观察
+### 12.5 防空转与长流程进度语义
+
+v1 当前按 `agent_result` 总数计数、并在 32 turn 处硬停的 progress guard 不适用于 v2 的已冻结大规模 ReviewRound；即使使用首个 256 目标安全档位，10,000 个目标也至少需要 40 个批次 turn。v2 必须采用两层互补门禁：
+
+- **计划预算**：Coordinator 在 round 创建时冻结 assignment 数量、层级 observation 数量和每类允许的 retry budget。执行这些已计划且每次提交了新覆盖事实的 WorkItem，不按原始 turn 总数判为空转。
+- **无语义进展预算**：只统计同一 WorkItem/round 上没有增加合法 coverage、没有推进 Finding stage、没有提交新 candidate/content digest 的重复 attempt；超过 profile 的连续无进展阈值才暂停并请求人工。
+
+每次 WorkItem 完成后系统记录单调 `progressCheckpoint`（coverage 计数、当前 observation level、Finding stage 计数及相应 digest）。retry 若 checkpoint 不前进则计入 no-progress；正常完成 417 个不同 assignment 不会触发空转。实际 WorkItem 数超过冻结计划、计划闭包无法覆盖 `maxSlots`、或 checkpoint 倒退都视为系统错误并 fail-closed。v1 guard 与模板 `maxTurnsSinceHumanAnswer` 保持原义，不能静默改写历史任务。
+
+### 12.6 分层整图/整树观察
 
 所有批次完成后必须执行整体观察，但“大任务整体观察”不等于一次 Agent turn。系统沿位置树生成确定性层级摘要并分层审核：
 
@@ -814,7 +894,7 @@ mixed 的初始内容写集合不是“所有受影响槽位”：它由该 Find
 - 初次生成只能在 MapReviewBundle 当前有效且 MapSnapshot 已激活后启动，并只能写系统当次 GenerationGrant 指定的内容槽位。
 - 返修只能写 `writeSlotIds`。
 - 一次提交只要包含任何未授权槽位，整个提交原子拒绝，不部分接受。
-- 提交必须带 `grantDigest`、`mapDigest` 和读取时的内容基线；任一过期即拒绝。
+- 提交必须带当前 `grantInstanceDigest`、其 `grantSpecDigest`、`mapDigest` 和读取时的内容基线；任一过期即拒绝。
 
 ### 14.3 扩权请求
 
@@ -824,7 +904,7 @@ mixed 的初始内容写集合不是“所有受影响槽位”：它由该 Find
 - 关联关系和连续性证据；
 - 不扩权会产生的矛盾。
 
-该调用不修改 Grant。系统根据关系图、Finding 和模板影响策略批准或拒绝，并结束当前写 attempt；随后签发扩大的新 Grant，或签发范围不变的新 attempt 并附拒绝原因。生成 Agent 不能“先改了再说明”。
+该调用不修改当前 WriteGrantSpec/GrantInstance。系统根据关系图、Finding 和模板影响策略批准或拒绝，并结束当前写 attempt；批准时创建扩大 scope 的新 WriteGrantSpec/WorkItem，拒绝时可复用原 WriteGrantSpec 创建新 WorkItem，并在下一 lease 签发新的 attempt-bound Instance。生成 Agent 不能“先改了再说明”。
 
 ## 15. 精确失效与审核继承
 
@@ -858,7 +938,7 @@ Map 候选只有通过预审并激活后才成为“Map 变化”；未通过候
 
 ### 15.4 继承方式
 
-新的 MapReviewRound/ReviewRound 都不复制或伪造旧 `pass`，而是通过 `inheritedRecordRefs` 引用仍完全有效的不可变记录。系统重新验证每个引用的局部 digest 后把它计入覆盖。任何无法证明当前性的记录不继承；Map 整图观察和内容整树观察都不继承。
+新的 MapReviewRound/ReviewRound 都不复制或伪造旧 `pass`。`inheritedRecordRefs` 指向系统为当前 round 新建的 ReviewAdoptionRecord；adoption 再引用旧 ReviewFact，并保存系统针对当前候选/Map 重新计算的局部 digest。任何无法证明当前性的事实不采纳；Map 整图观察和内容整树观察都不继承。
 
 ## 16. 系统聚合与 Seal Gate
 
@@ -901,7 +981,9 @@ Seal 前系统再次检查：
 
 ### 16.3 Assembler 与原子发布
 
-Gate 通过后，系统在冻结快照上运行 Assembler，并验证产物路径、媒体类型、字节、digest 和资源引用。最终原子批次同时提交：
+v2 contract 引入封闭的平台 artifact producer 身份 `system:structured_seal`。它不是 Agent、没有 prompt/模型/Agent 工具，也不能出现在普通 Agent Route 的 `from/to`；模板 validator 只允许它作为 v2 structured review lifecycle 的 required create artifact producer。其 assembler 配置、允许产物、extract/媒体类型、资源约束和 submitter 目标仍冻结在 template snapshot，系统不能在运行时自由增加产物。
+
+Gate 通过后，`system_seal` WorkItem 以该平台主体在冻结快照上运行 Assembler，并验证产物路径、媒体类型、字节、digest 和资源引用。最终原子批次同时提交：
 
 - `SealRecord`；
 - 发布制品 blob/ref；
@@ -923,6 +1005,26 @@ artifactDigest
 
 Assembler 不可用、超时或返回非法制品属于系统/基础设施失败：保持未 Seal，按策略重试或人工升级，不伪装成某个槽位的语义拒绝。
 
+artifact custody 由系统内部命令处理：Assembler 先写内容寻址 staging blob，Seal Gate 验证 digest 后才在同一原子批次发布引用；Submitter 只能从系统生成的 artifact WorkItem 读取已 Seal custody ref。v2 不调用 Agent `request_seal()`，也不伪造 seal grant 或 `artifact_published` 的 Agent sourceNodeId。事件 schema 为 `system:structured_seal` 提供独立 `producerKind: system` 与 `workItemId` 来源字段，旧 v1 Agent producer 事件保持不变。
+
+v2 为这条交付链定义独立的 `SystemArtifactDelivery`，而不是把 system producer 硬塞进现有 Agent route reachability：
+
+```text
+SystemArtifactDelivery
+  deliveryId
+  producer: system:structured_seal
+  sealRecordDigest
+  artifactId
+  artifactVersion
+  artifactDigest
+  custodyDigest
+  submitterWorkItemId
+  submitterAgentId
+  templateSnapshotHash
+```
+
+系统 Seal 原子批次同时写 `artifact_published_v2(producerKind: system, producerWorkItemId)`、SystemArtifactDelivery 和带 `inputArtifactDeliveryId` 的 submitter WorkItem；其 AssignmentDispatch/agent_input 通过该 deliveryId 装配 `currentInputArtifact`，不依赖 v1 `inputVersion + agent_result.sourceNodeId`。Submitter 的 final commit validator 对 v2 system artifact 使用封闭规则：delivery 存在且当前、关联 system Seal WorkItem completed、SealRecord/artifact/custody/template digests 全匹配、目标 submitter 与当前 WorkItem 一致；任一失败返回不可达。它不调用 v1 committed Agent Route walk，也不允许 humanAuthorized 绕过。v1 artifact input、`sourceNodeId` 和 `assertReachable` 规则保持原义。
+
 ## 17. 状态机与事件模型
 
 ### 17.1 派生任务阶段
@@ -940,18 +1042,140 @@ mapping
 -> sealed
 -> submitting
 -> completed
+任一非终态 v2 阶段 -> failed
 ```
 
-阶段由最新事件和未完成工作派生，不提供任意写阶段的 API。
+阶段由最新事件和未完成工作派生，不提供任意写阶段的 API。这里的 `failed` 是正式的 v2 任务终态，不是 WorkItem 的 `terminal_failed` 别名；二者通过下文的失败原子批次关联。
 
-### 17.2 新增领域事件
+### 17.2 持久化 WorkItem 状态机
+
+v2 的可执行性不再依赖 Agent Route 恰好生成下一条输入。Coordinator 为每个确定下一步创建系统拥有的 WorkItem：
+
+```text
+WorkItem
+  workItemId
+  kind: agent_assignment | system_review_settlement | system_seal
+  roleBinding: string | null
+  agentExecutionKind: structured_session | generic_turn | null
+  sessionKind: StructuredSessionKindV2 | null
+  roundId: string | null
+  assignmentId: string | null
+  grantSpecDigest: string | null
+  inputArtifactDeliveryId: string | null
+  baseDigests{}
+  payloadRef
+state: ready | leased | parked | completed | retryable_failed | terminal_failed | superseded
+leaseEpoch
+leaseOwner: string | null
+  leaseExpiresAt: string | null
+  attemptCount
+  retryOrdinal
+  retryNotBefore: string | null
+  maxAutomaticRetries
+```
+
+状态转换为：
+
+```text
+ready -> leased -> completed
+leased -> retryable_failed -> ready  # 通过持久化 requeue 事件
+leased(epoch n) -> ready(epoch n+1)  # crash/timeout reclaim
+leased -> terminal_failed
+ready | leased -> superseded  # 仅由新的权威基线/人工处置使旧工作失效
+```
+
+- 创建 WorkItem 与导致它产生的 candidate/content/review/grant/settlement 事实同一原子批次提交。
+- `agent_assignment` 必须满足封闭判别：结构槽 Structure/Review/Fill/Repair 使用 `agentExecutionKind: structured_session` 且 `sessionKind` 非空；Submitter 使用 `agentExecutionKind: generic_turn`、`sessionKind: null` 且 `inputArtifactDeliveryId` 非空。System WorkItem 的三个字段均为 null。validator 不从 role 名称猜测 execution kind。
+- Agent WorkItem 的 `ready -> leased` 使用 `workItemId + leaseEpoch + expectedLastSequence` CAS。公共部分原子写入 `structured_work_item_leased`、AssignmentDispatch 和确认 `agent_input`；`structured_session` 分支在同一 envelope 追加 `structured_slot_attempt_started` 以及适用的 GrantInstance，`generic_turn` 分支则追加 `structured_generic_agent_attempt_started`，且不伪造 StructuredSessionKindV2 或结构槽写 Grant。不存在“已 lease 但无 input/attempt/grant”的可见半状态。只有当前 lease 能物化或完成对应 Agent attempt。
+- Agent 输入不是权威调度状态，只是 AssignmentDispatch 的执行投影；其身份固定绑定 `workItemId + assignmentId + attemptId + baseDigests`。
+- Agent 结果、对应类型的 attempt terminal、review/content/final-commit 事实和 WorkItem completion 同批提交。响应丢失时以相同 operation/commit identity 重放。
+- lease 期限由服务端时钟和冻结 profile 决定。启动恢复或调度扫描发现已过期 lease 时，先以 CAS 原子提交旧 structured/generic attempt `abandoned/lease_expired`、旧 AssignmentDispatch `superseded`、`structured_work_item_lease_reclaimed` 和 WorkItem `ready(epoch+1)`；随后才允许新的 lease 原子 envelope。旧 attempt 的迟到提交因 epoch/baseDigest 不符原子拒绝。reclaim 不是 retryable failure 的隐式别名，必须有独立权威事件和可审计原因。
+- 调度器没有旧式 pending `agent_input` 时，必须继续检查 ready/retryable WorkItem；只有不存在可运行 WorkItem 且任务处于合法等待/终态时才能停止。
+- v1 事件回放和 Route 调度保持原义；v2 WorkItem 使用独立 schema/解释器，不能把历史 Route 事件推测成 WorkItem。
+
+v2 的第一个工作项也不例外：任务启动命令必须根据冻结 template snapshot 判定协议版本。v2 `start` 是一次性命令，只接受从未出现过 `task_started/task_resumed` 的 `ready` 任务；`stopped/interrupted` 一律返回稳定的 `USE_RESUME` 冲突，不能再次创建初始工作项。合法 start 以 `task_started + 初始 structure WorkItem(ready) + initial_structure WriteGrantSpec` 一个原子批次创建，roleBinding 固定为唯一 orchestrator，payloadRef 绑定冻结用户输入和 template hash；随后统一走 structured-session lease/AssignmentDispatch/GrantInstance envelope。v2 禁止再执行当前“取 agents[0] 直接 seed agent_input”的路径。v2 `resume` 只接受 stopped/interrupted，恢复已有 parked WorkItem，绝不 seed 初始输入。对 v1，现有 start-from-stopped、initial input seed/recovery 行为保持原义。若服务在响应前崩溃，start command 用稳定 operationId 重放相同批次，不能重复创建初始 WorkItem/spec。
+
+Submitter 的通用执行不能借用结构槽 attempt：
+
+```text
+GenericAgentAttempt
+  attemptId
+  workItemId
+  agentId
+  assignmentId
+  leaseEpoch
+  inputArtifactDeliveryId
+  baseDigests{}
+  state: started | completed | retryable_failed | terminal_failed | abandoned
+```
+
+`structured_generic_agent_attempt_started` 必须验证 SystemArtifactDelivery 当前、目标 WorkItem/Agent 一致，并把 deliveryId 固定进 attempt identity。Submitter 的 `submit_final` 成功批次原子写 final commit、generic attempt completed 和 WorkItem completed；失败/重领也使用相同 epoch/CAS 规则。它可以继续复用通用 turn runner 和输出协议，但不能写 `structured_slot_attempt_started`、不能填造 StructuredSessionKindV2，也不能获得结构槽写工具。
+
+System WorkItem 不伪造 Agent attempt。它使用独立的 `SystemCommandAttempt`：
+
+```text
+SystemCommandAttempt
+  commandId
+  workItemId
+  commandKind: review_settlement | seal
+  leaseEpoch
+  baseDigests{}
+  state: started | completed | retryable_failed | terminal_failed | abandoned
+```
+
+System WorkItem 的 lease envelope 原子提交 `structured_work_item_leased + structured_system_command_started`；handler 的所有外部准备动作只能写未发布、内容寻址的 staging 对象，最终可见 completion 使用 `workItemId + commandId + leaseEpoch + baseDigests + expectedLastSequence` CAS，把领域事实、WorkItem completed 和后续 WorkItem 同批提交。reclaim 原子写旧 command abandoned 与 epoch+1 ready；旧 handler 即使晚到也无法通过 completion CAS，staging 由后台回收。`system_seal` 是唯一的 assembler、promote、artifact publish 和 SystemArtifactDelivery 入口；不再存在 `system_artifact_publish` WorkItem，防止双重发布。
+
+系统命令图只有两个 system kinds，职责唯一：`system_review_settlement` 负责相应 Map/Content round 的验证、Map 激活或 repair/seal 下一 WorkItem 创建；不存在独立 `system_map_activation`。`system_seal` 负责 Gate、Assembler、唯一 publish/delivery，并直接创建 `agent_assignment(agentExecutionKind=generic_turn, roleBinding=submitter)`；不存在 `system_submitter_dispatch`。所有其他 structure/review/generation/repair/submitter 工作都是 agent_assignment，但只有前四类属于 structured session。
+
+失败与重试协议也必须持久化：
+
+- retryable failure 原子提交 attempt `retryable_failed`、WorkItem `retryable_failed`、递增 retryOrdinal、服务端计算的 retryNotBefore 和剩余预算；到期后 Coordinator 以 CAS 提交 `structured_work_item_requeued` 将其置为 ready，再按新 epoch lease。scheduler 不直接 lease retryable_failed。
+- 自动 retry budget 耗尽时，同批把 WorkItem park 为 `parked(reason: retry_budget_exhausted)`，并把任务投影为 `retryable_failure`；人工 retry 只恢复这一个 WorkItem、清除/重置由冻结策略允许的预算并提升 epoch。
+- permanent/system terminal failure 同批写 Agent/System attempt terminal_failed、WorkItem terminal_failed 和正式事件 `structured_task_failed_v2`（或模板在失败发生前声明并成功进入 waiting-human escalation），确保任务不保持假 running。terminal_failed 不能通过普通 resume/retry。
+- retry/requeue/terminal 事件都绑定 WorkItem、attempt/command、epoch、failure code 和 baseDigests；v1 继续使用现有 retry_scheduled/attempt 投影。
+
+v2 永久失败合同冻结如下：共享 `TaskStatus` union 正式增加 `failed`，但只有 `structured_task_failed_v2` 能产生该投影；事件携带 `workItemId`、`attemptId | commandId`、`leaseEpoch`、稳定 `failureCode`、`failureDigest` 和 `baseDigests`。projector 收到后设置 `status=failed`，API list/detail 返回结构化 failure summary，UI 显示失败来源和人工处置入口；scheduler 对 failed 的 start/resume/retry 全部拒绝。v1 事件不投影为 failed，旧回放结果不变。
+
+`failed` 对普通运行命令是终态。唯一的同任务恢复入口是具备权限的 `reopen_failed` 人工处置：它必须携带 expectedLastSequence、稳定 operationId、操作者和原因，并由冻结 recovery policy 证明可创建唯一替代 WorkItem；提交批次原子写 `structured_task_reopened_v2`、replacement WorkItem（以及适用的 WriteGrantSpec），原 terminal_failed WorkItem 保持不可变，任务回到 running。基线或恢复配方不合法时硬拒绝，只允许克隆为新任务；不得把 failed 偷映射成 retryable_failure 或用普通 resume 绕过。
+
+### 17.3 Task 生命周期与 WorkItem 联动
+
+WorkItem 可运行性的首要前置条件是任务投影严格为 `running`；`stopped/interrupted/waiting_human/completed/failed/corrupt/incompatible` 下，scheduler 即使看到 ready 或 lease-expired WorkItem 也不得认领或 reclaim 后执行。
+
+- **用户 stop**：先同步阻止新的 lease，再以一个 CAS envelope 提交当前 Agent/System attempt terminal/abandoned、当前 AssignmentDispatch superseded、所有非终态且非 question-bound 的 WorkItem `parked(reason: task_stop)`、相关 draft journal abandoned 和 `task_stopped`。ready WorkItem 保留身份/载荷但变为 parked，不丢失计划。已经 waiting_human 的 WorkItem 没有活动 attempt，保留原 `parked(reason: human_question)`、question identity 和未回答事实；stop 不取消问题。
+- **进程 shutdown/crash recovery**：只处理投影为 active-running 且确有 in-flight lease/attempt 的任务。恢复器对 v2 原子关闭悬空 Agent/System attempt、废弃 lease/dispatch/journal，把所有非终态 WorkItem 置为 `parked(reason: task_interrupted)`，并提交 `task_interrupted`。如果进程在 envelope 前崩溃，下次重复扫描；稳定 recovery operationId 保证幂等。
+- **resume**：只允许 stopped/interrupted 任务。一个原子 envelope 写 `task_resumed`，把仍符合当前 baseDigests、且不绑定未回答 question 的 parked WorkItems 恢复为 ready 并提升 leaseEpoch；不新建重复 WorkItem/assignment。已 stale 的 parked WorkItem supersede，并由同批权威状态确定唯一替代项。若存在未回答 question，resume 不恢复任何可执行工作，任务投影回 waiting_human；否则提交后 scheduler 才能 lease。
+- **waiting human**：活动 attempt 以 waiting_human 终结时，对应 WorkItem parked 并绑定 question identity，任务投影为 waiting_human。该状态不参加 crash interruption，服务重启后 question-bound parked WorkItem 和可回答状态原样保留；普通 resume 不允许直接处理 waiting_human。若用户先 stop，问题只是随任务暂停：随后 resume 原子写 `task_resumed`，projector 因 pending question 回到 waiting_human，WorkItem 仍 parked，绝不出现 running-without-work。只有在 waiting_human 状态下、绑定同一 question identity 的 answer/continue 原子批次才能终结问题：该批次恢复或替换 question-bound WorkItem，同时把其他仍符合当前 baseDigests 的 `parked(reason: task_stop)` WorkItems 恢复为 ready/提升 epoch，并 supersede stale 项，然后才把任务投影为 running。未回答前不运行其他同任务 WorkItem；显式“放弃问题并改走其他处置”必须是独立的人工作业，原子 supersede 旧 WorkItem 并创建有明确定义的替代项，不能由 stop 暗中完成。
+
+WorkItem 状态因此扩展 `parked`；合法转换包含 `ready|leased -> parked -> ready|superseded`。task lifecycle、attempt、dispatch、journal 与 WorkItem 不允许分别写成可见半状态。v1 stop/recovery/resume 仍执行现有 attempt/input 逻辑。
+
+### 17.4 新增领域事件
 
 建议的 v2 事件集合：
 
 - `structured_map_candidate_committed`
+- `structured_work_item_created`
+- `structured_work_item_leased`
+- `structured_work_item_completed`
+- `structured_work_item_retryable_failed`
+- `structured_work_item_requeued`
+- `structured_work_item_lease_reclaimed`
+- `structured_work_item_terminal_failed`
+- `structured_work_item_superseded`
+- `structured_work_item_parked`
+- `structured_work_item_resumed`
+- `structured_assignment_dispatched`
+- `structured_generic_agent_attempt_started`
+- `structured_generic_agent_attempt_completed`
+- `structured_generic_agent_attempt_failed`
+- `structured_generic_agent_attempt_abandoned`
+- `structured_system_command_started`
+- `structured_system_command_completed`
+- `structured_system_command_abandoned`
+- `structured_task_failed_v2`
+- `structured_task_reopened_v2`
 - `structured_map_review_round_planned`
-- `structured_map_node_review_recorded`
-- `structured_map_relation_review_recorded`
+- `structured_map_review_assignment_committed`
 - `structured_map_observation_recorded`
 - `structured_map_review_round_completed`
 - `structured_map_review_round_settled`
@@ -959,8 +1183,7 @@ mapping
 - `structured_content_revision_committed`
 - `structured_review_round_planned`
 - `structured_review_assignment_started`
-- `structured_slot_review_recorded`
-- `structured_relation_review_recorded`
+- `structured_content_review_assignment_committed`
 - `structured_finding_opened`
 - `structured_finding_verification_recorded`
 - `structured_validator_finding_verification_recorded`
@@ -979,16 +1202,18 @@ mapping
 
 `structured_map_observation_recorded` 与 `structured_whole_tree_observation_recorded` 都可出现多次，每条携带 `level`、`parentObservationId`、覆盖目标和子级 digest refs；只有根级事件闭包完整时才满足相应整体观察门禁。事件名中的 whole tree 表示逻辑覆盖整树，不表示单次 Agent turn 承载整树。
 
+所有 attempt/command/WorkItem 事件都是 v2 封闭 union 的正式成员，带协议版本和完整身份；回放器不得依据事件名字符串、缺省字段或当前进程状态猜测 epoch/owner。
+
 `stale` 不需要作为权威事件逐条写入；它由当前 digest 比较得出。为便于审计，可以在候选/Map/内容提交事件中记录一份非权威的 `affectedReviewSummary`，但回放时仍以 digest 计算为准。
 
-### 17.3 原子边界
+### 17.5 原子边界
 
-- Map 候选 blob、`structured_map_candidate_committed`、structure/map_repair attempt terminal 和 MapReviewRound 规划同批提交；候选提交不激活 Map。
-- MapReviewRound settlement 失败与绑定当前被退回 candidate/活动 Map 的 Map RepairGrant dispatch 同批；成功则 Map stage verification、Map 激活、MapReviewBundle、旧版本 supersede、内容迁移结果和下一阶段 dispatch 同批提交。mixed Finding 此时只推进到 content stage，不能关闭。
+- Map 候选 blob、`structured_map_candidate_committed`、structure/map_repair attempt terminal、当前 WorkItem completion、MapReviewRound 规划和首批 review WorkItems 同批提交；候选提交不激活 Map。
+- MapReviewRound settlement 失败与绑定当前被退回 candidate/活动 Map 的 Map RepairGrant、下一 Map repair WorkItem 同批；成功则 Map stage verification、Map 激活、MapReviewBundle、旧版本 supersede、内容迁移结果和下一阶段 WorkItem 同批提交。mixed Finding 此时只推进到 content stage，不能关闭。
 - Map/content 提交只把对应 Finding stage 更新为 committed，并同批追加 Finding `addressed`、attempt terminal 和复审规划；审核结算再原子更新 stage verification。所有 required stage verified 后才能追加 `verified_closed`。
 - 一条审核 verdict、它创建的 Findings 以及证据引用同批提交。
-- ReviewRound settlement 与 Repair Grant/Seal dispatch 同批提交。
-- SealRecord、制品发布和 Submitter dispatch 同批提交。
+- ReviewRound settlement 与 Repair Grant/系统 Seal WorkItem 同批提交。
+- 系统 Seal WorkItem completion、SealRecord、制品发布和 Submitter WorkItem 同批提交。
 
 进程在批次提交前崩溃时没有可见变化；提交后崩溃时可由事件账本重放恢复，不重复副作用。
 
@@ -1012,12 +1237,12 @@ mapping
 - `read_slots(selector)`
 - `read_relations(selector)`
 - `read_findings()`
-- `open_content_draft(grantDigest)`
+- `open_content_draft(grantInstanceDigest)`
 - `write_slot_content(slotId, content)`
 - `request_repair_scope_expansion(...)`
 - `submit_content_draft(baseContentRootDigest)`
 
-初次生成使用 GenerationGrant，返修使用 RepairGrant。服务端在每次写工具调用和最终提交时双重检查对应 content write grant。
+初次生成和返修都使用“WriteGrantSpec + 每 lease GrantInstance”；`kind: initial_generation` 的 spec 没有 findingIds，repair spec 绑定 Findings。服务端在每次写工具调用和最终提交时双重检查当前 content write GrantInstance。
 
 ### 18.3 审核 Agent
 
@@ -1052,22 +1277,35 @@ mapping
 
 ### 19.1 持久化
 
-大对象继续采用内容寻址 blob，不把完整正文或长证据直接塞入事件：
+大对象继续采用内容寻址 blob，不把完整正文、长证据或一万条 verdict 直接塞入事件：
 
 ```text
 structured-slots/
   map-candidates/<candidateDigest>.json
   maps/<mapDigest>.json
   contents/<contentDigest>.json
-  reviews/<recordDigest>.json
+  review-facts/<factDigest>.json
+  review-assignments/<assignmentLedgerDigest>.json
+  review-adoptions/<adoptionLedgerDigest>.json
   map-review-bundles/<mapReviewBundleDigest>.json
   review-bundles/<reviewBundleDigest>.json
   findings/<findingDigest>.json
-  grants/<grantDigest>.json        # private
+  grant-specs/<grantSpecDigest>.json       # private
+  grant-instances/<grantInstanceDigest>.json # private
   artifacts/<artifactDigest>.*
 ```
 
-事件只保存稳定身份、digest、必要摘要和 blob ref。RepairGrant 属于私有运行数据，不进入面向普通用户的公共制品。
+一个 assignment 的 verdicts、Finding drafts 和 evidence refs 规范化为单个不可变 `AssignmentLedgerBlob`，assignment 完成时原子提交；事件只保存稳定身份、目标范围摘要、计数、digest 和 blob ref，不为每条 verdict 写一个大载荷事件。逐条工具记录先写入上文严格绑定 attempt 的 draft journal；只有 `complete_review_assignment` 校验覆盖后，系统冻结 ledger blob 并追加一条权威 completion 引用事件。未完成 journal 不计入 Gate，跨 lease 不继承。
+
+继承 adoption 不属于任何 Agent assignment，使用独立的系统账本：Coordinator 在规划 round 时已经拥有所有历史 ReviewFacts 和当前局部 digests，因此可确定 `inherited/required`，按当前 profile 的总对象上限把仅历史事实的 ReviewAdoptionRecord 规范化分块写入 `ReviewAdoptionLedgerBlob`，最后生成一个 `ReviewAdoptionRoot`（roundId、ordered chunk digests、adopted target count、coverage digest）。root 引用事件与 round plan/assignments 在同一原子批次提交；它不预声明未来 Agent 新事实。未被当前 root 闭包引用的 adoption blob 不可见，也不能计入 Gate。详情 API 和 qualification 对 adoption chunks 使用与 assignment ledger 相同的分页、大小、重放和 RSS 门限。0 个继承目标使用 canonical empty root，不借用某个 Agent ledger。Gate 以 adoption root 覆盖 inherited 集合，以当前 round 后续 committed assignment ledgers 覆盖 required 集合。
+
+事件历史另外维护系统派生、可重建的增量设施：
+
+- 每任务 append manifest：保存当前 tail sequence、commitId 索引、事件 ID 索引和 envelope digest，append CAS 不再为正常写入反复扫描全部历史文件。
+- 单调 projection checkpoint：绑定 `throughSequence + priorCheckpointDigest + projectionSchemaVersion`，包含 WorkItem、当前 Map/content、round coverage、Finding 和 Seal readiness 索引。
+- 启动/恢复从最近合法 checkpoint 回放尾部；后台/qualification 可从 genesis 全量重放并核对 checkpoint digest。manifest/checkpoint 缺失或损坏时仍能全扫描恢复，不能把缓存当权威事实。
+
+RepairGrant 属于私有运行数据，不进入面向普通用户的公共制品。
 
 ### 19.2 读取 API
 
@@ -1082,6 +1320,10 @@ structured-slots/
 - `GET /api/tasks/:taskId/structured-slots/review/relations/:relationId`
 - `GET /api/tasks/:taskId/structured-slots/review/findings`
 - `GET /api/tasks/:taskId/structured-slots/review/seal-readiness`
+
+所有可能返回集合的 review API 强制使用稳定游标分页：`?limit=&after=`。第一页请求由服务端选择一个已提交 `throughSequence` 上界并返回带签名的 `snapshotCursor`；后续页固定在同一 projection schema、查询基线、filtersDigest、sortKey 和 throughSequence 上重放/读取，即使后台继续 lease 或完成 WorkItem，也不会改变这次遍历。排序至少由 `documentOrder/targetStableId/recordedAt/id` 的确定组合定义，默认 50、profile 最大 500。
+
+系统按冻结保留策略保存或可重建这些只读 projection snapshots；只有 snapshot 已被合法淘汰、查询者改变 filters/sort/baseline，或历史损坏时才返回明确 `CURSOR_STALE`，并附新的首页入口。活跃任务的新事件不会让正在使用的 cursor stale。summary/seal-readiness 默认返回最新态计数和 digest，不内嵌全量 records；详情可在指定 snapshot 上按 ID 点查 AssignmentLedgerBlob/ReviewFact。
 
 现有 `structured-slots/issues` 在 v2 中投影当前 blocking/advisory Findings 与确定性 validator issues，以保留旧 UI 的兼容读取；新 UI 使用详细 review API。
 
@@ -1121,7 +1363,8 @@ UI 必须明确区分：
 | 整树观察发现批次外问题 | 创建 Finding/追加 reject，加入返修和下一轮复审范围 |
 | reviewer 无法分类 | assignment incomplete，重试；达上限后人工升级 |
 | 超过最大审核/返修轮次 | fail-closed，进入人工处置，不允许降级 Seal |
-| Assembler/资源失败 | 保持 seal-ready 或 sealing-failed，按基础设施策略重试 |
+| Assembler/资源瞬时失败 | System WorkItem 进入持久化 retryable failure/退避；预算耗尽则任务进入 retryable_failure |
+| Assembler/策略或不可恢复失败 | 原子写 `structured_task_failed_v2`，任务进入 failed；仅受权 `reopen_failed` 可建立替代工作 |
 | 事件提交后进程崩溃 | 回放恢复；幂等 key 防止重复记录和重复发布 |
 
 恢复时系统首先重建候选 Map、MapReviewRound、活动 Map、内容根、内容 ReviewRound、records、Findings 和 Grants，再恢复调度。任何只能从进程内存获知的状态都不属于正确设计。
@@ -1146,6 +1389,7 @@ UI 必须明确区分：
 - 关系影响最大 hops 和最大闭包节点数。
 - 首个 production-qualified profile 单 assignment 至少支持 256 个目标节点/槽位、1,024 个总目标对象；模板默认目标 24、默认软上限 64。模板可在当前 profile 内收紧，也可凭 qualification 提高自己的软上限；平台 profile 本身也可随新证据继续提高。
 - 单轮最大 assignments 必须至少支持把当前 profile 的全部 `maxSlots` 按模板批次切完并完成分层整体观察；不得设置与整树容量互相矛盾的低值。
+- v2 `maxPlannedWorkItemsPerRound` 必须覆盖批次、分层 observation、系统 settlement 和 qualification 允许的 retry；`maxConsecutiveAttemptsWithoutProgress` 单独限制无语义进展重试，不得复用 v1 的 32-turn ceiling 截断合法计划。
 - 单槽/单关系最大 Findings、单轮最大 Findings。
 - evidence 单项与总字节数。
 - 单次 RepairGrant 最大写槽位数。
@@ -1174,7 +1418,7 @@ UI 必须明确区分：
 
 1. v2 contract/schema、候选/活动 Map 事件和回放器完成。
 2. Map 预审、内容 Review ledger、Repair Grant、系统 Seal 和 API/UI 完成。
-3. 关系层 disabled/optional、至少 10,000 槽位分批、分层整体观察、故障注入和安全 benchmark 通过。
+3. 关系层 disabled/optional、至少 10,000 槽位分批、分层整体观察、v2 progress checkpoint/无进展门禁、WorkItem/ledger/checkpoint 存储、故障注入和安全 benchmark 通过。
 4. 生成新的 qualification evidence 与 source digest bundle。
 5. capability 从 disabled 经过 qualify/promote 进入 enabled。
 6. 模板才允许发布引用 v2 的新冻结快照。
@@ -1183,7 +1427,8 @@ UI 必须明确区分：
 
 - 不修改已经创建任务的 snapshot。
 - 模板包发布新的 v2 revision；模板 ID 可保持稳定，但 snapshot hash 和 contract version 必须变化。
-- 增加 `review` Agent、生成前 Map 预审与 reviewPolicy；关系层按知乎模板实际需求选 optional，不因为平台机制强制建边；从 v2 pipeline 删除 `seal` Agent 路由。
+- 增加 `review` Agent、生成前 Map 预审与 reviewPolicy；关系层按知乎模板实际需求选 optional，不因为平台机制强制建边。
+- 从 v2 pipeline 删除 `seal` Agent 与其 message/artifact Route；把 `chapter.md` 的 producer 从 `seal` 显式改为 `system:structured_seal`，把 assembler/custody 约束冻结到 v2 contract，并由系统产生面向 `submitter` 的 artifact WorkItem。该修改必须改变 snapshot hash，loader 不做隐式迁移。
 - 先在隔离模板/端口完成真实 Case，再切换默认新建任务到 v2。
 - v1 revision 保留只读恢复能力，直到其任务生命周期和保留期结束。
 
@@ -1222,6 +1467,27 @@ UI 必须明确区分：
 29. 一个新建 v2 知乎任务在真实 Agent、浏览器 UI、journal 和发布制品上完整走通，并能看到 Map 预审先于生成。
 30. mixed Finding 的 Map stage 完成后仍不得验证关闭，必须完成内容 stage 和复审。
 31. system validator Finding 与 reviewer Finding 在 UI、事件来源和路由上可区分。
+32. Structure/Review/Repair 结果不产生 Agent Route 时，系统仍能通过持久化 WorkItem 物化下一 Agent 输入；进程在 create/lease/result/completion 各边界崩溃后不会丢任务或重复提交。
+33. v2 模板的 required artifact producer 为 `system:structured_seal`，loader 合法接受、Agent 不能冒用；Assembler custody、SealRecord 和 Submitter WorkItem 原子关联。
+34. 10,000 槽位按默认 24 目标产生的数百个合法 review WorkItems 可在无人介入下完成；只有连续无 coverage/digest/Finding-stage 进展的重试才触发 v2 progress guard。
+35. 修订 candidate 继承时，旧 ReviewFact 必须经当前 round 的 ReviewAdoptionRecord 才计入覆盖；candidate/context/policy 任一不匹配都不可采纳。
+36. 10,000 槽位 Map+内容审核账本完整写入、进程崩溃恢复、genesis 重放、checkpoint 尾部重放和分页查询均满足冻结性能/RSS 门限；旧 cursor 在 checkpoint/filter 变化时明确 stale。
+37. v2 task start 原子创建初始 Structure WorkItem；start 响应丢失重放不重复创建，且不会走 v1 `agents[0]` 直接 seed 路径；stopped/interrupted v2 调 start 返回 `USE_RESUME`，只能由 resume 恢复旧 WorkItem。
+38. WorkItem lease 与 AssignmentDispatch/input/对应 execution kind 的 attempt start 同批；在 lease 各崩溃边界恢复时通过显式 reclaim 终结旧 attempt、推进 epoch，旧提交全部拒绝。
+39. system artifact 通过 SystemArtifactDelivery 装配 Submitter 输入并完成 final commit；缺 SealRecord/custody/target 任一绑定都会拒绝，且不伪造 `agent_result`。
+40. 9,999 个继承目标可由分块 ReviewAdoptionLedgerBlob + root event 计入当前 round，不归属唯一重审 assignment，也不突破单对象上限。
+41. reviewer 写入部分 draft 后，同 attempt 响应恢复幂等；lease reclaim 后旧 journal abandoned、新 attempt 全批重审，旧 draft 永不进入 Gate。
+42. 活跃审核期间后台持续写事件时，基于固定 throughSequence snapshot 的分页仍能完整遍历；仅快照淘汰或查询基线改变才 stale。
+43. 初始/当前 round 的新 ReviewFacts 通过 committed AssignmentLedger 直接计入 required 覆盖；ReviewAdoptionRoot 只包含规划时已知的历史 inherited facts，不会冻结未来事实。
+44. settlement 创建 GrantSpec/WorkItem 时不需要 attempt；每次 lease 原子签发绑定新 attempt/epoch 的 GrantInstance，reclaim 后旧 instance 失效且新 instance scope 不变。
+45. system seal 使用 SystemCommandAttempt epoch/CAS；旧 handler 晚到不能发布，且不存在第二个 system_artifact_publish 入口。
+46. stop/interruption 将非终态 WorkItems 与 attempt/dispatch/journal 原子 park；非 running 任务不可 lease，resume 只恢复唯一旧 WorkItem 并推进 epoch。
+47. whole-observation reject/violated 标记 `adoptionEligible: false` 并进入 fact digest；后续 round 无论局部 digest 是否相同都不得继承。
+48. v2 task start 同批创建 initial_structure WriteGrantSpec；每个 Structure lease 都有 attempt-bound Instance，reclaim 后旧 proposal/instance 不能提交。
+49. waiting_human 在服务重启后保持 question-bound parked 和可回答状态；stop 只暂停、不取消问题，随后 resume 回到 waiting_human 且不产生 running-without-work；answer/continue 同批恢复问题项和其他合法 task-stop parked 项，或由显式人工处置创建替代 WorkItem 后才能继续。
+50. retryable failure 持久化 ordinal/not-before/budget 并显式 requeue；预算耗尽进入 task retryable_failure，terminal failure 通过正式 `structured_task_failed_v2` 进入 `failed`，API/UI 可见且不留下假 running；只有受权 `reopen_failed` 可创建替代 WorkItem。
+51. system command 图只有 review_settlement 与 seal；Map 激活由前者唯一负责，submitter 由后者直接创建 Agent WorkItem，不存在不可达/重复 kind。
+52. Submitter WorkItem 以 `generic_turn` lease，使用绑定 delivery/workItem/epoch 的 GenericAgentAttempt；它能完成 final commit，但无法伪造 StructuredSessionKindV2 或获得结构槽写 Grant。
 
 ## 25. 测试策略
 
@@ -1234,6 +1500,17 @@ UI 必须明确区分：
 - disabled/optional 关系策略、零关系 Map、零度槽位与模板特定关系 validator。
 - 默认目标、模板软上限、qualification 提升、平台 assignment 上限和总目标对象上限的边界测试。
 - 至少 10,000 节点及更高合成 profile 的确定性分批与分层 observation 闭包属性测试，验证 schema/算法没有 10,000 写死假设。
+- ReviewFact/ReviewAdoptionRecord 的合法局部继承、跨候选重放拒绝和 policy/context stale 属性测试。
+- 当前 assignment fact 与 inherited adoption root 的互斥覆盖、未来事实不可预冻结、whole-observation fact 不可 adoption。
+- WorkItem create/lease/epoch/retry/supersede、AssignmentDispatch 物化和 progressCheckpoint 单调性属性测试。
+- GrantSpec/GrantInstance 的 lease 签发、reclaim 重签、scope 恒定和旧 instance 迟到拒绝。
+- initial_structure WriteGrantSpec/Instance、proposal attempt 绑定和 start/reclaim 可达性。
+- SystemCommandAttempt 的 completion CAS、双 handler 竞态、staging orphan 回收与唯一 publish 入口。
+- GenericAgentAttempt 的 delivery 绑定、lease/reclaim/迟到提交，以及 Submitter final commit 与 WorkItem completion 原子性。
+- retry ordinal/not-before/requeue/budget exhausted/manual retry/permanent failure 的 WorkItem 与 task 投影闭环。
+- `structured_task_failed_v2` 的严格事件校验、`TaskStatus=failed` 投影、API/UI 呈现、普通命令拒绝与 `reopen_failed` 唯一替代项。
+- ReviewAdoptionLedger 分块/root 闭包、canonical empty root、孤儿 blob 不可见与 10k-1 继承场景。
+- snapshot cursor 的固定 throughSequence、并发 append 不饥饿、淘汰/stale 和确定排序属性测试。
 - Finding 状态机与缺陷路由。
 - mixed repairProgress 与 reviewer/system-validator 两类验证闭环。
 - Grant 子集写检查、stale 检查和扩权决策。
@@ -1246,6 +1523,7 @@ UI 必须明确区分：
 - relationshipPolicy 与 relation type/instance 合法、非法和空集合组合。
 - Agent 工具 allowlist、伪造 ID/ref、越权写和超限载荷。
 - pass 携带 blocking Finding、reject 无证据、关系证据 digest 缺失、`mapPassed/treePassed` 等恶意/错误提交。
+- `system:structured_seal` 只能用于 v2 artifact producer，不能声明成 Agent、Route 端点或模型工具调用者。
 
 ### 25.3 集成与故障注入
 
@@ -1253,6 +1531,14 @@ UI 必须明确区分：
 - Map 预审失败后不启动生成；Map 返修候选预审失败后保留旧活动 Map 与内容；通过后才执行迁移与失效。
 - 零关系、部分槽位零关系、关系 validator 强制特定边三条独立链路。
 - 至少 10,000 槽位及提高 profile 后的调度、断点恢复和高 fan-out 中间 observation 分组。
+- 默认 24 目标下的完整 10k Map+内容审核 WorkItem 流程，证明 v1 32-turn guard 不会错误介入，v2 无进展重试仍能正确停车。
+- 10k 审核 AssignmentLedgerBlob 写入、append manifest、projection checkpoint、genesis/增量重放、游标分页延迟与峰值 RSS。
+- system Seal producer 的 assembler staging、digest 验证、崩溃恢复、原子 custody 发布和 Submitter 交接。
+- v2 task start 初始 WorkItem、structured/generic lease+dispatch+attempt 原子 envelope、expired reclaim 与旧 epoch 迟到提交；stopped/interrupted 的 start/resume 版本分流。
+- stop/interruption/resume/waiting-human 与 Agent/System WorkItem、dispatch、journal 的原子联动和非 running 禁止 lease。
+- waiting_human 重启保持可回答、stop 暂停问题、resume 返回 waiting_human、answer 后恢复问题项及其他合法 task-stop parked 项；显式放弃问题必须同批创建替代 WorkItem。
+- partial review journal 的同 attempt 幂等恢复和跨 lease 整批废弃/重审。
+- SystemArtifactDelivery 到 currentInputArtifact/final commit 的 v2 权威链，以及 v1 route reachability 回归不变。
 - 每个事件原子批次的进程崩溃、超时、重放和重复 dispatch。
 - Map 变更后的内容迁移、slotId 稳定性和失效范围。
 - Assembler、blob、validator 暂时失败后的恢复。
@@ -1273,13 +1559,14 @@ UI 必须明确区分：
 这不是实现任务清单，而是降低切换风险的交付边界：
 
 1. **协议层**：Contract v2、可选关系策略、记录 schema、事件、投影和 v1/v2 回放分流。
-2. **Map 候选层**：位置结构、可选关系、候选验证、Map 预审账本、系统激活、版本化、diff 和影响计算。
-3. **内容审核层**：reviewer tools、增量账本、高容量批次、分层整树观察和继承。
-4. **返修层**：Finding 路由、RepairGrant、扩权和 Map/content 顺序。
-5. **Seal 层**：移除 v2 Agent Seal、ReviewBundle、系统 Gate 与原子发布。
-6. **可视化层**：任务详情 API、Map/Review/Findings/Seal UI。
-7. **模板层**：知乎模板 v2 revision、真实关系定义和 reviewer 配置。
-8. **门禁层**：测试、故障注入、真实 Case、qualify/promote 和逐步启用。
+2. **调度/存储底座**：WorkItem ledger、lease/AssignmentDispatch、v2 progress guard、assignment ledger blob、append manifest、projection checkpoint 和分页游标。
+3. **Map 候选层**：位置结构、可选关系、候选验证、Map 预审账本、系统激活、版本化、diff 和影响计算。
+4. **内容审核层**：reviewer tools、增量账本、高容量批次、ReviewFact/Adoption、分层整树观察和继承。
+5. **返修层**：Finding 路由、RepairGrant、扩权和 Map/content 顺序。
+6. **Seal 层**：移除 v2 Agent Seal、引入 `system:structured_seal` producer、ReviewBundle、系统 Gate、custody 与原子发布。
+7. **可视化层**：分页任务详情 API、Map/Review/Findings/Seal UI。
+8. **模板层**：知乎模板 v2 revision、artifact producer 迁移、真实关系定义和 reviewer 配置。
+9. **门禁层**：10k 全流程测试、故障注入、真实 Case、qualify/promote 和逐步启用。
 
 每一层必须保持 capability disabled，直到其下游依赖和证据完成；不能因为模板文件已经写好就宣称生产能力可用。
 
@@ -1298,6 +1585,9 @@ UI 必须明确区分：
 - 审核至少绑定内容、相关 Map 子图和审核策略 digest。
 - 未受影响审核可继承；整树观察每次变更后必重跑。
 - Agent 不得写整树 pass、Finding 关闭、Grant、Seal 或最终交付状态。
+- 所有系统调度决定必须原子产生持久化 WorkItem；v2 不依赖 Agent Route 选择下一步，v1 Route 语义保持不变。
+- 跨候选/跨轮复用审核必须通过当前 round 的 ReviewAdoptionRecord，不能直接把绑定旧 candidate/round 的 record 计入覆盖。
+- v2 大规模审核按冻结计划和语义进展计数，不能被 v1 32-turn guard 截断；10k ledger、checkpoint、重放和分页性能进入 capability 硬门。
 - v2 Seal 完全系统化；v1 历史任务不迁移、不重解释。
 - `zhihu-salt-chapter-draft` 通过新模板 revision 和 capability 生产门禁迁移。
 
