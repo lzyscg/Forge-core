@@ -1,4 +1,6 @@
 node_modules/
+.worktrees/
+__pycache__/
 dist/
 test-results/
 playwright-report/

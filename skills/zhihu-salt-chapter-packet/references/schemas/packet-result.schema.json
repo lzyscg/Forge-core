@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openai.local/zhihu-salt/packet-result.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "valid", "operation", "chapter", "verdict", "missing_units", "out_of_bounds_facts", "repair_scope", "checks", "markdown_sha256"],
+  "properties": {
+    "schema_version": {"enum": ["1.0", "1.1"]},
+    "valid": {"type": "boolean"},
+    "operation": {"const": "packet"},
+    "chapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "display", "sequence", "boundary_signature"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^B[0-9]{3}$"},
+        "display": {"type": "string", "minLength": 1},
+        "sequence": {"type": "integer", "minimum": 0},
+        "boundary_signature": {"type": "string", "pattern": "^(?:[a-f0-9]{64}|UNMAPPED)$"}
+      }
+    },
+    "verdict": {"enum": ["ready", "blocked"]},
+    "missing_units": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "out_of_bounds_facts": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "repair_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "targets"],
+      "properties": {
+        "mode": {"enum": ["none", "point", "block", "chapter"]},
+        "targets": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required_sections", "scene_units", "hard_facts", "boundary_match"],
+      "properties": {
+        "required_sections": {"type": "boolean"},
+        "scene_units": {"type": "boolean"},
+        "hard_facts": {"type": "boolean"},
+        "boundary_match": {"type": "boolean"},
+        "capacity_budget": {"type": "boolean"}
+      }
+    },
+    "capacity_budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "target_min_chinese_chars", "target_max_chinese_chars", "authorized_source_chinese_chars", "raw_capacity_chinese_chars", "authorized_safe_lower_ceiling_chinese_chars", "authorized_max_chinese_chars", "safe_lower_ratio", "maximum_ratio", "units"],
+      "properties": {
+        "method": {"const": "authorized-carriers-v1"},
+        "target_min_chinese_chars": {"type": "integer", "minimum": 1},
+        "target_max_chinese_chars": {"type": "integer", "minimum": 1},
+        "authorized_source_chinese_chars": {"type": "integer", "minimum": 1},
+        "raw_capacity_chinese_chars": {"type": "integer", "minimum": 1},
+        "authorized_safe_lower_ceiling_chinese_chars": {"type": "integer", "minimum": 1},
+        "authorized_max_chinese_chars": {"type": "integer", "minimum": 1},
+        "safe_lower_ratio": {"const": "4/5"},
+        "maximum_ratio": {"const": "11/10"},
+        "units": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "authorized_source_chinese_chars", "field_chinese_chars", "carriers", "raw_capacity_chinese_chars"],
+            "properties": {
+              "id": {"type": "string", "pattern": "^U[0-9]+$"},
+              "authorized_source_chinese_chars": {"type": "integer", "minimum": 1},
+              "raw_capacity_chinese_chars": {"type": "integer", "minimum": 1},
+              "carriers": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["dialogue_turns", "action_feedback_loops", "knowledge_or_perception_shifts", "aftermath_beats"],
+                "properties": {
+                  "dialogue_turns": {"type": "integer", "minimum": 0},
+                  "action_feedback_loops": {"type": "integer", "minimum": 0},
+                  "knowledge_or_perception_shifts": {"type": "integer", "minimum": 0},
+                  "aftermath_beats": {"type": "integer", "minimum": 0}
+                }
+              },
+              "field_chinese_chars": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["变化", "写作链", "压力", "直接写出", "本单元正向有限清单"],
+                "properties": {
+                  "变化": {"type": "integer", "minimum": 1},
+                  "写作链": {"type": "integer", "minimum": 1},
+                  "压力": {"type": "integer", "minimum": 1},
+                  "直接写出": {"type": "integer", "minimum": 1},
+                  "本单元正向有限清单": {"type": "integer", "minimum": 1}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "markdown_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}

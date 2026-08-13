@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openai.local/zhihu-salt/ledger-semantics.schema.json",
+  "$defs": {
+    "assertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "evidence_refs"],
+      "properties": {
+        "text": {"type": "string", "minLength": 1},
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "time_assertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "evidence_refs"],
+      "properties": {
+        "text": {"type": "string", "minLength": 1},
+        "evidence_refs": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "new_fact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "text", "evidence_refs"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^F-[A-Z0-9-]+$"},
+        "text": {"type": "string", "minLength": 1},
+        "evidence_refs": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^P[0-9]{3}-S[0-9]{3}$"}}
+      }
+    },
+    "new_active": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "text", "evidence_refs"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^A-[A-Z0-9-]+$"},
+        "kind": {"enum": ["person", "location", "item", "injury", "relationship", "procedure", "emotion", "action"]},
+        "text": {"type": "string", "minLength": 1},
+        "evidence_refs": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^P[0-9]{3}-S[0-9]{3}$"}}
+      }
+    },
+    "new_obligation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "text", "evidence_refs"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^O-[A-Z0-9-]+$"},
+        "kind": {"enum": ["promise", "return", "item", "injury", "emotion", "action", "procedure"]},
+        "text": {"type": "string", "minLength": 1},
+        "evidence_refs": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^P[0-9]{3}-S[0-9]{3}$"}}
+      }
+    },
+    "new_signal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "text", "evidence_refs"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^S-[A-Z0-9-]+$"},
+        "kind": {"const": "signal"},
+        "text": {"type": "string", "minLength": 1},
+        "evidence_refs": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^P[0-9]{3}-S[0-9]{3}$"}}
+      }
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "context", "direct_write_coverage", "new_facts", "live_operations",
+    "new_active_states", "new_obligations", "new_signals"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "current_time", "current_location", "accessible_people",
+        "narrator_knowledge", "narrator_inferences", "unresolved",
+        "last_visible_action", "required_continuity", "voice_anchors"
+      ],
+      "properties": {
+        "current_time": {"$ref": "#/$defs/time_assertion"},
+        "current_location": {"$ref": "#/$defs/time_assertion"},
+        "accessible_people": {"type": "array", "items": {"$ref": "#/$defs/assertion"}},
+        "narrator_knowledge": {"type": "array", "items": {"$ref": "#/$defs/assertion"}},
+        "narrator_inferences": {"type": "array", "items": {"$ref": "#/$defs/assertion"}},
+        "unresolved": {"type": "array", "items": {"$ref": "#/$defs/assertion"}},
+        "last_visible_action": {"$ref": "#/$defs/assertion"},
+        "required_continuity": {"type": "array", "items": {"$ref": "#/$defs/assertion"}},
+        "voice_anchors": {"type": "array", "items": {"$ref": "#/$defs/assertion"}}
+      }
+    },
+    "direct_write_coverage": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "evidence_refs"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "evidence_refs": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "pattern": "^P[0-9]{3}-S[0-9]{3}$"}
+          }
+        }
+      }
+    },
+    "new_facts": {"type": "array", "items": {"$ref": "#/$defs/new_fact"}},
+    "live_operations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source_id", "action"],
+        "properties": {
+          "source_id": {"type": "string", "minLength": 1},
+          "action": {"enum": ["carry", "confirm", "revise", "close"]},
+          "text": {"type": "string", "minLength": 1},
+          "payoff_condition": {"type": "string", "minLength": 1},
+          "evidence_refs": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^P[0-9]{3}-S[0-9]{3}$"}},
+          "disposition": {"enum": ["completed", "invalidated", "paid_off"]},
+          "resolution": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "new_active_states": {"type": "array", "items": {"$ref": "#/$defs/new_active"}},
+    "new_obligations": {"type": "array", "items": {"$ref": "#/$defs/new_obligation"}},
+    "new_signals": {"type": "array", "items": {"$ref": "#/$defs/new_signal"}}
+  }
+}

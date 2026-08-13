@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openai.local/zhihu-salt/draft-audit-semantics.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["units", "paragraphs", "direct_writes", "authorization_findings"],
+  "properties": {
+    "units": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "weight", "status", "trigger", "response", "feedback", "new_state"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^U[0-9]+$"},
+          "weight": {"enum": ["high", "standard", "light"]},
+          "status": {"enum": ["complete", "missing", "rewritten", "out_of_bounds"]},
+          "trigger": {"type": "array", "items": {"type": "string", "minLength": 1}},
+          "response": {"type": "array", "items": {"type": "string", "minLength": 1}},
+          "feedback": {"type": "array", "items": {"type": "string", "minLength": 1}},
+          "new_state": {"type": "array", "items": {"type": "string", "minLength": 1}}
+          ,"repair_instruction": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "paragraphs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["index", "owners", "effect", "verdict"],
+        "properties": {
+          "index": {"type": "integer", "minimum": 1},
+          "owners": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+          "effect": {"type": "string", "minLength": 1},
+          "verdict": {"enum": ["keep", "delete", "repair"]}
+        }
+      }
+    },
+    "direct_writes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "evidence"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "evidence": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+        }
+      }
+    },
+    "authorization_findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["quote", "category", "source_refs", "verdict", "reason"],
+        "properties": {
+          "quote": {"type": "string", "minLength": 1},
+          "category": {
+            "enum": ["identity", "object", "location_route", "time_number", "appearance_action", "backstory_habit", "cause_motive", "knowledge_conclusion", "continuity", "other"]
+          },
+          "source_refs": {"type": "array", "items": {"type": "string", "minLength": 1}},
+          "verdict": {"enum": ["authorized", "delete", "repair", "downgrade"]},
+          "reason": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}

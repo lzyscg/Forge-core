@@ -1,0 +1,124 @@
+{
+  "schema_version": "1.0",
+  "nodes": [
+    {
+      "id": "intake",
+      "purpose": "登记用户目标、生产模式和源输入",
+      "required_input_types": [],
+      "output_types": ["production_brief", "source_reference"],
+      "allowed_return_targets": ["intake"]
+    },
+    {
+      "id": "outline_design",
+      "purpose": "生成完整大纲、节奏与声音规划",
+      "required_input_types": ["production_brief"],
+      "output_types": ["story_outline"],
+      "allowed_return_targets": ["intake", "outline_design"]
+    },
+    {
+      "id": "private_blueprint",
+      "purpose": "建立总控私有因果、反转和揭示时点",
+      "required_input_types": ["story_outline"],
+      "output_types": ["private_blueprint"],
+      "allowed_return_targets": ["outline_design", "private_blueprint"]
+    },
+    {
+      "id": "stable_contract",
+      "purpose": "冻结不含未来答案的人称、视角、叙述时点、声音与公开身份名册",
+      "required_input_types": ["story_outline"],
+      "output_types": ["public_stable_contract"],
+      "allowed_return_targets": ["outline_design", "stable_contract"]
+    },
+    {
+      "id": "chapter_packet",
+      "purpose": "编译无剧透单章执行包",
+      "required_input_types": ["private_blueprint", "public_stable_contract"],
+      "output_types": ["chapter_packet"],
+      "allowed_return_targets": ["outline_design", "private_blueprint", "stable_contract", "chapter_packet", "ledger_update"]
+    },
+    {
+      "id": "chapter_draft",
+      "purpose": "仅凭已通过章节计划与执行包生成正文",
+      "required_input_types": ["chapter_packet", "chapter_plan_gate"],
+      "output_types": ["chapter_draft"],
+      "allowed_return_targets": ["chapter_packet", "chapter_focus", "chapter_scene_plan", "chapter_plan_gate", "chapter_draft"]
+    },
+    {
+      "id": "chapter_focus",
+      "purpose": "提取当前章唯一目的、P0 发生方式、硬事实与退出状态",
+      "required_input_types": ["chapter_packet"],
+      "output_types": ["chapter_focus_brief"],
+      "allowed_return_targets": ["chapter_packet", "chapter_focus"]
+    },
+    {
+      "id": "chapter_scene_plan",
+      "purpose": "为每个 P0 设计按先后发生的场景闭环与连接",
+      "required_input_types": ["chapter_packet", "chapter_focus_brief"],
+      "output_types": ["chapter_scene_plan"],
+      "allowed_return_targets": ["chapter_packet", "chapter_focus", "chapter_scene_plan"]
+    },
+    {
+      "id": "chapter_plan_gate",
+      "purpose": "验证重点、发生方式、事实边界、场景闭环和退出状态后放行正文",
+      "required_input_types": ["chapter_packet", "chapter_focus_brief", "chapter_scene_plan"],
+      "output_types": ["chapter_plan_gate"],
+      "allowed_return_targets": ["chapter_packet", "chapter_focus", "chapter_scene_plan", "chapter_plan_gate"]
+    },
+    {
+      "id": "surface_validation",
+      "purpose": "校验标题、篇幅、格式、重合和泄漏",
+      "required_input_types": ["chapter_draft"],
+      "output_types": ["surface_report"],
+      "allowed_return_targets": ["chapter_packet", "chapter_draft", "surface_validation"]
+    },
+    {
+      "id": "semantic_audit",
+      "purpose": "审核事实、闭环、授权、段落、知识和连续性",
+      "required_input_types": ["chapter_packet", "chapter_draft"],
+      "output_types": ["chapter_audit"],
+      "allowed_return_targets": ["outline_design", "private_blueprint", "chapter_packet", "chapter_draft", "semantic_audit", "ledger_update"]
+    },
+    {
+      "id": "chapter_repair",
+      "purpose": "按安全返修单执行返修",
+      "required_input_types": ["chapter_packet", "chapter_draft", "chapter_audit"],
+      "output_types": ["chapter_draft"],
+      "allowed_return_targets": ["chapter_packet", "chapter_draft", "semantic_audit", "chapter_repair"]
+    },
+    {
+      "id": "ledger_update",
+      "purpose": "仅从通过稿更新状态账本",
+      "required_input_types": ["chapter_draft", "chapter_audit"],
+      "output_types": ["state_ledger"],
+      "allowed_return_targets": ["chapter_packet", "chapter_draft", "semantic_audit", "ledger_update"]
+    },
+    {
+      "id": "full_story_assembly",
+      "purpose": "合并冻结章节",
+      "required_input_types": ["chapter_draft"],
+      "output_types": ["final_manuscript"],
+      "allowed_return_targets": ["chapter_packet", "chapter_draft", "ledger_update", "full_story_assembly"]
+    },
+    {
+      "id": "full_story_audit",
+      "purpose": "执行全文连续性、回收、知识和泄漏审计",
+      "required_input_types": ["private_blueprint", "final_manuscript"],
+      "output_types": ["full_story_audit"],
+      "allowed_return_targets": ["outline_design", "private_blueprint", "chapter_packet", "chapter_draft", "ledger_update", "full_story_assembly", "full_story_audit"]
+    },
+    {
+      "id": "final_director_review",
+      "purpose": "总控核验完整记录和全文门槛",
+      "required_input_types": ["final_manuscript", "full_story_audit"],
+      "output_types": ["director_review"],
+      "allowed_return_targets": ["outline_design", "private_blueprint", "chapter_packet", "chapter_draft", "semantic_audit", "ledger_update", "full_story_assembly", "full_story_audit", "final_director_review"]
+    },
+    {
+      "id": "delivery",
+      "purpose": "签发机器可读交付证书",
+      "required_input_types": ["final_manuscript", "full_story_audit", "director_review"],
+      "output_types": ["delivery_certificate"],
+      "allowed_return_targets": ["final_director_review"]
+    }
+  ]
+}

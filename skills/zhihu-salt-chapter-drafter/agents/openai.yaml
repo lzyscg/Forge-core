@@ -1,0 +1,4 @@
+interface:
+  display_name: "盐选单章正文写作"
+  short_description: "仅凭无剧透章节执行包写出完整单章正文，控制事实边界、情绪宣泄与语言呼吸"
+  default_prompt: "Use $zhihu-salt-chapter-drafter to write only the requested chapter from its execution packet."

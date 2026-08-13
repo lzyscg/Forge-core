@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openai.local/zhihu-salt/audit-result.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "valid", "operation", "chapter", "verdict", "missing_units", "out_of_bounds_facts", "repair_scope", "checks", "markdown_sha256"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "valid": {"type": "boolean"},
+    "operation": {"const": "audit"},
+    "chapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "display", "sequence", "boundary_signature"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^B[0-9]{3}$"},
+        "display": {"type": "string", "minLength": 1},
+        "sequence": {"type": "integer", "minimum": 0},
+        "boundary_signature": {"type": "string", "pattern": "^(?:[a-f0-9]{64}|UNMAPPED)$"}
+      }
+    },
+    "verdict": {"enum": ["pass", "repair"]},
+    "missing_units": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "out_of_bounds_facts": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "repair_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "targets"],
+      "properties": {
+        "mode": {"enum": ["none", "point", "block", "chapter"]},
+        "targets": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hard_facts", "knowledge_boundary", "scene_matrix", "paragraph_function", "continuity", "surface_language", "length_last"],
+      "properties": {
+        "hard_facts": {"type": "boolean"},
+        "knowledge_boundary": {"type": "boolean"},
+        "scene_matrix": {"type": "boolean"},
+        "paragraph_function": {"type": "boolean"},
+        "continuity": {"type": "boolean"},
+        "surface_language": {"type": "boolean"},
+        "length_last": {"type": "boolean"}
+      }
+    },
+    "markdown_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}

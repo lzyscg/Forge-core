@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version","decision_id","issue_type","failed_artifact_id","rollback_root_artifact_id","discovered_at_node","return_node","scope","reason","required_actions"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "decision_id": {"type": "string","pattern": "^RB-[A-Z0-9-]+$"},
+    "issue_type": {"enum": ["input_contract","story_direction","outline_structure","blueprint_contract","packet_scope","capacity_budget","prose_local","scene_completion","style_voice","audit_transport","authorization","knowledge_boundary","continuity_state","full_story_structure","delivery_quality"]},
+    "failed_artifact_id": {"type": "string","minLength": 1},
+    "rollback_root_artifact_id": {"type": "string","minLength": 1},
+    "discovered_at_node": {"type": "string","minLength": 1},
+    "return_node": {"type": "string","minLength": 1},
+    "scope": {"enum": ["point","block","chapter","chapter_forward","whole_story"]},
+    "chapter_id": {"type": "string","pattern": "^B[0-9]{3}$"},
+    "reason": {"type": "string","minLength": 1},
+    "required_actions": {"type": "array","minItems": 1,"items": {"type": "string","minLength": 1}}
+  }
+}

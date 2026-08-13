@@ -1,0 +1,4 @@
+interface:
+  display_name: "盐选短篇生产总控"
+  short_description: "统筹小说全链路、追溯产物依赖、路由返工并签发最终交付结果"
+  default_prompt: "Use $zhihu-salt-production-director to supervise this story production run, route failures to the responsible node, and issue the final delivery verdict."

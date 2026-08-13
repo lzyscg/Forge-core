@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openai.local/zhihu-salt/ledger-state.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "chapter",
+    "ordinary_facts",
+    "active_states",
+    "open_obligations",
+    "pending_signals",
+    "closed_items"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "chapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "display", "sequence", "boundary_signature"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^B[0-9]{3}$"},
+        "display": {"type": "string", "minLength": 1},
+        "sequence": {"type": "integer", "minimum": 0},
+        "boundary_signature": {"type": "string", "pattern": "^(?:[a-f0-9]{64}|UNMAPPED)$"}
+      }
+    },
+    "ordinary_facts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "text", "established_chapter", "evidence"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^F-[A-Z0-9-]+$"},
+          "text": {"type": "string", "minLength": 1},
+          "established_chapter": {"type": "string", "pattern": "^B[0-9]{3}$"},
+          "evidence": {"type": ["string", "array"], "minLength": 1, "minItems": 1, "items": {"type": "string", "minLength": 1}}
+        }
+      }
+    },
+    "active_states": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "kind", "text", "established_chapter", "last_confirmed_chapter", "evidence"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^A-[A-Z0-9-]+$"},
+          "kind": {"enum": ["person", "location", "item", "injury", "relationship", "procedure", "emotion", "action"]},
+          "text": {"type": "string", "minLength": 1},
+          "established_chapter": {"type": "string", "pattern": "^B[0-9]{3}$"},
+          "last_confirmed_chapter": {"type": "string", "pattern": "^B[0-9]{3}$"},
+          "evidence": {"type": ["string", "array"], "minLength": 1, "minItems": 1, "items": {"type": "string", "minLength": 1}}
+        }
+      }
+    },
+    "open_obligations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "kind", "text", "established_chapter", "last_confirmed_chapter", "evidence"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^O-[A-Z0-9-]+$"},
+          "kind": {"enum": ["promise", "return", "item", "injury", "emotion", "action", "procedure"]},
+          "text": {"type": "string", "minLength": 1},
+          "established_chapter": {"type": "string", "pattern": "^B[0-9]{3}$"},
+          "last_confirmed_chapter": {"type": "string", "pattern": "^B[0-9]{3}$"},
+          "evidence": {"type": ["string", "array"], "minLength": 1, "minItems": 1, "items": {"type": "string", "minLength": 1}}
+        }
+      }
+    },
+    "pending_signals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "text", "established_chapter", "last_confirmed_chapter", "payoff_condition", "evidence"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^S-[A-Z0-9-]+$"},
+          "text": {"type": "string", "minLength": 1},
+          "established_chapter": {"type": "string", "pattern": "^B[0-9]{3}$"},
+          "last_confirmed_chapter": {"type": "string", "pattern": "^B[0-9]{3}$"},
+          "payoff_condition": {"type": "string", "minLength": 1},
+          "evidence": {"type": ["string", "array"], "minLength": 1, "minItems": 1, "items": {"type": "string", "minLength": 1}}
+        }
+      }
+    },
+    "closed_items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source_id", "source_section", "disposition", "closed_chapter", "resolution", "evidence"],
+        "properties": {
+          "source_id": {"type": "string", "minLength": 1},
+          "source_section": {"enum": ["active_states", "open_obligations", "pending_signals"]},
+          "disposition": {"enum": ["completed", "invalidated", "paid_off"]},
+          "closed_chapter": {"type": "string", "pattern": "^B[0-9]{3}$"},
+          "resolution": {"type": "string", "minLength": 1},
+          "evidence": {"type": ["string", "array"], "minLength": 1, "minItems": 1, "items": {"type": "string", "minLength": 1}}
+        }
+      }
+    }
+  }
+}

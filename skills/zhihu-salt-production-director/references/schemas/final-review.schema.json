@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version","review_id","reviewer","verdict","final_manuscript_artifact_id","full_story_audit_artifact_id","checks","notes"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "review_id": {"type": "string","pattern": "^FR-[A-Z0-9-]+$"},
+    "reviewer": {"const": "production-director"},
+    "verdict": {"enum": ["pass","reject"]},
+    "final_manuscript_artifact_id": {"type": "string","minLength": 1},
+    "full_story_audit_artifact_id": {"type": "string","minLength": 1},
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["all_chapters_accepted","forward_continuity","reverse_payoff","knowledge_boundaries","no_control_leakage","quality_readthrough","reference_independence","trace_complete","costs_recorded"],
+      "properties": {
+        "all_chapters_accepted": {"type": "boolean"},
+        "forward_continuity": {"type": "boolean"},
+        "reverse_payoff": {"type": "boolean"},
+        "knowledge_boundaries": {"type": "boolean"},
+        "no_control_leakage": {"type": "boolean"},
+        "quality_readthrough": {"type": "boolean"},
+        "reference_independence": {"type": "boolean"},
+        "trace_complete": {"type": "boolean"},
+        "costs_recorded": {"type": "boolean"}
+      }
+    },
+    "notes": {"type": "string","minLength": 1}
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openai.local/zhihu-salt-outline-lifecycle.schema.json",
+  "title": "Zhihu Salt Outline Lifecycle Contract",
+  "type": "object",
+  "required": ["version", "story_id", "entities"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {"const": 1},
+    "story_id": {"type": "string", "minLength": 1},
+    "entities": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "label",
+          "initial_state",
+          "final_state",
+          "transitions"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": "string", "pattern": "^(OBJ|CHR|EMO|SIG)-[0-9]{2,}$"},
+          "kind": {
+            "enum": ["object", "character", "emotion", "signal"]
+          },
+          "label": {"type": "string", "minLength": 1},
+          "initial_state": {"type": "string", "minLength": 1},
+          "final_state": {"type": "string", "minLength": 1},
+          "transitions": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": [
+                "order",
+                "chapter",
+                "scene",
+                "trigger",
+                "before",
+                "after",
+                "terminal"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "order": {"type": "integer", "minimum": 1},
+                "chapter": {
+                  "type": "string",
+                  "pattern": "^(?:00|0[1-9]|[1-9][0-9])$",
+                  "description": "Two-digit narrative sequence: 00 for a cold open, then 01-99."
+                },
+                "scene": {"type": "string", "minLength": 1},
+                "trigger": {"type": "string", "minLength": 1},
+                "before": {"type": "string", "minLength": 1},
+                "after": {"type": "string", "minLength": 1},
+                "terminal": {"type": "boolean"}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

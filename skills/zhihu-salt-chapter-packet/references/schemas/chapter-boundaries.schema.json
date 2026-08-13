@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openai.local/zhihu-salt/chapter-boundaries.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "operation", "valid", "source", "chapters"],
+  "properties": {
+    "$schema": {"type": "string", "minLength": 1},
+    "schema_version": {"const": "1.0"},
+    "operation": {"const": "chapter-boundary-map"},
+    "valid": {"const": true},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "file_name", "encoding", "sha256", "line_count", "character_count"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "file_name": {"type": "string", "minLength": 1},
+        "encoding": {"enum": ["utf-8-sig", "utf-8", "gb18030"]},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "line_count": {"type": "integer", "minimum": 1},
+        "character_count": {"type": "integer", "minimum": 1}
+      }
+    },
+    "chapters": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id", "sequence", "display", "source_label", "heading_line",
+          "content_start_line", "content_end_line", "content_start_offset",
+          "content_end_offset", "start_anchor", "end_anchor",
+          "last_non_crossable_action", "next_forbidden_action",
+          "segment_sha256", "boundary_signature"
+        ],
+        "properties": {
+          "id": {"type": "string", "pattern": "^B[0-9]{3}$"},
+          "sequence": {"type": "integer", "minimum": 0},
+          "display": {"type": "string", "minLength": 1},
+          "source_label": {"type": ["string", "null"]},
+          "heading_line": {"type": ["integer", "null"], "minimum": 1},
+          "content_start_line": {"type": "integer", "minimum": 1},
+          "content_end_line": {"type": "integer", "minimum": 1},
+          "content_start_offset": {"type": "integer", "minimum": 0},
+          "content_end_offset": {"type": "integer", "minimum": 1},
+          "start_anchor": {"type": "string", "minLength": 1},
+          "end_anchor": {"type": "string", "minLength": 1},
+          "last_non_crossable_action": {"type": "string", "minLength": 1},
+          "next_forbidden_action": {"type": ["string", "null"]},
+          "segment_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "boundary_signature": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+        }
+      }
+    }
+  }
+}

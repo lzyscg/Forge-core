@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openai.local/zhihu-salt-outline-chapter-constraints.schema.json",
+  "title": "Zhihu Salt Outline Chapter Constraints",
+  "type": "object",
+  "required": ["version", "story_id", "chapters"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {"const": 1},
+    "story_id": {"type": "string", "minLength": 1},
+    "chapters": {
+      "type": "object",
+      "minProperties": 1,
+      "patternProperties": {
+        "^(?:00|0[1-9]|[1-9][0-9])$": {
+          "type": "object",
+          "required": ["required_terms", "forbidden_terms"],
+          "additionalProperties": false,
+          "properties": {
+            "required_terms": {
+              "type": "array",
+              "items": {"type": "string", "minLength": 1},
+              "uniqueItems": true
+            },
+            "forbidden_terms": {
+              "type": "array",
+              "items": {"type": "string", "minLength": 1},
+              "uniqueItems": true
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
