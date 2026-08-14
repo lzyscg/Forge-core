@@ -179,6 +179,15 @@ export interface TaskSummary {
    * historical/corrupt fallbacks fail closed to 'none' (never guess v2).
    */
   structuredProtocol: 'none' | 'v1' | 'v2';
+  /**
+   * Bounded failed-task recovery summary (spec §10.3.1): present ONLY on a
+   * v2 task projected `failed`. Carries the stable failure code, failed
+   * sequence, the policy-allowed legal recipe keys/tracks, `reopenAllowed`
+   * and the clone fallback — never private refs or evidence. Absent (the
+   * field stays unspecified on the wire) for every v1/basic/non-failed
+   * summary, so v1 bytes remain unchanged.
+   */
+  failedRecovery?: import('./authoritative-review-v2').FailedTaskRecoverySummaryV2;
 }
 
 export interface WorkspaceNode {

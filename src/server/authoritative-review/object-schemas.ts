@@ -8,6 +8,7 @@
  */
 import { AUTHORITATIVE_REVIEW_PROFILE_SNAPSHOT_MAX_BYTES } from './object-schema-parsers-3-constants';
 import type { AuthoritativeBlobKindV2, BlobRefV2 } from '../../shared/authoritative-review-v2';
+import { canonicalJsonSha256 } from '../structured-slots/canonical-json';
 import type { AuthoritativeReviewProfile, BlobKindByteLimits } from './authority-types';
 import { everyEmbeddedRef } from './schema-common';
 import {
@@ -78,6 +79,31 @@ import {
 
 export { parseProfileSnapshotObject };
 export { AUTHORITATIVE_REVIEW_PROFILE_SNAPSHOT_MAX_BYTES as PROFILE_SNAPSHOT_BOOTSTRAP_MAX_BYTES };
+
+
+/**
+ * Task-11 A-M1 / Ruling-2 HARD GATE: the frozen projection carries no field
+ * for the round-limit reopen's attempt-private imported staging manifest (and
+ * no active candidate/Map/manifest before the first activation), so the
+ * lifecycle publishes EXPLICIT PLACEHOLDER refs for those plan-base fields.
+ * A placeholder digest is `canonicalJsonSha256({ placeholder: literal })` for
+ * one of the three fixed literals below — it NEVER exists on disk, and
+ * neither GC mark nor an attempt lease may resolve it (that would be a
+ * permanent TASK_CORRUPTED abort). Task 13 replaces every placeholder with a
+ * REAL projection ref in the same release that removes this predicate.
+ */
+export const REOPEN_PLACEHOLDER_LITERALS = [
+  'repairBase:map',
+  'repairBase:manifest',
+  'staging:imported',
+] as const;
+
+/** True when `ref` is one of the fixed reopen placeholders (never resolved). */
+export function isReopenPlaceholderRef(ref: BlobRefV2): boolean {
+  return REOPEN_PLACEHOLDER_LITERALS.some(
+    (literal) => ref.digest === canonicalJsonSha256({ placeholder: literal }),
+  );
+}
 
 
 

@@ -34,10 +34,32 @@ import { parsePublicationOperationPayload } from '../authoritative-review/object
 import type {
   PublicationOperationPayloadV2,
   WorkItemReclaimReasonV2,
+  WorkItemSuspensionReasonV2,
 } from '../authoritative-review/authority-types';
 import type { WorkItemKindV2 } from '../../shared/authoritative-review-v2';
 import type { AuthoritativeReviewEventV2 } from './authoritative-review-events';
+import type { TaskEvent } from './task-events';
 import type { BlobRefV2 } from '../../shared/authoritative-review-v2';
+
+/**
+ * Standard legacy display-node helper: the shared EventNode body every legacy
+ * `human_requested`/`human_answered` companion carries (design §17.3 public
+ * display events). Sequence comes from the payload's expectedLastSequence
+ * (the DETERMINISTIC batch position — the node sequence equals the current
+ * tail + 1, the first event of the batch).
+ */
+function legacyDisplayNode(agentId: string, title: string, body: string, sequence: number, kind: 'human_request' | 'human_answer'): Extract<TaskEvent, { type: 'human_requested' }>['node'] {
+  return {
+    sequence,
+    agentId,
+    kind,
+    title,
+    body,
+    status: 'confirmed',
+    attemptCount: 1,
+    inputVersion: null,
+  };
+}
 
 /** An event envelope before the facade stamps the deterministic id. */
 export type AuthoritativeReviewEventEnvelopeV2 =
@@ -46,6 +68,19 @@ export type AuthoritativeReviewEventEnvelopeV2 =
       ? Omit<_Self, 'id'>
       : never
     : never;
+
+/**
+ * Task 11: a v2 atomic batch MAY legally carry a small set of LEGACY
+ * companion events (the shared frozen TaskEvent union always accepted them
+ * beside v2 members — the fold skips non-v2 members). The v2 START envelope
+ * carries `task_started`, the composed STOP envelope carries `task_stopped`
+ * / `task_interrupted`, and the question OPEN/ANSWER envelopes carry the
+ * public `human_requested`/`human_answered` display events (§17.2/§17.3). The
+ * facade validates every envelope through the same `validateTaskEvent`.
+ */
+export type PublicationEventEnvelopeV2 =
+  | AuthoritativeReviewEventEnvelopeV2
+  | Omit<TaskEvent & { at: string }, 'id'>;
 
 /** The exact closed publication payload families (design §19.1, frozen union). */
 export type PublicationPayloadFamilyV2 =
@@ -129,11 +164,11 @@ export interface PublicationIntentRegistrationV2 {
     payload: PublicationOperationPayloadV2,
     at: string,
     refs?: ReadonlyMap<string, unknown>,
-  ): readonly AuthoritativeReviewEventEnvelopeV2[];
+  ): readonly PublicationEventEnvelopeV2[];
   /** Deterministic identity of the committed result (events INCLUDING ids). */
   expectedResultIdentity(
     payload: PublicationOperationPayloadV2,
-    events: readonly AuthoritativeReviewEventV2[],
+    events: readonly (AuthoritativeReviewEventV2 | TaskEvent)[],
   ): string;
 }
 
@@ -149,7 +184,7 @@ export function deterministicEventId(operationId: string, handlerKind: string, i
   return `evt-${digest.slice(0, 32)}`;
 }
 
-function sha256OfEvents(events: readonly AuthoritativeReviewEventV2[]): string {
+function sha256OfEvents(events: readonly (AuthoritativeReviewEventV2 | TaskEvent)[]): string {
   return createHash('sha256').update(canonicalJson(events), 'utf8').digest('hex');
 }
 
@@ -164,8 +199,12 @@ export function publicationPayloadChildRefs(payload: PublicationOperationPayload
       return [parsed.authorityBaseRef];
     case 'lifecycle':
       return [];
-    case 'question':
-      return [parsed.authorityBaseRef];
+    case 'question': {
+      const refs: BlobRefV2[] = [parsed.authorityBaseRef];
+      if (parsed.grantSpecRef !== null) refs.push(parsed.grantSpecRef);
+      if (parsed.payloadRef !== null) refs.push(parsed.payloadRef);
+      return refs;
+    }
     case 'recovery': {
       const refs: BlobRefV2[] = [parsed.failureRecoveryPayloadRef];
       if (parsed.overrideRef !== null) {
@@ -223,14 +262,33 @@ export class PublicationIntentRegistry {
       if (parsed.family !== 'lifecycle') return [];
       const refs: BlobRefV2[] = [];
       if (parsed.authorityBaseRef !== null) refs.push(parsed.authorityBaseRef);
+      if (parsed.grantSpecRef !== null) refs.push(parsed.grantSpecRef);
+      if (parsed.payloadRef !== null) refs.push(parsed.payloadRef);
+      if (parsed.sourceValidationReceiptRef !== null) refs.push(parsed.sourceValidationReceiptRef);
       return refs;
     };
     const resolveRefs = (): readonly PublicationIntentResolvedRef[] => [];
+    /**
+     * Task 11 (constraint A round 2): the stop builder is the FULL §17.3
+     * composition when the payload carries the reclaim carriers (the v2
+     * lifecycle service composes [abandon, reclaim, task_stopped,
+     * suspension_applied] in ONE batch); the Task 10 overlay-only seed (a
+     * `workItemId:null` payload) keeps producing exactly the single overlay
+     * event, so applySuspension bytes are unchanged.
+     */
     this.register({
       handlerKind: 'lifecycle/stop',
       handlerVersion: 1,
       payloadFamily: family,
-      expectedEventTypes: ['structured_task_suspension_applied_v2'],
+      expectedEventTypes: [
+        'structured_agent_attempt_abandoned_v2',
+        'structured_generic_agent_attempt_abandoned',
+        'structured_system_command_abandoned',
+        'structured_work_item_lease_reclaimed',
+        'task_stopped',
+        'task_interrupted',
+        'structured_task_suspension_applied_v2',
+      ],
       rebuildable: true,
       missingInputs: [],
       parsePayload: parsePublicationOperationPayload,
@@ -246,16 +304,167 @@ export class PublicationIntentRegistry {
         if (p.kind !== 'stop') {
           throw new NotRebuildableError('lifecycle/stop', [`payload kind '${p.kind}' is not stop`]);
         }
+        const reason = p.reason ?? 'user_stop';
+        const composed = p.workItemId !== null || p.attemptFamily !== null;
+        const envelopes: PublicationEventEnvelopeV2[] = [];
+        if (composed) {
+          const missing: string[] = [];
+          const need = (value: unknown, name: string): void => {
+            if (value === null || value === undefined) missing.push(name);
+          };
+          need(p.workItemId, 'workItemId');
+          need(p.leaseEpoch, 'leaseEpoch');
+          need(p.authorityBaseRef, 'authorityBaseRef');
+          need(p.attemptFamily, 'attemptFamily');
+          if (p.attemptFamily === 'structured') {
+            need(p.attemptId, 'attemptId');
+            need(p.logicalAssignmentId, 'logicalAssignmentId');
+            need(p.sessionKind, 'sessionKind');
+          } else if (p.attemptFamily === 'generic') {
+            need(p.attemptId, 'attemptId');
+            need(p.agentId, 'agentId');
+            need(p.logicalAssignmentId, 'logicalAssignmentId');
+            need(p.inputArtifactDeliveryId, 'inputArtifactDeliveryId');
+          } else {
+            need(p.commandId, 'commandId');
+            need(p.commandKind, 'commandKind');
+          }
+          if (missing.length > 0) throw new NotRebuildableError('lifecycle/stop', missing);
+          if (p.attemptFamily === 'structured') {
+            envelopes.push({
+              protocolVersion: 2,
+              at,
+              type: 'structured_agent_attempt_abandoned_v2',
+              workItemId: p.workItemId as string,
+              logicalAssignmentId: p.logicalAssignmentId as string,
+              reviewAssignmentId: p.reviewAssignmentId,
+              attemptId: p.attemptId as string,
+              sessionKind: p.sessionKind as NonNullable<Extract<PublicationOperationPayloadV2, { family: 'lifecycle' }>['sessionKind']>,
+              leaseEpoch: p.leaseEpoch as number,
+              reason,
+              authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+            });
+          } else if (p.attemptFamily === 'generic') {
+            envelopes.push({
+              protocolVersion: 2,
+              at,
+              type: 'structured_generic_agent_attempt_abandoned',
+              attemptId: p.attemptId as string,
+              workItemId: p.workItemId as string,
+              agentId: p.agentId as string,
+              logicalAssignmentId: p.logicalAssignmentId as string,
+              leaseEpoch: p.leaseEpoch as number,
+              inputArtifactDeliveryId: p.inputArtifactDeliveryId as string,
+              reason,
+              authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+            });
+          } else {
+            envelopes.push({
+              protocolVersion: 2,
+              at,
+              type: 'structured_system_command_abandoned',
+              commandId: p.commandId as string,
+              workItemId: p.workItemId as string,
+              commandKind: p.commandKind as NonNullable<Extract<PublicationOperationPayloadV2, { family: 'lifecycle' }>['commandKind']>,
+              leaseEpoch: p.leaseEpoch as number,
+              reason,
+              authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+            });
+          }
+          envelopes.push({
+            protocolVersion: 2,
+            at,
+            type: 'structured_work_item_lease_reclaimed',
+            workItemId: p.workItemId as string,
+            leaseEpoch: p.leaseEpoch as number,
+            reason,
+            authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+          });
+          envelopes.push({ at, type: reason === 'operator_interrupt' ? 'task_interrupted' : 'task_stopped' });
+        }
+        envelopes.push({
+          protocolVersion: 2,
+          at,
+          type: 'structured_task_suspension_applied_v2',
+          suspensionId: p.suspensionId,
+          // Task 10 extension: the payload may name the interrupt reason; the
+          // Task 8 default (payloads without the field) stays user_stop.
+          reason,
+          operationId: p.operationId,
+        });
+        return envelopes;
+      },
+      expectedResultIdentity: (_payload, events) => sha256OfEvents(events),
+    });
+    /**
+     * Task 11 (constraint A round 2): the ONE-BATCH v2 START (design §17.2) —
+     * `task_started` + `structured_map_build_started` + the first
+     * structure-chunk `structured_work_item_created` with AuthorityBase and
+     * initial_structure_chunk WriteGrantSpec pinned in the SAME publication.
+     * No legacy `agent_input` is ever seeded by v2 (the new build has no v1
+     * input node).
+     */
+    this.register({
+      handlerKind: 'lifecycle/start_task',
+      handlerVersion: 1,
+      payloadFamily: family,
+      expectedEventTypes: ['task_started', 'structured_map_build_started', 'structured_work_item_created'],
+      rebuildable: true,
+      missingInputs: [],
+      parsePayload: parsePublicationOperationPayload,
+      childRefsOf: (p) => childRefsOfChecked(p, family, childRefs),
+      resolveRefs,
+      buildEvents: (payload, at) => {
+        const p = payload as Extract<PublicationOperationPayloadV2, { family: 'lifecycle' }>;
+        if (p.kind !== 'start') {
+          throw new NotRebuildableError('lifecycle/start_task', [`payload kind '${p.kind}' is not start`]);
+        }
+        const missing: string[] = [];
+        const need = (value: unknown, name: string): void => {
+          if (value === null || value === undefined) missing.push(name);
+        };
+        need(p.workItemId, 'workItemId');
+        need(p.workItemKind, 'workItemKind');
+        need(p.roleBinding, 'roleBinding');
+        need(p.sessionKind, 'sessionKind');
+        need(p.logicalAssignmentId, 'logicalAssignmentId');
+        need(p.grantSpecRef, 'grantSpecRef');
+        need(p.payloadRef, 'payloadRef');
+        need(p.initialLeaseEpoch, 'initialLeaseEpoch');
+        need(p.maxAutomaticRetries, 'maxAutomaticRetries');
+        need(p.mapBuildId, 'mapBuildId');
+        need(p.authorityBaseRef, 'authorityBaseRef');
+        if (missing.length > 0) throw new NotRebuildableError('lifecycle/start_task', missing);
         return [
+          { at, type: 'task_started' },
           {
             protocolVersion: 2,
             at,
-            type: 'structured_task_suspension_applied_v2',
-            suspensionId: p.suspensionId,
-            // Task 10 extension: the payload may name the interrupt reason; the
-            // Task 8 default (payloads without the field) stays user_stop.
-            reason: p.reason ?? 'user_stop',
-            operationId: p.operationId,
+            type: 'structured_map_build_started',
+            mapBuildId: p.mapBuildId as string,
+            revision: 1,
+            mapBuildSpecRef: p.payloadRef as BlobRefV2,
+            supersedesMapBuildId: p.supersedesMapBuildId,
+            sourceValidationReceiptRef: p.sourceValidationReceiptRef,
+          },
+          {
+            protocolVersion: 2,
+            at,
+            type: 'structured_work_item_created',
+            workItemId: p.workItemId as string,
+            kind: p.workItemKind as WorkItemKindV2,
+            roleBinding: p.roleBinding,
+            agentExecutionKind: p.agentExecutionKind ?? null,
+            sessionKind: p.sessionKind as NonNullable<Extract<PublicationOperationPayloadV2, { family: 'lifecycle' }>['sessionKind']>,
+            roundId: p.roundId ?? null,
+            logicalAssignmentId: p.logicalAssignmentId as string,
+            reviewAssignmentId: p.reviewAssignmentId ?? null,
+            grantSpecRef: p.grantSpecRef,
+            inputArtifactDeliveryId: p.inputArtifactDeliveryId ?? null,
+            authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+            payloadRef: p.payloadRef as BlobRefV2,
+            initialLeaseEpoch: p.initialLeaseEpoch as number,
+            maxAutomaticRetries: p.maxAutomaticRetries as number,
           },
         ];
       },
@@ -871,38 +1080,499 @@ export class PublicationIntentRegistry {
       },
       expectedResultIdentity: (_payload, events) => sha256OfEvents(events),
     });
+
+    // Task 11 (constraint A round 2): the `RUNNING_WITHOUT_WORK` startup
+    // compensation (spec §10.4) — ONE `structured_task_failed_v2` whose
+    // terminal attempt/command ALREADY committed (the task is otherwise stuck
+    // falsely running). The failure carriers ride the lease_or_retry payload,
+    // so the compensation is byte-rebuildable.
+    this.register({
+      handlerKind: 'task_terminal_failed',
+      handlerVersion: 1,
+      payloadFamily: family,
+      expectedEventTypes: ['structured_task_failed_v2'],
+      rebuildable: true,
+      missingInputs: [],
+      parsePayload: parsePublicationOperationPayload,
+      childRefsOf: (p) => childRefsOfChecked(p, family, childRefs),
+      resolveRefs,
+      buildEvents: (payload, at) => {
+        const p = lease(payload);
+        if (p.eventBuilder !== 'task_terminal_failed') {
+          throw new NotRebuildableError('task_terminal_failed', ['eventBuilder']);
+        }
+        const missing: string[] = [];
+        const need = (value: unknown, name: string): void => {
+          if (value === null || value === undefined) missing.push(name);
+        };
+        need(p.workItemId, 'workItemId');
+        need(p.leaseEpoch, 'leaseEpoch');
+        need(p.failureCode, 'failureCode');
+        need(p.failureDigest, 'failureDigest');
+        need(p.authorityBaseRef, 'authorityBaseRef');
+        if (p.attemptFamily === 'structured' || p.attemptFamily === 'generic') {
+          need(p.attemptId, 'attemptId');
+          if (p.attemptFamily === 'generic') need(p.logicalAssignmentId, 'logicalAssignmentId');
+        } else if (p.attemptFamily === 'command') {
+          need(p.commandId, 'commandId');
+        } else {
+          missing.push('attemptFamily');
+        }
+        if (missing.length > 0) throw new NotRebuildableError('task_terminal_failed', missing);
+        return [
+          {
+            protocolVersion: 2,
+            at,
+            type: 'structured_task_failed_v2',
+            workItemId: p.workItemId as string,
+            attemptId: p.attemptFamily === 'command' ? null : (p.attemptId as string),
+            commandId: p.attemptFamily === 'command' ? (p.commandId as string) : null,
+            leaseEpoch: p.leaseEpoch as number,
+            failureCode: p.failureCode as string,
+            failureDigest: p.failureDigest as string,
+            failureRecoveryPayloadRef: p.failureRecoveryPayloadRef,
+            authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+          },
+        ];
+      },
+      expectedResultIdentity: (_payload, events) => sha256OfEvents(events),
+    });
+
+    // Task 11 (constraint A round 2): the terminal-failure envelope (Task 12
+    // attempt-coordinator handoff): attempt/command terminal_failed +
+    // work_item_terminal_failed in ONE batch, plus structured_task_failed_v2
+    // when `taskFailure` is true (§10.3 permanent failure atomicity).
+    this.register({
+      handlerKind: 'work_item_terminal_failed',
+      handlerVersion: 1,
+      payloadFamily: family,
+      expectedEventTypes: [
+        'structured_agent_attempt_terminal_failed_v2',
+        'structured_generic_agent_attempt_terminal_failed',
+        'structured_system_command_terminal_failed',
+        'structured_work_item_terminal_failed',
+        'structured_task_failed_v2',
+      ],
+      rebuildable: true,
+      missingInputs: [],
+      parsePayload: parsePublicationOperationPayload,
+      childRefsOf: (p) => childRefsOfChecked(p, family, childRefs),
+      resolveRefs,
+      buildEvents: (payload, at) => {
+        const p = lease(payload);
+        if (p.eventBuilder !== 'work_item_terminal_failed') {
+          throw new NotRebuildableError('work_item_terminal_failed', ['eventBuilder']);
+        }
+        if (p.attemptFamily === null) {
+          throw new NotRebuildableError('work_item_terminal_failed', ['attemptFamily']);
+        }
+        const missing: string[] = [];
+        const need = (value: unknown, name: string): void => {
+          if (value === null || value === undefined) missing.push(name);
+        };
+        need(p.workItemId, 'workItemId');
+        need(p.leaseEpoch, 'leaseEpoch');
+        need(p.failureCode, 'failureCode');
+        need(p.failureDigest, 'failureDigest');
+        if (p.attemptFamily === 'structured') {
+          need(p.attemptId, 'attemptId');
+          need(p.logicalAssignmentId, 'logicalAssignmentId');
+          need(p.sessionKind, 'sessionKind');
+        } else if (p.attemptFamily === 'generic') {
+          need(p.attemptId, 'attemptId');
+          need(p.agentId, 'agentId');
+          need(p.logicalAssignmentId, 'logicalAssignmentId');
+          need(p.inputArtifactDeliveryId, 'inputArtifactDeliveryId');
+        } else {
+          need(p.commandId, 'commandId');
+          need(p.commandKind, 'commandKind');
+        }
+        if (missing.length > 0) throw new NotRebuildableError('work_item_terminal_failed', missing);
+        const envelopes: PublicationEventEnvelopeV2[] = [];
+        if (p.attemptFamily === 'structured') {
+          envelopes.push({
+            protocolVersion: 2,
+            at,
+            type: 'structured_agent_attempt_terminal_failed_v2',
+            workItemId: p.workItemId as string,
+            logicalAssignmentId: p.logicalAssignmentId as string,
+            reviewAssignmentId: p.reviewAssignmentId,
+            attemptId: p.attemptId as string,
+            sessionKind: p.sessionKind as NonNullable<LeaseOrRetryPayload['sessionKind']>,
+            leaseEpoch: p.leaseEpoch as number,
+            failureCode: p.failureCode as string,
+            failureDigest: p.failureDigest as string,
+            validatorAggregateRef: p.validatorAggregateRef,
+            authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+          });
+        } else if (p.attemptFamily === 'generic') {
+          envelopes.push({
+            protocolVersion: 2,
+            at,
+            type: 'structured_generic_agent_attempt_terminal_failed',
+            attemptId: p.attemptId as string,
+            workItemId: p.workItemId as string,
+            agentId: p.agentId as string,
+            logicalAssignmentId: p.logicalAssignmentId as string,
+            leaseEpoch: p.leaseEpoch as number,
+            inputArtifactDeliveryId: p.inputArtifactDeliveryId as string,
+            failureCode: p.failureCode as string,
+            failureDigest: p.failureDigest as string,
+            validatorAggregateRef: p.validatorAggregateRef,
+            authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+          });
+        } else {
+          envelopes.push({
+            protocolVersion: 2,
+            at,
+            type: 'structured_system_command_terminal_failed',
+            commandId: p.commandId as string,
+            workItemId: p.workItemId as string,
+            commandKind: p.commandKind as NonNullable<LeaseOrRetryPayload['commandKind']>,
+            leaseEpoch: p.leaseEpoch as number,
+            failureCode: p.failureCode as string,
+            failureDigest: p.failureDigest as string,
+            validatorAggregateRef: p.validatorAggregateRef,
+            authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+          });
+        }
+        envelopes.push({
+          protocolVersion: 2,
+          at,
+          type: 'structured_work_item_terminal_failed',
+          workItemId: p.workItemId as string,
+          leaseEpoch: p.leaseEpoch as number,
+          terminalAttemptId: p.attemptFamily === 'command' ? null : (p.attemptId as string),
+          terminalCommandId: p.attemptFamily === 'command' ? (p.commandId as string) : null,
+          failureCode: p.failureCode as string,
+          failureDigest: p.failureDigest as string,
+          validatorAggregateRef: p.validatorAggregateRef,
+          authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+        });
+        if (p.taskFailure === true) {
+          envelopes.push({
+            protocolVersion: 2,
+            at,
+            type: 'structured_task_failed_v2',
+            workItemId: p.workItemId as string,
+            attemptId: p.attemptFamily === 'command' ? null : (p.attemptId as string),
+            commandId: p.attemptFamily === 'command' ? (p.commandId as string) : null,
+            leaseEpoch: p.leaseEpoch as number,
+            failureCode: p.failureCode as string,
+            failureDigest: p.failureDigest as string,
+            failureRecoveryPayloadRef: p.failureRecoveryPayloadRef,
+            authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+          });
+        }
+        return envelopes;
+      },
+      expectedResultIdentity: (_payload, events) => sha256OfEvents(events),
+    });
   }
 
   private seedQuestion(): void {
     const family: PublicationPayloadFamilyV2 = 'question';
+    const childRefs = (parsed: PublicationOperationPayloadV2): readonly BlobRefV2[] => {
+      if (parsed.family !== 'question') return [];
+      const refs: BlobRefV2[] = [parsed.authorityBaseRef];
+      if (parsed.grantSpecRef !== null) refs.push(parsed.grantSpecRef);
+      if (parsed.payloadRef !== null) refs.push(parsed.payloadRef);
+      return refs;
+    };
+    const resolveRefs = (): readonly PublicationIntentResolvedRef[] => [];
+    // Task 11 (constraint A round 2): the §17.3 OPEN envelope — attempt
+    // terminal, question opened, question park and the public display event in
+    // ONE batch. The attempt-terminal carrier set comes from the payload, so
+    // a crashed pin replays the exact bytes.
+    this.register({
+      handlerKind: 'human_question_open',
+      handlerVersion: 1,
+      payloadFamily: family,
+      expectedEventTypes: [
+        'structured_agent_attempt_terminal_failed_v2',
+        'structured_human_question_opened_v2',
+        'structured_work_item_parked',
+        'human_requested',
+      ],
+      rebuildable: true,
+      missingInputs: [],
+      parsePayload: parsePublicationOperationPayload,
+      childRefsOf: (p) => childRefsOfChecked(p, family, childRefs),
+      resolveRefs,
+      buildEvents: (payload, at) => {
+        const p = payload as Extract<PublicationOperationPayloadV2, { family: 'question' }>;
+        if (p.mode !== 'open') {
+          throw new NotRebuildableError('human_question_open', [`payload mode '${p.mode}' is not open`]);
+        }
+        const missing: string[] = [];
+        const need = (value: unknown, name: string): void => {
+          if (value === null || value === undefined) missing.push(name);
+        };
+        need(p.questionDigest, 'questionDigest');
+        need(p.text, 'text');
+        need(p.openedCommitId, 'openedCommitId');
+        need(p.originalWorkItemId, 'originalWorkItemId');
+        need(p.attemptId, 'attemptId');
+        need(p.leaseEpoch, 'leaseEpoch');
+        need(p.logicalAssignmentId, 'logicalAssignmentId');
+        need(p.sessionKind, 'sessionKind');
+        need(p.failureCode, 'failureCode');
+        need(p.failureDigest, 'failureDigest');
+        if (missing.length > 0) throw new NotRebuildableError('human_question_open', missing);
+        const sequence = p.expectedLastSequence ?? 0;
+        return [
+          {
+            protocolVersion: 2,
+            at,
+            type: 'structured_agent_attempt_terminal_failed_v2',
+            workItemId: p.originalWorkItemId as string,
+            logicalAssignmentId: p.logicalAssignmentId as string,
+            reviewAssignmentId: p.reviewAssignmentId,
+            attemptId: p.attemptId as string,
+            sessionKind: p.sessionKind as NonNullable<Extract<PublicationOperationPayloadV2, { family: 'question' }>['sessionKind']>,
+            leaseEpoch: p.leaseEpoch as number,
+            failureCode: p.failureCode as string,
+            failureDigest: p.failureDigest as string,
+            validatorAggregateRef: null,
+            authorityBaseRef: p.authorityBaseRef,
+          },
+          {
+            protocolVersion: 2,
+            at,
+            type: 'structured_human_question_opened_v2',
+            questionId: p.questionId,
+            questionVersion: p.questionVersion,
+            questionDigest: p.questionDigest as string,
+            originalWorkItemId: p.originalWorkItemId as string,
+            attemptId: p.attemptId as string,
+            leaseEpoch: p.leaseEpoch as number,
+            logicalAssignmentId: p.logicalAssignmentId as string,
+            authorityBaseRef: p.authorityBaseRef,
+          },
+          {
+            protocolVersion: 2,
+            at,
+            type: 'structured_work_item_parked',
+            workItemId: p.originalWorkItemId as string,
+            leaseEpoch: p.leaseEpoch as number,
+            parkDisposition: {
+              kind: 'human_question',
+              questionId: p.questionId,
+              questionVersion: p.questionVersion,
+            },
+            authorityBaseRef: p.authorityBaseRef,
+          },
+          {
+            at,
+            type: 'human_requested',
+            node: legacyDisplayNode(
+              p.agentId as string,
+              'Human Question',
+              p.text as string,
+              sequence + 1,
+              'human_request',
+            ),
+            question: p.text as string,
+            source: 'agent_request',
+          },
+        ];
+      },
+      expectedResultIdentity: (_payload, events) => sha256OfEvents(events),
+    });
+    // Task 11 (constraint A round 2): the §17.3 ANSWER envelope — the delivered
+    // event consumes the exact pending question, the original question-bound
+    // WorkItem is superseded (human_disposition), the replacement WorkItem is
+    // created, and the public display event lands — all in ONE batch. The
+    // union extension (deliveryId/originalWorkItemId/replacementWorkItemId/
+    // logicalAssignmentId) makes this byte-rebuildable from the pin alone.
     this.register({
       handlerKind: 'human_answer',
       handlerVersion: 1,
       payloadFamily: family,
-      expectedEventTypes: ['structured_human_answer_delivered_v2'],
-      rebuildable: false,
-      missingInputs: [
-        'originalWorkItemId/replacementWorkItemId/logicalAssignmentId/deliveryId are state facts absent from the frozen question payload',
+      expectedEventTypes: [
+        'human_answered',
+        'structured_human_answer_delivered_v2',
+        'structured_work_item_superseded',
+        'structured_work_item_created',
       ],
+      rebuildable: true,
+      missingInputs: [],
       parsePayload: parsePublicationOperationPayload,
-      childRefsOf: (p) =>
-        childRefsOfChecked(p, family, (parsed) =>
-          parsed.family === 'question' ? [parsed.authorityBaseRef] : [],
-        ),
-      resolveRefs: (p) => (p.family === 'question' ? [{ key: 'authorityBase', ref: p.authorityBaseRef }] : []),
-      buildEvents: () => {
-        throw new NotRebuildableError('human_answer', [
-          'originalWorkItemId, replacementWorkItemId, logicalAssignmentId, deliveryId',
-        ]);
+      childRefsOf: (p) => childRefsOfChecked(p, family, childRefs),
+      resolveRefs,
+      buildEvents: (payload, at) => {
+        const p = payload as Extract<PublicationOperationPayloadV2, { family: 'question' }>;
+        if (p.mode !== 'answer') {
+          throw new NotRebuildableError('human_answer', [`payload mode '${p.mode}' is not answer`]);
+        }
+        const missing: string[] = [];
+        const need = (value: unknown, name: string): void => {
+          if (value === null || value === undefined) missing.push(name);
+        };
+        need(p.deliveryId, 'deliveryId');
+        need(p.originalWorkItemId, 'originalWorkItemId');
+        need(p.replacementWorkItemId, 'replacementWorkItemId');
+        need(p.logicalAssignmentId, 'logicalAssignmentId');
+        need(p.answerDigest, 'answerDigest');
+        need(p.kind, 'kind');
+        need(p.roleBinding, 'roleBinding');
+        need(p.payloadRef, 'payloadRef');
+        need(p.initialLeaseEpoch, 'initialLeaseEpoch');
+        need(p.maxAutomaticRetries, 'maxAutomaticRetries');
+        need(p.leaseEpoch, 'leaseEpoch');
+        if (missing.length > 0) throw new NotRebuildableError('human_answer', missing);
+        const sequence = p.expectedLastSequence ?? 0;
+        return [
+          {
+            at,
+            type: 'human_answered',
+            node: legacyDisplayNode(
+              p.agentId as string,
+              'Human Answer',
+              p.answerText as string,
+              sequence + 1,
+              'human_answer',
+            ),
+            answer: p.answerText as string,
+          },
+          {
+            protocolVersion: 2,
+            at,
+            type: 'structured_human_answer_delivered_v2',
+            deliveryId: p.deliveryId as string,
+            questionId: p.questionId,
+            questionVersion: p.questionVersion,
+            originalWorkItemId: p.originalWorkItemId as string,
+            replacementWorkItemId: p.replacementWorkItemId as string,
+            logicalAssignmentId: p.logicalAssignmentId as string,
+            answerDigest: p.answerDigest as string,
+            operationId: p.operationId,
+            authorityBaseRef: p.authorityBaseRef,
+          },
+          {
+            protocolVersion: 2,
+            at,
+            type: 'structured_work_item_superseded',
+            workItemId: p.originalWorkItemId as string,
+            leaseEpoch: p.leaseEpoch as number,
+            reason: 'human_disposition',
+            authorityBaseRef: p.authorityBaseRef,
+          },
+          {
+            protocolVersion: 2,
+            at,
+            type: 'structured_work_item_created',
+            workItemId: p.replacementWorkItemId as string,
+            kind: p.kind as WorkItemKindV2,
+            roleBinding: p.roleBinding,
+            agentExecutionKind: p.agentExecutionKind ?? null,
+            sessionKind: p.sessionKind ?? null,
+            roundId: p.roundId ?? null,
+            logicalAssignmentId: p.logicalAssignmentId as string,
+            reviewAssignmentId: p.reviewAssignmentId,
+            grantSpecRef: p.grantSpecRef,
+            inputArtifactDeliveryId: p.inputArtifactDeliveryId ?? null,
+            authorityBaseRef: p.authorityBaseRef,
+            payloadRef: p.payloadRef as BlobRefV2,
+            initialLeaseEpoch: p.initialLeaseEpoch as number,
+            maxAutomaticRetries: p.maxAutomaticRetries as number,
+          },
+        ];
       },
-      expectedResultIdentity: () => {
-        throw new NotRebuildableError('human_answer', ['not rebuildable']);
-      },
+      expectedResultIdentity: (_payload, events) => sha256OfEvents(events),
     });
   }
 
   private seedRecovery(): void {
     const family: PublicationPayloadFamilyV2 = 'recovery';
+    // Task 11 (constraint A round 2): the §10.3.1 policy table is applied ONLY
+    // from the frozen projection + recovery payload; the operator-owned reopen
+    // facts (operatorId/reason/track) now ride in the payload, so every recipe
+    // envelope is byte-rebuildable from the pin (spec §10.4 crash-pin replay).
+    const buildReopened = (recipeKey: string) => (payload: PublicationOperationPayloadV2, at: string): readonly PublicationEventEnvelopeV2[] => {
+      const p = payload as Extract<PublicationOperationPayloadV2, { family: 'recovery' }>;
+      if (p.recipeKey !== recipeKey) {
+        throw new NotRebuildableError(recipeKey, [`payload recipe '${p.recipeKey}' is not ${recipeKey}`]);
+      }
+      if (p.reason === '') {
+        throw new NotRebuildableError(recipeKey, ['reason must be a non-empty bounded string']);
+      }
+      const track: 'map' | 'content' | null =
+        p.track === 'map' || p.track === 'content' ? p.track : null;
+      if (recipeKey === 'restart_map_review_cycle' && track !== 'map') {
+        throw new NotRebuildableError(recipeKey, [`track must be 'map', got '${String(p.track)}'`]);
+      }
+      if (recipeKey === 'restart_content_review_cycle' && track !== 'content') {
+        throw new NotRebuildableError(recipeKey, [`track must be 'content', got '${String(p.track)}'`]);
+      }
+      if (recipeKey === 'retry_system_command' && track !== null) {
+        throw new NotRebuildableError(recipeKey, ['track must be null for retry_system_command']);
+      }
+      return [
+        {
+          protocolVersion: 2,
+          at,
+          type: 'structured_task_reopened_v2',
+          expectedLastSequence: p.expectedLastSequence,
+          operationId: p.operationId,
+          operatorId: p.operatorId,
+          reason: p.reason,
+          recipeKey: p.recipeKey,
+          track: recipeKey === 'retry_system_command' ? null : track,
+          failureRecoveryPayloadRef: p.failureRecoveryPayloadRef,
+          overrideRef: p.overrideRef,
+        },
+      ];
+    };
+    const buildFor = (recipeKey: string) => (payload: PublicationOperationPayloadV2, at: string): readonly PublicationEventEnvelopeV2[] => {
+      const reopened = buildReopened(recipeKey)(payload, at);
+      const p = payload as Extract<PublicationOperationPayloadV2, { family: 'recovery' }>;
+      if (p.replacementWorkItemId === null || p.replacementKind === null) {
+        throw new NotRebuildableError(recipeKey, ['replacementWorkItemId/replacementKind']);
+      }
+      const missing: string[] = [];
+      const need = (value: unknown, name: string): void => {
+        if (value === null || value === undefined) missing.push(name);
+      };
+      need(p.replacementPayloadRef, 'replacementPayloadRef');
+      need(p.replacementAuthorityBaseRef, 'replacementAuthorityBaseRef');
+      need(p.replacementLeaseEpoch, 'replacementLeaseEpoch');
+      need(p.replacementMaxAutomaticRetries, 'replacementMaxAutomaticRetries');
+      if (p.replacementKind === 'agent_assignment') {
+        need(p.replacementRoleBinding, 'replacementRoleBinding');
+        need(p.replacementLogicalAssignmentId, 'replacementLogicalAssignmentId');
+        if (p.replacementAgentExecutionKind === 'structured_session') need(p.replacementSessionKind, 'replacementSessionKind');
+      }
+      if (missing.length > 0) throw new NotRebuildableError(recipeKey, missing);
+      return [
+        ...reopened,
+        {
+          protocolVersion: 2,
+          at,
+          type: 'structured_work_item_created',
+          workItemId: p.replacementWorkItemId as string,
+          kind: p.replacementKind as WorkItemKindV2,
+          roleBinding: p.replacementRoleBinding,
+          agentExecutionKind: p.replacementAgentExecutionKind ?? null,
+          sessionKind: p.replacementSessionKind ?? null,
+          roundId: p.replacementRoundId ?? null,
+          logicalAssignmentId: p.replacementLogicalAssignmentId as string,
+          reviewAssignmentId: p.replacementReviewAssignmentId,
+          grantSpecRef: p.replacementGrantSpecRef,
+          inputArtifactDeliveryId: p.replacementInputArtifactDeliveryId ?? null,
+          authorityBaseRef: p.replacementAuthorityBaseRef as BlobRefV2,
+          payloadRef: p.replacementPayloadRef as BlobRefV2,
+          initialLeaseEpoch: p.replacementLeaseEpoch as number,
+          maxAutomaticRetries: p.replacementMaxAutomaticRetries as number,
+        },
+      ];
+    };
+    const childRefs = (parsed: PublicationOperationPayloadV2): readonly BlobRefV2[] => {
+      if (parsed.family !== 'recovery') return [];
+      const refs: BlobRefV2[] = [parsed.failureRecoveryPayloadRef];
+      if (parsed.overrideRef !== null) refs.push(parsed.overrideRef);
+      return refs;
+    };
     for (const recipeKey of [
       'retry_system_command',
       'restart_map_review_cycle',
@@ -913,19 +1583,11 @@ export class PublicationIntentRegistry {
         handlerKind: recipeKey,
         handlerVersion: 1,
         payloadFamily: family,
-        expectedEventTypes: ['structured_task_reopened_v2'],
-        rebuildable: false,
-        missingInputs: [
-          'operatorId and reason are operator-owned reopen facts absent from the frozen recovery payload',
-        ],
+        expectedEventTypes: ['structured_task_reopened_v2', 'structured_work_item_created'],
+        rebuildable: true,
+        missingInputs: [],
         parsePayload: parsePublicationOperationPayload,
-        childRefsOf: (p) =>
-          childRefsOfChecked(p, family, (parsed) => {
-            if (parsed.family !== 'recovery') return [];
-            const refs: BlobRefV2[] = [parsed.failureRecoveryPayloadRef];
-            if (parsed.overrideRef !== null) refs.push(parsed.overrideRef);
-            return refs;
-          }),
+        childRefsOf: (p) => childRefsOfChecked(p, family, childRefs),
         resolveRefs: (p) => {
           if (p.family !== 'recovery') return [];
           const out: PublicationIntentResolvedRef[] = [
@@ -934,25 +1596,33 @@ export class PublicationIntentRegistry {
           if (p.overrideRef !== null) out.push({ key: 'override', ref: p.overrideRef });
           return out;
         },
-        buildEvents: () => {
-          throw new NotRebuildableError(recipeKey, ['operatorId', 'reason']);
-        },
-        expectedResultIdentity: () => {
-          throw new NotRebuildableError(recipeKey, ['not rebuildable']);
-        },
+        buildEvents: buildFor(recipeKey),
+        expectedResultIdentity: (_payload, events) => sha256OfEvents(events),
       });
     }
   }
 
   private seedDelete(): void {
     const family: PublicationPayloadFamilyV2 = 'delete';
+    /**
+     * Task 11 RULING (constraint A round 2) — delete stays NON-rebuildable and
+     * MUST, because the v2 delete PRODUCES NO v2 EVENT at all: the tombstone
+     * is an installation-level task-index record (spec §10.5), not an event.
+     * A rebuildable delete handler would need the tombstone's state inside the
+     * publication payload — which is precisely the un-derivable fact. The
+     * delete family remains a REGISTERED family so the payload union stays
+     * closed and pins of any future delete operation fail closed instead of
+     * being guessed; `AuthoritativeTaskDeletionV2` never commits through the
+     * facade and therefore never creates a pin. schemaVersion stays 1 (no
+     * production bytes exist; capability disabled).
+     */
     this.register({
       handlerKind: 'task_delete',
       handlerVersion: 1,
       payloadFamily: family,
       expectedEventTypes: [],
       rebuildable: false,
-      missingInputs: ['the delete tombstone is a task-index record, not a v2 event (Task 11)'],
+      missingInputs: ['the delete tombstone is a task-index record, not a v2 event (Task 11 ruling)'],
       parsePayload: parsePublicationOperationPayload,
       childRefsOf: (p) => childRefsOfChecked(p, family, () => []),
       resolveRefs: () => [],

@@ -207,3 +207,113 @@ describe('TaskControls', () => {
     expect(submitHumanDecision).not.toHaveBeenCalled();
   });
 });
+
+/* --------------------------------------------------------------------------
+ * Task 11 deliverable 10: failed-state recovery surface (spec §10.3.1) —
+ * source + stable code + only the server-returned legal recipes, or the
+ * clone fallback when reopen is not allowed. Ordinary controls stay disabled
+ * for `failed`.
+ * ------------------------------------------------------------------------ */
+
+describe('TaskControls v2 failed-state recovery surface (spec §10.3.1)', () => {
+  function failedTask(overrides: Partial<TaskSummary> = {}): TaskSummary {
+    return makeTask('failed', {
+      structuredProtocol: 'v2',
+      failedRecovery: {
+        failureCode: 'ARTIFACT_VALIDATION_FAILED',
+        failedSequence: 3,
+        legalRecipes: [{ recipeKey: 'retry_system_command', track: null }],
+        reopenAllowed: true,
+        cloneFallback: false,
+      },
+      ...overrides,
+    });
+  }
+
+  it('renders the stable failure code and NO ordinary lifecycle controls', async () => {
+    const gateway = stubGateway();
+    const { container } = renderControls(failedTask(), gateway);
+    expect(await screen.findByText('ARTIFACT_VALIDATION_FAILED')).toBeVisible();
+    expect(screen.queryByRole('button', { name: '开始生产' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '重试' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '继续' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '停止' })).toBeNull();
+    // The ONLY buttons are the recovery surface's own.
+    expect(container.querySelectorAll('button')).toHaveLength(1);
+  });
+
+  it('offers ONLY the server-returned legal recipes and submits reopen with the failed sequence', async () => {
+    const reopenSpy = vi.fn(async () => makeTask('running', { structuredProtocol: 'v2' }));
+    const gateway = stubGateway({
+      reopenFailed: reopenSpy as unknown as ForgeCoreGateway['reopenFailed'],
+    });
+    renderControls(failedTask(), gateway);
+    expect(await screen.findByText(/失败码/)).toBeVisible();
+    await userEvent.type(screen.getByLabelText(/恢复原因/), '重跑一次系统命令');
+    await userEvent.click(screen.getByRole('radio', { name: /重试失败的系统命令/ }));
+    await userEvent.click(screen.getByRole('button', { name: /按所选配方恢复/ }));
+    await vi.waitFor(() => {
+      expect(reopenSpy).toHaveBeenCalledTimes(1);
+      const request = (reopenSpy as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as Record<string, unknown> & {
+        expectedLastSequence: number;
+        reason: string;
+        recipeKey: string;
+        track: 'map' | 'content' | null;
+      };
+      expect(request).toMatchObject({
+        expectedLastSequence: 3,
+        reason: '重跑一次系统命令',
+        recipeKey: 'retry_system_command',
+        track: null,
+      });
+      expect(request.operationId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    });
+  });
+
+  it('requires a recovery reason and bounds it to 1000 code points', async () => {
+    const reopenSpy = vi.fn(async () => makeTask('running', { structuredProtocol: 'v2' }));
+    const gateway = stubGateway({
+      reopenFailed: reopenSpy as unknown as ForgeCoreGateway['reopenFailed'],
+    });
+    renderControls(failedTask(), gateway);
+    await userEvent.click(await screen.findByRole('radio', { name: /重试失败的系统命令/ }));
+    await userEvent.click(screen.getByRole('button', { name: /按所选配方恢复/ }));
+    expect(await screen.findByText(/请填写恢复原因/)).toBeVisible();
+    expect(reopenSpy).not.toHaveBeenCalled();
+    await userEvent.type(screen.getByLabelText(/恢复原因/), '原'.repeat(1001));
+    await userEvent.click(screen.getByRole('button', { name: /按所选配方恢复/ }));
+    expect(await screen.findByText(/不能超过 1000 个字符/)).toBeVisible();
+    expect(reopenSpy).not.toHaveBeenCalled();
+  });
+
+  it('renders the clone fallback when the failure is not reopenable', async () => {
+    const cloneSpy = vi.fn(async () => makeTask('running', { structuredProtocol: 'v2' }));
+    const gateway = stubGateway({
+      cloneTask: cloneSpy as unknown as ForgeCoreGateway['cloneTask'],
+    });
+    renderControls(
+      failedTask({
+        failedRecovery: {
+          failureCode: 'RUNNING_WITHOUT_WORK',
+          failedSequence: 1,
+          legalRecipes: [],
+          reopenAllowed: false,
+          cloneFallback: true,
+        },
+      }),
+      gateway,
+    );
+    expect(await screen.findByText('RUNNING_WITHOUT_WORK')).toBeVisible();
+    expect(await screen.findByText(/不可就地恢复，请克隆为新任务重跑/)).toBeVisible();
+    // No recipe radio and no reopen submit button; the clone control exists.
+    expect(screen.queryByRole('radio')).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: '克隆为新任务' }));
+    await vi.waitFor(() => expect(cloneSpy).toHaveBeenCalledWith('task-controls-1'));
+  });
+
+  it('keeps ordinary v1 behavior byte-for-byte for non-failed tasks', async () => {
+    renderControls(makeTask('retryable_failure'), stubGateway());
+    expect(await screen.findByRole('button', { name: '重试' })).toBeVisible();
+    expect(screen.queryByRole('radio')).toBeNull();
+  });
+});

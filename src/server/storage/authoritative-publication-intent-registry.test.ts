@@ -113,10 +113,30 @@ describe('PublicationIntentRegistry deterministic builders', () => {
       leaseEpoch: null,
       expectedLastSequence: null,
       authorityBaseRef: null,
+      attemptFamily: null,
+      attemptId: null,
+      commandId: null,
+      agentId: null,
+      commandKind: null,
+      logicalAssignmentId: null,
+      reviewAssignmentId: null,
+      sessionKind: null,
+      inputArtifactDeliveryId: null,
+      workItemKind: null,
+      roleBinding: null,
+      agentExecutionKind: null,
+      roundId: null,
+      grantSpecRef: null,
+      payloadRef: null,
+      initialLeaseEpoch: null,
+      maxAutomaticRetries: null,
+      mapBuildId: null,
+      supersedesMapBuildId: null,
+      sourceValidationReceiptRef: null,
     };
     const at = '2026-08-14T10:00:00.000Z';
     const first = registration.buildEvents(payload, at);
-    const stamp = (events: readonly (AuthoritativeReviewEventV2 | Omit<AuthoritativeReviewEventV2, 'id'>)[]): AuthoritativeReviewEventV2[] =>
+    const stamp = (events: readonly (AuthoritativeReviewEventV2 | Omit<AuthoritativeReviewEventV2, 'id'> | (import('./authoritative-publication-intent-registry').PublicationEventEnvelopeV2))[]): AuthoritativeReviewEventV2[] =>
       events.map((event, index) => ({
         ...event,
         id: deterministicEventId(payload.operationId, registration.handlerKind, index),
@@ -154,6 +174,26 @@ describe('PublicationIntentRegistry deterministic builders', () => {
       leaseEpoch: null,
       expectedLastSequence: null,
       authorityBaseRef: null,
+      attemptFamily: null,
+      attemptId: null,
+      commandId: null,
+      agentId: null,
+      commandKind: null,
+      logicalAssignmentId: null,
+      reviewAssignmentId: null,
+      sessionKind: null,
+      inputArtifactDeliveryId: null,
+      workItemKind: null,
+      roleBinding: null,
+      agentExecutionKind: null,
+      roundId: null,
+      grantSpecRef: null,
+      payloadRef: null,
+      initialLeaseEpoch: null,
+      maxAutomaticRetries: null,
+      mapBuildId: null,
+      supersedesMapBuildId: null,
+      sourceValidationReceiptRef: null,
     };
     const events = stampIds(registration, payload, registration.buildEvents(payload, '2026-08-14T10:00:00.000Z'));
     expect(events).toHaveLength(1);
@@ -215,6 +255,9 @@ describe('PublicationIntentRegistry deterministic builders', () => {
 
   it('fails closed (NotRebuildableError) for registered families whose payload cannot rebuild the event byte-identically', () => {
     const cases: ReadonlyArray<[string, number, PublicationOperationPayloadV2]> = [
+      // Task 11 (constraint A round 2): human_answer is now REBUILDABLE; a
+      // mode-open payload under the answer handler still fails closed because
+      // the builder demands the answer-mode fields it cannot rebuild.
       [
         'human_answer',
         1,
@@ -224,8 +267,34 @@ describe('PublicationIntentRegistry deterministic builders', () => {
           taskId: 'task-1',
           questionId: 'q-1',
           questionVersion: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-          answerDigest: H1,
+          mode: 'open',
+          questionDigest: H1,
+          text: 'question text',
+          answerText: null,
+          openedCommitId: 'c-1',
+          expectedLastSequence: 0,
+          originalWorkItemId: 'w-1',
+          replacementWorkItemId: null,
+          deliveryId: null,
+          attemptId: 'att-1',
+          leaseEpoch: 1,
+          logicalAssignmentId: 'la-1',
+          reviewAssignmentId: null,
+          sessionKind: 'structure_chunk',
+          agentId: 'agent-1',
+          answerDigest: null,
           authorityBaseRef: H_REF('authority_base_set', H1),
+          kind: null,
+          roleBinding: null,
+          agentExecutionKind: null,
+          roundId: null,
+          grantSpecRef: null,
+          inputArtifactDeliveryId: null,
+          payloadRef: null,
+          initialLeaseEpoch: null,
+          maxAutomaticRetries: null,
+          failureCode: 'WAITING_HUMAN',
+          failureDigest: H1,
         },
       ],
       [
@@ -235,9 +304,27 @@ describe('PublicationIntentRegistry deterministic builders', () => {
           family: 'recovery',
           operationId: 'f66f5f50-0000-4000-8000-000000000000',
           taskId: 'task-1',
-          recipeKey: 'retry_system_command',
+          expectedLastSequence: 2,
+          operatorId: 'task_owner',
+          reason: 'reopen',
+          recipeKey: 'restart_map_review_cycle',
+          track: 'map',
           failureRecoveryPayloadRef: H_REF('failure_recovery_payload', H1),
           overrideRef: null,
+          replacementWorkItemId: null,
+          replacementKind: null,
+          replacementRoleBinding: null,
+          replacementAgentExecutionKind: null,
+          replacementSessionKind: null,
+          replacementRoundId: null,
+          replacementLogicalAssignmentId: null,
+          replacementReviewAssignmentId: null,
+          replacementGrantSpecRef: null,
+          replacementInputArtifactDeliveryId: null,
+          replacementPayloadRef: null,
+          replacementAuthorityBaseRef: null,
+          replacementLeaseEpoch: null,
+          replacementMaxAutomaticRetries: null,
         },
       ],
       [
@@ -259,7 +346,7 @@ describe('PublicationIntentRegistry deterministic builders', () => {
 function stampIds(
   registration: PublicationIntentRegistrationV2,
   payload: PublicationOperationPayloadV2,
-  events: readonly (AuthoritativeReviewEventV2 | Omit<AuthoritativeReviewEventV2, 'id'>)[],
+  events: readonly (AuthoritativeReviewEventV2 | Omit<AuthoritativeReviewEventV2, 'id'> | (import('./authoritative-publication-intent-registry').PublicationEventEnvelopeV2))[],
 ): AuthoritativeReviewEventV2[] {
   return events.map((event, index) => ({
     ...event,
@@ -276,23 +363,23 @@ describe('publication_operation_payload child-ref extraction', () => {
         [H_REF('map_build_spec', H2)],
       ],
       [
-        { family: 'lease_or_retry', operationId: 'op-1', taskId: 't', workItemId: 'w', leaseEpoch: 1, eventBuilder: 'work_item_leased', authorityBaseRef: authority, kind: null, roleBinding: null, agentExecutionKind: null, sessionKind: null, roundId: null, logicalAssignmentId: null, reviewAssignmentId: null, grantSpecRef: null, inputArtifactDeliveryId: null, payloadRef: null, initialLeaseEpoch: null, maxAutomaticRetries: null, leaseOwner: null, leaseExpiresAt: null, expectedLastSequence: null, attemptFamily: null, attemptId: null, commandId: null, agentId: null, commandKind: null, dispatchRef: null, grantInstanceRef: null, reason: null, failureCode: null, failureDigest: null, retryOrdinal: null, retryNotBefore: null, validatorAggregateRef: null, budgetPolicyDigest: null },
+        { family: 'lease_or_retry', operationId: 'op-1', taskId: 't', workItemId: 'w', leaseEpoch: 1, eventBuilder: 'work_item_leased', authorityBaseRef: authority, kind: null, roleBinding: null, agentExecutionKind: null, sessionKind: null, roundId: null, logicalAssignmentId: null, reviewAssignmentId: null, grantSpecRef: null, inputArtifactDeliveryId: null, payloadRef: null, initialLeaseEpoch: null, maxAutomaticRetries: null, leaseOwner: null, leaseExpiresAt: null, expectedLastSequence: null, attemptFamily: null, attemptId: null, commandId: null, agentId: null, commandKind: null, dispatchRef: null, grantInstanceRef: null, reason: null, failureCode: null, failureDigest: null, retryOrdinal: null, retryNotBefore: null, validatorAggregateRef: null, budgetPolicyDigest: null, failureRecoveryPayloadRef: null, taskFailure: null },
         [authority],
       ],
       [
-        { family: 'lifecycle', operationId: 'op-1', taskId: 't', kind: 'stop', suspensionId: null, workItemId: null, reason: null, leaseEpoch: null, expectedLastSequence: null, authorityBaseRef: null },
+        { family: 'lifecycle', operationId: 'op-1', taskId: 't', kind: 'stop', suspensionId: null, workItemId: null, reason: null, leaseEpoch: null, expectedLastSequence: null, authorityBaseRef: null, attemptFamily: null, attemptId: null, commandId: null, agentId: null, commandKind: null, logicalAssignmentId: null, reviewAssignmentId: null, sessionKind: null, inputArtifactDeliveryId: null, workItemKind: null, roleBinding: null, agentExecutionKind: null, roundId: null, grantSpecRef: null, payloadRef: null, initialLeaseEpoch: null, maxAutomaticRetries: null, mapBuildId: null, supersedesMapBuildId: null, sourceValidationReceiptRef: null },
         [],
       ],
       [
-        { family: 'question', operationId: 'op-1', taskId: 't', questionId: 'q', questionVersion: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', answerDigest: H3, authorityBaseRef: authority },
-        [authority],
+        { family: 'question', operationId: 'op-1', taskId: 't', questionId: 'q', questionVersion: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', mode: 'answer', questionDigest: null, text: null, answerText: 'reply', openedCommitId: null, expectedLastSequence: 3, originalWorkItemId: 'w-old', replacementWorkItemId: 'w-new', deliveryId: 'del-1', attemptId: null, leaseEpoch: 1, logicalAssignmentId: 'la-1', reviewAssignmentId: null, sessionKind: 'structure_chunk', agentId: 'agent-1', answerDigest: H3, authorityBaseRef: authority, kind: 'agent_assignment', roleBinding: 'orchestrator', agentExecutionKind: 'structured_session', roundId: null, grantSpecRef: null, inputArtifactDeliveryId: null, payloadRef: H_REF('content_value', H2), initialLeaseEpoch: 2, maxAutomaticRetries: 3, failureCode: null, failureDigest: null },
+        [authority, H_REF('content_value', H2)],
       ],
       [
-        { family: 'recovery', operationId: 'op-1', taskId: 't', recipeKey: 'rebuild_missing_work', failureRecoveryPayloadRef: H_REF('failure_recovery_payload', H4), overrideRef: H_REF('round_budget_override', H5) },
+        { family: 'recovery', operationId: 'op-1', taskId: 't', expectedLastSequence: 4, operatorId: 'task_owner', reason: 'reopen', recipeKey: 'rebuild_missing_work', track: 'map', failureRecoveryPayloadRef: H_REF('failure_recovery_payload', H4), overrideRef: H_REF('round_budget_override', H5), replacementWorkItemId: null, replacementKind: null, replacementRoleBinding: null, replacementAgentExecutionKind: null, replacementSessionKind: null, replacementRoundId: null, replacementLogicalAssignmentId: null, replacementReviewAssignmentId: null, replacementGrantSpecRef: null, replacementInputArtifactDeliveryId: null, replacementPayloadRef: null, replacementAuthorityBaseRef: null, replacementLeaseEpoch: null, replacementMaxAutomaticRetries: null },
         [H_REF('failure_recovery_payload', H4), H_REF('round_budget_override', H5)],
       ],
       [
-        { family: 'recovery', operationId: 'op-1', taskId: 't', recipeKey: 'retry_system_command', failureRecoveryPayloadRef: H_REF('failure_recovery_payload', H4), overrideRef: null },
+        { family: 'recovery', operationId: 'op-1', taskId: 't', expectedLastSequence: 4, operatorId: 'task_owner', reason: 'reopen', recipeKey: 'retry_system_command', track: null, failureRecoveryPayloadRef: H_REF('failure_recovery_payload', H4), overrideRef: null, replacementWorkItemId: null, replacementKind: null, replacementRoleBinding: null, replacementAgentExecutionKind: null, replacementSessionKind: null, replacementRoundId: null, replacementLogicalAssignmentId: null, replacementReviewAssignmentId: null, replacementGrantSpecRef: null, replacementInputArtifactDeliveryId: null, replacementPayloadRef: null, replacementAuthorityBaseRef: null, replacementLeaseEpoch: null, replacementMaxAutomaticRetries: null },
         [H_REF('failure_recovery_payload', H4)],
       ],
       [
@@ -339,14 +426,24 @@ describe('PublicationIntentRegistry isolation', () => {
       ['lifecycle/manual_retry', 1],
       ['lifecycle/stop', 1],
       ['lifecycle/resume', 1],
+      // Task 11 (constraint A round 2): start/question/recovery/failure handlers.
+      ['lifecycle/start_task', 1],
+      ['human_question_open', 1],
+      ['human_answer', 1],
+      ['retry_system_command', 1],
+      ['restart_map_review_cycle', 1],
+      ['restart_content_review_cycle', 1],
+      ['rebuild_missing_work', 1],
+      ['task_terminal_failed', 1],
     ];
     for (const [handlerKind, handlerVersion] of rebuildable) {
       const registration = resolvePublicationIntent(handlerKind, handlerVersion);
       expect(registration?.rebuildable).toBe(true);
       expect(registration?.missingInputs).toEqual([]);
     }
-    // The Task 11+ burdens stay registered but NON-rebuildable.
-    for (const handlerKind of ['human_answer', 'retry_system_command', 'task_delete']) {
+    // The delete tombstone produces NO v2 event (Task 11 ruling): it stays
+    // registered but NON-rebuildable — no pin may ever replay a delete.
+    for (const handlerKind of ['task_delete']) {
       expect(resolvePublicationIntent(handlerKind, 1)?.rebuildable).toBe(false);
     }
   });
@@ -390,6 +487,8 @@ describe('PublicationIntentRegistry isolation', () => {
       retryNotBefore: '2026-08-14T10:00:05.000Z',
       validatorAggregateRef: null,
       budgetPolicyDigest: H2,
+      failureRecoveryPayloadRef: null,
+      taskFailure: null,
     });
     for (const builder of ['work_item_leased', 'work_item_retryable_failed', 'work_item_lease_reclaimed', 'work_item_parked'] as const) {
       const registration = resolvePublicationIntent(builder, 1);
@@ -409,6 +508,12 @@ describe('PublicationIntentRegistry isolation', () => {
 
   it('exposes exact event-schema identity per registration', () => {
     expect(resolvePublicationIntent('lifecycle/stop', 1)?.expectedEventTypes).toEqual([
+      'structured_agent_attempt_abandoned_v2',
+      'structured_generic_agent_attempt_abandoned',
+      'structured_system_command_abandoned',
+      'structured_work_item_lease_reclaimed',
+      'task_stopped',
+      'task_interrupted',
       'structured_task_suspension_applied_v2',
     ]);
     expect(resolvePublicationIntent('lifecycle/resume', 1)?.expectedEventTypes).toEqual([

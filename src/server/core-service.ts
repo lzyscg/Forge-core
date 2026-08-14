@@ -55,8 +55,13 @@ import { projectStructuredSlotState } from './storage/structured-slot-state';
 import { TraceStore } from './storage/trace-store';
 import { TemplateCatalog } from './template/template-catalog';
 import type { StructuredRuntimeEnvironmentV1 } from './structured-slots/runtime-capability';
-import type { AuthoritativeReviewRuntimeEnvironmentV1 } from './structured-slots/authoritative-review-capability';
-import { createProductionAuthoritativeReviewEnvironment } from './structured-slots/authoritative-review-capability';
+import {
+  createProductionAuthoritativeReviewEnvironment,
+  currentAuthoritativeReviewProfileDigest,
+  deriveAuthoritativeReviewExecutionEligibility,
+  requiredAuthoritativeReviewAbiAvailable,
+  type AuthoritativeReviewRuntimeEnvironmentV1,
+} from './structured-slots/authoritative-review-capability';
 import type { AgentRuntime, AgentTurnInput } from './runtime/agent-runtime';
 import type { AcceptanceStopHook } from './acceptance-boundary';
 import {
@@ -70,7 +75,11 @@ import { SkillService } from './runtime/skill-service';
 import { GateRunner } from './runtime/gate-runner';
 import { ActionCommitter } from './runtime/action-committer';
 import { TaskRunner } from './runtime/task-runner';
-import { TaskScheduler, type HumanAnswerRequest } from './runtime/task-scheduler';
+import {
+  AuthoritativeV2SchedulingEngine,
+  TaskScheduler,
+  type HumanAnswerRequest,
+} from './runtime/task-scheduler';
 import type {
   FrozenStructuredSlotContractV1,
 } from './template/structured-slot-contract';
@@ -89,6 +98,36 @@ import { canonicalJson, canonicalJsonSha256 } from './structured-slots/canonical
 import { ALL_LOCATION_KINDS, projectStructuredVerdict } from './structured-slots/issues';
 import type { CompiledSlotSchemaV1 } from './structured-slots/slot-schema';
 import type { CompiledLayoutGrammarV1 } from './structured-slots/layout-grammar';
+import { AuthoritativeTaskIndexV1 } from './storage/authoritative-task-index';
+import { AuthoritativeTaskDeletionV2, type DeleteTaskRequestV2 } from './storage/authoritative-task-deletion';
+import { AuthoritativeWakeupIndexV1 } from './runtime/authoritative-review/wakeup-index';
+import { AuthoritativeReviewBlobStore } from './storage/authoritative-review-blob-store';
+import { AuthoritativePublicationStore } from './storage/authoritative-publication-store';
+import { AuthoritativeAppendFacadeV2 } from './storage/authoritative-append-facade';
+import {
+  AuthoritativeReviewCheckpointStore,
+  type ValidatedEventSource,
+} from './storage/authoritative-review-checkpoint-store';
+import {
+  ProjectionCorruptionError,
+  projectAuthoritativeReviewStateSync,
+} from './storage/authoritative-review-state';
+import type { AuthoritativeReviewEventV2 } from './storage/authoritative-review-events';
+import { runStartupRecoveryV2, recoverySummaryOf } from './runtime/authoritative-review/startup-recovery';
+import {
+  TaskLifecycleServiceV2,
+  failedRecoverySummaryResolved,
+  type FrozenTaskProfileV2,
+  type ReopenRequestV2,
+} from './runtime/authoritative-review/task-lifecycle';
+import { WorkItemCoordinatorV2 } from './runtime/authoritative-review/work-item-coordinator';
+import type { BlobRefV2, AuthoritativeReviewExecutionEligibilityV1 } from '../shared/authoritative-review-v2';
+import { STORAGE_ERROR_CODES, StorageError } from './storage/atomic-file';
+import type { PublicationOperationPayloadV2 } from './authoritative-review/authority-types';
+import type { AuthoritativeReviewProjectionV2 } from './storage/authoritative-review-state';
+import type { DeleteTaskBodyV2, DeleteTaskResultV2, ReopenFailedRequestV2 } from '../shared/authoritative-review-v2';
+import { defaultMaxBytesByKind } from './authoritative-review/object-schemas';
+import type { AuthoritativeReviewProfile } from './authoritative-review/authority-types';
 
 export interface CoreServiceOptions {
   /** Injected runtime (tests use the deterministic fake); defaults to Pi. */
@@ -244,6 +283,36 @@ export class CoreService {
    */
   private readonly structuredCursorSigners = new Map<string, TaskLocalCursorSigner>();
 
+  /* ------------------- Task 11 v2 lifecycle stack (spec §10.5/§14.3) ------------------- */
+
+  /** The ONE installation task index (sole ID/root registry, §10.5). */
+  readonly v2Index: AuthoritativeTaskIndexV1;
+
+  /** The fenced v2 deletion engine (prepared→detached→purged tombstones). */
+  readonly v2Deletion: AuthoritativeTaskDeletionV2;
+
+  /** The durable per-task wakeup index (§10.4). */
+  readonly v2Wakeups: AuthoritativeWakeupIndexV1;
+
+  /** The ONE v2 append facade (every v2 write goes through it, §8). */
+  readonly v2Facade: AuthoritativeAppendFacadeV2;
+
+  /** The checkpoint-backed v2 projection store (§9.4). */
+  readonly v2CheckpointStore: AuthoritativeReviewCheckpointStore;
+
+  /** The Task 10 WorkItem coordinator. */
+  readonly v2Coordinator: WorkItemCoordinatorV2;
+
+  /** The v2 lifecycle dispatcher (start/stop/resume/retry/answer/reopen). */
+  readonly v2Lifecycle: TaskLifecycleServiceV2;
+
+  /** The deterministic v2 scheduling engine (§10.4 — the v2 loop). */
+  readonly v2Scheduling: AuthoritativeV2SchedulingEngine;
+
+  private readonly v2PublicationStore: AuthoritativePublicationStore;
+
+  readonly v2BlobStore: AuthoritativeReviewBlobStore;
+
   constructor(paths: CorePaths, options: CoreServiceOptions = {}) {
     this.paths = paths;
     // The catalog owns ONE structured runtime environment; TaskStore derives
@@ -256,8 +325,125 @@ export class CoreService {
     });
     this.runtimeEnvironment = this.templates.runtimeEnvironment;
     this.authoritativeReviewEnvironment = this.templates.authoritativeReviewEnvironment;
-    this.tasks = new TaskStore(paths, this.templates);
     this.events = new EventStore(paths);
+    // Task 11 v2 stack. Construction performs no IO; the fence is the SAME
+    // installation store lock the facade/GC/delete share. The v2 profile the
+    // blob store/facade size against is the CURRENT authoritative profile's
+    // runtime group (its maxBytesByKind); while the capability is disabled
+    // (production default) the registry's platform defaults apply and the
+    // whole stack simply idles — no v2 rows, no pins, no wakeups.
+    this.v2Wakeups = new AuthoritativeWakeupIndexV1({ paths });
+    this.v2PublicationStore = new AuthoritativePublicationStore(paths);
+    const v2Clock = (): string => new Date().toISOString();
+    const withStoreFence = async <T>(fn: () => Promise<T>): Promise<T> => {
+      const hold = await this.v2PublicationStore.lock().acquire();
+      try {
+        return await fn();
+      } finally {
+        await hold.release();
+      }
+    };
+    this.v2Index = new AuthoritativeTaskIndexV1({ paths, withStoreFence, clock: v2Clock });
+    this.v2Deletion = new AuthoritativeTaskDeletionV2({
+      paths,
+      index: this.v2Index,
+      wakeups: this.v2Wakeups,
+      withStoreFence,
+      snapshotPins: () => this.v2PublicationStore.snapshotPins(),
+      clock: v2Clock,
+    });
+    const reviewProfile = this.authoritativeReviewEnvironment.profile;
+    const v2Profile: AuthoritativeReviewProfile =
+      reviewProfile === null
+        ? ({ maxBytesByKind: defaultMaxBytesByKind() } as AuthoritativeReviewProfile)
+        : (reviewProfile.runtime as unknown as AuthoritativeReviewProfile);
+    this.v2BlobStore = new AuthoritativeReviewBlobStore(paths, v2Profile);
+    this.v2Facade = new AuthoritativeAppendFacadeV2({
+      eventStore: this.events,
+      blobStore: this.v2BlobStore,
+      publicationStore: this.v2PublicationStore,
+      profile: v2Profile,
+      paths,
+      clock: v2Clock,
+    });
+    const v2EventSource: ValidatedEventSource = {
+      read: async (taskId) =>
+        (await this.events.read(taskId)).map((entry) => ({
+          sequence: entry.sequence,
+          fileName: entry.fileName,
+          size: entry.size,
+          event: entry.event as never,
+        })),
+      readAfter: async (taskId, throughSequence) =>
+        (await this.events.readAfter(taskId, throughSequence)).map((entry) => ({
+          sequence: entry.sequence,
+          fileName: entry.fileName,
+          size: entry.size,
+          event: entry.event as never,
+        })),
+    };
+    this.v2CheckpointStore = new AuthoritativeReviewCheckpointStore(paths, v2EventSource);
+    const resolver = (taskId: string, ref: BlobRefV2): Promise<unknown> =>
+      this.v2BlobStore.readJson(taskId, ref, ref.kind);
+    this.v2Coordinator = new WorkItemCoordinatorV2({
+      facade: this.v2Facade,
+      checkpointStore: this.v2CheckpointStore,
+      resolver,
+      tail: (taskId) => this.events.tail(taskId),
+      committedOperation: async (taskId, operationId) => {
+        const committed = await this.events.readBatchByCommitId(taskId, operationId);
+        return committed === null
+          ? null
+          : committed.map((entry) => ({ sequence: entry.sequence, event: entry.event }));
+      },
+      clock: v2Clock,
+      leaseDurationMs: 30 * 60 * 1000,
+    });
+    this.v2Lifecycle = new TaskLifecycleServiceV2({
+      facade: this.v2Facade,
+      checkpointStore: this.v2CheckpointStore,
+      resolver,
+      tail: (taskId) => this.events.tail(taskId),
+      committedOperation: async (taskId, operationId) => {
+        const committed = await this.events.readBatchByCommitId(taskId, operationId);
+        return committed === null
+          ? null
+          : committed.map((entry) => ({ sequence: entry.sequence, event: entry.event }));
+      },
+      events: async (taskId) =>
+        (await this.events.read(taskId)).map((entry) => ({
+          sequence: entry.sequence,
+          fileName: entry.fileName,
+          event: entry.event,
+        })),
+      clock: v2Clock,
+      leaseDurationMs: 30 * 60 * 1000,
+      coordinator: this.v2Coordinator,
+      wakeups: this.v2Wakeups,
+      deletion: this.v2Deletion,
+      eligibility: (frozenProfileDigest) => this.executionEligibilityOf(frozenProfileDigest),
+      frozenProfile: (taskId) => this.frozenProfileV2(taskId),
+      orchestratorRoleBinding: (taskId) => this.frozenRoleBinding(taskId, 'orchestrator'),
+      repairRoleBinding: (taskId, session) =>
+        this.frozenRoleBindingV2(taskId, session === 'map_repair' ? 'mapRepair' : 'contentRepair'),
+      defaultAutomaticRetries: (taskId) => this.frozenAutomaticRetries(taskId),
+    });
+    this.v2Scheduling = new AuthoritativeV2SchedulingEngine({
+      index: this.v2Index,
+      deletion: this.v2Deletion,
+      wakeups: this.v2Wakeups,
+      lifecycle: this.v2Lifecycle,
+      coordinator: this.v2Coordinator,
+      checkpointStore: this.v2CheckpointStore,
+      resolver,
+      eligibility: (frozenProfileDigest) => this.executionEligibilityOf(frozenProfileDigest),
+      frozenProfileDigest: async (taskId) => (await this.frozenProfileV2(taskId)).profileDigest,
+      clock: v2Clock,
+      // The fixed local owner principal leases v2 work; Task 12's
+      // attempt-coordinator replaces the claim with the executing worker.
+      leaseOwner: 'task_owner',
+    });
+    this.tasks = new TaskStore(paths, this.templates, this.v2Index);
     this.artifacts = new ArtifactStore(paths, this.events);
     // Phase E stores exist before the runtime/runner so every consumer shares
     // the same derivation (plan Task E3).
@@ -391,6 +577,7 @@ export class CoreService {
       runtime: this.runtime,
       runtimeEnvironment: this.runtimeEnvironment,
       authoritativeReviewEnvironment: this.authoritativeReviewEnvironment,
+      v2Scheduling: this.v2Scheduling,
       ...(options.acceptanceStopAfterCommit !== undefined
         ? { acceptanceStopAfterCommit: options.acceptanceStopAfterCommit }
         : {}),
@@ -402,6 +589,93 @@ export class CoreService {
     // The v2 cursor keyring is created durably at service bootstrap
     // (spec §14.2); fail-closed loading never mints a replacement key.
     await this.cursorKeyring.initialize();
+    // Task 11 startup wiring (spec §10.5/§10.4): the installation migration
+    // barrier, creation recovery BEFORE any GC sweep, the deletion-tombstone
+    // resume, the facade pin recovery, the post-marker unindexed quarantine,
+    // and finally the deterministic §10.4 startup scan of every v2 task.
+    if (!(await this.v2Index.migrationComplete())) {
+      await this.v2Index.runMigrationBarrier();
+    }
+    await this.v2Index.runCreationRecovery();
+    await this.v2Deletion.runStartupRecovery();
+    await this.v2Facade.startupRecovery();
+    await this.quarantineUnindexedDirectories();
+    await runStartupRecoveryV2({
+      index: this.v2Index,
+      deletion: this.v2Deletion,
+      wakeups: this.v2Wakeups,
+      lifecycle: this.v2Lifecycle,
+      coordinator: this.v2Coordinator,
+      facade: this.v2Facade,
+      checkpointStore: this.v2CheckpointStore,
+      resolver: (taskId, ref) => this.v2BlobStore.readJson(taskId, ref, ref.kind),
+      tail: (taskId) => this.events.tail(taskId),
+      committedOperation: async (taskId, operationId) => {
+        const committed = await this.events.readBatchByCommitId(taskId, operationId);
+        return committed === null
+          ? null
+          : committed.map((entry) => ({ sequence: entry.sequence, event: entry.event }));
+      },
+      clock: () => new Date().toISOString(),
+      eligibility: (frozenProfileDigest) => this.executionEligibilityOf(frozenProfileDigest),
+      frozenProfileDigest: async (taskId) => (await this.frozenProfileV2(taskId)).profileDigest,
+    });
+  }
+
+  /**
+   * Every post-marker task directory WITHOUT a prepared/active index row is
+   * quarantined (spec §10.5: "a directory first appearing after the marker
+   * without a prepared/active index is never classified legacy and is
+   * quarantined/fail-closed"). Platform-created v1/basic tasks legitimately
+   * carry NO index row (the index registers v2 identities only), so they are
+   * recognized by their frozen-snapshot copy and left alone; only directories
+   * that cannot prove platform creation — unreadable record AND no snapshot,
+   * or a v2-shaped snapshot without its row — fail closed. Examined at
+   * bootstrap under the fence.
+   */
+  private async quarantineUnindexedDirectories(): Promise<string[]> {
+    const quarantined: string[] = [];
+    const ids = await this.tasks.listTaskIds();
+    await this.v2Index.withFence(async () => {
+      for (const taskId of ids) {
+        const row = await this.v2Index.entryFor(taskId);
+        if (row !== null) continue;
+        if (await this.platformCreatedLegacyDir(taskId)) continue;
+        const moved = await this.v2Index.quarantineUnindexedDirectory(taskId, 'post-marker unindexed');
+        if (moved !== null) quarantined.push(taskId);
+      }
+    });
+    return quarantined;
+  }
+
+  /**
+   * True when a directory is a platform-created legacy (v1/basic) task. Spec
+   * §10.5 fails closed EVEN when the bytes resemble a valid v1 task, so the
+   * ONLY discriminator is the frozen SNAPSHOT COPY — only TaskStore.create
+   * publishes a `snapshot/` directory. A readable non-v2 record WITHOUT the
+   * snapshot (or a damaged record without the snapshot) is a foreign/unindexed
+   * directory and is quarantined, never legacy-deleted. Shared by the startup
+   * quarantine and the delete dispatch (review A-M3).
+   */
+  private async platformCreatedLegacyDir(taskId: string): Promise<boolean> {
+    try {
+      await stat(this.paths.taskSnapshotRoot(taskId));
+    } catch {
+      return false;
+    }
+    try {
+      const frozen = await this.tasks.readFrozenTemplate(taskId);
+      // Platform-created v2 tasks ALWAYS have an index row (fenced create);
+      // a v2 snapshot without a row is proof of a tampered/foreign dir.
+      if (structuredProtocolOf(frozen) === 'v2') {
+        return false;
+      }
+      return true;
+    } catch {
+      // Damaged record: the snapshot copy itself is the platform-creation
+      // proof (the pre-existing corrupt-v1 delete contract).
+      return true;
+    }
   }
 
   /** Creates a frozen task from a validated request (delegates to TaskStore). */
@@ -662,17 +936,72 @@ export class CoreService {
   }
 
   /**
-   * Permanently deletes one task in ANY status (task list delete): when the
-   * task holds the single execution slot the run is aborted and its disposal
-   * awaited first, so no execution survives; then the whole task directory
-   * (frozen record, snapshot, events, artifacts, traces, workspaces) is
-   * removed and the in-memory live buffer cleared. Corrupt tasks delete the
-   * same way; unknown ids reject with the public TASK_NOT_FOUND code.
+   * Deletes one task. The v2 branch (spec §10.5) dispatches by the
+   * INSTALLATION TASK INDEX — never the request body, the public summary or a
+   * guessed protocol: a prepared/active v2 row (and every tombstoned id) uses
+   * the fenced tombstone machine; a legacy-preexisting/corrupt v1 keeps the
+   * legacy recursive deletion; an unindexed post-marker directory is
+   * quarantined and refused (it can never bypass fenced handling). The v1
+   * slot for a running task still aborts the run first (unchanged).
    */
-  async deleteTask(taskId: string): Promise<void> {
+  async deleteTask(taskId: string, body?: DeleteTaskBodyV2): Promise<DeleteTaskResultV2 | { ok: true }> {
+    // The dispatch must never guess a protocol from a possibly corrupt root:
+    // CorePaths validates the identifier FIRST so unsafe ids surface the
+    // stable CORE_PATH_INVALID (400), exactly like the legacy path.
+    void this.paths.taskFile(taskId);
+    const row = await this.v2Index.entryFor(taskId);
+    const tombstone = await this.v2Deletion.tombstoneFor(taskId);
+    const isV2 = row !== null && row.state !== 'legacy_preexisting';
+    if (isV2 || tombstone !== null) {
+      if (body === undefined) {
+        throw new StorageError(
+          STORAGE_ERROR_CODES.INVALID_INPUT,
+          'v2 任务删除必须携带 operationId 与 reason。',
+          null,
+          '按 { operationId, reason } 形状重新提交。',
+        );
+      }
+      await this.scheduler.releaseIfRunning(taskId);
+      const result = await this.v2Deletion.runDelete(taskId, body as DeleteTaskRequestV2);
+      this.live.clear(taskId);
+      // The recursive purge of the detached quarantine happens afterward
+      // (spec §10.5: purgeTask is crash-resumed from the tombstone); the
+      // confirmed fenced result is detached/purged.
+      const current = await this.v2Deletion.tombstoneFor(taskId);
+      if (current !== null && current.state === 'detached') {
+        await this.v2Deletion.purgeTask(taskId, current.deleteEpoch).catch(() => undefined);
+      }
+      return { operationId: result.operationId, state: result.state };
+    }
+    if (body !== undefined) {
+      // A v2-protocol body on a v1 task is a stable exact-error: reject
+      // BEFORE any deletion begins (spec §10.5).
+      throw new StorageError(
+        STORAGE_ERROR_CODES.INVALID_INPUT,
+        '该任务不是 v2 任务，不接受 v2 删除载荷。',
+        null,
+        '移除删除载荷后重试。',
+      );
+    }
+    if (row === null && (await this.v2Index.migrationComplete()) && !(await this.platformCreatedLegacyDir(taskId))) {
+      // Post-marker directory that cannot prove platform creation: quarantine
+      // + fail closed (spec §10.5 — never legacy deletion, never fenced
+      // bypass; a corrupt legacy task keeps its legacy delete THROUGH its
+      // legacy_preexisting row or its snapshot copy, never through a guess).
+      const moved = await this.v2Index.quarantineUnindexedDirectory(taskId, 'unindexed delete refused');
+      if (moved !== null) {
+        throw new StorageError(
+          STORAGE_ERROR_CODES.TASK_CORRUPTED,
+          '任务目录未登记，已被隔离。',
+          null,
+          '联系平台检查任务目录登记。',
+        );
+      }
+    }
     await this.scheduler.releaseIfRunning(taskId);
     await this.tasks.deleteTask(taskId);
     this.live.clear(taskId);
+    return { ok: true };
   }
 
   /** Lifecycle delegation to the one-slot scheduler (plan Phase C Task 4). */
@@ -694,6 +1023,181 @@ export class CoreService {
 
   answerHuman(taskId: string, answer: string | HumanAnswerRequest): Promise<TaskSummary> {
     return this.scheduler.answer(taskId, answer);
+  }
+
+  /* ------------------- Task 11 v2 lifecycle API (deliverable 9) ------------------- */
+
+  /** V2 start: one atomic batch, then the v2 scheduling pass. */
+  async startTaskV2(taskId: string): Promise<TaskSummary> {
+    await this.v2Lifecycle.startV2(taskId, { operationId: randomUUID(), userInputText: '' });
+    await this.runV2SchedulingPass();
+    return (await this.getWorkspace(taskId)).task;
+  }
+
+  /** V2 stop (composed envelope: abandon + reclaim + overlay in ONE batch). */
+  async stopTaskV2(taskId: string): Promise<TaskSummary> {
+    await this.v2Lifecycle.stopV2(taskId, { operationId: randomUUID(), reason: 'user_stop' });
+    return (await this.getWorkspace(taskId)).task;
+  }
+
+  /** V2 resume (clears the exact suspension overlay, reactivates wakeups). */
+  async resumeTaskV2(taskId: string): Promise<TaskSummary> {
+    await this.v2Lifecycle.resumeV2(taskId, { operationId: randomUUID() });
+    await this.runV2SchedulingPass();
+    return (await this.getWorkspace(taskId)).task;
+  }
+
+  /**
+   * V2 retry: clears ONLY the retry-budget park of the budget-exhausted
+   * workitem (projected — no body, mirroring the v1 retry surface).
+   */
+  async retryTaskV2(taskId: string): Promise<TaskSummary> {
+    const projection = await this.v2Projection(taskId);
+    const workItemId = projection.retryBudgetExhaustedWorkItemId;
+    if (workItemId === null) {
+      throw new StorageError(
+        STORAGE_ERROR_CODES.INVALID_INPUT,
+        '该任务没有耗尽重试预算的 WorkItem，无法手动重试。',
+        null,
+        '刷新任务状态后重试。',
+      );
+    }
+    await this.v2Lifecycle.manualRetryV2(taskId, { operationId: randomUUID(), workItemId });
+    await this.runV2SchedulingPass();
+    return (await this.getWorkspace(taskId)).task;
+  }
+
+  /** V2 human answer (question identity + operation from the validated body). */
+  async answerTaskV2(taskId: string, body: import('../shared/authoritative-review-v2').AnswerTaskBodyV2): Promise<TaskSummary> {
+    // B-F1: the wire schema accepts the plain { answer } variant — the
+    // decision union is only for the structured progress-guard choices.
+    if ('decision' in body && body.decision === 'stop') {
+      await this.v2Lifecycle.stopV2(taskId, {
+        operationId: body.operationId,
+        reason: 'user_stop',
+      });
+    } else {
+      await this.v2Lifecycle.answerV2(taskId, {
+        operationId: body.operationId,
+        questionId: body.questionId,
+        questionVersion: body.questionVersion,
+        answer: 'answer' in body ? body.answer : body.text,
+      });
+    }
+    await this.runV2SchedulingPass();
+    return (await this.getWorkspace(taskId)).task;
+  }
+
+  /** V2 fenced reopen (frozen §10.3.1 policy table only). */
+  async reopenFailedTask(taskId: string, request: ReopenFailedRequestV2): Promise<TaskSummary> {
+    // B-M2 (delete-route pattern): a v1 task carrying a reopen body is a
+    // stable exact-error BEFORE the lifecycle path (which would surface the
+    // TASK_CORRUPTED index-identity code).
+    try {
+      const frozen = await this.tasks.readFrozenTemplate(taskId);
+      if (structuredProtocolOf(frozen) !== 'v2') {
+        throw new StorageError(
+          STORAGE_ERROR_CODES.INVALID_INPUT,
+          '该任务不是 v2 任务，不接受 reopen_failed 载荷。',
+          null,
+          '移除 reopen 载荷后重试。',
+        );
+      }
+    } catch (error) {
+      if (error instanceof StorageError) throw error;
+      // Unreadable identity: let the lifecycle path fail closed as corruption.
+    }
+    await this.v2Lifecycle.reopenFailed(taskId, request as unknown as ReopenRequestV2);
+    await this.runV2SchedulingPass();
+    return (await this.getWorkspace(taskId)).task;
+  }
+
+  /** One deterministic v2 scheduling pass (the §10.4 loop; idempotent per tail). */
+  runV2SchedulingPass(now?: string): Promise<Awaited<ReturnType<AuthoritativeV2SchedulingEngine['runPass']>>> {
+    return this.v2Scheduling.runPass(now);
+  }
+
+  /** The current v2 projection of one task (corrupt histories fail closed). */
+  private async v2Projection(taskId: string): Promise<AuthoritativeReviewProjectionV2> {
+    try {
+      return (await this.v2CheckpointStore.readState(taskId, (ref) => this.v2BlobStore.readJson(taskId, ref, ref.kind))).projection;
+    } catch (error) {
+      if (error instanceof ProjectionCorruptionError) {
+        throw new StorageError(STORAGE_ERROR_CODES.TASK_CORRUPTED, '任务权威历史损坏。', null, '联系平台检查任务事件账本。');
+      }
+      throw error;
+    }
+  }
+
+  /** The task-FROZEN profile carrier (constraint B: row refs + frozen digest). */
+  private async frozenProfileV2(taskId: string): Promise<FrozenTaskProfileV2> {
+    const row = await this.v2Index.entryFor(taskId);
+    if (row === null || row.state === 'legacy_preexisting') {
+      throw new StorageError(STORAGE_ERROR_CODES.TASK_CORRUPTED, '该任务没有 v2 索引身份。', null, '联系平台检查任务索引。');
+    }
+    const record = await this.tasks.readTaskRecord(taskId);
+    const frozen = await this.tasks.readFrozenTemplate(taskId);
+    const binding = frozen.authoritativeReviewProfile;
+    if (binding === null) {
+      throw new StorageError(STORAGE_ERROR_CODES.TASK_CORRUPTED, 'frozen 快照缺少 authoritative profile 绑定。', null, '联系平台检查任务快照。');
+    }
+    return {
+      profileSnapshotRef: row.profileSnapshotRef,
+      templateSnapshotRef: row.templateSnapshotRef,
+      profileDigest: binding.profileDigest,
+      snapshotHash: record.templateVersion,
+    };
+  }
+
+  /**
+   * The separately derived execution eligibility (spec §4.3): frozen task
+   * profile digest vs the CURRENT deployed profile/ABI. Never TaskStatus and
+   * never written into event history.
+   */
+  private executionEligibilityOf(frozenProfileDigest: string): AuthoritativeReviewExecutionEligibilityV1 {
+    const environment = this.authoritativeReviewEnvironment;
+    const profile = environment.profile;
+    const availableAbis =
+      profile === null
+        ? new Set<string>()
+        : new Set<string>([profile.abi.validatorAbi, profile.abi.assemblerAbi, profile.abi.profileAbi]);
+    return deriveAuthoritativeReviewExecutionEligibility({
+      frozenProfileDigest,
+      baseStructuredCapabilityEnabled:
+        this.runtimeEnvironment.capability.status === 'enabled' && this.runtimeEnvironment.profile !== null,
+      currentCapability: environment.capability,
+      currentProfileDigest: currentAuthoritativeReviewProfileDigest(environment),
+      requiredAbisAvailable: requiredAuthoritativeReviewAbiAvailable(environment, availableAbis),
+    });
+  }
+
+  /** The frozen orchestrator role binding of one task's snapshot. */
+  private async frozenRoleBinding(taskId: string, role: 'orchestrator'): Promise<string> {
+    const frozen = await this.tasks.readFrozenTemplate(taskId);
+    const bindings = frozen.structuredReviewLifecycle?.roleBindings;
+    const binding = bindings?.[role];
+    if (typeof binding !== 'string' || binding.length === 0) {
+      throw new StorageError(STORAGE_ERROR_CODES.TASK_CORRUPTED, 'frozen 快照缺少 orchestrator 角色绑定。', null, '联系平台检查任务快照。');
+    }
+    return binding;
+  }
+
+  /**
+   * The repair-session role binding: the frozen template declares no repair
+   * role key, so repairs reuse the orchestrator role binding of the snapshot
+   * (Task 13 owns the final repair-role model).
+   */
+  private frozenRoleBindingV2(taskId: string, _session: 'mapRepair' | 'contentRepair'): Promise<string> {
+    return this.frozenRoleBinding(taskId, 'orchestrator');
+  }
+
+  /** The frozen automatic retry budget: the profile's consecutive-attempts floor. */
+  private async frozenAutomaticRetries(taskId: string): Promise<number> {
+    const frozen = await this.tasks.readFrozenTemplate(taskId);
+    const profile = this.authoritativeReviewEnvironment.profile;
+    if (profile === null) return 0;
+    void frozen;
+    return profile.runtime.maxConsecutiveAttemptsWithoutProgress;
   }
 
   /** Stops the scheduler (abort + bounded disposal + interruption marking). */
@@ -763,10 +1267,68 @@ export class CoreService {
       // Contract v2 never reads v1 content revisions (spec §4.4).
       isV2 ? null : await this.structuredContentRootFor(taskId, frozenTemplate, events),
     );
+    if (isV2) {
+      // Task 11 (spec §4.3/§10.3.1/§14): the versioned v2 workspace summary —
+      // execution eligibility SEPARATE from the event-derived status, the
+      // pending question, and the bounded failed-recovery summary (only the
+      // policy-allowed reopen/clone surface; never private refs). A corrupt
+      // v2 history already projects `corrupt` (Task 9) and gets no v2
+      // enrichment beyond the status.
+      const projected = projectAuthoritativeReviewStateSync(events as AuthoritativeReviewEventV2[]);
+      if (projected.ok && workspace.task.status !== 'corrupt') {
+        const frozenDigest = await this.frozenProfileDigestFor(taskId);
+        // The public question display text rides the LEGACY human_requested
+        // companion the v2 open batch carries (spec §17.3 display event);
+        // the v2 projection holds the authoritative identity fields.
+        let questionText = '';
+        for (const entry of events) {
+          if (entry.type === 'human_requested' && 'question' in entry && typeof entry.question === 'string') {
+            questionText = entry.question;
+          }
+        }
+        const pending = projected.state.pendingQuestion;
+        // B-M7 (loud, no silent guess): the frozen v2 opened-question event
+        // carries NO source discriminator — every v2 question the lifecycle
+        // opens is an AGENT request in this release, so the summary pins
+        // source='agent_request'. Introducing system/progress-guard questions
+        // REQUIRES a source member on the opened event + projection wiring;
+        // until then this is documented, not inferred.
+        workspace.authoritativeReview = {
+          version: 2,
+          executionEligibility: this.executionEligibilityOf(frozenDigest),
+          pendingQuestion:
+            pending === null
+              ? null
+              : {
+                  questionId: pending.questionId,
+                  questionDigest: pending.questionDigest,
+                  questionVersion: pending.questionVersion,
+                  source: 'agent_request',
+                  text: questionText,
+                },
+        };
+        if (projected.state.taskStatus === 'failed') {
+          // B-F3: the TRACK-EXACT summary — the recorded track is resolved
+          // from the failureRecoveryPayloadRef blob (kind-checked by the
+          // strict projector) so the UI never offers an impossible recipe.
+          const recovery = await failedRecoverySummaryResolved(projected.state, (ref) =>
+            this.v2BlobStore.readJson(taskId, ref, ref.kind),
+          );
+          if (recovery !== null) {
+            workspace.task.failedRecovery = recovery;
+          }
+        }
+      }
+    }
     // Live-preview attachment (plan C): the in-memory buffer, when present,
     // rides along as activeTurn. Never persisted; display only.
     workspace.activeTurn = this.live.get(taskId);
     return this.enrichSkillNodeBodies(taskId, workspace);
+  }
+
+  /** The frozen profile digest (row identity + archived binding). */
+  private async frozenProfileDigestFor(taskId: string): Promise<string> {
+    return (await this.frozenProfileV2(taskId)).profileDigest;
   }
 
   /**

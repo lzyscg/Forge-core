@@ -50,10 +50,16 @@
  * Errors leave as PublicCoreError shapes with stable codes (iron rule 6); no
  * business vocabulary lives here (iron rule 1).
  */
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
+import { canonicalJson } from '../structured-slots/canonical-json';
+import { structuredProtocolOf } from '../../shared/authoritative-review-v2';
+import {
+  ProjectionCorruptionError,
+  type WorkItemProjectionV2,
+} from '../storage/authoritative-review-state';
 import type { TaskStatus, TaskSummary } from '../../shared/contracts';
 import {
   TASK_CONTRACT_INCOMPATIBLE_ACTION,
@@ -316,6 +322,13 @@ export interface TaskSchedulerOptions {
    * stay, the task remains resumable. Production never installs this.
    */
   acceptanceStopAfterCommit?: AcceptanceStopHook;
+  /**
+   * Task 11 v2 scheduling engine (spec §10.4): v2 tasks never run through the
+   * v1 one-slot Turn loop — the deterministic durable-wakeup pass drives
+   * them. `runV2SchedulingPass` delegates here; CoreService wires the engine
+   * (and the API answers v2 mutations synchronously).
+   */
+  v2Scheduling?: AuthoritativeV2SchedulingEngine;
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
@@ -478,6 +491,8 @@ export class TaskScheduler {
 
   readonly #acceptanceStopAfterCommit: AcceptanceStopHook | undefined;
 
+  readonly #v2Scheduling: AuthoritativeV2SchedulingEngine | undefined;
+
   #current: ActiveRun | null = null;
 
   #shutdown = false;
@@ -494,6 +509,24 @@ export class TaskScheduler {
     this.#retrySleep = policy.sleep ?? defaultRetrySleep;
     this.#progressPolicy = options.progressPolicy ?? PROGRESS_POLICY;
     this.#acceptanceStopAfterCommit = options.acceptanceStopAfterCommit;
+    this.#v2Scheduling = options.v2Scheduling;
+  }
+
+  /**
+   * One deterministic v2 scheduling pass (Task 11): evaluates every due
+   * durable wakeup once — tombstone, event-derived status, execution
+   * eligibility, then lease ONE WorkItem. Idempotent per observed tail;
+   * CoreService (and the API) drive it after every v2 mutation.
+   */
+  runV2SchedulingPass(now?: string): Promise<Awaited<ReturnType<AuthoritativeV2SchedulingEngine['runPass']>>> {
+    const engine = this.#v2Scheduling;
+    if (engine === undefined) {
+      throw new SchedulerError(
+        SCHEDULER_ERROR_CODES.INVALID_TRANSITION,
+        'v2 调度引擎未装配。',
+      );
+    }
+    return engine.runPass(now);
   }
 
   /**
@@ -643,6 +676,16 @@ export class TaskScheduler {
       } catch {
         continue;
       }
+      // Task 11 (spec §4.4/§10.4): v2 tasks NEVER pass through the v1 recovery
+      // path. task_started is a LEGAL v2 batch member, so the v1 projector
+      // would fold a v2 task `running` and the legacy path would append a
+      // plain v1 task_interrupted into the v2 ledger on EVERY boot (the v2
+      // status stays running forever and resume rejects INVALID_TRANSITION).
+      // The deterministic §10.4 v2 startup scan owns these tasks; the v2
+      // ledger never carries v1 interruption/incompatible events.
+      if (structuredProtocolOf(frozenSnapshot) === 'v2') {
+        continue;
+      }
       if (!snapshotSupported) {
         await this.markIncompatibleOnce(
           summary.id,
@@ -690,6 +733,17 @@ export class TaskScheduler {
     taskId: string,
     reason: 'TURN_CONTRACT_REQUIRED' | 'SCHEMA_V2_REQUIRED',
   ): Promise<void> {
+    // Hard gate (review A-F1): the v2 ledger never carries task_incompatible.
+    // A v2 task under a TEMPORARILY unavailable authoritative runtime stays
+    // non-terminal — incompatible is only for a permanently unsupported
+    // frozen schema, which v2 can never be.
+    try {
+      if (structuredProtocolOf(await this.#service.tasks.readFrozenTemplate(taskId)) === 'v2') {
+        return;
+      }
+    } catch {
+      return; // Unreadable identity: the caller already decided, stay inert.
+    }
     const committed = await this.#service.events.read(taskId);
     if (committed.some((entry) => entry.event.type === 'task_incompatible')) {
       return;
@@ -1879,4 +1933,253 @@ export class TaskScheduler {
       },
     });
   }
+}
+
+/* --------------------------------------------------------------------------
+ * Task 11 deliverable 7: the v2 scheduler loop (spec §10.4/§14.3, design
+ * §17.3). V2 tasks never run through the v1 one-slot Turn loop: a DETERMINISTIC
+ * PASS over the durable wakeup index drives every transition, in the frozen
+ * order: deletion tombstone -> event-derived task status/dispositions ->
+ * separately derived execution eligibility -> lease ONE WorkItem through the
+ * Task 10 coordinator.
+ *
+ * The loop holds NO in-memory queue or timer (process-local state is only an
+ * accelerator); startup + every committed successor/timer/resume upsert the
+ * same durable wakeup index (the cycle closes: the coordinator's
+ * LeasedWorkV2.wakeup / RetryRecordedResultV2.wakeup survive crashes here).
+ * A blocked deployment keeps its wakeup entry (`eligibilityBlocked`) and does
+ * not busy-loop; the environment/startup reconciliation reactivates it when
+ * the exact frozen profile becomes eligible.
+ * ------------------------------------------------------------------------ */
+
+/** Stable lease-operation id of the scheduler's own auto-claims (§10.4). */
+export function schedulerLeaseOperationId(taskId: string, observedTailCommitId: string): string {
+  return `ls-${createHash('sha256')
+    .update(canonicalJson({ taskId, observedTailCommitId, label: 'v2_scheduler_auto_lease' }), 'utf8')
+    .digest('hex')
+    .slice(0, 32)}`;
+}
+
+export interface V2SchedulingDependencies {
+  index: import('../storage/authoritative-task-index').AuthoritativeTaskIndexV1;
+  deletion: import('../storage/authoritative-task-deletion').AuthoritativeTaskDeletionV2;
+  wakeups: import('./authoritative-review/wakeup-index').AuthoritativeWakeupIndexV1;
+  lifecycle: import('./authoritative-review/task-lifecycle').TaskLifecycleServiceV2;
+  coordinator: import('./authoritative-review/work-item-coordinator').WorkItemCoordinatorV2;
+  checkpointStore: import('../storage/authoritative-review-checkpoint-store').AuthoritativeReviewCheckpointStore;
+  resolver: (taskId: string, ref: import('../../shared/authoritative-review-v2').BlobRefV2) => Promise<unknown> | unknown;
+  /**
+   * The separately derived execution eligibility (spec §4.3): never TaskStatus
+   * and never rewritten into event history.
+   */
+  eligibility(frozenProfileDigest: string): import('../../shared/authoritative-review-v2').AuthoritativeReviewExecutionEligibilityV1;
+  frozenProfileDigest(taskId: string): Promise<string>;
+  clock(): string;
+  /**
+   * The server-side worker identity claiming v2 work: the fixed local owner
+   * principal. Task 12's attempt-coordinator replaces the claim with the real
+   * executing worker.
+   */
+  leaseOwner: string;
+}
+
+export interface V2SchedulingPassResult {
+  scanned: number;
+  reclaimed: string[];
+  requeued: string[];
+  leased: Array<{ taskId: string; workItemId: string }>;
+  /** Eligibility-blocked tasks whose wakeups were RETAINED (never busy-loop). */
+  blocked: string[];
+  skipped: string[];
+  wakeupRemoved: string[];
+  /** Corrupt v2 histories: disposable wakeups dropped, task left for diagnosis. */
+  corrupt: string[];
+}
+
+/**
+ * The deterministic v2 scheduling pass. One `runPass` evaluates every due
+ * wakeup row exactly once, in the frozen order above; repeat calls are
+ * idempotent per committed tail (same due rows - same compensation ids).
+ */
+export class AuthoritativeV2SchedulingEngine {
+  private readonly deps: V2SchedulingDependencies;
+
+  constructor(deps: V2SchedulingDependencies) {
+    this.deps = deps;
+  }
+
+  async runPass(now?: string): Promise<V2SchedulingPassResult> {
+    const nowValue = now ?? this.deps.clock();
+    const result: V2SchedulingPassResult = {
+      scanned: 0,
+      reclaimed: [],
+      requeued: [],
+      leased: [],
+      blocked: [],
+      skipped: [],
+      wakeupRemoved: [],
+      corrupt: [],
+    };
+    const due = await this.deps.wakeups.due(nowValue);
+    const taskIds = Array.from(new Set(due.map((row) => row.taskId))).sort();
+    for (const taskId of taskIds) {
+      result.scanned += 1;
+      // 1. deletion tombstone: TASK_DELETED tasks are simply gone.
+      if (await this.deps.deletion.isDeleted(taskId)) {
+        result.skipped.push(taskId);
+        continue;
+      }
+      // 2. the installation index: only active v2 rows are schedulable.
+      const row = await this.deps.index.entryFor(taskId);
+      if (row === null || row.state !== 'active') {
+        result.skipped.push(taskId);
+        continue;
+      }
+      // 3. separately derived execution eligibility (spec §4.3): a blocked
+      //    deployment KEEPS its durable wakeup (marked blocked) and never
+      //    busy-loops; reconciliation reactivates it once the profile is
+      //    eligible again.
+      let frozenDigest: string;
+      try {
+        frozenDigest = await this.deps.frozenProfileDigest(taskId);
+      } catch {
+        result.skipped.push(taskId);
+        continue;
+      }
+      const eligibility = this.deps.eligibility(frozenDigest);
+      if (eligibility.state !== 'eligible') {
+        const rows = await this.deps.wakeups.read(taskId);
+        for (const wakeup of rows) {
+          if (!wakeup.eligibilityBlocked) {
+            await this.deps.wakeups.upsert(taskId, { ...wakeup, eligibilityBlocked: true });
+          }
+        }
+        result.blocked.push(taskId);
+        continue;
+      }
+      // Review A-M5: an ELIGIBLE pass clears the blocked flag on rows the
+      // pass does not otherwise rewrite (the norm lease/requeue upserts
+      // already write eligibilityBlocked: false).
+      const flaggedRows = await this.deps.wakeups.read(taskId);
+      if (flaggedRows.some((wakeup) => wakeup.eligibilityBlocked)) {
+        await this.deps.wakeups.write(
+          taskId,
+          flaggedRows.map((wakeup) => ({ ...wakeup, eligibilityBlocked: false })),
+        );
+      }
+      // 4. the event-derived task status/dispositions (never the last v1
+      //    lifecycle event).
+      let projection: import('../storage/authoritative-review-state').AuthoritativeReviewProjectionV2;
+      try {
+        projection = (await this.deps.checkpointStore.readState(taskId, (ref) => this.deps.resolver(taskId, ref))).projection;
+      } catch (error) {
+        if (error instanceof ProjectionCorruptionError) {
+          await this.deps.wakeups.removeTask(taskId);
+          result.corrupt.push(taskId);
+          continue;
+        }
+        throw error;
+      }
+      if (projection.taskStatus === 'failed' || projection.taskStatus === 'completed') {
+        await this.deps.wakeups.removeTask(taskId);
+        result.wakeupRemoved.push(taskId);
+        continue;
+      }
+      // stopped/interrupted keep DORMANT timers; waiting_human never claims.
+      if (projection.taskStatus !== 'running') {
+        result.skipped.push(taskId);
+        continue;
+      }
+      // 5. lease ONE WorkItem: expiry reclaim -> due requeue -> ready claim.
+      const leases = projection.activeLease;
+      const taskRows = due
+        .filter((wakeup) => wakeup.taskId === taskId)
+        .sort((a, b) => (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0));
+      for (const wakeup of taskRows) {
+        const workItemId = wakeup.workItemId;
+        if (wakeup.kind === 'lease_expiry') {
+          if (workItemId === null) {
+            await this.deps.wakeups.remove(taskId, 'lease_expiry', null);
+            continue;
+          }
+          const leased = projection.workItems[workItemId];
+          if (leased !== undefined && leased !== null && leased.state === 'leased' && leaseExpiryDue(nowValue, leased)) {
+            await this.deps.lifecycle.reclaimLeaseV2(taskId, {
+              operationId: schedulerLeaseOperationId(taskId, projection.lastSequence + ':' + workItemId),
+              workItemId,
+              reason: 'lease_expired',
+            });
+            await this.deps.wakeups.remove(taskId, 'lease_expiry', workItemId);
+            result.reclaimed.push(taskId);
+          } else if (leased === undefined || leased === null) {
+            await this.deps.wakeups.remove(taskId, 'lease_expiry', workItemId);
+          }
+          continue;
+        }
+        if (wakeup.kind === 'retry_due') {
+          if (workItemId === null) {
+            await this.deps.wakeups.remove(taskId, 'retry_due', null);
+            continue;
+          }
+          const retryable = projection.workItems[workItemId];
+          if (retryable !== undefined && retryable !== null && retryable.state === 'retryable_failed') {
+            if (retryable.retryNotBefore !== null && nowValue < retryable.retryNotBefore) {
+              continue; // Not due yet: the durable timer row is already exact.
+            }
+            await this.deps.lifecycle.requeueDueV2(taskId, {
+              operationId: schedulerLeaseOperationId(taskId, projection.lastSequence + ':' + workItemId),
+              workItemId,
+            });
+            await this.deps.wakeups.remove(taskId, 'retry_due', workItemId);
+            result.requeued.push(taskId);
+          } else {
+            await this.deps.wakeups.remove(taskId, 'retry_due', workItemId);
+          }
+          continue;
+        }
+        // runnable: lease ONE workitem through the coordinator. If a lease is
+        // already active (its expiry row was lost), repair the expiry wakeup
+        // from the projection instead of claiming — deterministic, never a
+        // second lease (maxActiveLeasesPerTask = 1).
+        if (leases !== null && leases !== undefined) {
+          const activeWi = projection.workItems[leases.workItemId];
+          if (activeWi !== undefined && activeWi.state === 'leased') {
+            await this.deps.wakeups.upsert(taskId, {
+              kind: 'lease_expiry',
+              at: activeWi.leaseExpiresAt,
+              dormant: false,
+              workItemId: leases.workItemId,
+              operationId: null,
+              eligibilityBlocked: false,
+            });
+            continue;
+          }
+        }
+        const claimed = await this.deps.coordinator.leaseNext(
+          taskId,
+          this.deps.leaseOwner,
+          schedulerLeaseOperationId(taskId, projection.lastSequence + ':claim'),
+        );
+        if (claimed !== null) {
+          await this.deps.wakeups.upsert(taskId, {
+            kind: 'lease_expiry',
+            at: claimed.wakeup.at,
+            dormant: false,
+            workItemId: claimed.workItemId,
+            operationId: schedulerLeaseOperationId(taskId, projection.lastSequence + ':' + claimed.workItemId),
+            eligibilityBlocked: false,
+          });
+          await this.deps.wakeups.remove(taskId, 'runnable', claimed.workItemId);
+          result.leased.push({ taskId, workItemId: claimed.workItemId });
+        }
+        // A null claim keeps the runnable row (the coordinator is the gate).
+      }
+    }
+    return result;
+  }
+}
+
+/** True when the leased workitem's frozen expiry has passed (string compare on ISO). */
+function leaseExpiryDue(now: string, leased: Pick<WorkItemProjectionV2, 'leaseExpiresAt'>): boolean {
+  return leased.leaseExpiresAt !== null && leased.leaseExpiresAt <= now;
 }

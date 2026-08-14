@@ -583,6 +583,8 @@ export class WorkItemCoordinatorV2 {
       retryNotBefore: null,
       validatorAggregateRef: null,
       budgetPolicyDigest: null,
+      failureRecoveryPayloadRef: null,
+      taskFailure: null,
     };
     const tail = await this.expectedTail(input.taskId, state);
     const published = await this.commitOne({
@@ -804,6 +806,8 @@ export class WorkItemCoordinatorV2 {
       retryNotBefore: null,
       validatorAggregateRef: null,
       budgetPolicyDigest: null,
+      failureRecoveryPayloadRef: null,
+      taskFailure: null,
     };
     const tail = await this.expectedTail(taskId, state);
     const published = await this.commitOne({
@@ -950,6 +954,8 @@ export class WorkItemCoordinatorV2 {
       retryNotBefore: null,
       validatorAggregateRef: null,
       budgetPolicyDigest: null,
+      failureRecoveryPayloadRef: null,
+      taskFailure: null,
     };
     const tail = await this.expectedTail(taskId, state);
     const published = await this.commitOne({
@@ -1050,6 +1056,8 @@ export class WorkItemCoordinatorV2 {
       retryNotBefore: parked ? null : retryNotBefore,
       validatorAggregateRef,
       budgetPolicyDigest: parked ? dispositionDigest(input.workItemId, retryOrdinal, input.failureCode) : null,
+      failureRecoveryPayloadRef: null,
+      taskFailure: null,
     } as Extract<PublicationOperationPayloadV2, { family: 'lease_or_retry' }>;
     const tail = await this.expectedTail(input.taskId, state);
     const published = await this.commitOne({
@@ -1173,6 +1181,8 @@ export class WorkItemCoordinatorV2 {
       retryNotBefore: null,
       validatorAggregateRef: null,
       budgetPolicyDigest: null,
+      failureRecoveryPayloadRef: null,
+      taskFailure: null,
     };
     const tail = await this.expectedTail(taskId, state);
     const published = await this.commitOne({
@@ -1235,6 +1245,26 @@ export class WorkItemCoordinatorV2 {
       leaseEpoch: wi.leaseEpoch + 1,
       expectedLastSequence: state.lastSequence,
       authorityBaseRef: base,
+      attemptFamily: null,
+      attemptId: null,
+      commandId: null,
+      agentId: null,
+      commandKind: null,
+      logicalAssignmentId: null,
+      reviewAssignmentId: null,
+      sessionKind: null,
+      inputArtifactDeliveryId: null,
+      workItemKind: null,
+      roleBinding: null,
+      agentExecutionKind: null,
+      roundId: null,
+      grantSpecRef: null,
+      payloadRef: null,
+      initialLeaseEpoch: null,
+      maxAutomaticRetries: null,
+      mapBuildId: null,
+      supersedesMapBuildId: null,
+      sourceValidationReceiptRef: null,
     };
     const tail = await this.expectedTail(taskId, state);
     await this.commitOne({
@@ -1287,6 +1317,26 @@ export class WorkItemCoordinatorV2 {
       leaseEpoch: null,
       expectedLastSequence: null,
       authorityBaseRef: null,
+      attemptFamily: null,
+      attemptId: null,
+      commandId: null,
+      agentId: null,
+      commandKind: null,
+      logicalAssignmentId: null,
+      reviewAssignmentId: null,
+      sessionKind: null,
+      inputArtifactDeliveryId: null,
+      workItemKind: null,
+      roleBinding: null,
+      agentExecutionKind: null,
+      roundId: null,
+      grantSpecRef: null,
+      payloadRef: null,
+      initialLeaseEpoch: null,
+      maxAutomaticRetries: null,
+      mapBuildId: null,
+      supersedesMapBuildId: null,
+      sourceValidationReceiptRef: null,
     };
     const tail = await this.expectedTail(taskId, state);
     await this.commitOne({
@@ -1335,6 +1385,26 @@ export class WorkItemCoordinatorV2 {
       leaseEpoch: null,
       expectedLastSequence: null,
       authorityBaseRef: null,
+      attemptFamily: null,
+      attemptId: null,
+      commandId: null,
+      agentId: null,
+      commandKind: null,
+      logicalAssignmentId: null,
+      reviewAssignmentId: null,
+      sessionKind: null,
+      inputArtifactDeliveryId: null,
+      workItemKind: null,
+      roleBinding: null,
+      agentExecutionKind: null,
+      roundId: null,
+      grantSpecRef: null,
+      payloadRef: null,
+      initialLeaseEpoch: null,
+      maxAutomaticRetries: null,
+      mapBuildId: null,
+      supersedesMapBuildId: null,
+      sourceValidationReceiptRef: null,
     };
     const tail = await this.expectedTail(taskId, state);
     await this.commitOne({

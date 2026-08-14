@@ -268,14 +268,22 @@ export type AnswerTaskDecisionV2 =
 
 /**
  * The v2 answer mutation (spec §10.6): the question identity token and an
- * operation id are mandatory on every branch. The server atomically checks
+ * operation id are mandatory on every branch. `{ answer }` is the ordinary
+ * text-answer variant (matches the wire schema exactly); the decision union
+ * serves the structured progress-guard choices. The server atomically checks
  * the current unconsumed identity; stale tabs receive HUMAN_QUESTION_STALE.
  */
-export type AnswerTaskBodyV2 = {
-  questionId: string;
-  questionVersion: string;
-  operationId: string;
-} & AnswerTaskDecisionV2;
+export type AnswerTaskBodyV2 =
+  | ({
+      questionId: string;
+      questionVersion: string;
+      operationId: string;
+    } & { answer: string })
+  | ({
+      questionId: string;
+      questionVersion: string;
+      operationId: string;
+    } & AnswerTaskDecisionV2);
 
 /* ----------------------------- §10.5 delete v2 ----------------------------- */
 

@@ -35,7 +35,7 @@ import type {
   TurnTrace,
 } from '../../shared/contracts';
 import type { StructuredSlotTreeCursorV1 } from '../../shared/structured-slots';
-import type { DeleteTaskBodyV2 } from '../../shared/authoritative-review-v2';
+import type { DeleteTaskBodyV2, ReopenFailedRequestV2 } from '../../shared/authoritative-review-v2';
 import type { PublicCoreError } from '../../shared/errors';
 import {
   errorBodySchema,
@@ -375,6 +375,18 @@ export function createHttpGateway(options: HttpGatewayOptions = {}): ForgeCoreGa
       // The task is gone server-side: drop it from the watchable set so a
       // stale watchTask call fails exactly like a never-seen id.
       knownTaskIds.delete(taskId);
+    },
+
+    async reopenFailed(taskId: string, request: ReopenFailedRequestV2): Promise<TaskSummary> {
+      // The wire schema is validated server-side (recipe/track pairing);
+      // the UI only ever sends server-returned legal recipes (spec §10.3.1).
+      const reopened = await postDecoded<TaskSummary>(
+        taskSummarySchema,
+        `/api/tasks/${encodeURIComponent(taskId)}/reopen_failed`,
+        request,
+      );
+      knownTaskIds.add(reopened.id);
+      return reopened;
     },
 
     async getStructuredContract(taskId: string): Promise<StructuredSlotPublicContractV1> {

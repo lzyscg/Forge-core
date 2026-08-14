@@ -13,7 +13,7 @@ import type {
   TurnTrace,
 } from '../../shared/contracts';
 import type { StructuredSlotTreeCursorV1 } from '../../shared/structured-slots';
-import type { DeleteTaskBodyV2 } from '../../shared/authoritative-review-v2';
+import type { DeleteTaskBodyV2, ReopenFailedRequestV2 } from '../../shared/authoritative-review-v2';
 
 /**
  * 正式页面唯一的生产数据接口。页面不得直接访问 localStorage、
@@ -69,6 +69,12 @@ export interface ForgeCoreGateway {
    * the delete dialog's stable operation id land with the v2 delete flow.
    */
   deleteTask(taskId: string, request?: DeleteTaskBodyV2): Promise<void>;
+  /**
+   * Fenced reopen of a FAILED v2 task (spec §10.3.1): ONLY the server-returned
+   * legal recipe keys/tracks are offered; the server re-derives the
+   * replacement base/scope/Grant. V1 has no reopen endpoint behavior.
+   */
+  reopenFailed(taskId: string, request: ReopenFailedRequestV2): Promise<TaskSummary>;
   /**
    * Public contract projection of the structured-slot contract (spec §14).
    * The owner projection never includes implementation paths, validators,

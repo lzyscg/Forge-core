@@ -30,6 +30,7 @@ import { isV2Event } from './event-store';
 import type { AuthoritativeReviewBlobStore } from './authoritative-review-blob-store';
 import { refKey } from './authoritative-review-blob-store';
 import { childRefsForBlob, isRegisteredKind } from '../authoritative-review/object-registry';
+import { isReopenPlaceholderRef } from '../authoritative-review/object-schemas';
 import { SchemaError } from '../authoritative-review/authority-types';
 import type { AuthoritativePublicationStore, PublicationPinV2 } from './authoritative-publication-store';
 import { STORAGE_ERROR_CODES, StorageError, syncDirectory } from './atomic-file';
@@ -213,6 +214,12 @@ export class AuthoritativeReviewGc {
     let markedRefs = 0;
 
     const markBlob = async (taskId: string, ref: BlobRefV2): Promise<void> => {
+      // Task-11 A-M1 HARD GATE: a reopen PLACEHOLDER plan-base ref is never
+      // marked or resolved (it has no bytes on disk by design; resolving it
+      // would abort the whole round as corruption). The lifecycle publishes
+      // placeholders ONLY for fields the frozen projection cannot carry; Task
+      // 13 replaces them with real projection refs.
+      if (isReopenPlaceholderRef(ref)) return;
       const key = liveKey(taskId, ref);
       if (live.has(key)) return;
       live.add(key);

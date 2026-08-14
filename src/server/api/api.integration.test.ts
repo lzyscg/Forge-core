@@ -1033,3 +1033,576 @@ describe('DELETE /api/tasks/:taskId (task list delete)', () => {
     await client.close();
   });
 });
+
+/* --------------------------------------------------------------------------
+ * Task 11 deliverable 9: v2 version dispatch over the real HTTP surface
+ * (spec §4.1/§10.3.1/§10.5/§10.6/§14.3). The v2 branch is decided by the
+ * FROZEN snapshot / installation index — never the request body.
+ * ------------------------------------------------------------------------ */
+
+import { cpSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import type { BlobRefV2 } from '../../shared/authoritative-review-v2';
+import { createTestRuntimeEnvironment } from '../structured-slots/runtime-capability';
+import { createAuthoritativeReviewTestEnvironment } from '../structured-slots/test-support/authoritative-review-test-registry';
+import { createAuthoritativeReviewRuntimeEnvironment } from '../structured-slots/authoritative-review-capability';
+import { buildAuthoritativeReviewTestProfileBody } from '../structured-slots/test-support/authoritative-review-test-registry';
+import { canonicalJsonSha256 } from '../structured-slots/canonical-json';
+import { validateAuthoritativeReviewProfile } from '../structured-slots/authoritative-review-profile';
+import { createAuthoritativeReviewTestHandlerRegistry } from '../structured-slots/test-support/authoritative-review-test-registry';
+
+const V2_TEMPLATE_ID = 'authoritative-valid';
+
+/** Fits expectPublicErrorEnvelope: fetch Response -> ApiTestResponse. */
+async function toApiResponse(response: Awaited<ReturnType<typeof fetch>>): Promise<ApiTestResponse> {
+  const text = await response.text();
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    parsed = null;
+  }
+  return { status: response.status, headers: response.headers, text, body: parsed };
+}
+
+function v2Request(): { templateId: string; name: string; input: Record<string, string> } {
+  return { templateId: V2_TEMPLATE_ID, name: '权威评审在线任务', input: { 'source-text': '在线素材。' } };
+}
+
+async function bootV2Server(
+  roots: { dataRoot: string; templateRoot: string },
+  env: ReturnType<typeof createAuthoritativeReviewTestEnvironment>,
+): Promise<{ baseUrl: string; service: CoreService; close(): Promise<void> }> {
+  const service = new CoreService(CorePaths.create(roots), {
+    runtime: new FakeAgentRuntime(),
+    runtimeEnvironment: createTestRuntimeEnvironment(),
+    authoritativeReviewEnvironment: env,
+  });
+  await service.initialize();
+  const server = await createForgeCoreServer({
+    mode: 'test',
+    dataRoot: roots.dataRoot,
+    templateRoot: roots.templateRoot,
+    coreService: service,
+  });
+  const baseUrl = await server.listen(0);
+  return { baseUrl, service, close: () => server.close() };
+}
+
+describe('v2 lifecycle HTTP dispatch (Task 11, spec §14.3)', { timeout: 30_000 }, () => {
+  async function v2Roots(): Promise<{ dataRoot: string; templateRoot: string }> {
+    const dataRoot = mkdtempSync(join(tmpdir(), 'forge-core-api-v2-data-'));
+    const templateRoot = mkdtempSync(join(tmpdir(), 'forge-core-api-v2-templates-'));
+    manualRoots.push(dataRoot, templateRoot);
+    const srcDir = fileURLToPath(new URL('../template/__fixtures__/authoritative-valid', import.meta.url));
+    cpSync(srcDir, join(templateRoot, V2_TEMPLATE_ID), { recursive: true });
+    return { dataRoot, templateRoot };
+  }
+
+  it('creates a v2 task; list/detail expose protocol and the separately derived eligibility', async () => {
+    const roots = await v2Roots();
+    const { baseUrl, close } = await bootV2Server(roots, createAuthoritativeReviewTestEnvironment());
+    try {
+      const created = await fetch(`${baseUrl}/api/tasks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(v2Request()),
+      });
+      expect(created.status).toBe(200);
+      const task = (await created.json()) as TaskSummary;
+      expect(task.structuredProtocol).toBe('v2');
+      expect(task.failedRecovery).toBeUndefined();
+      const workspace = (await (await fetch(`${baseUrl}/api/tasks/${task.id}/workspace`)).json()) as TaskWorkspace;
+      expect(workspace.task.structuredProtocol).toBe('v2');
+      expect(workspace.authoritativeReview?.version).toBe(2);
+      expect(workspace.authoritativeReview?.executionEligibility.state).toBe('eligible');
+      expect(workspace.authoritativeReview?.pendingQuestion).toBeNull();
+      const listed = (await (await fetch(`${baseUrl}/api/tasks`)).json()) as TaskSummary[];
+      expect(listed.find((summary) => summary.id === task.id)?.structuredProtocol).toBe('v2');
+    } finally {
+      await close();
+    }
+  });
+
+  it('start answers 200 synchronously and commits the ONE-BATCH start; a second start conflicts (USE_RESUME)', async () => {
+    const roots = await v2Roots();
+    const { baseUrl, close } = await bootV2Server(roots, createAuthoritativeReviewTestEnvironment());
+    try {
+      const task = (await (
+        await fetch(`${baseUrl}/api/tasks`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(v2Request()),
+        })
+      ).json()) as TaskSummary;
+      const started = await fetch(`${baseUrl}/api/tasks/${task.id}/start`, { method: 'POST' });
+      expect(started.status).toBe(200);
+      expect(((await started.json()) as TaskSummary).status).toBe('running');
+      const second = await fetch(`${baseUrl}/api/tasks/${task.id}/start`, { method: 'POST' });
+      expect(second.status).toBe(409);
+      expectPublicErrorEnvelope(await toApiResponse(second), 'USE_RESUME');
+    } finally {
+      await close();
+    }
+  });
+
+  it('stop commits the composed envelope and answers 200; resume reactivates; double-stop conflicts', async () => {
+    const roots = await v2Roots();
+    const { baseUrl, close } = await bootV2Server(roots, createAuthoritativeReviewTestEnvironment());
+    try {
+      const task = (await (
+        await fetch(`${baseUrl}/api/tasks`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(v2Request()),
+        })
+      ).json()) as TaskSummary;
+      await fetch(`${baseUrl}/api/tasks/${task.id}/start`, { method: 'POST' });
+      const stopped = await fetch(`${baseUrl}/api/tasks/${task.id}/stop`, { method: 'POST' });
+      expect(stopped.status).toBe(200);
+      const stoppedBody = (await stopped.json()) as TaskSummary;
+      expect(stoppedBody.status).toBe('stopped');
+      const doubleStop = await fetch(`${baseUrl}/api/tasks/${task.id}/stop`, { method: 'POST' });
+      expect(doubleStop.status).toBe(409);
+      const resumed = await fetch(`${baseUrl}/api/tasks/${task.id}/resume`, { method: 'POST' });
+      expect(resumed.status).toBe(200);
+      expect((await resumed.json()) as TaskSummary).toMatchObject({ status: expect.stringMatching(/running|waiting_human/) });
+    } finally {
+      await close();
+    }
+  });
+
+  it('v2 answer requires the exact question identity body; stale question identity is HUMAN_QUESTION_STALE', async () => {
+    const roots = await v2Roots();
+    const { baseUrl, close } = await bootV2Server(roots, createAuthoritativeReviewTestEnvironment());
+    try {
+      const task = (await (
+        await fetch(`${baseUrl}/api/tasks`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(v2Request()),
+        })
+      ).json()) as TaskSummary;
+      // Wrong protocol body (legacy { answer }) on a v2 task: schema rejects.
+      const legacyAnswer = await fetch(`${baseUrl}/api/tasks/${task.id}/answer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ answer: '继续' }),
+      });
+      expect(legacyAnswer.status).toBe(400);
+      expectPublicErrorEnvelope(await toApiResponse(legacyAnswer), 'INVALID_INPUT');
+      // Well-formed v2 body against NO pending question: stale token.
+      const stale = await fetch(`${baseUrl}/api/tasks/${task.id}/answer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          questionId: 'q-1',
+          questionVersion: 'A'.repeat(43),
+          operationId: '44444444-4444-4444-8444-444444444444',
+          answer: '继续评审',
+        }),
+      });
+      expect(stale.status).toBe(409);
+      expectPublicErrorEnvelope(await toApiResponse(stale), 'HUMAN_QUESTION_STALE');
+    } finally {
+      await close();
+    }
+  });
+
+  it('v2 delete dispatches by the INSTALLATION INDEX: body required, fenced tombstone, replay and conflict semantics', async () => {
+    const roots = await v2Roots();
+    const { baseUrl, service, close } = await bootV2Server(roots, createAuthoritativeReviewTestEnvironment());
+    try {
+      const task = (await (
+        await fetch(`${baseUrl}/api/tasks`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(v2Request()),
+        })
+      ).json()) as TaskSummary;
+      const op = '55555555-5555-4555-8555-555555555555';
+      // Missing body: refused BEFORE any tombstone write.
+      const noBody = await fetch(`${baseUrl}/api/tasks/${task.id}`, { method: 'DELETE' });
+      expect(noBody.status).toBe(400);
+      expect(await service.v2Deletion.tombstoneFor(task.id)).toBeNull();
+      // Invalid body fields: refused.
+      const badBody = await fetch(`${baseUrl}/api/tasks/${task.id}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operationId: 'not-a-uuid', reason: '' }),
+      });
+      expect(badBody.status).toBe(400);
+      // Fenced delete answers the detached result.
+      const deleted = await fetch(`${baseUrl}/api/tasks/${task.id}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operationId: op, reason: '清理遗留评审任务' }),
+      });
+      expect(deleted.status).toBe(200);
+      expect((await deleted.json()) as { operationId: string; state: string }).toEqual({ operationId: op, state: 'detached' });
+      const after = (await (await fetch(`${baseUrl}/api/tasks`)).json()) as TaskSummary[];
+      expect(after.map((summary) => summary.id)).not.toContain(task.id);
+      // Same operation + same canonical body replays (after the async purge it
+      // reports purged); a CHANGED reason under the same operation conflicts.
+      const replay = await fetch(`${baseUrl}/api/tasks/${task.id}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operationId: op, reason: '清理遗留评审任务' }),
+      });
+      expect(replay.status).toBe(200);
+      await service.v2Deletion.purgeTask(task.id, 1);
+      const afterPurge = await fetch(`${baseUrl}/api/tasks/${task.id}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operationId: op, reason: '清理遗留评审任务' }),
+      });
+      expect(afterPurge.status).toBe(200);
+      expect(((await afterPurge.json()) as { state: string }).state).toBe('purged');
+      const conflict = await fetch(`${baseUrl}/api/tasks/${task.id}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operationId: op, reason: '不同原因' }),
+      });
+      expect(conflict.status).toBe(409);
+      expectPublicErrorEnvelope(await toApiResponse(conflict), 'DELETE_CONFLICT');
+    } finally {
+      await close();
+    }
+  });
+
+  it('B-F1: the spec-legal { answer } variant answers a LIVE pending question (and A-M6 mints a replacement grant naming the replacement)', async () => {
+    const roots = await v2Roots();
+    const { baseUrl, service, close } = await bootV2Server(roots, createAuthoritativeReviewTestEnvironment());
+    try {
+      const task = await service.createTask(v2Request() as Parameters<CoreService['createTask']>[0]);
+      await service.startTaskV2(task.id);
+      await service.runV2SchedulingPass('2026-08-14T10:00:00.000Z');
+      // Open a live question from the active structured attempt.
+      const opened = await service.v2Lifecycle.openQuestionV2(task.id, {
+        operationId: 'op-open-live',
+        questionId: 'q-live',
+        questionText: '请确认继续评审',
+      });
+      expect(opened.questionVersion).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      const workspace = await service.getWorkspace(task.id);
+      expect(workspace.authoritativeReview?.pendingQuestion?.questionId).toBe('q-live');
+      const answer = await fetch(`${baseUrl}/api/tasks/${task.id}/answer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          questionId: 'q-live',
+          questionVersion: opened.questionVersion,
+          operationId: 'op-answer-live',
+          answer: '继续评审',
+        }),
+      });
+      expect(answer.status).toBe(200);
+      const events = await service.events.read(task.id);
+      const delivered = events.find((entry) => entry.event.type === 'structured_human_answer_delivered_v2') as
+        | { event: { replacementWorkItemId: string } }
+        | undefined;
+      expect(delivered).toBeDefined();
+      const replacementId = delivered?.event.replacementWorkItemId as string;
+      // A-M6: the replacement workitem's grant spec NAMES the replacement.
+      const projection = await service.v2CheckpointStore.readState(task.id, (ref) =>
+        service.v2BlobStore.readJson(task.id, ref, ref.kind),
+      );
+      const replacement = projection.projection.workItems[replacementId];
+      expect(replacement).toBeDefined();
+      const grant = (await service.v2BlobStore.readJson(
+        task.id,
+        replacement?.grantSpecRef as BlobRefV2,
+        'write_grant_spec',
+      )) as { workItemId: string };
+      expect(grant.workItemId).toBe(replacementId);
+    } finally {
+      await close();
+    }
+  });
+
+  it('B-F2/B-M5: whitespace-only reasons and malformed DELETE JSON are stable 400 INVALID_INPUT (no tombstone written)', async () => {
+    const roots = await v2Roots();
+    const { baseUrl, service, close } = await bootV2Server(roots, createAuthoritativeReviewTestEnvironment());
+    try {
+      const task = await service.createTask(v2Request() as Parameters<CoreService['createTask']>[0]);
+      const whitespace = await fetch(`${baseUrl}/api/tasks/${task.id}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operationId: '99999999-9999-4999-8999-999999999999', reason: '   ' }),
+      });
+      expect(whitespace.status).toBe(400);
+      expectPublicErrorEnvelope(await toApiResponse(whitespace), 'INVALID_INPUT');
+      expect(await service.v2Deletion.tombstoneFor(task.id)).toBeNull();
+      const malformed = await fetch(`${baseUrl}/api/tasks/${task.id}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{not-json',
+      });
+      expect(malformed.status).toBe(400);
+      expectPublicErrorEnvelope(await toApiResponse(malformed), 'INVALID_INPUT');
+      expect(await service.v2Deletion.tombstoneFor(task.id)).toBeNull();
+    } finally {
+      await close();
+    }
+  });
+
+  it('a v2 delete body on a v1 task is refused before deletion; v1 delete stays body-less', async () => {
+    const client = await startApiTestClient();
+    try {
+      const task = await createValidTask(client);
+      const withBody = await client.request('DELETE', `/api/tasks/${task.id}`, {
+        json: { operationId: '66666666-6666-4666-8666-666666666666', reason: '正文' },
+      });
+      expect(withBody.status).toBe(400);
+      expectPublicErrorEnvelope(withBody, 'INVALID_INPUT');
+      const plain = await client.request('DELETE', `/api/tasks/${task.id}`);
+      expect(plain.status).toBe(200);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('a blocked deployment answers AUTHORITATIVE_REVIEW_UNAVAILABLE (503) without changing the task', async () => {
+    const roots = await v2Roots();
+    const envA = createAuthoritativeReviewTestEnvironment();
+    const harnessA = await bootV2Server(roots, envA);
+    try {
+      const task = (await (
+        await fetch(`${harnessA.baseUrl}/api/tasks`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(v2Request()),
+        })
+      ).json()) as TaskSummary;
+      await harnessA.close();
+      // Profile B over the SAME roots: same identity, different digest.
+      const bodyA = buildAuthoritativeReviewTestProfileBody();
+      const body = { ...bodyA, runtime: { ...bodyA.runtime, maxFindingsPerRound: bodyA.runtime.maxFindingsPerRound + 1 } };
+      const withDigest = { ...body, profileDigest: '' } as Record<string, unknown>;
+      delete withDigest.profileDigest;
+      const validatedB = validateAuthoritativeReviewProfile({ ...body, profileDigest: canonicalJsonSha256(withDigest) });
+      const envB = createAuthoritativeReviewRuntimeEnvironment(
+        {
+          version: 1,
+          status: 'enabled',
+          profileIdentity: validatedB.profileIdentity as 'forge-authoritative-review/v1',
+          profileDigest: validatedB.profileDigest,
+          evidenceDigest: '0'.repeat(64),
+          requiredAbis: ['forge-validator/v2', 'forge-assembler/v2'],
+        },
+        validatedB,
+        createAuthoritativeReviewTestHandlerRegistry(),
+      );
+      const harnessB = await bootV2Server(roots, envB);
+      try {
+        const started = await fetch(`${harnessB.baseUrl}/api/tasks/${task.id}/start`, { method: 'POST' });
+        expect(started.status).toBe(503);
+        expectPublicErrorEnvelope(await toApiResponse(started), 'AUTHORITATIVE_REVIEW_UNAVAILABLE');
+        // Reads stay available under B; the task never ran.
+        const workspace = (await (
+          await fetch(`${harnessB.baseUrl}/api/tasks/${task.id}/workspace`)
+        ).json()) as TaskWorkspace;
+        expect(workspace.authoritativeReview?.executionEligibility.state).toBe('blocked');
+        expect(workspace.task.status).toBe('ready');
+      } finally {
+        await harnessB.close();
+      }
+    } finally {
+      await harnessA.close().catch(() => undefined);
+    }
+  });
+
+  it('B-F3: a round-limit failure lists ONLY the recorded track recipe', async () => {
+    const roots = await v2Roots();
+    const { baseUrl, service, close } = await bootV2Server(roots, createAuthoritativeReviewTestEnvironment());
+    try {
+      const task = await service.createTask(v2Request() as Parameters<CoreService['createTask']>[0]);
+      // Legal round-limit (map) failure: the strict projector validates every
+      // identity field, the terminal event id and the rejectedSubject kind.
+      const { lifecycleWorkItemId } = await import('../runtime/authoritative-review/task-lifecycle');
+      const { deterministicEventId } = await import('../storage/authoritative-publication-intent-registry');
+      const { WorkItemCoordinatorV2 } = await import('../runtime/authoritative-review/work-item-coordinator');
+      await service.v2Lifecycle.startV2(task.id, { operationId: 'op-round-start', userInputText: '' });
+      const now = '2026-08-14T10:00:00.000Z';
+      const coordinator = new WorkItemCoordinatorV2({
+        facade: service.v2Facade,
+        checkpointStore: service.v2CheckpointStore,
+        resolver: (id, ref) => service.v2BlobStore.readJson(id, ref, ref.kind),
+        tail: (id) => service.events.tail(id),
+        committedOperation: async (id, operationId) => {
+          const committed = await service.events.readBatchByCommitId(id, operationId);
+          return committed === null ? null : committed.map((entry) => ({ sequence: entry.sequence, event: entry.event }));
+        },
+        clock: () => now,
+        leaseDurationMs: 30 * 60 * 1000,
+      });
+      const leasePass = await service.v2Scheduling.runPass(now);
+      const workItemId = leasePass.leased[0]?.workItemId as string;
+      void coordinator;
+      const projection = await service.v2CheckpointStore.readState(task.id, (ref) =>
+        service.v2BlobStore.readJson(task.id, ref, ref.kind),
+      );
+      const wi = projection.projection.workItems[workItemId];
+      const attemptId = projection.projection.activeLease?.attemptId ?? '';
+      const failOp = 'op-round-fail';
+      const refLike = (kind: BlobRefV2['kind'], digest: string): BlobRefV2 => ({ kind, digest, byteLength: 10, mediaType: 'application/json', schemaVersion: 1 });
+      const recoveryPayload = await service.v2Facade.prepareBlob(task.id, 'failure_recovery_payload', {
+        kind: 'restart_review_cycle',
+        track: 'map',
+        failedWorkItemId: workItemId,
+        failedAttemptOrCommandId: attemptId,
+        failedLeaseEpoch: wi?.leaseEpoch ?? 1,
+        terminalEventId: deterministicEventId(failOp, 'work_item_terminal_failed', 0),
+        terminalCommitId: failOp,
+        authorityBaseRef: wi?.authorityBaseRef,
+        rejectedSubjectRef: refLike('map_candidate', canonicalJsonSha256({ rejected: 'candidate' })),
+        findingSetRef: refLike('finding_set', canonicalJsonSha256({ findings: [] })),
+        failedCycleOrdinal: 3,
+      });
+      await service.v2Lifecycle.terminalFailWorkItem(task.id, {
+        operationId: failOp,
+        workItemId,
+        failureCode: 'REVIEW_REPAIR_LIMIT_EXCEEDED',
+        failureDigest: 'e'.repeat(64),
+        failureRecoveryPayloadRef: recoveryPayload,
+        taskFailure: true,
+      });
+      const listed = (await (await fetch(`${baseUrl}/api/tasks`)).json()) as TaskSummary[];
+      const failedSummary = listed.find((summary) => summary.id === task.id);
+      expect(failedSummary?.status).toBe('failed');
+      // B-F3: ONLY the recorded map track recipe is advertised — the UI can
+      // never offer the impossible content recipe.
+      expect(failedSummary?.failedRecovery?.legalRecipes).toEqual([
+        { recipeKey: 'restart_map_review_cycle', track: 'map' },
+      ]);
+    } finally {
+      await close();
+    }
+  });
+
+  it('a failed v2 task lists the bounded recovery summary and rejects ordinary mutations', async () => {
+    const roots = await v2Roots();
+    const { baseUrl, service, close } = await bootV2Server(roots, createAuthoritativeReviewTestEnvironment());
+    try {
+      const task = await service.createTask(v2Request() as Parameters<CoreService['createTask']>[0]);
+      // Legal failing path: system workitem -> lease -> terminal fail.
+      const { lifecycleWorkItemId } = await import('../runtime/authoritative-review/task-lifecycle');
+      const { buildAuthorityBaseSet } = await import('../runtime/authoritative-review/authority-base');
+      const { deterministicEventId } = await import('../storage/authoritative-publication-intent-registry');
+      const { WorkItemCoordinatorV2 } = await import('../runtime/authoritative-review/work-item-coordinator');
+      const row = await service.v2Index.entryFor(task.id);
+      const systemWiId = lifecycleWorkItemId(task.id, 'op-wi-c', 'system_map_finalize');
+      const specBody = { mapBuildId: 'mb-g', revision: 1, supersedesMapBuildId: null, sourceValidationReceiptRef: null, snapshotHash: 'g'.repeat(64), plannedChunkPolicy: { maxChunks: 8, maxNodesPerChunk: 512, maxRelationsPerChunk: 64 } };
+      const specValue = { ...specBody, specDigest: canonicalJsonSha256(specBody) };
+      const specRef = await service.v2Facade.prepareBlob(task.id, 'map_build_spec', specValue);
+      const base = buildAuthorityBaseSet({
+        taskId: task.id,
+        templateSnapshotRef: (row as { templateSnapshotRef: BlobRefV2 }).templateSnapshotRef,
+        profileSnapshotRef: (row as { profileSnapshotRef: BlobRefV2 }).profileSnapshotRef,
+        refs: { planSpecRef: specRef },
+        kind: 'system_map_finalize',
+      });
+      await service.v2Coordinator.createWorkItem({
+        taskId: task.id,
+        operationId: 'op-wi-c',
+        workItemId: systemWiId,
+        kind: 'system_map_finalize',
+        roleBinding: null,
+        agentExecutionKind: null,
+        sessionKind: null,
+        roundId: null,
+        logicalAssignmentId: null,
+        reviewAssignmentId: null,
+        inputArtifactDeliveryId: null,
+        payload: { kind: 'map_build_spec' as const, value: specValue },
+        authorityBase: base,
+        maxAutomaticRetries: 2,
+      });
+      const coordinator = new WorkItemCoordinatorV2({
+        facade: service.v2Facade,
+        checkpointStore: service.v2CheckpointStore,
+        resolver: (id, ref) => service.v2BlobStore.readJson(id, ref, ref.kind),
+        tail: (id) => service.events.tail(id),
+        committedOperation: async (id, operationId) => {
+          const committed = await service.events.readBatchByCommitId(id, operationId);
+          return committed === null ? null : committed.map((entry) => ({ sequence: entry.sequence, event: entry.event }));
+        },
+        clock: () => '2026-08-14T10:00:00.000Z',
+        leaseDurationMs: 30 * 60 * 1000,
+      });
+      const leased = await coordinator.leaseNext(task.id, 'task_owner', 'op-lease-g');
+      const leaseProjection = await service.v2CheckpointStore.readState(task.id, (ref) =>
+        service.v2BlobStore.readJson(task.id, ref, ref.kind),
+      );
+      const commandId = leaseProjection.projection.activeLease?.commandId ?? '';
+      const failOperationId = 'op-fail-g';
+      const recoveryPayload = await service.v2Facade.prepareBlob(task.id, 'failure_recovery_payload', {
+        kind: 'retry_system_command',
+        failedWorkItemId: systemWiId,
+        failedCommandId: commandId,
+        failedLeaseEpoch: 1,
+        terminalEventId: deterministicEventId(failOperationId, 'work_item_terminal_failed', 0),
+        terminalCommitId: failOperationId,
+        authorityBaseRef: leased?.authorityBaseRef as BlobRefV2,
+        systemKind: 'system_map_finalize',
+        systemPayloadRef: specRef,
+      });
+      await service.v2Lifecycle.terminalFailWorkItem(task.id, {
+        operationId: failOperationId,
+        workItemId: systemWiId,
+        failureCode: 'ARTIFACT_VALIDATION_FAILED',
+        failureDigest: 'e'.repeat(64),
+        failureRecoveryPayloadRef: recoveryPayload,
+        taskFailure: true,
+      });
+      // The list carries the bounded recovery summary (spec §10.3.1).
+      const listed = (await (await fetch(`${baseUrl}/api/tasks`)).json()) as TaskSummary[];
+      const failedSummary = listed.find((summary) => summary.id === task.id);
+      expect(failedSummary?.status).toBe('failed');
+      expect(failedSummary?.failedRecovery).toMatchObject({
+        failureCode: 'ARTIFACT_VALIDATION_FAILED',
+        reopenAllowed: true,
+        cloneFallback: false,
+      });
+      expect(failedSummary?.failedRecovery?.legalRecipes).toEqual([
+        { recipeKey: 'retry_system_command', track: null },
+      ]);
+      // Ordinary v2 mutations reject with the stable codes (spec §14.3).
+      const start = await fetch(`${baseUrl}/api/tasks/${task.id}/start`, { method: 'POST' });
+      expect(start.status).toBe(409);
+      expectPublicErrorEnvelope(await toApiResponse(start), 'TASK_TERMINAL');
+      const stop = await fetch(`${baseUrl}/api/tasks/${task.id}/stop`, { method: 'POST' });
+      expect(stop.status).toBe(409);
+      // reopen_failed on the legal recipe is reachable (the response is a
+      // summary; the lifecycle tests own the full recipe matrix).
+      const reopened = await fetch(`${baseUrl}/api/tasks/${task.id}/reopen_failed`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          expectedLastSequence: failedSummary?.failedRecovery?.failedSequence,
+          operationId: '77777777-7777-4777-8777-777777777777',
+          reason: '重试系统命令',
+          recipeKey: 'retry_system_command',
+          track: null,
+        }),
+      });
+      expect(reopened.status).toBe(200);
+      // Illegal recipe/track pairs fail the wire schema BEFORE the service.
+      const illegalRecipe = await fetch(`${baseUrl}/api/tasks/${task.id}/reopen_failed`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          expectedLastSequence: 0,
+          operationId: '88888888-8888-4888-8888-888888888888',
+          reason: '错误配方',
+          recipeKey: 'restart_map_review_cycle',
+          track: null,
+        }),
+      });
+      expect(illegalRecipe.status).toBe(400);
+      expectPublicErrorEnvelope(await toApiResponse(illegalRecipe), 'INVALID_INPUT');
+    } finally {
+      await close();
+    }
+  });
+});

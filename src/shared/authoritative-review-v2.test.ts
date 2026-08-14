@@ -521,8 +521,12 @@ describe('DeleteTaskBodyV2 / DeleteTaskResultV2 (spec §10.5)', () => {
     expect(check(deleteTaskBodyV2Schema, DELETE_BODY)).toBe(true);
     expect(check(deleteTaskBodyV2Schema, { ...DELETE_BODY, operationId: 'not-a-uuid' })).toBe(false);
     expect(check(deleteTaskBodyV2Schema, { ...DELETE_BODY, reason: '' })).toBe(false);
-    expect(check(deleteTaskBodyV2Schema, { ...DELETE_BODY, reason: '长'.repeat(501) })).toBe(false);
+    // B-M5: the schema is a UTF-16 backstop ONLY (1000 units cover 500 astral
+    // code points); the authoritative 1..500 CODE-POINT bound + trim is
+    // enforced in the task routes (whitespace-only -> 400 INVALID_INPUT).
     expect(check(deleteTaskBodyV2Schema, { ...DELETE_BODY, reason: '长'.repeat(500) })).toBe(true);
+    expect(check(deleteTaskBodyV2Schema, { ...DELETE_BODY, reason: '𠀀'.repeat(500) })).toBe(true);
+    expect(check(deleteTaskBodyV2Schema, { ...DELETE_BODY, reason: '长'.repeat(1001) })).toBe(false);
   });
 
   it('forbids caller-supplied actor fields (the server fixes task_owner)', () => {
@@ -560,8 +564,12 @@ describe('ReopenFailedRequestV2 (spec §10.3.1)', () => {
     expect(check(reopenFailedRequestV2Schema, { ...REOPEN_BASE, ...retryTrack, expectedLastSequence: 1.5 })).toBe(false);
     expect(check(reopenFailedRequestV2Schema, { ...REOPEN_BASE, ...retryTrack, operationId: 'not-a-uuid' })).toBe(false);
     expect(check(reopenFailedRequestV2Schema, { ...REOPEN_BASE, ...retryTrack, reason: '' })).toBe(false);
-    expect(check(reopenFailedRequestV2Schema, { ...REOPEN_BASE, ...retryTrack, reason: '长'.repeat(1001) })).toBe(false);
+    // B-M5: the schema is a UTF-16 backstop ONLY (2000 units cover 1000 astral
+    // code points); the authoritative 1..1000 CODE-POINT bound + trim is
+    // enforced in the task routes.
     expect(check(reopenFailedRequestV2Schema, { ...REOPEN_BASE, ...retryTrack, reason: '长'.repeat(1000) })).toBe(true);
+    expect(check(reopenFailedRequestV2Schema, { ...REOPEN_BASE, ...retryTrack, reason: '𠀀'.repeat(1000) })).toBe(true);
+    expect(check(reopenFailedRequestV2Schema, { ...REOPEN_BASE, ...retryTrack, reason: '长'.repeat(2001) })).toBe(false);
   });
 
   it('rejects cross-recipe fields (exact policy table pairing)', () => {

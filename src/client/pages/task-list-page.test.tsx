@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { TaskSummary, WorkspaceNode } from '../../shared/contracts';
 import { CORE_ERROR_CODES, CoreError } from '../gateway/core-errors';
 import { TEMPLATE_ID, templateFixture } from '../mock/__fixtures__/zhihu-single-chapter';
@@ -175,19 +175,20 @@ describe('TaskListPage', () => {
     expect(screen.queryByText('Agent 1')).toBeNull();
   });
 
-  it('renders a failed row with the danger chip and zero action buttons (spec §10.3)', async () => {
-    // Task 2 minimal neutral rendering: the failed status label chips the
-    // row, but start/stop/resume/retry/rerun never appear — reopen_failed
-    // and the clone fallback surface land with the v2 recovery flow (Task 11).
+  it('renders a failed row with the danger chip and only the policy-allowed clone (重跑) plus delete', async () => {
+    // Task 11 (review B-M3): a failed v2 row shows NO ordinary lifecycle
+    // control — the only mutating affordances are the policy-allowed clone
+    // (重跑) and delete. reopen_failed lives on the detail page's recovery
+    // panel (server-returned legal recipes only).
     const gateway = stubGateway({ listTasks: async () => [failedSummaryRow()] });
     renderPage('/tasks', gateway);
     await screen.findByRole('heading', { level: 2, name: '示例任务 已失败' });
 
     expect(screen.getByText('已失败、无法继续运行')).toBeVisible();
     const row = rowOf('示例任务 已失败');
-    expect(within(row).getAllByRole('button')).toHaveLength(1);
+    expect(within(row).getAllByRole('button')).toHaveLength(2);
     expect(within(row).getByRole('button', { name: '删除' })).toBeVisible();
-    expect(within(row).queryByRole('button', { name: '重跑' })).toBeNull();
+    expect(within(row).getByRole('button', { name: '重跑' })).toBeVisible();
     expect(within(row).queryByRole('button', { name: '重试' })).toBeNull();
     expect(within(row).queryByRole('button', { name: '继续' })).toBeNull();
   });
@@ -433,5 +434,207 @@ describe('TaskListPage', () => {
     // The list and the failed row remain available.
     expect(screen.getByRole('heading', { level: 2, name: '任务 A' })).toBeVisible();
     expect(screen.getByRole('button', { name: '删除' })).toBeEnabled();
+  });
+});
+
+/* --------------------------------------------------------------------------
+ * Task 11 deliverable 10: the real v2 delete confirmation (spec §10.5) —
+ * ONE UUID per dialog open, required+bounded reason, the dialog + SAME
+ * canonical body survive retryable/response-loss errors, success/cancel
+ * clear, and editing the reason deliberately creates a NEW operation.
+ * ------------------------------------------------------------------------ */
+
+
+function v2Summary(overrides: Partial<TaskSummary> = {}): TaskSummary {
+  return {
+    id: 'task-v2-a',
+    name: '权威评审任务',
+    templateId: 'authoritative-valid',
+    templateName: 'Authoritative Output Template',
+    status: 'running',
+    currentAgentName: null,
+    latestVersion: null,
+    updatedAt: '2026-08-14T10:00:00.000Z',
+    diagnostic: null,
+    structuredProtocol: 'v2',
+    ...overrides,
+  };
+}
+
+describe('TaskListPage v2 delete confirmation (spec §10.5)', () => {
+  it('creates ONE UUID when the v2 dialog opens and sends the exact JSON body', async () => {
+    const deleteCalls: Array<[string, unknown]> = [];
+    const gateway = stubGateway({
+      listTasks: async () => [v2Summary()],
+      deleteTask: async (taskId: string, body?: { operationId: string; reason: string }) => {
+        deleteCalls.push([taskId, body]);
+      },
+    });
+    renderPage('/tasks', gateway);
+    await screen.findByRole('heading', { level: 2, name: '权威评审任务' });
+    await userEvent.click(within(rowOf('权威评审任务')).getByRole('button', { name: '删除' }));
+    const dialog = await screen.findByRole('dialog', { name: '删除 v2 任务' });
+    const operationId = within(dialog).getByText(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/).textContent ?? '';
+    await userEvent.type(within(dialog).getByRole('textbox'), '遗留评审任务清理');
+    await userEvent.click(within(dialog).getByRole('button', { name: '删除' }));
+
+    await waitFor(() => {
+      expect(deleteCalls).toHaveLength(1);
+      expect(deleteCalls[0]?.[0]).toBe('task-v2-a');
+      expect(deleteCalls[0]?.[1]).toEqual({ operationId, reason: '遗留评审任务清理' });
+    });
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+
+  it('requires a reason and bounds it to 500 code points before any delete', async () => {
+    const deleteCalls: Array<[string, unknown]> = [];
+    const gateway = stubGateway({
+      listTasks: async () => [v2Summary()],
+      deleteTask: async (taskId: string, body?: unknown) => {
+        deleteCalls.push([taskId, body]);
+      },
+    });
+    renderPage('/tasks', gateway);
+    await screen.findByRole('heading', { level: 2, name: '权威评审任务' });
+    await userEvent.click(within(rowOf('权威评审任务')).getByRole('button', { name: '删除' }));
+    const dialog = await screen.findByRole('dialog', { name: '删除 v2 任务' });
+    // Empty reason: refused client-side.
+    await userEvent.click(within(dialog).getByRole('button', { name: '删除' }));
+    expect(await screen.findByText(/请输入删除原因/)).toBeVisible();
+    expect(deleteCalls).toHaveLength(0);
+    // 501 code points: refused client-side.
+    await userEvent.type(within(dialog).getByRole('textbox'), '删'.repeat(501));
+    await userEvent.click(within(dialog).getByRole('button', { name: '删除' }));
+    expect(await screen.findByText(/不能超过 500 个字符/)).toBeVisible();
+    expect(deleteCalls).toHaveLength(0);
+  });
+
+  it('keeps the dialog and the SAME operation + reason after a retryable error; only an edit creates a NEW operation', async () => {
+    // B-M4: the SECOND dialog (reopened after the first success) performs a
+    // FAILED submit FIRST — then an intentional reason edit mints a NEW
+    // operation that the next sent body actually carries.
+    let calls = 0;
+    const deleteCalls: Array<[string, { operationId: string; reason: string }]> = [];
+    const gateway = stubGateway({
+      listTasks: async () => [v2Summary()],
+      deleteTask: async (taskId: string, body?: { operationId: string; reason: string }) => {
+        calls += 1;
+        if (body !== undefined) deleteCalls.push([taskId, body]);
+        // Calls 1 and 3 fail (retryable/response-loss); 2 and 4 succeed.
+        if (calls === 1 || calls === 3) {
+          throw new Error('network lost');
+        }
+      },
+    });
+    renderPage('/tasks', gateway);
+    await screen.findByRole('heading', { level: 2, name: '权威评审任务' });
+
+    // Dialog 1: failure retains the exact submitted body; the same-body retry
+    // succeeds with the SAME operation id.
+    await userEvent.click(within(rowOf('权威评审任务')).getByRole('button', { name: '删除' }));
+    const dialog = await screen.findByRole('dialog', { name: '删除 v2 任务' });
+    const operationId = within(dialog).getByText(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/).textContent ?? '';
+    await userEvent.type(within(dialog).getByRole('textbox'), '清理');
+    await userEvent.click(within(dialog).getByRole('button', { name: '删除' }));
+    expect(await screen.findByText(/删除失败/)).toBeVisible();
+    expect(await screen.findByRole('dialog', { name: '删除 v2 任务' })).toBeVisible();
+    await userEvent.click(within(await screen.findByRole('dialog', { name: '删除 v2 任务' })).getByRole('button', { name: '删除' }));
+    await waitFor(() => expect(deleteCalls).toHaveLength(2));
+    expect(deleteCalls[0]).toEqual(deleteCalls[1]);
+    expect(deleteCalls[0]?.[1].operationId).toBe(operationId);
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+
+    // Dialog 2: a FAILED submit first, then an intentional reason edit mints a
+    // NEW operation that the NEXT submit carries (distinct from both the
+    // fresh-open UUID and the first dialog's).
+    await userEvent.click(within(rowOf('权威评审任务')).getByRole('button', { name: '删除' }));
+    const dialog2 = await screen.findByRole('dialog', { name: '删除 v2 任务' });
+    const openOperationId = within(dialog2).getByText(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/).textContent ?? '';
+    expect(openOperationId).not.toBe(operationId);
+    await userEvent.type(within(dialog2).getByRole('textbox'), '更换');
+    await userEvent.click(within(dialog2).getByRole('button', { name: '删除' }));
+    expect(await screen.findByText(/删除失败/)).toBeVisible();
+    expect(await screen.findByRole('dialog', { name: '删除 v2 任务' })).toBeVisible();
+    await waitFor(() => expect(deleteCalls).toHaveLength(3));
+    expect(deleteCalls[2]?.[1].operationId).toBe(openOperationId);
+    // Intentional edit AFTER the failed submit -> NEW operation.
+    await userEvent.type(within(dialog2).getByRole('textbox'), '（修改后）');
+    const editedOperationId = within(dialog2).getAllByText(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/).at(-1)?.textContent ?? '';
+    expect(editedOperationId).not.toBe(openOperationId);
+    await userEvent.click(within(dialog2).getByRole('button', { name: '删除' }));
+    await waitFor(() => expect(deleteCalls).toHaveLength(4));
+    expect(deleteCalls[3]?.[1].operationId).toBe(editedOperationId);
+    expect(deleteCalls[3]?.[1].reason).toBe('更换（修改后）');
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+
+  it('success clears the dialog state; cancel clears without deleting', async () => {
+    const deleteCalls: Array<[string, unknown]> = [];
+    const gateway = stubGateway({
+      listTasks: async () => [v2Summary()],
+      deleteTask: async (taskId: string, body?: unknown) => {
+        deleteCalls.push([taskId, body]);
+      },
+    });
+    renderPage('/tasks', gateway);
+    await screen.findByRole('heading', { level: 2, name: '权威评审任务' });
+    await userEvent.click(within(rowOf('权威评审任务')).getByRole('button', { name: '删除' }));
+    const dialog = await screen.findByRole('dialog', { name: '删除 v2 任务' });
+    await userEvent.type(within(dialog).getByRole('textbox'), '清理');
+    await userEvent.click(within(dialog).getByRole('button', { name: '删除' }));
+    await waitFor(() => expect(deleteCalls).toHaveLength(1));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    // A new dialog open produces a NEW operation id.
+    await userEvent.click(within(rowOf('权威评审任务')).getByRole('button', { name: '删除' }));
+    await userEvent.click(within(await screen.findByRole('dialog', { name: '删除 v2 任务' })).getByRole('button', { name: '取消' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(deleteCalls).toHaveLength(1);
+  });
+
+  it('B-M3: a clone-only failed v2 row still offers the clone (重跑) affordance', async () => {
+    const cloneCalls: string[] = [];
+    const gateway = stubGateway({
+      listTasks: async () => [
+        v2Summary({
+          id: 'task-failed-clone',
+          status: 'failed',
+          name: '克隆回退任务',
+          failedRecovery: {
+            failureCode: 'RUNNING_WITHOUT_WORK',
+            failedSequence: 1,
+            legalRecipes: [],
+            reopenAllowed: false,
+            cloneFallback: true,
+          },
+        }),
+      ],
+      cloneTask: async (taskId: string) => {
+        cloneCalls.push(taskId);
+        return v2Summary({ id: 'task-failed-clone-copy' });
+      },
+    });
+    renderPage('/tasks', gateway);
+    await screen.findByRole('heading', { level: 2, name: '克隆回退任务' });
+    await userEvent.click(within(rowOf('克隆回退任务')).getByRole('button', { name: '重跑' }));
+    await waitFor(() => expect(cloneCalls).toEqual(['task-failed-clone']));
+  });
+
+  it('v1 tasks keep the legacy no-reason dialog and body-less delete', async () => {
+    const deleteCalls: Array<[string, unknown]> = [];
+    const gateway = stubGateway({
+      listTasks: async () => [v2Summary({ id: 'task-v1-a', structuredProtocol: 'none' } as TaskSummary)],
+      deleteTask: async (taskId: string, body?: unknown) => {
+        deleteCalls.push([taskId, body]);
+      },
+    });
+    renderPage('/tasks', gateway);
+    await screen.findByRole('heading', { level: 2, name: '权威评审任务' });
+    await userEvent.click(within(rowOf('权威评审任务')).getByRole('button', { name: '删除' }));
+    const dialog = await screen.findByRole('dialog', { name: '删除任务' });
+    await userEvent.click(within(dialog).getByRole('button', { name: '删除' }));
+    await waitFor(() => {
+      expect(deleteCalls).toHaveLength(1);
+      expect(deleteCalls[0]).toEqual(['task-v1-a', undefined]);
+    });
   });
 });

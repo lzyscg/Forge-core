@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import type { TaskStatus, TaskSummary } from '../../shared/contracts';
 import type { PublicCoreError } from '../../shared/errors';
+import type { RecoveryRecipeKeyV2 } from '../../shared/authoritative-review-v2';
 import { useForgeCoreGateway } from '../gateway/gateway-context';
 import { toPublicCoreError } from '../hooks/use-gateway-query';
 import { PublicErrorNotice } from '../pages/public-error-notice';
@@ -45,13 +46,28 @@ const CONTROLS_BY_STATUS: Partial<Record<TaskStatus, LifecycleControl[]>> = {
     { action: 'stopTask', label: '停止' },
   ],
   /**
-   * v2 permanent failure (spec §10.3): terminal for every ordinary lifecycle
-   * command. Task 2 renders the minimal neutral state (no action buttons);
-   * the recovery surface (server-returned legal recipes, reopen_failed, clone
-   * fallback) lands with the v2 recovery flow (Task 11).
+   * v2 permanent failure (spec §10.3/§10.3.1): terminal for every ordinary
+   * lifecycle command. The recovery surface lives OUTSIDE the ordinary
+   * controls — the component renders the bounded failed summary (source +
+   * stable code + only the server-returned legal reopen recipes, or the clone
+   * fallback) instead of this table.
    */
   failed: [],
 };
+
+/**
+ * Bounded reasons shown for each legal v2 reopen recipe (spec §10.3.1). The
+ * recipe/track PAIRING itself comes from the server's failedRecovery summary
+ * — the client never invents a recipe.
+ */
+const RECIPE_LABELS: Record<RecoveryRecipeKeyV2, string> = {
+  retry_system_command: '重试失败的系统命令',
+  restart_map_review_cycle: '重启 Map 评审轮次',
+  restart_content_review_cycle: '重启内容评审轮次',
+  rebuild_missing_work: '重建缺失的执行工作项',
+};
+
+const REOPEN_REASON_MAX_CODE_POINTS = 1000;
 
 /**
  * Lifecycle controls mapped purely from task.status: 开始生产 / 停止 / 继续 /
@@ -67,6 +83,11 @@ export function TaskControls({ task, pendingHumanQuestion, pendingHumanSource }:
   const [error, setError] = useState<PublicCoreError | null>(null);
   const [answer, setAnswer] = useState('');
   const [answerProblem, setAnswerProblem] = useState<string | null>(null);
+  const [reopenReason, setReopenReason] = useState('');
+  const [reopenRecipe, setReopenRecipe] = useState<
+    { recipeKey: RecoveryRecipeKeyV2; track: 'map' | 'content' | null } | null
+  >(null);
+  const [reopenProblem, setReopenProblem] = useState<string | null>(null);
 
   const controls = CONTROLS_BY_STATUS[task.status] ?? [];
   const showAnswerForm = task.status === 'waiting_human';
@@ -80,6 +101,48 @@ export function TaskControls({ task, pendingHumanQuestion, pendingHumanSource }:
     setError(null);
     try {
       await gateway[action](task.id);
+    } catch (cause) {
+      setError(toPublicCoreError(cause));
+    } finally {
+      setPending(false);
+    }
+  };
+
+  // v2 failed-task recovery surface (spec §10.3.1): source + stable code +
+  // only the policy-allowed actions. Ordinary retry/resume stay disabled —
+  // the status table above renders NO ordinary controls for `failed`.
+  const failedRecovery = task.failedRecovery ?? null;
+  const showRecoverySurface = task.status === 'failed' && failedRecovery !== null;
+
+  // B-M7 (documented): the v2 question events carry NO source discriminator in
+  // the frozen union — every opened question is an AGENT request in the first
+  // release, so the workspace summary pins source='agent_request'. A future
+  // release that opens SYSTEM/progress-guard questions must add the source to
+  // the opened event and wire it through the projection + this summary; until
+  // then, hardcoding it is loud and explicit (see core-service enrichment).
+
+  const submitReopen = async (): Promise<void> => {
+    if (failedRecovery === null || reopenRecipe === null) return;
+    const codePoints = [...reopenReason.trim()];
+    if (codePoints.length === 0) {
+      setReopenProblem('请填写恢复原因后再提交。');
+      return;
+    }
+    if (codePoints.length > REOPEN_REASON_MAX_CODE_POINTS) {
+      setReopenProblem(`恢复原因不能超过 ${REOPEN_REASON_MAX_CODE_POINTS} 个字符。`);
+      return;
+    }
+    setReopenProblem(null);
+    setPending(true);
+    setError(null);
+    try {
+      await gateway.reopenFailed(task.id, {
+        expectedLastSequence: failedRecovery.failedSequence,
+        operationId: crypto.randomUUID(),
+        reason: reopenReason.trim(),
+        recipeKey: reopenRecipe.recipeKey,
+        track: reopenRecipe.track,
+      });
     } catch (cause) {
       setError(toPublicCoreError(cause));
     } finally {
@@ -217,6 +280,84 @@ export function TaskControls({ task, pendingHumanQuestion, pendingHumanSource }:
         </div>
       ) : null}
       {error !== null ? <PublicErrorNotice title="任务操作失败" error={error} /> : null}
+
+      {showRecoverySurface ? (
+        <div className="fc-recovery-panel">
+          <h3 className="fc-recovery-panel__title">任务已失败</h3>
+          <dl className="fc-recovery-panel__meta">
+            <div className="fc-recovery-panel__meta-item">
+              <dt>失败原因</dt>
+              <dd>{task.diagnostic ?? '权威评审执行失败。'}</dd>
+            </div>
+            <div className="fc-recovery-panel__meta-item">
+              <dt>失败码</dt>
+              <dd>
+                <code>{failedRecovery?.failureCode}</code>
+              </dd>
+            </div>
+          </dl>
+          {failedRecovery !== null && failedRecovery.reopenAllowed && failedRecovery.legalRecipes.length > 0 ? (
+            <>
+              <label className="fc-answer-form__label" htmlFor="fc-reopen-reason">
+                恢复原因（用于审计，必填，{REOPEN_REASON_MAX_CODE_POINTS} 字符以内）
+              </label>
+              <textarea
+                id="fc-reopen-reason"
+                className="fc-answer-form__input"
+                value={reopenReason}
+                disabled={pending}
+                onChange={(event) => setReopenReason(event.target.value)}
+              />
+              <div className="fc-recovery-panel__recipes">
+                {failedRecovery.legalRecipes.map((recipe) => (
+                  <label key={`${recipe.recipeKey}:${recipe.track ?? ''}`} className="fc-recovery-panel__recipe">
+                    <input
+                      type="radio"
+                      name="fc-reopen-recipe"
+                      checked={reopenRecipe?.recipeKey === recipe.recipeKey}
+                      disabled={pending}
+                      onChange={() => setReopenRecipe(recipe)}
+                    />
+                    {RECIPE_LABELS[recipe.recipeKey] ?? recipe.recipeKey}
+                  </label>
+                ))}
+              </div>
+              {reopenProblem !== null ? (
+                <p className="fc-answer-form__problem" role="alert">
+                  {reopenProblem}
+                </p>
+              ) : null}
+              <button
+                type="button"
+                className="fc-button"
+                disabled={pending || reopenRecipe === null}
+                onClick={() => void submitReopen()}
+              >
+                按所选配方恢复
+              </button>
+            </>
+          ) : (
+            <div className="fc-recovery-panel__fallback">
+              <p>该失败不可就地恢复，请克隆为新任务重跑。</p>
+              <button
+                type="button"
+                className="fc-button fc-button--secondary"
+                disabled={pending}
+                onClick={() => {
+                  setPending(true);
+                  setError(null);
+                  void gateway
+                    .cloneTask(task.id)
+                    .catch((cause: unknown) => setError(toPublicCoreError(cause)))
+                    .finally(() => setPending(false));
+                }}
+              >
+                克隆为新任务
+              </button>
+            </div>
+          )}
+        </div>
+      ) : null}
     </div>
   );
 }

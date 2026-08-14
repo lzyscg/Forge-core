@@ -23,8 +23,10 @@
  * in test data.
  */
 import { randomUUID } from 'node:crypto';
-import { readFileSync, readdirSync, writeFileSync, cpSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, writeFileSync, cpSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { canonicalJsonSha256 } from '../structured-slots/canonical-json';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { RuntimeFailure } from './agent-runtime';
@@ -57,7 +59,7 @@ import { SkillService } from './skill-service';
 import { startAttempt, deriveTurnId } from './structured-slot/attempt-coordinator';
 import { createTestRuntimeEnvironment } from '../structured-slots/runtime-capability';
 import { CoreService } from '../core-service';
-import type { CorePaths } from '../storage/core-paths';
+import { CorePaths } from '../storage/core-paths';
 import { TaskRunner } from './task-runner';
 import { TaskScheduler } from './task-scheduler';
 import { WorkspaceStore } from './workspace-store';
@@ -2074,3 +2076,535 @@ describe('TaskScheduler structured stop and recovery (Task 17, design §11.5)', 
     expect(['running', 'interrupted', 'retryable_failure']).toContain(summary.status);
   });
 });
+
+/* --------------------------------------------------------------------------
+ * Task 11 deliverable 7: the v2 scheduling loop (spec §10.4) + the deferred
+ * Task 2 debt (scheduler failed-rejection unit tests). V2 tasks NEVER run
+ * through the v1 one-slot Turn loop: the deterministic durable-wakeup pass
+ * drives every transition.
+ * ------------------------------------------------------------------------ */
+
+import { AuthoritativeV2SchedulingEngine, schedulerLeaseOperationId } from './task-scheduler';
+import { WorkItemCoordinatorV2 } from './authoritative-review/work-item-coordinator';
+import {
+  createAuthoritativeReviewTestEnvironment,
+  buildAuthoritativeReviewTestProfileBody,
+} from '../structured-slots/test-support/authoritative-review-test-registry';
+import {
+  createAuthoritativeReviewRuntimeEnvironment,
+  deriveAuthoritativeReviewExecutionEligibility,
+  currentAuthoritativeReviewProfileDigest,
+  requiredAuthoritativeReviewAbiAvailable,
+} from '../structured-slots/authoritative-review-capability';
+import type { BlobRefV2 } from '../../shared/authoritative-review-v2';
+
+/** One v2 installation over the authoritative fixture (real storage surface). */
+async function v2ServiceHarness(options: {
+  authoritativeReviewEnvironment?: ReturnType<typeof createAuthoritativeReviewTestEnvironment>;
+  shared?: { dataRoot: string; templateRoot: string };
+} = {}) {
+  const { paths, dataRoot, templateRoot } =
+    options.shared === undefined
+      ? (() => {
+          const fresh = makeTempCorePaths();
+          const srcDir = fileURLToPath(new URL('../template/__fixtures__/authoritative-valid', import.meta.url));
+          cpSync(srcDir, join(fresh.paths.templateRoot, 'authoritative-valid'), { recursive: true });
+          return {
+            paths: fresh.paths,
+            dataRoot: fresh.paths.dataRoot,
+            templateRoot: fresh.paths.templateRoot,
+          };
+        })()
+      : {
+          paths: CorePaths.create({ dataRoot: options.shared.dataRoot, templateRoot: options.shared.templateRoot }),
+          dataRoot: options.shared.dataRoot,
+          templateRoot: options.shared.templateRoot,
+        };
+  const env = options.authoritativeReviewEnvironment ?? createAuthoritativeReviewTestEnvironment();
+  const service = new CoreService(paths, {
+    runtime: new FakeAgentRuntime(),
+    runtimeEnvironment: createTestRuntimeEnvironment(),
+    authoritativeReviewEnvironment: env,
+  });
+  await service.initialize();
+  return { paths, dataRoot, templateRoot, service, env };
+}
+
+function v2Request(): { templateId: string; name: string; input: Record<string, string> } {
+  return { templateId: 'authoritative-valid', name: '权威调度任务', input: { 'source-text': '素材。' } };
+}
+
+describe('v2 scheduling loop (Task 11, spec §10.4)', { timeout: 30_000 }, () => {
+  /**
+   * A controller engine over the SAME storage surface with an injectable
+   * clock + its own coordinator, so expiry/due transitions are deterministic.
+   * (The service's own engine uses the real wall clock — production — and its
+   * pass is exercised separately.)
+   */
+  function controlledEngine(service: CoreService, taskId: string, now: { value: string }): AuthoritativeV2SchedulingEngine {
+    const coordinator = new WorkItemCoordinatorV2({
+      facade: service.v2Facade,
+      checkpointStore: service.v2CheckpointStore,
+      resolver: (id, ref) => service.v2BlobStore.readJson(id, ref, ref.kind),
+      tail: (id) => service.events.tail(id),
+      committedOperation: async (id, operationId) => {
+        const committed = await service.events.readBatchByCommitId(id, operationId);
+        return committed === null ? null : committed.map((entry) => ({ sequence: entry.sequence, event: entry.event }));
+      },
+      clock: () => now.value,
+      leaseDurationMs: 30 * 60 * 1000,
+    });
+    return new AuthoritativeV2SchedulingEngine({
+      index: service.v2Index,
+      deletion: service.v2Deletion,
+      wakeups: service.v2Wakeups,
+      lifecycle: service.v2Lifecycle,
+      coordinator,
+      checkpointStore: service.v2CheckpointStore,
+      resolver: (id, ref) => service.v2BlobStore.readJson(id, ref, ref.kind),
+      eligibility: (digest) => deriveAuthoritativeReviewExecutionEligibility({
+        frozenProfileDigest: digest,
+        baseStructuredCapabilityEnabled: true,
+        currentCapability: service.authoritativeReviewEnvironment.capability,
+        currentProfileDigest: currentAuthoritativeReviewProfileDigest(service.authoritativeReviewEnvironment),
+        requiredAbisAvailable: true,
+      }),
+      frozenProfileDigest: async () => (await service.tasks.readFrozenTemplate(taskId)).authoritativeReviewProfile?.profileDigest as string,
+      clock: () => now.value,
+      leaseOwner: 'task_owner',
+    });
+  }
+
+  it('start then one pass leases exactly ONE workitem and persists the lease_expiry wakeup', async () => {
+    const { service } = await v2ServiceHarness();
+    const task = await service.createTask(v2Request());
+    const now = { value: '2026-08-14T10:00:00.000Z' };
+    // Commit the start WITHOUT the internal pass so the runnable wakeup is
+    // observed in its durable state.
+    await service.v2Lifecycle.startV2(task.id, { operationId: 'op-start-a', userInputText: '' });
+    const before = await service.v2Wakeups.read(task.id);
+    expect(before.some((row) => row.kind === 'runnable' && !row.dormant)).toBe(true);
+    const engine = controlledEngine(service, task.id, now);
+    const pass = await engine.runPass(now.value);
+    expect(pass.leased).toHaveLength(1);
+    expect(pass.leased[0]?.taskId).toBe(task.id);
+    const after = await service.v2Wakeups.read(task.id);
+    const expiry = after.filter((row) => row.kind === 'lease_expiry' && !row.dormant);
+    expect(expiry).toHaveLength(1);
+    expect(expiry[0]?.workItemId).toBe(pass.leased[0]?.workItemId);
+    // Repeat passes are inert (idempotent per tail).
+    const again = await engine.runPass(now.value);
+    expect(again.leased).toEqual([]);
+    expect(again.scanned).toBe(0);
+    const workspace = await service.getWorkspace(task.id);
+    expect(workspace.task.status).toBe('running');
+    expect(workspace.authoritativeReview?.executionEligibility.state).toBe('eligible');
+  });
+
+  it('an expired lease is reclaimed and re-leased through the durable wakeup', async () => {
+    const { service } = await v2ServiceHarness();
+    const task = await service.createTask(v2Request());
+    const now = { value: '2026-08-14T10:00:00.000Z' };
+    await service.v2Lifecycle.startV2(task.id, { operationId: 'op-start-b', userInputText: '' });
+    const engine = controlledEngine(service, task.id, now);
+    const leased = await engine.runPass(now.value);
+    expect(leased.leased).toHaveLength(1);
+    // At 10:31 the lease (expiring 10:30) is reclaimed as lease_expired.
+    now.value = '2026-08-14T10:31:00.000Z';
+    const pass = await engine.runPass(now.value);
+    expect(pass.reclaimed).toContain(task.id);
+    const afterReclaim = await service.v2Wakeups.read(task.id);
+    expect(afterReclaim.some((row) => row.kind === 'runnable' && !row.dormant)).toBe(true);
+    const leasePass = await engine.runPass(now.value);
+    expect(leasePass.leased.some((entry) => entry.taskId === task.id)).toBe(true);
+    const afterLease = await service.v2Wakeups.read(task.id);
+    expect(afterLease.filter((row) => row.kind === 'lease_expiry')).toHaveLength(1);
+  });
+
+  it('a blocked deployment keeps its wakeup (no busy loop) and reactivates when the exact profile returns', async () => {
+    const harnessA = await v2ServiceHarness();
+    const task = await harnessA.service.createTask(v2Request());
+    await harnessA.service.v2Lifecycle.startV2(task.id, { operationId: 'op-start-c', userInputText: '' });
+    const runnableBefore = (await harnessA.service.v2Wakeups.read(task.id)).filter((row) => row.kind === 'runnable');
+    expect(runnableBefore.length).toBeGreaterThan(0);
+
+    // Same roots, profile B (same identity, different digest): eligibility is
+    // blocked SEPARATELY from the unchanged TaskStatus/wakeups.
+    const bodyA = buildAuthoritativeReviewTestProfileBody();
+    const body = { ...bodyA, runtime: { ...bodyA.runtime, maxFindingsPerRound: bodyA.runtime.maxFindingsPerRound + 1 } };
+    const withDigest = { ...body, profileDigest: '' } as Record<string, unknown>;
+    delete withDigest.profileDigest;
+    const digest = canonicalJsonSha256(withDigest);
+    const validateB = (await import('../structured-slots/authoritative-review-profile')).validateAuthoritativeReviewProfile;
+    const validatedB = validateB({ ...body, profileDigest: digest });
+    const envB = createAuthoritativeReviewRuntimeEnvironment(
+      {
+        version: 1,
+        status: 'enabled',
+        profileIdentity: validatedB.profileIdentity as 'forge-authoritative-review/v1',
+        profileDigest: validatedB.profileDigest,
+        evidenceDigest: '0'.repeat(64),
+        requiredAbis: ['forge-validator/v2', 'forge-assembler/v2'],
+      },
+      validatedB,
+      (await import('../structured-slots/test-support/authoritative-review-test-registry')).createAuthoritativeReviewTestHandlerRegistry(),
+    );
+    const serviceB = new CoreService(CorePaths.create({ dataRoot: harnessA.dataRoot, templateRoot: harnessA.templateRoot }), {
+      runtime: new FakeAgentRuntime(),
+      runtimeEnvironment: createTestRuntimeEnvironment(),
+      authoritativeReviewEnvironment: envB,
+    });
+    await serviceB.initialize();
+    const passB = await serviceB.runV2SchedulingPass('2026-08-14T10:00:00.000Z');
+    expect(passB.blocked).toContain(task.id);
+    expect(passB.leased).toEqual([]);
+    const kept = await serviceB.v2Wakeups.read(task.id);
+    expect(kept.filter((row) => row.kind === 'runnable')).toHaveLength(1);
+    expect(kept.every((row) => row.eligibilityBlocked)).toBe(true);
+    const workspaceB = await serviceB.getWorkspace(task.id);
+    expect(workspaceB.task.status).toBe('running');
+    expect(workspaceB.authoritativeReview?.executionEligibility.state).toBe('blocked');
+
+    // Exact profile A returns: the very next pass on the A instance leases.
+    const now = { value: '2026-08-14T10:00:00.000Z' };
+    const engineA = controlledEngine(harnessA.service, task.id, now);
+    const passA = await engineA.runPass(now.value);
+    expect(passA.leased.some((entry) => entry.taskId === task.id)).toBe(true);
+  });
+
+  it('retry-due wakeups requeue at/after due and stay timers before due (no early requeue)', async () => {
+    const { service } = await v2ServiceHarness();
+    const task = await service.createTask(v2Request());
+    const now = { value: '2026-08-14T10:00:00.000Z' };
+    await service.v2Lifecycle.startV2(task.id, { operationId: 'op-start-d', userInputText: '' });
+    const engine = controlledEngine(service, task.id, now);
+    const claimed = await engine.runPass(now.value);
+    expect(claimed.leased).toHaveLength(1);
+    // Record a retryable failure on the CLAIMED workitem with a future
+    // retryNotBefore (the pass's claim is the only legal lease).
+    const coordinator = (engine as unknown as { deps: { coordinator: WorkItemCoordinatorV2 } }).deps.coordinator;
+    const recorded = await coordinator.recordRetryableFailure({
+      taskId: task.id,
+      operationId: 'ls-fail-seed',
+      workItemId: claimed.leased[0]?.workItemId as string,
+      failureCode: 'HANDLER_FAILED',
+      failureDigest: 'f'.repeat(64),
+      retryNotBefore: '2026-08-14T10:30:00.000Z',
+    });
+    // The coordinator RETURNED the durable timer; the caller (Task 12's
+    // attempt-coordinator, and the startup scan today) persists it into the
+    // SAME wakeup index the scheduler loop consumes.
+    if (recorded.mode === 'retryable') {
+      await service.v2Wakeups.upsert(task.id, {
+        kind: 'retry_due',
+        at: recorded.wakeup.at,
+        dormant: false,
+        workItemId: claimed.leased[0]?.workItemId ?? null,
+        operationId: 'ls-fail-seed',
+        eligibilityBlocked: false,
+      });
+    }
+    const dueRows = (await service.v2Wakeups.read(task.id)).filter((row) => row.kind === 'retry_due');
+    expect(dueRows).toHaveLength(1);
+    // Before due: the pass keeps the timer (never an early requeue).
+    now.value = '2026-08-14T10:10:00.000Z';
+    const earlyPass = await engine.runPass(now.value);
+    expect(earlyPass.requeued).toEqual([]);
+    expect((await service.v2Wakeups.read(task.id)).filter((row) => row.kind === 'retry_due')).toHaveLength(1);
+    // At/after due: requeue + runnable wakeup, then the norm lease claims it.
+    now.value = '2026-08-14T10:31:00.000Z';
+    const duePass = await engine.runPass(now.value);
+    expect(duePass.requeued).toContain(task.id);
+    expect((await service.v2Wakeups.read(task.id)).filter((row) => row.kind === 'retry_due')).toHaveLength(0);
+    const claim = await engine.runPass(now.value);
+    expect(claim.leased.some((entry) => entry.taskId === task.id)).toBe(true);
+  });
+
+  it('deleted tasks are never scheduled (tombstone gate before anything else)', async () => {
+    const { service } = await v2ServiceHarness();
+    const task = await service.createTask(v2Request());
+    await service.startTaskV2(task.id);
+    await service.runV2SchedulingPass('2026-08-14T10:00:00.000Z');
+    await service.deleteTask(task.id, { operationId: '33333333-3333-4333-8333-333333333333', reason: '清理' });
+    const pass = await service.runV2SchedulingPass('2026-08-14T10:00:00.000Z');
+    expect(pass.leased).toEqual([]);
+  });
+});
+
+describe('v1 boot recovery v2 gate (review A-F1) + blocked startup (review A-F2)', { timeout: 30_000 }, () => {
+  /** Profile B: same identity/handlers, different digest (runtime change). */
+  async function profileBEnv(): Promise<ReturnType<typeof createAuthoritativeReviewTestEnvironment>> {
+    const bodyA = buildAuthoritativeReviewTestProfileBody();
+    const body = { ...bodyA, runtime: { ...bodyA.runtime, maxFindingsPerRound: bodyA.runtime.maxFindingsPerRound + 1 } };
+    const withDigest = { ...body, profileDigest: '' } as Record<string, unknown>;
+    delete withDigest.profileDigest;
+    const validatedB = (await import('../structured-slots/authoritative-review-profile')).validateAuthoritativeReviewProfile({
+      ...body,
+      profileDigest: canonicalJsonSha256(withDigest),
+    });
+    return createAuthoritativeReviewRuntimeEnvironment(
+      {
+        version: 1,
+        status: 'enabled',
+        profileIdentity: validatedB.profileIdentity as 'forge-authoritative-review/v1',
+        profileDigest: validatedB.profileDigest,
+        evidenceDigest: '0'.repeat(64),
+        requiredAbis: ['forge-validator/v2', 'forge-assembler/v2'],
+      },
+      validatedB,
+      (await import('../structured-slots/test-support/authoritative-review-test-registry')).createAuthoritativeReviewTestHandlerRegistry(),
+    );
+  }
+
+  it('A-F1: the v1 boot recovery never touches a v2 task (no v1 interruption/incompatible events)', async () => {
+    const { service } = await v2ServiceHarness();
+    const task = await service.createTask(v2Request());
+    await service.startTaskV2(task.id);
+    await service.runV2SchedulingPass('2026-08-14T10:00:00.000Z');
+    const before = await service.events.read(task.id);
+    const recovered = await service.scheduler.recoverInterruptedTasks();
+    expect(recovered).toEqual([]);
+    const after = await service.events.read(task.id);
+    expect(after).toHaveLength(before.length);
+    expect(after.some((entry) => entry.event.type === 'task_interrupted')).toBe(false);
+    expect(after.some((entry) => entry.event.type === 'task_incompatible')).toBe(false);
+    const workspace = await service.getWorkspace(task.id);
+    expect(workspace.task.status).toBe('running');
+  });
+
+  it('A-F1: a v2 task under a temporarily disabled authoritative runtime stays non-terminal (never task_incompatible)', async () => {
+    const harnessA = await v2ServiceHarness();
+    const task = await harnessA.service.createTask(v2Request());
+    await harnessA.service.startTaskV2(task.id);
+    const disabledService = new CoreService(
+      CorePaths.create({ dataRoot: harnessA.dataRoot, templateRoot: harnessA.templateRoot }),
+      {
+        runtime: new FakeAgentRuntime(),
+        runtimeEnvironment: createTestRuntimeEnvironment(),
+        authoritativeReviewEnvironment: (await import('../structured-slots/authoritative-review-capability'))
+          .createProductionAuthoritativeReviewEnvironment(),
+      },
+    );
+    await disabledService.initialize();
+    const recovered = await disabledService.scheduler.recoverInterruptedTasks();
+    expect(recovered).toEqual([]);
+    const events = await disabledService.events.read(task.id);
+    expect(events.some((entry) => entry.event.type === 'task_incompatible')).toBe(false);
+    expect(events.some((entry) => entry.event.type === 'task_interrupted')).toBe(false);
+    // The task never changed state under the disabled runtime.
+    const workspace = await disabledService.getWorkspace(task.id);
+    expect(workspace.task.status).toBe('running');
+    expect(workspace.authoritativeReview?.executionEligibility.state).toBe('blocked');
+  });
+
+  it('A-F2: a blocked deployment boots cleanly with a DUE retry — no requeue commit, wakeup retained (blocked)', async () => {
+    const harnessA = await v2ServiceHarness();
+    const task = await harnessA.service.createTask(v2Request());
+    const now = { value: '2026-08-14T10:00:00.000Z' };
+    await harnessA.service.v2Lifecycle.startV2(task.id, { operationId: 'op-start-e', userInputText: '' });
+    const engine = (() => {
+      const coordinator = new WorkItemCoordinatorV2({
+        facade: harnessA.service.v2Facade,
+        checkpointStore: harnessA.service.v2CheckpointStore,
+        resolver: (id, ref) => harnessA.service.v2BlobStore.readJson(id, ref, ref.kind),
+        tail: (id) => harnessA.service.events.tail(id),
+        committedOperation: async (id, operationId) => {
+          const committed = await harnessA.service.events.readBatchByCommitId(id, operationId);
+          return committed === null ? null : committed.map((entry) => ({ sequence: entry.sequence, event: entry.event }));
+        },
+        clock: () => now.value,
+        leaseDurationMs: 30 * 60 * 1000,
+      });
+      return new AuthoritativeV2SchedulingEngine({
+        index: harnessA.service.v2Index,
+        deletion: harnessA.service.v2Deletion,
+        wakeups: harnessA.service.v2Wakeups,
+        lifecycle: harnessA.service.v2Lifecycle,
+        coordinator,
+        checkpointStore: harnessA.service.v2CheckpointStore,
+        resolver: (id, ref) => harnessA.service.v2BlobStore.readJson(id, ref, ref.kind),
+        eligibility: () => ({ state: 'eligible', frozenProfileDigest: 'a'.repeat(64), currentProfileDigest: 'a'.repeat(64) }),
+        frozenProfileDigest: async () => 'a'.repeat(64),
+        clock: () => now.value,
+        leaseOwner: 'task_owner',
+      });
+    })();
+    const leasedPass = await engine.runPass(now.value);
+    expect(leasedPass.leased).toHaveLength(1);
+    const workItemId = leasedPass.leased[0]?.workItemId as string;
+    const coordinator = (engine as unknown as { deps: { coordinator: WorkItemCoordinatorV2 } }).deps.coordinator;
+    const recorded = await coordinator.recordRetryableFailure({
+      taskId: task.id,
+      operationId: 'ls-fail-due',
+      workItemId,
+      failureCode: 'HANDLER_FAILED',
+      failureDigest: 'f'.repeat(64),
+      retryNotBefore: '2026-08-14T09:00:00.000Z', // ALREADY DUE
+    });
+    if (recorded.mode === 'retryable') {
+      await harnessA.service.v2Wakeups.upsert(task.id, {
+        kind: 'retry_due',
+        at: recorded.wakeup.at,
+        dormant: false,
+        workItemId,
+        operationId: 'ls-fail-due',
+        eligibilityBlocked: false,
+      });
+    }
+    // Boot a SECOND service over the same roots with profile B (blocked).
+    const serviceB = new CoreService(
+      CorePaths.create({ dataRoot: harnessA.dataRoot, templateRoot: harnessA.templateRoot }),
+      {
+        runtime: new FakeAgentRuntime(),
+        runtimeEnvironment: createTestRuntimeEnvironment(),
+        authoritativeReviewEnvironment: await profileBEnv(),
+      },
+    );
+    // The boot MUST NOT throw AUTHORITATIVE_REVIEW_UNAVAILABLE.
+    await expect(serviceB.initialize()).resolves.toBeUndefined();
+    const events = await serviceB.events.read(task.id);
+    expect(events.some((entry) => entry.event.type === 'structured_work_item_requeued')).toBe(false);
+    const wakeups = await serviceB.v2Wakeups.read(task.id);
+    const retryDue = wakeups.filter((row) => row.kind === 'retry_due');
+    expect(retryDue.length).toBeGreaterThan(0);
+    expect(retryDue.every((row) => row.eligibilityBlocked)).toBe(true);
+    const workspace = await serviceB.getWorkspace(task.id);
+    expect(workspace.authoritativeReview?.executionEligibility.state).toBe('blocked');
+    // The task is still running (nothing was requeued/committed under blocked).
+    expect(workspace.task.status).toBe('running');
+  });
+});
+
+describe('scheduler failed-state rejection (Task 2 debt, spec §10.3/§14.3)', { timeout: 30_000 }, () => {
+  it('ordinary start/resume/retry/answer reject a v2 failed task with INVALID_TRANSITION', async () => {
+    const { service } = await v2ServiceHarness();
+    const task = await service.createTask(v2Request());
+    const now = { value: '2026-08-14T10:00:00.000Z' };
+    const { syncFriendlyEngine } = (() => {
+      const coordinator = new WorkItemCoordinatorV2({
+        facade: service.v2Facade,
+        checkpointStore: service.v2CheckpointStore,
+        resolver: (id, ref) => service.v2BlobStore.readJson(id, ref, ref.kind),
+        tail: (id) => service.events.tail(id),
+        committedOperation: async (id, operationId) => {
+          const committed = await service.events.readBatchByCommitId(id, operationId);
+          return committed === null ? null : committed.map((entry) => ({ sequence: entry.sequence, event: entry.event }));
+        },
+        clock: () => now.value,
+        leaseDurationMs: 30 * 60 * 1000,
+      });
+      return {
+        syncFriendlyEngine: new AuthoritativeV2SchedulingEngine({
+          index: service.v2Index,
+          deletion: service.v2Deletion,
+          wakeups: service.v2Wakeups,
+          lifecycle: service.v2Lifecycle,
+          coordinator,
+          checkpointStore: service.v2CheckpointStore,
+          resolver: (id, ref) => service.v2BlobStore.readJson(id, ref, ref.kind),
+          eligibility: () => ({
+            state: 'eligible',
+            frozenProfileDigest: 'a'.repeat(64),
+            currentProfileDigest: 'a'.repeat(64),
+          }),
+          frozenProfileDigest: async () => 'a'.repeat(64),
+          clock: () => now.value,
+          leaseOwner: 'task_owner',
+        }),
+      };
+    })();
+    // Legal failing path (the frozen §10.3.1 row matrix): ONE system
+    // workitem, leased, terminally failed with a REAL recovery payload whose
+    // identity fields match the ledger exactly (the strict projector rejects
+    // fabricated identities).
+    const { lifecycleWorkItemId } = await import('./authoritative-review/task-lifecycle');
+    const { buildAuthorityBaseSet } = await import('./authoritative-review/authority-base');
+    const { deterministicEventId } = await import('../storage/authoritative-publication-intent-registry');
+    const row = await service.v2Index.entryFor(task.id);
+    const systemWiId = lifecycleWorkItemId(task.id, 'op-wi-create', 'system_map_finalize');
+    const specBody = { mapBuildId: 'mb-f', revision: 1, supersedesMapBuildId: null, sourceValidationReceiptRef: null, snapshotHash: 'f'.repeat(64), plannedChunkPolicy: { maxChunks: 8, maxNodesPerChunk: 512, maxRelationsPerChunk: 64 } };
+    const specValue = { ...specBody, specDigest: canonicalJsonSha256(specBody) };
+    const specRef = await service.v2Facade.prepareBlob(task.id, 'map_build_spec', specValue);
+    const base = buildAuthorityBaseSet({
+      taskId: task.id,
+      templateSnapshotRef: (row as { templateSnapshotRef: BlobRefV2 }).templateSnapshotRef,
+      profileSnapshotRef: (row as { profileSnapshotRef: BlobRefV2 }).profileSnapshotRef,
+      refs: { planSpecRef: specRef },
+      kind: 'system_map_finalize',
+    });
+    await service.v2Coordinator.createWorkItem({
+      taskId: task.id,
+      operationId: 'op-wi-create',
+      workItemId: systemWiId,
+      kind: 'system_map_finalize',
+      roleBinding: null,
+      agentExecutionKind: null,
+      sessionKind: null,
+      roundId: null,
+      logicalAssignmentId: null,
+      reviewAssignmentId: null,
+      inputArtifactDeliveryId: null,
+      payload: { kind: 'map_build_spec' as const, value: specValue },
+      authorityBase: base,
+      maxAutomaticRetries: 2,
+    });
+    // The workitem is ready: lease it deterministically, then fail it.
+    const coordinator = new WorkItemCoordinatorV2({
+      facade: service.v2Facade,
+      checkpointStore: service.v2CheckpointStore,
+      resolver: (id, ref) => service.v2BlobStore.readJson(id, ref, ref.kind),
+      tail: (id) => service.events.tail(id),
+      committedOperation: async (id, operationId) => {
+        const committed = await service.events.readBatchByCommitId(id, operationId);
+        return committed === null ? null : committed.map((entry) => ({ sequence: entry.sequence, event: entry.event }));
+      },
+      clock: () => now.value,
+      leaseDurationMs: 30 * 60 * 1000,
+    });
+    const leased = await coordinator.leaseNext(task.id, 'task_owner', 'ls-fail-lease');
+    expect(leased).not.toBeNull();
+    const leaseProjection = await service.v2CheckpointStore.readState(task.id, (ref) =>
+      service.v2BlobStore.readJson(task.id, ref, ref.kind),
+    );
+    const commandId = leaseProjection.projection.activeLease?.commandId ?? '';
+    const failOperationId = 'op-fail-seed';
+    const terminalEventId = deterministicEventId(failOperationId, 'work_item_terminal_failed', 0);
+    const recoveryPayload = await service.v2Facade.prepareBlob(task.id, 'failure_recovery_payload', {
+      kind: 'retry_system_command',
+      failedWorkItemId: systemWiId,
+      failedCommandId: commandId,
+      failedLeaseEpoch: 1,
+      terminalEventId,
+      terminalCommitId: failOperationId,
+      authorityBaseRef: leased?.authorityBaseRef as BlobRefV2,
+      systemKind: 'system_map_finalize',
+      systemPayloadRef: specRef,
+    });
+    await service.v2Lifecycle.terminalFailWorkItem(task.id, {
+      operationId: failOperationId,
+      workItemId: systemWiId,
+      failureCode: 'ARTIFACT_VALIDATION_FAILED',
+      failureDigest: 'e'.repeat(64),
+      failureRecoveryPayloadRef: recoveryPayload,
+      taskFailure: true,
+    });
+    const workspace = await service.getWorkspace(task.id);
+    expect(workspace.task.status).toBe('failed');
+    const summary = workspace.task.failedRecovery;
+    expect(summary).toMatchObject({
+      failureCode: 'ARTIFACT_VALIDATION_FAILED',
+      reopenAllowed: true,
+      legalRecipes: [{ recipeKey: 'retry_system_command', track: null }],
+    });
+    // The v1 scheduler surface (the API answers v2 through the lifecycle, but
+    // the frozen gate must also hold at the scheduler level).
+    await expect(service.startTask(task.id)).rejects.toMatchObject({ code: 'INVALID_TRANSITION' });
+    await expect(service.resumeTask(task.id)).rejects.toMatchObject({ code: 'INVALID_TRANSITION' });
+    await expect(service.retryTask(task.id)).rejects.toMatchObject({ code: 'INVALID_TRANSITION' });
+    await expect(service.answerHuman(task.id, '仍然继续')).rejects.toMatchObject({ code: 'INVALID_TRANSITION' });
+    await expect(service.startTaskV2(task.id)).rejects.toMatchObject({ code: 'TASK_TERMINAL' });
+    expect(summary?.legalRecipes).toEqual([{ recipeKey: 'retry_system_command', track: null }]);
+  });
+});
+
+export { schedulerLeaseOperationId };

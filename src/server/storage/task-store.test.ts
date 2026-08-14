@@ -31,6 +31,11 @@ import { loadTemplateDirectory } from '../template/template-loader';
 import { TemplateCatalog } from '../template/template-catalog';
 import type { CorePaths } from './core-paths';
 import { TaskStore, type CreateTaskRequest } from './task-store';
+import type { FrozenTemplate } from '../template/template-schema';
+import type { AuthoritativeReviewProfileBindingV1 } from '../structured-slots/authoritative-review-profile';
+import { resolve } from 'node:path';
+import type { BlobRefV2 } from '../../shared/authoritative-review-v2';
+import type { PreparedActiveTaskRowV2 } from './authoritative-task-index';
 
 afterEach(() => {
   disposeAllTestRoots();
@@ -467,6 +472,457 @@ describe('TaskStore structured mode (Task 5, spec §5 / O05)', () => {
     const disabledStore = new TaskStore(paths, disabledCatalog);
     await expect(disabledStore.readFrozenTemplate(task.id)).rejects.toMatchObject({
       code: 'TEMPLATE_RUNTIME_UNAVAILABLE',
+    });
+  });
+});
+
+/* --------------------------------------------------------------------------
+ * Task 11 deliverable 6: TaskStore.create choreography (spec §10.5) +
+ * constraint-B archived-profile binding.
+ * ------------------------------------------------------------------------ */
+
+import { AuthoritativeTaskIndexV1 } from './authoritative-task-index';
+import { AuthoritativePublicationStore } from './authoritative-publication-store';
+import { AuthoritativeReviewBlobStore } from './authoritative-review-blob-store';
+import { AuthoritativeReviewGc } from './authoritative-review-gc';
+import { EventStore } from './event-store';
+import { AuthoritativeWakeupIndexV1 } from '../runtime/authoritative-review/wakeup-index';
+import { AuthoritativeTaskDeletionV2, deletionTrashPath } from './authoritative-task-deletion';
+import { canonicalJsonSha256 } from '../structured-slots/canonical-json';
+import { fullProfileForTests } from '../authoritative-review/object-registry';
+import {
+  buildAuthoritativeReviewTestProfileBody,
+  createAuthoritativeReviewTestEnvironment,
+  createAuthoritativeReviewTestHandlerRegistry,
+} from '../structured-slots/test-support/authoritative-review-test-registry';
+import {
+  AUTHORITATIVE_REVIEW_PROFILE_IDENTITY as AUTHORITATIVE_PROFILE_IDENTITY,
+  validateAuthoritativeReviewProfile,
+} from '../structured-slots/authoritative-review-profile';
+import {
+  createAuthoritativeReviewRuntimeEnvironment,
+  createProductionAuthoritativeReviewEnvironment,
+  deriveAuthoritativeReviewExecutionEligibility,
+} from '../structured-slots/authoritative-review-capability';
+/** The v2 fixture template id (contract v2 + authoritative profile binding). */
+const V2_TEMPLATE_ID = 'authoritative-valid';
+
+/** Copies the checked-in v2 fixture into a template root. */
+function installAuthoritativeFixture(templateRoot: string): void {
+  let source: string;
+  try {
+    source = fileURLToPath(new URL('../template/__fixtures__/authoritative-valid', import.meta.url));
+  } catch {
+    source = resolve(
+      process.cwd(),
+      'src',
+      'server',
+      'template',
+      '__fixtures__',
+      'authoritative-valid',
+    );
+  }
+  cpSync(source, join(templateRoot, V2_TEMPLATE_ID), { recursive: true });
+}
+
+/** A valid v2 create request for the authoritative fixture. */
+function v2Request(): CreateTaskRequest {
+  return { templateId: V2_TEMPLATE_ID, name: '权威评审任务', input: { 'source-text': '用于权威评审的素材。' } };
+}
+
+/**
+ * One v2 installation: fresh roots, the authoritative fixture in the catalog,
+ * an enabled test environment and the REAL store fence (the same
+ * mkdir-lock/fence the facade commits and GC use). Returns the TaskStore wired
+ * with the index dependency exactly like CoreService will, plus the raw
+ * storage surface for crash/GC/race analysis.
+ */
+async function v2Installation(options: {
+  authoritativeReviewEnvironment?: ReturnType<typeof createAuthoritativeReviewTestEnvironment>;
+  shared?: { paths: CorePaths };
+} = {}) {
+  const fresh = options.shared === undefined;
+  const paths = fresh
+    ? makeTempCorePaths('forge-core-store-v2-').paths
+    : options.shared?.paths as CorePaths;
+  if (fresh) {
+    installAuthoritativeFixture(join(paths.templateRoot));
+  }
+  const templateRoot = join(paths.templateRoot);
+  const env = options.authoritativeReviewEnvironment ?? createAuthoritativeReviewTestEnvironment();
+  const catalog = new TemplateCatalog(paths, {
+    runtimeEnvironment: createTestRuntimeEnvironment(),
+    authoritativeReviewEnvironment: env,
+  });
+  await catalog.initialize();
+  const detail = catalog.get(V2_TEMPLATE_ID);
+  if (fresh && (!detail || detail.status !== 'valid')) {
+    throw new Error('task-store v2 harness: the authoritative fixture did not initialize as valid');
+  }
+  const publicationStore = new AuthoritativePublicationStore(paths, {
+    bootId: 'task-store-v2-boot',
+    ownerPid: process.pid,
+    processAlive: () => true,
+    retrySleepMs: 0,
+  });
+  const withStoreFence = async <T>(fn: () => Promise<T>): Promise<T> => {
+    const hold = await publicationStore.lock().acquire();
+    try {
+      return await fn();
+    } finally {
+      await hold.release();
+    }
+  };
+  const clock = () => '2026-08-14T10:00:00.000Z';
+  const index = new AuthoritativeTaskIndexV1({ paths, withStoreFence, clock });
+  if (!(await index.migrationComplete())) {
+    const barrier = await index.runMigrationBarrier();
+    if (!(await index.migrationComplete())) throw new Error('v2 harness: migration barrier failed');
+    void barrier;
+  } else if (fresh) {
+    // A fresh installation completes the barrier exactly once.
+  }
+  const taskStore = new TaskStore(paths, catalog, index);
+  const eventStore = new EventStore(paths);
+  const blobStore = new AuthoritativeReviewBlobStore(paths, fullProfileForTests());
+  const wakeups = new AuthoritativeWakeupIndexV1({ paths });
+  const deletion = new AuthoritativeTaskDeletionV2({
+    paths,
+    index,
+    wakeups,
+    withStoreFence,
+    snapshotPins: () => publicationStore.snapshotPins(),
+    clock,
+  });
+  const gc = new AuthoritativeReviewGc(paths, blobStore, eventStore, publicationStore, {
+    // Task 11 constraint-D wiring: the index rows are the formal roots; the
+    // index itself excludes tombstoned rows (their blobs live in trash).
+    rootsProvider: () => index.gcRootsProvider(),
+  });
+  return { paths, catalog, env, index, taskStore, eventStore, publicationStore, blobStore, wakeups, deletion, gc };
+}
+
+describe('TaskStore v2 create choreography (spec §10.5)', { timeout: 30_000 }, () => {
+  it('publishes prepared→active with the task-frozen profile blob and alias INSIDE the root', async () => {
+    const { paths, index, taskStore, env } = await v2Installation();
+    const task = await taskStore.create(v2Request());
+    const row = await index.entryFor(task.id);
+    expect(row).toMatchObject({ taskId: task.id, protocol: 'v2', state: 'active', templateSnapshotHash: task.templateVersion });
+    const active = row as PreparedActiveTaskRowV2;
+    const binding = env.profileSnapshotRef as BlobRefV2;
+    expect(active.profileSnapshotRef).toEqual(binding);
+    // The profile blob exists INSIDE the task root at the blobs address ...
+    const profileFile = paths.taskStructuredV2BlobFile(task.id, 'profile_snapshot', active.profileSnapshotRef.digest);
+    expect(() => readFileSync(profileFile)).not.toThrow();
+    // ... and its bytes ARE the canonical frozen profile (never the current one).
+    const archived = JSON.parse(readFileSync(profileFile, 'utf8')) as Record<string, unknown>;
+    expect(archived.profileDigest).toBe(env.profile?.profileDigest);
+    // The alias blob resolves too (a registered content_value).
+    const aliasFile = paths.taskStructuredV2BlobFile(task.id, 'content_value', active.templateSnapshotRef.digest);
+    expect(() => readFileSync(aliasFile)).not.toThrow();
+    // The snapshot reopens byte-identically and projects v2.
+    const frozen = await taskStore.readFrozenTemplate(task.id);
+    expect(frozen.authoritativeReviewProfile?.profileSnapshotRef).toEqual(active.profileSnapshotRef);
+    // find the alias digest on disk
+    const aliasTree = relativeTree(paths.taskRoot(task.id)).filter((name) => name.startsWith('structured-slots/v2/blobs/'));
+    expect(aliasTree).toContain(`structured-slots/v2/blobs/profile_snapshot/${active.profileSnapshotRef.digest.slice(0, 2)}/${active.profileSnapshotRef.digest}`);
+  });
+
+  it('crash after prepared (no final root): creation recovery cancels the entry and removes the temp root', async () => {
+    const { paths, index, taskStore, catalog } = await v2Installation();
+    // Phase A crash: only the prepared row landed (no root).
+    const frozen = (await catalog.getFrozen(V2_TEMPLATE_ID)) as FrozenTemplate;
+    const binding = frozen.authoritativeReviewProfile as AuthoritativeReviewProfileBindingV1;
+    const fakeId = 'task-crash-prepared';
+    if (!(await index.migrationComplete())) throw new Error('harness');
+    await index.prepareTaskUnderFence({
+      taskId: fakeId,
+      templateSnapshotHash: frozen.versionHash,
+      profileSnapshotRef: binding.profileSnapshotRef,
+      templateSnapshotRef: binding.profileSnapshotRef,
+    });
+    expect(await index.entryFor(fakeId)).not.toBeNull();
+    await index.runCreationRecovery();
+    expect(await index.entryFor(fakeId)).toBeNull();
+    // The temp staging root (if any) was removed; no usable directory remains.
+    expect((await usableTaskDirectories(paths)).includes(fakeId)).toBe(false);
+  });
+
+  it('crash after root rename but before activate: recovery verifies the snapshot hash and activates', async () => {
+    const { paths, index, taskStore } = await v2Installation();
+    // Phase B/C crash: prepared row + COMPLETE root, not activated. The root
+    // is rebuilt from a real create of a sibling (same template => identical
+    // profile/alias bytes) so every recovery read is honest.
+    const sibling = await taskStore.create(v2Request());
+    const siblingRow = (await index.entryFor(sibling.id)) as PreparedActiveTaskRowV2;
+    const fakeId = 'task-crash-renamed';
+    if (!(await index.migrationComplete())) throw new Error('harness');
+    await index.prepareTaskUnderFence({
+      taskId: fakeId,
+      templateSnapshotHash: sibling.templateVersion,
+      profileSnapshotRef: siblingRow.profileSnapshotRef,
+      templateSnapshotRef: siblingRow.templateSnapshotRef,
+    });
+    // Build the complete root exactly like the choreography would: copy the
+    // sibling's immutable root (task.json differs only in id/name — same
+    // templateVersion, same blobs).
+    cpSync(paths.taskRoot(sibling.id), paths.taskRoot(fakeId), { recursive: true });
+    const record = JSON.parse(readFileSync(paths.taskFile(fakeId), 'utf8')) as Record<string, unknown>;
+    record.id = fakeId;
+    record.name = '崩溃重命名任务';
+    writeFileSync(paths.taskFile(fakeId), `${JSON.stringify(record, null, 2)}\n`, 'utf8');
+    const outcome = await index.runCreationRecovery();
+    expect(outcome.activated).toContain(fakeId);
+    const row = await index.entryFor(fakeId);
+    expect(row).toMatchObject({ taskId: fakeId, state: 'active' });
+  });
+
+  it('crash with a mismatched/unreadable root: quarantined and the prepared entry cancelled', async () => {
+    const { paths, index, taskStore } = await v2Installation();
+    const sibling = await taskStore.create(v2Request());
+    const siblingRow = (await index.entryFor(sibling.id)) as PreparedActiveTaskRowV2;
+    const fakeId = 'task-crash-mismatch';
+    await index.prepareTaskUnderFence({
+      taskId: fakeId,
+      templateSnapshotHash: sibling.templateVersion,
+      profileSnapshotRef: siblingRow.profileSnapshotRef,
+      templateSnapshotRef: siblingRow.templateSnapshotRef,
+    });
+    cpSync(paths.taskRoot(sibling.id), paths.taskRoot(fakeId), { recursive: true });
+    // Tamper the FROZEN SNAPSHOT HASH authority: the record's templateVersion
+    // no longer matches the prepared row (the recovery verifies this hash).
+    const tampered = JSON.parse(readFileSync(paths.taskFile(fakeId), 'utf8')) as Record<string, unknown>;
+    tampered.templateVersion = 'f'.repeat(64);
+    writeFileSync(paths.taskFile(fakeId), `${JSON.stringify(tampered, null, 2)}\n`, 'utf8');
+    const outcome = await index.runCreationRecovery();
+    expect(outcome.quarantined).toContain(fakeId);
+    await expect(index.entryFor(fakeId)).resolves.toBeNull();
+    // The quarantine is dot-prefixed — never listable.
+    expect((await usableTaskDirectories(paths)).includes(fakeId)).toBe(false);
+  });
+
+  it('two instances share one installation: concurrent creates serialize and both activate', async () => {
+    const harness = await v2Installation();
+    const { paths } = harness;
+    const second = await v2Installation({ shared: { paths } });
+    const [a, b] = await Promise.all([
+      harness.taskStore.create(v2Request()),
+      second.taskStore.create(v2Request()),
+    ]);
+    expect(await harness.index.entryFor(a.id)).toMatchObject({ state: 'active' });
+    expect(await second.index.entryFor(b.id)).toMatchObject({ state: 'active' });
+    // Both roots listable and each reopens its own frozen snapshot.
+    expect((await usableTaskDirectories(paths)).sort()).toEqual([a.id, b.id].sort());
+  });
+
+  it('a v2 delete + create race: the fenced create never resurrects a tombstoned id', async () => {
+    const { taskStore, index, deletion } = await v2Installation();
+    const created = await taskStore.create(v2Request());
+    const result = await deletion.runDelete(created.id, { operationId: '11111111-1111-4111-8111-111111111111', reason: '资格复核' });
+    expect(result.state).toBe('detached');
+    // The tombstoned id is retired forever: a prepared write for it rejects.
+    await expect(
+      index.prepareTaskUnderFence({
+        taskId: created.id,
+        templateSnapshotHash: 'a'.repeat(64),
+        profileSnapshotRef: { kind: 'profile_snapshot', digest: 'b'.repeat(64), byteLength: 1, mediaType: 'application/json', schemaVersion: 1 },
+        templateSnapshotRef: { kind: 'content_value', digest: 'c'.repeat(64), byteLength: 1, mediaType: 'text/plain', schemaVersion: 1 },
+      }),
+    ).rejects.toMatchObject({ code: 'ID_UNAVAILABLE' });
+  });
+
+  it('create-before-start survives multiple GC generations (index refs are formal roots)', async () => {
+    const { paths, index, taskStore, gc, deletion } = await v2Installation();
+    const created = await taskStore.create(v2Request());
+    const frozen = await taskStore.readFrozenTemplate(created.id);
+    // The profile/alias blob files exist before any GC round.
+    const row = (await index.entryFor(created.id)) as PreparedActiveTaskRowV2;
+    const profileFile = paths.taskStructuredV2BlobFile(created.id, 'profile_snapshot', row.profileSnapshotRef.digest);
+    const aliasFile = paths.taskStructuredV2BlobFile(created.id, 'content_value', row.templateSnapshotRef.digest);
+    expect(() => readFileSync(profileFile)).not.toThrow();
+    for (let generation = 0; generation < 3; generation += 1) {
+      const result = await gc.run();
+      expect(result.deletedBlobs).toBe(0);
+      // mark must have walked the installed roots.
+      expect(result.markedRefs).toBeGreaterThanOrEqual(2);
+    }
+    // GC recheck with a live tombstone retains the roots through detached.
+    await deletion.runDelete(created.id, { operationId: '22222222-2222-4222-8222-222222222222', reason: '清理' });
+    const retained = await deletion.retainedRootsFor(created.id);
+    expect(retained.map((ref) => ref.digest)).toEqual(
+      expect.arrayContaining([row.profileSnapshotRef.digest, row.templateSnapshotRef.digest]),
+    );
+    const afterDelete = await gc.run();
+    expect(afterDelete.deletedBlobs).toBe(0);
+    // The detached quarantine physically moved the blobs OUT of the tasks root
+    // (GC's sweep surface never walks dataRoot/trash); the row keeps the
+    // identity until the purged tombstone is durable.
+    expect(() => readFileSync(profileFile)).toThrow();
+    const trashFile = join(deletionTrashPath(paths, created.id, 1), 'structured-slots', 'v2', 'blobs', 'profile_snapshot', row.profileSnapshotRef.digest.slice(0, 2), row.profileSnapshotRef.digest);
+    expect(() => readFileSync(trashFile)).not.toThrow();
+  });
+
+  it('preexisting corrupt v1 directory keeps legacy deletion and can never be reused for v2', async () => {
+    const { paths, index, taskStore } = await v2Installation();
+    // A pre-marker directory whose record is corrupt (created BEFORE the
+    // barrier on a fresh installation is impossible — reorder: build the dir
+    // FIRST, then run the barrier on a fresh installation).
+    // => separate fresh installation without the barrier.
+    const fresh = makeTempCorePaths('forge-core-store-v2pre-');
+    installAuthoritativeFixture(fresh.templateRoot);
+    const prePaths = fresh.paths;
+    const legacyId = 'legacy-corrupt-v1';
+    mkdirSync(join(prePaths.taskRoot(legacyId)), { recursive: true });
+    writeFileSync(join(prePaths.taskRoot(legacyId), 'task.json'), '{broken', 'utf8');
+    const pub = new AuthoritativePublicationStore(prePaths, { bootId: 'pre-boot', ownerPid: process.pid, processAlive: () => true, retrySleepMs: 0 });
+    const fence = async <T>(fn: () => Promise<T>): Promise<T> => {
+      const hold = await pub.lock().acquire();
+      try { return await fn(); } finally { await hold.release(); }
+    };
+    const preIndex = new AuthoritativeTaskIndexV1({ paths: prePaths, withStoreFence: fence, clock: () => '2026-08-14T10:00:00.000Z' });
+    const barrier = await preIndex.runMigrationBarrier();
+    expect(barrier.captured).toContain(legacyId);
+    expect(await preIndex.entryFor(legacyId)).toMatchObject({ state: 'legacy_preexisting' });
+    // Legacy deletion path removes the corrupt directory.
+    const preCatalog = new TemplateCatalog(prePaths);
+    await preCatalog.initialize();
+    const preStore = new TaskStore(prePaths, preCatalog);
+    await preStore.deleteTask(legacyId);
+    expect((await usableTaskDirectories(prePaths)).includes(legacyId)).toBe(false);
+    // The row stays retired: v2 creation for the id is refused forever.
+    await expect(
+      preIndex.prepareTaskUnderFence({
+        taskId: legacyId,
+        templateSnapshotHash: 'a'.repeat(64),
+        profileSnapshotRef: { kind: 'profile_snapshot', digest: 'b'.repeat(64), byteLength: 1, mediaType: 'application/json', schemaVersion: 1 },
+        templateSnapshotRef: { kind: 'content_value', digest: 'c'.repeat(64), byteLength: 1, mediaType: 'text/plain', schemaVersion: 1 },
+      }),
+    ).rejects.toMatchObject({ code: 'ID_UNAVAILABLE' });
+  });
+
+  it('v2 create before the migration barrier is refused (MIGRATION_INCOMPLETE)', async () => {
+    const paths = makeTempCorePaths('forge-core-store-v2nomig-').paths;
+    installAuthoritativeFixture(join(paths.templateRoot));
+    const env = createAuthoritativeReviewTestEnvironment();
+    const catalog = new TemplateCatalog(paths, {
+      runtimeEnvironment: createTestRuntimeEnvironment(),
+      authoritativeReviewEnvironment: env,
+    });
+    await catalog.initialize();
+    const index = new AuthoritativeTaskIndexV1({ paths });
+    const taskStore = new TaskStore(paths, catalog, index);
+    await expect(taskStore.create(v2Request())).rejects.toMatchObject({ code: 'MIGRATION_INCOMPLETE' });
+  });
+
+  it('a post-marker unindexed directory is quarantineable and never listable as usable', async () => {
+    const { paths, index, taskStore } = await v2Installation();
+    mkdirSync(join(paths.taskRoot('unindexed-dir')), { recursive: true });
+    const moved = await index.quarantineUnindexedDirectory('unindexed-dir', 'post-marker unindexed');
+    expect(moved).not.toBeNull();
+    expect((await usableTaskDirectories(paths)).includes('unindexed-dir')).toBe(false);
+    // Listing treats it as corrupt at worst (never v2, never legacy).
+    const listed = await taskStore.listTasks();
+    expect(listed.some((summary) => summary.id === 'unindexed-dir')).toBe(false);
+  });
+});
+
+describe('TaskStore archived-profile binding (constraint B): A → B → disabled → exact A', { timeout: 30_000 }, () => {
+  /** Profile B: SAME identity, SAME handler registry, DIFFERENT bytes (runtime change). */
+  function profileB(): { env: ReturnType<typeof createAuthoritativeReviewTestEnvironment>; body: ReturnType<typeof buildAuthoritativeReviewTestProfileBody> } {
+    const bodyA = buildAuthoritativeReviewTestProfileBody();
+    const body = {
+      ...bodyA,
+      runtime: { ...bodyA.runtime, maxFindingsPerRound: bodyA.runtime.maxFindingsPerRound + 1 },
+    };
+    const withDigest = { ...body, profileDigest: '' };
+    delete (withDigest as Record<string, unknown>).profileDigest;
+    const digest = canonicalJsonSha256(withDigest);
+    const validated = validateAuthoritativeReviewProfile({ ...body, profileDigest: digest });
+    const capability: Parameters<typeof createAuthoritativeReviewRuntimeEnvironment>[0] = {
+      version: 1,
+      status: 'enabled',
+      profileIdentity: AUTHORITATIVE_PROFILE_IDENTITY,
+      profileDigest: validated.profileDigest,
+      evidenceDigest: '0'.repeat(64),
+      requiredAbis: ['forge-validator/v2', 'forge-assembler/v2'],
+    };
+    const env = createAuthoritativeReviewRuntimeEnvironment(
+      capability,
+      validated,
+      createAuthoritativeReviewTestHandlerRegistry(),
+    );
+    return { env, body: validated };
+  }
+
+  it('A → B and A → disabled: the task snapshot reopens with the FROZEN profile and the exact A binding', async () => {
+    const harness = await v2Installation();
+    const { paths } = harness;
+    const created = await harness.taskStore.create(v2Request());
+    const record = JSON.parse(readFileSync(paths.taskFile(created.id), 'utf8')) as { templateVersion: string };
+    const row = (await harness.index.entryFor(created.id)) as PreparedActiveTaskRowV2;
+
+    // Reopen under profile B (same identity, different digest).
+    const b = profileB();
+    const reopenedWithB = await v2Installation({ shared: { paths }, authoritativeReviewEnvironment: b.env });
+    const frozenB = await reopenedWithB.taskStore.readFrozenTemplate(created.id);
+    expect(frozenB.versionHash).toBe(record.templateVersion);
+    expect(frozenB.authoritativeReviewProfile?.profileSnapshotRef).toEqual(row.profileSnapshotRef);
+    expect(frozenB.authoritativeReviewProfile?.profileDigest).toBe(harness.env.profile?.profileDigest);
+    // Eligibility is SEPARATE from the (unchanged) snapshot identity.
+    const eligibility = deriveAuthoritativeReviewExecutionEligibility({
+      frozenProfileDigest: harness.env.profile?.profileDigest as string,
+      baseStructuredCapabilityEnabled: true,
+      currentCapability: b.env.capability,
+      currentProfileDigest: b.env.profile?.profileDigest ?? null,
+      requiredAbisAvailable: true,
+    });
+    expect(eligibility).toMatchObject({ state: 'blocked', reason: 'profile_digest_mismatch' });
+
+    // Reopen under the DISABLED production environment: reads stay available.
+    const disabledEnv = createProductionAuthoritativeReviewEnvironment();
+    const reopenedDisabled = await v2Installation({ shared: { paths }, authoritativeReviewEnvironment: disabledEnv });
+    const frozenDisabled = await reopenedDisabled.taskStore.readFrozenTemplate(created.id);
+    expect(frozenDisabled.versionHash).toBe(record.templateVersion);
+    expect(frozenDisabled.authoritativeReviewProfile?.profileSnapshotRef).toEqual(row.profileSnapshotRef);
+    const disabledEligibility = deriveAuthoritativeReviewExecutionEligibility({
+      frozenProfileDigest: harness.env.profile?.profileDigest as string,
+      baseStructuredCapabilityEnabled: true,
+      currentCapability: disabledEnv.capability,
+      currentProfileDigest: disabledEnv.profile?.profileDigest ?? null,
+      requiredAbisAvailable: false,
+    });
+    expect(disabledEligibility).toMatchObject({ state: 'blocked', reason: 'authoritative_capability_disabled' });
+
+    // Exact A restart restores eligibility with the SAME snapshot identity.
+    const returnedA = await v2Installation({ shared: { paths } });
+    const frozenA = await returnedA.taskStore.readFrozenTemplate(created.id);
+    expect(frozenA.versionHash).toBe(record.templateVersion);
+    const aEligibility = deriveAuthoritativeReviewExecutionEligibility({
+      frozenProfileDigest: returnedA.env.profile?.profileDigest as string,
+      baseStructuredCapabilityEnabled: true,
+      currentCapability: returnedA.env.capability,
+      currentProfileDigest: returnedA.env.profile?.profileDigest ?? null,
+      requiredAbisAvailable: true,
+    });
+    expect(aEligibility).toMatchObject({ state: 'eligible' });
+    // One checkbox: the create-time profile bytes are archived in the task
+    // root even when the current environment never saw them.
+    const archived = readFileSync(
+      paths.taskStructuredV2BlobFile(created.id, 'profile_snapshot', row.profileSnapshotRef.digest),
+      'utf8',
+    );
+    const parsed = JSON.parse(archived) as { profileDigest?: string };
+    expect(parsed.profileDigest).toBe(harness.env.profile?.profileDigest);
+  });
+
+  it('a tampered/missing profile blob fails the reopen as TASK_CORRUPTED (never guessed)', async () => {
+    const harness = await v2Installation();
+    const created = await harness.taskStore.create(v2Request());
+    const row = (await harness.index.entryFor(created.id)) as PreparedActiveTaskRowV2;
+    const profileFile = harness.paths.taskStructuredV2BlobFile(created.id, 'profile_snapshot', row.profileSnapshotRef.digest);
+    writeFileSync(profileFile, '{}', 'utf8');
+    await expect(harness.taskStore.readFrozenTemplate(created.id)).rejects.toMatchObject({
+      code: 'TASK_CORRUPTED',
     });
   });
 });

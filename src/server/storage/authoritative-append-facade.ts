@@ -50,6 +50,7 @@ import {
 } from './authoritative-publication-intent-registry';
 import { parsePublicationOperationPayload } from '../authoritative-review/object-schema-parsers-3';
 import type { AuthoritativeReviewEventV2 } from './authoritative-review-events';
+import type { TaskEvent } from './task-events';
 import { validateTaskEvent } from './task-events';
 
 /** The pin intent a caller declares; the facade derives and verifies the rest. */
@@ -486,12 +487,16 @@ export class AuthoritativeAppendFacadeV2 {
       );
     }
     const events: AuthoritativeReviewEventV2[] = envelopes.map((envelope, index) => {
+      // Task 11: a v2 atomic batch may carry LEGACY companion events
+      // (task_started/task_stopped/human_requested/human_answered — §17.2/17.3
+      // display + lifecycle companions). The id stamp is deterministic for
+      // every envelope; validateTaskEvent covers both unions fail-closed.
       const withId = {
         ...envelope,
         id: deterministicEventId(pin.operationId, registration.handlerKind, index),
-      } as AuthoritativeReviewEventV2;
+      } as TaskEvent;
       validateTaskEvent(withId); // fail closed: envelopes must validate
-      return withId;
+      return withId as AuthoritativeReviewEventV2;
     });
     const computedIdentity = registration.expectedResultIdentity(parsed, events);
     if (pin.intent.expectedResultIdentity !== '' && pin.intent.expectedResultIdentity !== computedIdentity) {

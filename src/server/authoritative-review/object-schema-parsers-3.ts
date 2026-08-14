@@ -240,8 +240,9 @@ const PUBLISH_KINDS = [
 const EVENT_BUILDERS = [
   'work_item_created', 'work_item_leased', 'work_item_retryable_failed',
   'work_item_requeued', 'work_item_lease_reclaimed', 'work_item_parked',
+  'task_terminal_failed', 'work_item_terminal_failed',
 ] as const;
-const LIFECYCLE_KINDS = ['stop', 'resume', 'manual_retry', 'run_migration_batch'] as const;
+const LIFECYCLE_KINDS = ['stop', 'resume', 'manual_retry', 'run_migration_batch', 'start'] as const;
 const RECLAIM_REASONS = ['lease_expired', 'crash_recovery', 'user_stop', 'operator_interrupt'] as const;
 const SUSPENSION_REASONS = ['user_stop', 'operator_interrupt'] as const;
 const ATTEMPT_FAMILIES = ['structured', 'generic', 'command'] as const;
@@ -274,7 +275,7 @@ export function parsePublicationOperationPayload(value: unknown): PublicationOpe
       'initialLeaseEpoch', 'maxAutomaticRetries', 'leaseOwner', 'leaseExpiresAt',
       'expectedLastSequence', 'attemptFamily', 'attemptId', 'commandId', 'agentId', 'commandKind',
       'dispatchRef', 'grantInstanceRef', 'reason', 'failureCode', 'failureDigest', 'retryOrdinal',
-      'retryNotBefore', 'validatorAggregateRef', 'budgetPolicyDigest',
+      'retryNotBefore', 'validatorAggregateRef', 'budgetPolicyDigest', 'failureRecoveryPayloadRef', 'taskFailure',
     ], 'publication_operation_payload');
     if (!(EVENT_BUILDERS as readonly string[]).includes(str(o.eventBuilder, 'eventBuilder'))) throw new SchemaError('eventBuilder unknown');
     const attemptFamily = o.attemptFamily === null ? null : str(o.attemptFamily, 'attemptFamily');
@@ -324,13 +325,24 @@ export function parsePublicationOperationPayload(value: unknown): PublicationOpe
       retryNotBefore: o.retryNotBefore === null ? null : str(o.retryNotBefore, 'retryNotBefore'),
       validatorAggregateRef: rfn(o.validatorAggregateRef, 'validatorAggregateRef'),
       budgetPolicyDigest: o.budgetPolicyDigest === null ? null : hx(o.budgetPolicyDigest, 'budgetPolicyDigest'),
+      failureRecoveryPayloadRef: rfn(o.failureRecoveryPayloadRef, 'failureRecoveryPayloadRef'),
+      taskFailure: o.taskFailure === null ? null : (o.taskFailure === true || o.taskFailure === false ? o.taskFailure : (() => { throw new SchemaError('taskFailure must be boolean|null'); })()),
     } as PublicationOperationPayloadV2;
   }
   if (family === 'lifecycle') {
-    ex(o, ['family', 'operationId', 'taskId', 'kind', 'suspensionId', 'workItemId', 'reason', 'leaseEpoch', 'expectedLastSequence', 'authorityBaseRef'], 'publication_operation_payload');
+    ex(o, ['family', 'operationId', 'taskId', 'kind', 'suspensionId', 'workItemId', 'reason', 'leaseEpoch', 'expectedLastSequence', 'authorityBaseRef', 'attemptFamily', 'attemptId', 'commandId', 'agentId', 'commandKind', 'logicalAssignmentId', 'reviewAssignmentId', 'sessionKind', 'inputArtifactDeliveryId', 'workItemKind', 'roleBinding', 'agentExecutionKind', 'roundId', 'grantSpecRef', 'payloadRef', 'initialLeaseEpoch', 'maxAutomaticRetries', 'mapBuildId', 'supersedesMapBuildId', 'sourceValidationReceiptRef'], 'publication_operation_payload');
     if (!(LIFECYCLE_KINDS as readonly string[]).includes(str(o.kind, 'kind'))) throw new SchemaError('kind unknown');
     const reason = o.reason === null ? null : str(o.reason, 'reason');
     if (reason !== null && !(SUSPENSION_REASONS as readonly string[]).includes(reason)) throw new SchemaError('reason unknown');
+    const attemptFamily = o.attemptFamily === null ? null : str(o.attemptFamily, 'attemptFamily');
+    if (attemptFamily !== null && !(ATTEMPT_FAMILIES as readonly string[]).includes(attemptFamily)) throw new SchemaError('attemptFamily unknown');
+    const commandKind = o.commandKind === null ? null : str(o.commandKind, 'commandKind');
+    if (commandKind !== null && !(SYSTEM_COMMAND_KINDS as readonly string[]).includes(commandKind)) throw new SchemaError('commandKind unknown');
+    const agentExecutionKind = o.agentExecutionKind === null ? null : str(o.agentExecutionKind, 'agentExecutionKind');
+    if (agentExecutionKind !== null && agentExecutionKind !== 'structured_session' && agentExecutionKind !== 'generic_turn') {
+      throw new SchemaError('agentExecutionKind must be structured_session|generic_turn|null');
+    }
+    const workItemKind = o.workItemKind === null ? null : (str(o.workItemKind, 'workItemKind') as PublicationOperationPayloadV2 extends infer _ ? never : never);
     return {
       family,
       operationId: str(o.operationId, 'operationId'),
@@ -342,30 +354,159 @@ export function parsePublicationOperationPayload(value: unknown): PublicationOpe
       leaseEpoch: o.leaseEpoch === null ? null : onn(o.leaseEpoch, 'leaseEpoch'),
       expectedLastSequence: o.expectedLastSequence === null ? null : onn(o.expectedLastSequence, 'expectedLastSequence'),
       authorityBaseRef: rfn(o.authorityBaseRef, 'authorityBaseRef'),
+      attemptFamily,
+      attemptId: o.attemptId === null ? null : str(o.attemptId, 'attemptId'),
+      commandId: o.commandId === null ? null : str(o.commandId, 'commandId'),
+      agentId: o.agentId === null ? null : str(o.agentId, 'agentId'),
+      commandKind,
+      logicalAssignmentId: o.logicalAssignmentId === null ? null : str(o.logicalAssignmentId, 'logicalAssignmentId'),
+      reviewAssignmentId: o.reviewAssignmentId === null ? null : str(o.reviewAssignmentId, 'reviewAssignmentId'),
+      sessionKind: o.sessionKind === null ? null : (str(o.sessionKind, 'sessionKind') as PublicationOperationPayloadV2 extends infer _ ? never : never),
+      inputArtifactDeliveryId: o.inputArtifactDeliveryId === null ? null : str(o.inputArtifactDeliveryId, 'inputArtifactDeliveryId'),
+      workItemKind,
+      roleBinding: o.roleBinding === null ? null : str(o.roleBinding, 'roleBinding'),
+      agentExecutionKind,
+      roundId: o.roundId === null ? null : str(o.roundId, 'roundId'),
+      grantSpecRef: rfn(o.grantSpecRef, 'grantSpecRef'),
+      payloadRef: rfn(o.payloadRef, 'payloadRef'),
+      initialLeaseEpoch: o.initialLeaseEpoch === null ? null : onn(o.initialLeaseEpoch, 'initialLeaseEpoch'),
+      maxAutomaticRetries: o.maxAutomaticRetries === null ? null : onn(o.maxAutomaticRetries, 'maxAutomaticRetries'),
+      mapBuildId: o.mapBuildId === null ? null : str(o.mapBuildId, 'mapBuildId'),
+      supersedesMapBuildId: o.supersedesMapBuildId === null ? null : str(o.supersedesMapBuildId, 'supersedesMapBuildId'),
+      sourceValidationReceiptRef: rfn(o.sourceValidationReceiptRef, 'sourceValidationReceiptRef'),
     } as PublicationOperationPayloadV2;
   }
   if (family === 'question') {
-    ex(o, ['family', 'operationId', 'taskId', 'questionId', 'questionVersion', 'answerDigest', 'authorityBaseRef'], 'publication_operation_payload');
-    return {
+    // Task 11 (constraint A round 2): exact per-mode key matrix. The answer
+    // branch carries the delivery identities the delivered event demands;
+    // the open branch carries the opened-event + attempt-terminal + park
+    // carriers. Every other field must be null for the active mode.
+    ex(o, ['family', 'operationId', 'taskId', 'questionId', 'questionVersion', 'mode', 'questionDigest', 'text', 'answerText', 'openedCommitId', 'expectedLastSequence', 'originalWorkItemId', 'replacementWorkItemId', 'deliveryId', 'attemptId', 'leaseEpoch', 'logicalAssignmentId', 'reviewAssignmentId', 'sessionKind', 'agentId', 'answerDigest', 'authorityBaseRef', 'kind', 'roleBinding', 'agentExecutionKind', 'roundId', 'grantSpecRef', 'inputArtifactDeliveryId', 'payloadRef', 'initialLeaseEpoch', 'maxAutomaticRetries', 'failureCode', 'failureDigest'], 'publication_operation_payload');
+    const mode = str(o.mode, 'mode');
+    if (mode !== 'open' && mode !== 'answer') throw new SchemaError('question.mode must be open|answer');
+    const required = (fields: readonly string[], missing: string[]): void => {
+      for (const field of fields) {
+        if (o[field] === null || o[field] === undefined) missing.push(field);
+      }
+    };
+    const nulled = (fields: readonly string[], bad: string[]): void => {
+      for (const field of fields) {
+        if (o[field] !== null) bad.push(field);
+      }
+    };
+    // Common exact fields.
+    const out: Record<string, unknown> = {
       family,
       operationId: str(o.operationId, 'operationId'),
       taskId: str(o.taskId, 'taskId'),
       questionId: str(o.questionId, 'questionId'),
       questionVersion: str(o.questionVersion, 'questionVersion'),
-      answerDigest: hx(o.answerDigest, 'answerDigest'),
+      mode,
       authorityBaseRef: rf(o.authorityBaseRef, 'authorityBaseRef'),
-    } as PublicationOperationPayloadV2;
+    };
+    if (mode === 'open') {
+      const missing: string[] = [];
+      required(['questionDigest', 'text', 'openedCommitId', 'originalWorkItemId', 'attemptId', 'leaseEpoch', 'logicalAssignmentId', 'sessionKind', 'agentId', 'failureCode', 'failureDigest'], missing);
+      nulled(['replacementWorkItemId', 'deliveryId', 'answerText', 'answerDigest', 'kind', 'roleBinding', 'agentExecutionKind', 'roundId', 'grantSpecRef', 'inputArtifactDeliveryId', 'payloadRef', 'initialLeaseEpoch', 'maxAutomaticRetries'], missing);
+      if (missing.length > 0) throw new SchemaError(`question open payload missing or illegal fields: ${missing.join(', ')}`);
+      out.questionDigest = hx(o.questionDigest, 'questionDigest');
+      out.text = str(o.text, 'text');
+      out.answerText = null;
+      out.openedCommitId = str(o.openedCommitId, 'openedCommitId');
+      out.originalWorkItemId = str(o.originalWorkItemId, 'originalWorkItemId');
+      out.attemptId = str(o.attemptId, 'attemptId');
+      out.leaseEpoch = onn(o.leaseEpoch, 'leaseEpoch');
+      out.logicalAssignmentId = str(o.logicalAssignmentId, 'logicalAssignmentId');
+      out.reviewAssignmentId = o.reviewAssignmentId === null ? null : str(o.reviewAssignmentId, 'reviewAssignmentId');
+      out.sessionKind = str(o.sessionKind, 'sessionKind') as PublicationOperationPayloadV2 extends infer _ ? never : never;
+      out.agentId = str(o.agentId, 'agentId');
+      out.failureCode = str(o.failureCode, 'failureCode');
+      out.failureDigest = hx(o.failureDigest, 'failureDigest');
+      out.replacementWorkItemId = null;
+      out.deliveryId = null;
+      out.answerDigest = null;
+      out.kind = null;
+      out.roleBinding = null;
+      out.agentExecutionKind = null;
+      out.roundId = null;
+      out.grantSpecRef = null;
+      out.inputArtifactDeliveryId = null;
+      out.payloadRef = null;
+      out.initialLeaseEpoch = null;
+      out.maxAutomaticRetries = null;
+    } else {
+      const missing: string[] = [];
+      required(['originalWorkItemId', 'replacementWorkItemId', 'deliveryId', 'logicalAssignmentId', 'answerDigest', 'answerText', 'agentId', 'kind', 'roleBinding', 'payloadRef', 'initialLeaseEpoch', 'maxAutomaticRetries', 'leaseEpoch', 'sessionKind'], missing);
+      nulled(['questionDigest', 'text', 'openedCommitId', 'attemptId', 'failureCode', 'failureDigest'], missing);
+      if (missing.length > 0) throw new SchemaError(`question answer payload missing or illegal fields: ${missing.join(', ')}`);
+      out.originalWorkItemId = str(o.originalWorkItemId, 'originalWorkItemId');
+      out.replacementWorkItemId = str(o.replacementWorkItemId, 'replacementWorkItemId');
+      out.deliveryId = str(o.deliveryId, 'deliveryId');
+      out.logicalAssignmentId = str(o.logicalAssignmentId, 'logicalAssignmentId');
+      out.answerDigest = hx(o.answerDigest, 'answerDigest');
+      out.answerText = str(o.answerText, 'answerText');
+      out.agentId = str(o.agentId, 'agentId');
+      out.leaseEpoch = onn(o.leaseEpoch, 'leaseEpoch');
+      out.kind = str(o.kind, 'kind') as PublicationOperationPayloadV2 extends infer _ ? never : never;
+      out.roleBinding = o.roleBinding === null ? null : str(o.roleBinding, 'roleBinding');
+      out.agentExecutionKind = o.agentExecutionKind === null ? null : str(o.agentExecutionKind, 'agentExecutionKind');
+      out.roundId = o.roundId === null ? null : str(o.roundId, 'roundId');
+      out.grantSpecRef = rfn(o.grantSpecRef, 'grantSpecRef');
+      out.inputArtifactDeliveryId = o.inputArtifactDeliveryId === null ? null : str(o.inputArtifactDeliveryId, 'inputArtifactDeliveryId');
+      out.payloadRef = rf(o.payloadRef, 'payloadRef');
+      out.initialLeaseEpoch = onn(o.initialLeaseEpoch, 'initialLeaseEpoch');
+      out.maxAutomaticRetries = onn(o.maxAutomaticRetries, 'maxAutomaticRetries');
+      out.questionDigest = null;
+      out.text = null;
+      out.openedCommitId = null;
+      out.attemptId = null;
+      out.sessionKind = str(o.sessionKind, 'sessionKind') as PublicationOperationPayloadV2 extends infer _ ? never : never;
+      out.reviewAssignmentId = o.reviewAssignmentId === null ? null : str(o.reviewAssignmentId, 'reviewAssignmentId');
+      out.failureCode = null;
+      out.failureDigest = null;
+    }
+    out.expectedLastSequence = o.expectedLastSequence === null ? null : onn(o.expectedLastSequence, 'expectedLastSequence');
+    return out as PublicationOperationPayloadV2;
   }
   if (family === 'recovery') {
-    ex(o, ['family', 'operationId', 'taskId', 'recipeKey', 'failureRecoveryPayloadRef', 'overrideRef'], 'publication_operation_payload');
+    ex(o, ['family', 'operationId', 'taskId', 'expectedLastSequence', 'operatorId', 'reason', 'recipeKey', 'track', 'failureRecoveryPayloadRef', 'overrideRef', 'replacementWorkItemId', 'replacementKind', 'replacementRoleBinding', 'replacementAgentExecutionKind', 'replacementSessionKind', 'replacementRoundId', 'replacementLogicalAssignmentId', 'replacementReviewAssignmentId', 'replacementGrantSpecRef', 'replacementInputArtifactDeliveryId', 'replacementPayloadRef', 'replacementAuthorityBaseRef', 'replacementLeaseEpoch', 'replacementMaxAutomaticRetries'], 'publication_operation_payload');
     if (!(RECIPE_KEYS as readonly string[]).includes(str(o.recipeKey, 'recipeKey'))) throw new SchemaError('recipeKey unknown');
+    const track = o.track === null ? null : str(o.track, 'track');
+    if (track !== null && track !== 'map' && track !== 'content') throw new SchemaError('track must be map|content|null');
+    const replacementAgentExecutionKind = o.replacementAgentExecutionKind === null ? null : str(o.replacementAgentExecutionKind, 'replacementAgentExecutionKind');
+    if (replacementAgentExecutionKind !== null && replacementAgentExecutionKind !== 'structured_session' && replacementAgentExecutionKind !== 'generic_turn') {
+      throw new SchemaError('replacementAgentExecutionKind must be structured_session|generic_turn|null');
+    }
+    const replacementSessionKind = o.replacementSessionKind === null ? null : (str(o.replacementSessionKind, 'replacementSessionKind') as PublicationOperationPayloadV2 extends infer _ ? never : never);
+    const replacementKind = o.replacementKind === null ? null : (str(o.replacementKind, 'replacementKind') as PublicationOperationPayloadV2 extends infer _ ? never : never);
+    if (replacementKind !== null && o.replacementWorkItemId === null) {
+      throw new SchemaError('replacementWorkItemId is required when a replacement is declared');
+    }
     return {
       family,
       operationId: str(o.operationId, 'operationId'),
       taskId: str(o.taskId, 'taskId'),
+      expectedLastSequence: onn(o.expectedLastSequence, 'expectedLastSequence'),
+      operatorId: str(o.operatorId, 'operatorId'),
+      reason: str(o.reason, 'reason'),
       recipeKey: str(o.recipeKey, 'recipeKey') as PublicationOperationPayloadV2 extends infer _ ? never : never,
+      track,
       failureRecoveryPayloadRef: rf(o.failureRecoveryPayloadRef, 'failureRecoveryPayloadRef'),
       overrideRef: rfn(o.overrideRef, 'overrideRef'),
+      replacementWorkItemId: o.replacementWorkItemId === null ? null : str(o.replacementWorkItemId, 'replacementWorkItemId'),
+      replacementKind,
+      replacementRoleBinding: o.replacementRoleBinding === null ? null : str(o.replacementRoleBinding, 'replacementRoleBinding'),
+      replacementAgentExecutionKind,
+      replacementSessionKind,
+      replacementRoundId: o.replacementRoundId === null ? null : str(o.replacementRoundId, 'replacementRoundId'),
+      replacementLogicalAssignmentId: o.replacementLogicalAssignmentId === null ? null : str(o.replacementLogicalAssignmentId, 'replacementLogicalAssignmentId'),
+      replacementReviewAssignmentId: o.replacementReviewAssignmentId === null ? null : str(o.replacementReviewAssignmentId, 'replacementReviewAssignmentId'),
+      replacementGrantSpecRef: rfn(o.replacementGrantSpecRef, 'replacementGrantSpecRef'),
+      replacementInputArtifactDeliveryId: o.replacementInputArtifactDeliveryId === null ? null : str(o.replacementInputArtifactDeliveryId, 'replacementInputArtifactDeliveryId'),
+      replacementPayloadRef: rfn(o.replacementPayloadRef, 'replacementPayloadRef'),
+      replacementAuthorityBaseRef: rfn(o.replacementAuthorityBaseRef, 'replacementAuthorityBaseRef'),
+      replacementLeaseEpoch: o.replacementLeaseEpoch === null ? null : onn(o.replacementLeaseEpoch, 'replacementLeaseEpoch'),
+      replacementMaxAutomaticRetries: o.replacementMaxAutomaticRetries === null ? null : onn(o.replacementMaxAutomaticRetries, 'replacementMaxAutomaticRetries'),
     } as PublicationOperationPayloadV2;
   }
   if (family === 'delete') {

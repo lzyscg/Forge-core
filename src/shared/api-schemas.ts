@@ -123,6 +123,13 @@ export const templateDetailSchema = Type.Object({
   }),
 });
 
+export const recoveryRecipeKeyV2Schema = Type.Union([
+  Type.Literal('retry_system_command'),
+  Type.Literal('restart_map_review_cycle'),
+  Type.Literal('restart_content_review_cycle'),
+  Type.Literal('rebuild_missing_work'),
+]);
+
 export const taskSummarySchema = Type.Object({
   id: Type.String(),
   name: Type.String(),
@@ -154,6 +161,30 @@ export const taskSummarySchema = Type.Object({
     Type.Literal('v1'),
     Type.Literal('v2'),
   ]),
+  // B-M6: the bounded failed-task recovery summary (spec §10.3.1), present
+  // ONLY on v2 tasks projected `failed` (optional on the wire so v1/basic
+  // summaries decode unchanged; the schema fails loud on drift). The member
+  // shape mirrors failedTaskRecoverySummaryV2Schema exactly.
+  failedRecovery: Type.Optional(
+    Type.Object(
+      {
+        failureCode: Type.String({ minLength: 1 }),
+        failedSequence: Type.Integer({ minimum: 0 }),
+        legalRecipes: Type.Array(
+          Type.Object(
+            {
+              recipeKey: recoveryRecipeKeyV2Schema,
+              track: Type.Union([Type.Literal('map'), Type.Literal('content'), Type.Null()]),
+            },
+            { additionalProperties: false },
+          ),
+        ),
+        reopenAllowed: Type.Boolean(),
+        cloneFallback: Type.Boolean(),
+      },
+      { additionalProperties: false },
+    ),
+  ),
 });
 
 export const taskSummaryListSchema = Type.Array(taskSummarySchema);
@@ -399,11 +430,14 @@ export const answerBodyV2Schema = Type.Union([
   Type.Object({ ...answerIdentityV2Fields, decision: Type.Literal('stop') }, { additionalProperties: false }),
 ]);
 
-/** Fenced delete mutation (spec §10.5): UUID operation + 1..500 reason. */
+/** Fenced delete mutation (spec §10.5): UUID operation + 1..500 CODE-POINT reason. */
 export const deleteTaskBodyV2Schema = Type.Object(
   {
     operationId: uuidV4Schema,
-    reason: Type.String({ minLength: 1, maxLength: 500 }),
+    // maxLength is a UTF-16 backstop ONLY (1000 units cover 500 astral code
+    // points); the route enforces the authoritative 1..500 CODE-POINT bound
+    // and trims whitespace-only reasons (B-M5 closes the Task 2 minor).
+    reason: Type.String({ minLength: 1, maxLength: 1000 }),
   },
   { additionalProperties: false },
 );
@@ -416,17 +450,14 @@ export const deleteTaskResultV2Schema = Type.Object(
   { additionalProperties: false },
 );
 
-export const recoveryRecipeKeyV2Schema = Type.Union([
-  Type.Literal('retry_system_command'),
-  Type.Literal('restart_map_review_cycle'),
-  Type.Literal('restart_content_review_cycle'),
-  Type.Literal('rebuild_missing_work'),
-]);
 
 const reopenIdentityV2Fields = {
   expectedLastSequence: Type.Integer({ minimum: 0 }),
   operationId: uuidV4Schema,
-  reason: Type.String({ minLength: 1, maxLength: 1000 }),
+  // maxLength is a UTF-16 backstop (2000 units cover 1000 astral code
+  // points); the route enforces the authoritative 1..1000 CODE-POINT bound
+  // and trims whitespace-only reasons (B-M5).
+  reason: Type.String({ minLength: 1, maxLength: 2000 }),
 };
 
 /**

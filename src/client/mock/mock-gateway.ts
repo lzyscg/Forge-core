@@ -532,6 +532,10 @@ export function createMockGateway(
       );
     },
 
+    reopenFailed: (async () => {
+      throw new Error('MockGateway.reopenFailed: the mock simulates basic templates only');
+    }) as ForgeCoreGateway['reopenFailed'],
+
     async deleteTask(taskId: string, _request?: DeleteTaskBodyV2): Promise<void> {
       const location = 'MockGateway.deleteTask';
       // The mock simulates basic templates only, so no fenced v2 delete path

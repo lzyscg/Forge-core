@@ -20,12 +20,15 @@ import {
   answerBodySchema,
   answerBodyV2Schema,
   createTaskBodySchema,
+  deleteTaskBodyV2Schema,
+  reopenFailedRequestV2Schema,
 } from '../../shared/api-schemas';
 import { structuredProtocolOf } from '../../shared/authoritative-review-v2';
 import type { CoreService } from '../core-service';
 import type { HumanAnswerRequest } from '../runtime/task-scheduler';
 import {
   ApiError,
+  readBody,
   readJsonObject,
   sendJson,
   type ApiRoute,
@@ -115,6 +118,14 @@ async function handleAnswer({ service, req, params, res }: ApiRouteContext): Pro
         : '按 { answer: string } 或 { decision, text? } 形状重新提交。',
     );
   }
+  if (isV2) {
+    // V2 answers synchronously: the server atomically verifies the question
+    // token and commits the delivery; stale tabs receive HUMAN_QUESTION_STALE
+    // (spec §10.6).
+    const summary = await service.answerTaskV2(params.taskId, body as Parameters<CoreService['answerTaskV2']>[1]);
+    sendJson(res, 200, summary);
+    return;
+  }
   // Accepted asynchronously: validation errors still reject publicly, the
   // loop continues in the background after the 202 is answered.
   const { accepted, completion } = await service.scheduler.answerDetached(
@@ -125,19 +136,32 @@ async function handleAnswer({ service, req, params, res }: ApiRouteContext): Pro
   sendJson(res, 202, accepted);
 }
 
+/** The frozen-snapshot protocol of one task (loads the task snapshot once). */
+async function protocolOf(service: CoreService, taskId: string): Promise<'none' | 'v1' | 'v2'> {
+  const frozen = await service.tasks.readFrozenTemplate(taskId);
+  return structuredProtocolOf(frozen);
+}
+
 /**
- * start/resume/retry accept asynchronously (202): the scheduler validates and
- * commits the lifecycle event before the acceptance is answered, then runs
- * the loop in the background. Validation failures reject through the public
- * error map exactly like before.
+ * start/resume/retry accept asynchronously for v1 (202) and answer
+ * synchronously for v2 (200 — the v2 mutation IS the commit; the durable
+ * wakeup pass drives the next step). The frozen snapshot decides the branch
+ * (spec §4.1/§14.3), never the request body.
  */
-function lifecycleRoute(
-  action: 'start' | 'resume' | 'retry',
-): ApiRoute {
+function lifecycleRoute(action: 'start' | 'resume' | 'retry'): ApiRoute {
   return {
     method: 'POST',
     segments: ['api', 'tasks', ':taskId', action],
     async handle({ service, params, res }) {
+      if ((await protocolOf(service, params.taskId)) === 'v2') {
+        const accepted = {
+          start: () => service.startTaskV2(params.taskId),
+          resume: () => service.resumeTaskV2(params.taskId),
+          retry: () => service.retryTaskV2(params.taskId),
+        }[action]();
+        sendJson(res, 200, await accepted);
+        return;
+      }
       const accept = {
         start: () => service.scheduler.startDetached(params.taskId),
         resume: () => service.scheduler.resumeDetached(params.taskId),
@@ -158,6 +182,10 @@ function stopRoute(): ApiRoute {
     method: 'POST',
     segments: ['api', 'tasks', ':taskId', 'stop'],
     async handle({ service, params, res }) {
+      if ((await protocolOf(service, params.taskId)) === 'v2') {
+        sendJson(res, 200, await service.stopTaskV2(params.taskId));
+        return;
+      }
       sendJson(res, 200, await service.stopTask(params.taskId));
     },
   };
@@ -216,18 +244,88 @@ function cloneRoute(): ApiRoute {
 }
 
 /**
- * Irreversible task deletion (task list delete): covers EVERY task status —
- * running tasks are aborted first by the service, corrupt ones delete like
- * healthy ones. Misses surface as the stable TASK_NOT_FOUND envelope through
- * the shared error map; the 200 body only confirms the deletion.
+ * Irreversible task deletion (task list delete): covers EVERY task status.
+ * The dispatch READS the JSON body only when the client sends one; the
+ * CoreService selects the protocol from the installation task index (spec
+ * §10.5) — a v2 task requires the exact `{ operationId, reason }` body, a v1
+ * task rejects a v2-protocol body BEFORE any deletion begins, and legacy v1
+ * deletion stays body-less byte-for-byte.
  */
 function deleteRoute(): ApiRoute {
   return {
     method: 'DELETE',
     segments: ['api', 'tasks', ':taskId'],
-    async handle({ service, params, res }) {
-      await service.deleteTask(params.taskId);
-      sendJson(res, 200, { ok: true });
+    async handle({ service, req, params, res }) {
+      // B-M1: the router's guarded body reader (1 MiB cap + malformed-JSON
+      // rejection) is reused; a body present but EMPTY counts as absent so
+      // legacy v1 DELETE stays body-less byte-for-byte.
+      const raw = await readBody(req);
+      let body: unknown = undefined;
+      if (raw.length > 0) {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(raw.toString('utf8'));
+        } catch {
+          throw new ApiError(
+            'INVALID_INPUT',
+            '删除请求体不是有效 JSON。',
+            null,
+            '提交合法的 JSON 请求体。',
+          );
+        }
+        if (!Value.Check(deleteTaskBodyV2Schema, parsed)) {
+          throw new ApiError(
+            'INVALID_INPUT',
+            'v2 删除请求必须携带 operationId（UUID v4）与 1..500 字符的 reason。',
+            null,
+            '按 { operationId, reason } 形状重新提交。',
+          );
+        }
+        // B-F2/B-M5: whitespace-only reasons are 400 INVALID_INPUT (never a
+        // latent DELETE_NOT_FOUND) and the bound is CODE POINTS server-side.
+        const deleteReason = (parsed as { reason?: unknown }).reason;
+        if (typeof deleteReason !== 'string' || deleteReason.trim().length === 0) {
+          throw new ApiError('INVALID_INPUT', '删除原因不能为空。', null, '填写删除原因后重试。');
+        }
+        if ([...deleteReason].length > 500) {
+          throw new ApiError('INVALID_INPUT', '删除原因不能超过 500 个字符。', null, '缩短删除原因后重试。');
+        }
+        body = parsed;
+      }
+      sendJson(res, 200, await service.deleteTask(params.taskId, body as { operationId: string; reason: string } | undefined));
+    },
+  };
+}
+
+/**
+ * The fenced reopen route (spec §10.3.1): ONLY the frozen policy table can
+ * recover a failed v2 task; the body is schema-validated BEFORE the service
+ * derives the replacement base/scope/Grant server-side. V1 has no reopen.
+ */
+function reopenFailedRoute(): ApiRoute {
+  return {
+    method: 'POST',
+    segments: ['api', 'tasks', ':taskId', 'reopen_failed'],
+    async handle({ service, req, params, res }) {
+      const body = await readJsonObject(req);
+      if (!Value.Check(reopenFailedRequestV2Schema, body)) {
+        throw new ApiError(
+          'INVALID_INPUT',
+          'reopen_failed 请求必须携带 expectedLastSequence、operationId（UUID v4）、reason（1..1000 字符）、recipeKey 与匹配的 track。',
+          null,
+          '按冻结恢复策略表提交合法 recipe/track。',
+        );
+      }
+      // B-M5: reason bounds are CODE POINTS server-side; whitespace-only is a
+      // stable 400 INVALID_INPUT.
+      const reopenReason = (body as { reason?: unknown }).reason;
+      if (typeof reopenReason !== 'string' || reopenReason.trim().length === 0) {
+        throw new ApiError('INVALID_INPUT', '恢复原因不能为空。', null, '填写恢复原因后重试。');
+      }
+      if ([...reopenReason].length > 1000) {
+        throw new ApiError('INVALID_INPUT', '恢复原因不能超过 1000 个字符。', null, '缩短恢复原因后重试。');
+      }
+      sendJson(res, 200, await service.reopenFailedTask(params.taskId, body as Parameters<CoreService['reopenFailedTask']>[1]));
     },
   };
 }
@@ -267,5 +365,6 @@ export function taskRoutes(): ApiRoute[] {
     skillRoute(),
     cloneRoute(),
     deleteRoute(),
+    reopenFailedRoute(),
   ];
 }

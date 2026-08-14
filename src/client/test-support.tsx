@@ -77,6 +77,7 @@ export function stubGateway(
     getSkillContent: unused,
     cloneTask: unused,
     deleteTask: unused,
+    reopenFailed: unused,
     getStructuredContract: unused,
     listStructuredSlots: unused,
     getStructuredSlot: unused,

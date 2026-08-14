@@ -234,11 +234,21 @@ export class CorePaths {
 
   /** blobs/<kind>/<first2>/<digest> (spec §8) — the 64-hex digest is the filename. */
   taskStructuredV2BlobFile(taskId: string, kind: string, digest: string): string {
+    return this.taskStructuredV2BlobFileUnder(this.taskStructuredV2BlobsRoot(taskId), kind, digest);
+  }
+
+  /**
+   * The v2 blob address relative to ONE blobs root — Task 11 create staging
+   * publishes the task-frozen profile/alias blobs inside the TEMPORARY task
+   * root before rename, so every address derivation stays at this single site
+   * (blobs/<kind>/<first2>/<digest>).
+   */
+  taskStructuredV2BlobFileUnder(blobsRoot: string, kind: string, digest: string): string {
     assertSafeSegment('kind', kind);
     if (!STRUCTURED_SHA256.test(digest)) {
       throw new CorePathError('digest');
     }
-    return resolve(this.taskStructuredV2BlobsRoot(taskId), kind, digest.slice(0, 2), digest);
+    return resolve(blobsRoot, kind, digest.slice(0, 2), digest);
   }
 
   /** structured-slots/blobs/ — content-addressed immutable blobs. */

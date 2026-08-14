@@ -543,6 +543,16 @@ describe('createWorkItem', () => {
   });
 });
 
+// Flake-hardening (Task 11 continuation): every test here chains many
+// sequential fsync-heavy facade publishes; under full-suite 12-worker load a
+// single test can exceed vitest's 5 s default even though it runs in ~1.4 s
+// in isolation. The 30 s bound is a pure hang guard — the tests never depend
+// on wall time (all clocks injected).
+// Flake-hardening (Task 11 continuation): every test here chains many
+// sequential fsync-heavy facade publishes; under full-suite 12-worker load a
+// single test can exceed vitest's 5 s default even though it runs in ~1.4 s
+// in isolation. The 30 s bound is a pure hang guard — the tests never depend
+// on wall time (all clocks injected).
 describe('leaseNext — claims, ordering, batch shape', () => {
   it('leases the only ready agent workitem with a full lease→dispatch→attempt envelope', async () => {
     const env = await makeEnv();
@@ -916,7 +926,7 @@ describe('leaseNext — claims, ordering, batch shape', () => {
       coordinator.leaseNext('task-x', 'worker-a', 'op-x'),
     ).rejects.toMatchObject({ code: 'STALE_TAIL' });
   });
-});
+}, 30_000);
 
 describe('reclaimExpired — expiry, epochs, late results', () => {
   it('reclaims an EXPIRED lease with abandon + reclaim and advances the epoch', async () => {
@@ -1268,7 +1278,7 @@ describe('recordRetryableFailure / requeueDue / manualRetry — ordinals, budget
     expect(commandFailed?.event.commandKind).toBe('generation_finalize');
     expect(commandFailed?.event.commandId).toBe(leased?.commandId);
   });
-});
+}, 30_000);
 
 describe('suspension overlay — applySuspension / clearSuspension', () => {
   it('applies and clears an overlay without touching the underlying WorkItem state', async () => {
@@ -1568,6 +1578,8 @@ describe('constraint A evidence — half-state lease pins are rejected at admiss
       retryNotBefore: null,
       validatorAggregateRef: null,
       budgetPolicyDigest: null,
+      failureRecoveryPayloadRef: null,
+      taskFailure: null,
     };
     await expect(
       env.facade.publishWithPin({
@@ -1608,6 +1620,26 @@ describe('constraint A evidence — rebuildable intents through startup recovery
         leaseEpoch: null,
         expectedLastSequence: null,
         authorityBaseRef: null,
+      attemptFamily: null,
+      attemptId: null,
+      commandId: null,
+      agentId: null,
+      commandKind: null,
+      logicalAssignmentId: null,
+      reviewAssignmentId: null,
+      sessionKind: null,
+      inputArtifactDeliveryId: null,
+      workItemKind: null,
+      roleBinding: null,
+      agentExecutionKind: null,
+      roundId: null,
+      grantSpecRef: null,
+      payloadRef: null,
+      initialLeaseEpoch: null,
+      maxAutomaticRetries: null,
+      mapBuildId: null,
+      supersedesMapBuildId: null,
+      sourceValidationReceiptRef: null,
       },
       intent: { handlerKind: 'lifecycle/stop', handlerVersion: 1 },
       expectedTailSequence: tail.lastSequence,
@@ -1721,4 +1753,4 @@ describe('deterministic identities and full-history replay equivalence', () => {
     expect(a).not.toBe(c);
     expect(a).toMatch(/^[0-9a-f]{64}$/);
   });
-});
+}, 30_000);

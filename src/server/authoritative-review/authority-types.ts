@@ -1505,7 +1505,24 @@ export type WorkItemMutationEventBuilderV2 =
   | 'work_item_retryable_failed'
   | 'work_item_requeued'
   | 'work_item_lease_reclaimed'
-  | 'work_item_parked';
+  | 'work_item_parked'
+  /**
+   * Task 11 (constraint A round 2): the startup `RUNNING_WITHOUT_WORK`
+   * compensation (spec §10.4) commits `structured_task_failed_v2` through the
+   * EXACT lease_or_retry payload with this builder — the failure carriers
+   * (failureCode/failureDigest/workItemId/leaseEpoch/authorityBaseRef/
+   * failureRecoveryPayloadRef) already live in the union, so the branch is
+   * byte-rebuildable.
+   */
+  | 'task_terminal_failed'
+  /**
+   * Task 11 (constraint A round 2): the terminal-failure envelope the
+   * attempt-coordinator (Task 12) uses — [attempt/command terminal_failed,
+   * work_item_terminal_failed] and, when `taskFailure=true`,
+   * `structured_task_failed_v2` in the SAME batch (§10.3). Registered NOW so
+   * the reopen/startup/rejection tests have a legal failing path.
+   */
+  | 'work_item_terminal_failed';
 
 /**
  * §8/§7.1 exact closed union of canonical publication operation payloads.
@@ -1572,16 +1589,30 @@ export type PublicationOperationPayloadV2 =
       // --- work_item_retryable_failed / work_item_parked ---
       failureCode: string | null;
       failureDigest: string | null;
+      /** Task 11: the RUNNING_WITHOUT_WORK failure's recovery payload (§10.4). */
+      failureRecoveryPayloadRef: BlobRefV2 | null;
+      /** Task 11: work_item_terminal_failed also emits structured_task_failed_v2. */
+      taskFailure: boolean | null;
       retryOrdinal: number | null;
       retryNotBefore: string | null;
       validatorAggregateRef: BlobRefV2 | null;
       budgetPolicyDigest: string | null;
     }
   | {
+      /**
+       * Task 11 extension (constraint A round 2): the lifecycle family now
+       * also carries (a) the v2 START envelope carriers (`task_started` +
+       * `structured_map_build_started` + first `structured_work_item_created`
+       * in ONE batch — §17.2 start) and (b) the composed STOP envelope
+       * carriers (reclaim of the leased workitem + `task_stopped` + overlay in
+       * ONE batch — §17.3 user stop / operator interrupt). Any carrier that a
+       * mutation does not need stays null; the exact-key parser enforces the
+       * per-`kind` field matrix.
+       */
       family: 'lifecycle';
       operationId: string;
       taskId: string;
-      kind: 'stop' | 'resume' | 'manual_retry' | 'run_migration_batch';
+      kind: 'stop' | 'resume' | 'manual_retry' | 'run_migration_batch' | 'start';
       suspensionId: string | null;
       workItemId: string | null;
       /** Task 10 extension: stop reason (null keeps the Task 8 user_stop default). */
@@ -1590,23 +1621,122 @@ export type PublicationOperationPayloadV2 =
       leaseEpoch: number | null;
       expectedLastSequence: number | null;
       authorityBaseRef: BlobRefV2 | null;
+      // --- composed-stop reclaim carriers (lease_or_retry lease/reclaim shape) ---
+      attemptFamily: AttemptExecutionKindV2 | null;
+      attemptId: string | null;
+      commandId: string | null;
+      agentId: string | null;
+      commandKind: SystemCommandKindV2 | null;
+      logicalAssignmentId: string | null;
+      reviewAssignmentId: string | null;
+      sessionKind: StructuredSessionKindV2 | null;
+      inputArtifactDeliveryId: string | null;
+      // --- start envelope carriers (work_item_created + map build) ---
+      workItemKind: WorkItemKindV2 | null;
+      roleBinding: string | null;
+      agentExecutionKind: 'structured_session' | 'generic_turn' | null;
+      roundId: string | null;
+      grantSpecRef: BlobRefV2 | null;
+      payloadRef: BlobRefV2 | null;
+      initialLeaseEpoch: number | null;
+      maxAutomaticRetries: number | null;
+      mapBuildId: string | null;
+      supersedesMapBuildId: string | null;
+      sourceValidationReceiptRef: BlobRefV2 | null;
     }
   | {
+      /**
+       * Task 11 extension (constraint A round 2): the human-question family now
+       * covers BOTH the open (structured_human_question_opened_v2) and the
+       * answer (structured_human_answer_delivered_v2) flow atomically. The
+       * answer branch carries the delivery successor identities the Task 7
+       * union lacked (deliveryId/originalWorkItemId/replacementWorkItemId/
+       * logicalAssignmentId) so `human_answer` is byte-rebuildable; the open
+       * branch carries the attempt-terminal + park carriers the §17.3 open
+       * envelope needs. `mode` discriminates; every other field is keyed
+       * exactly per mode.
+       */
       family: 'question';
       operationId: string;
       taskId: string;
       questionId: string;
       questionVersion: string;
-      answerDigest: string;
+      mode: 'open' | 'answer';
+      /** The opened question's canonical digest (mode open). */
+      questionDigest: string | null;
+      /** Text of the public display question (mode open; bounded, public). */
+      text: string | null;
+      /** Public display answer text (mode answer; bounded, public). */
+      answerText: string | null;
+      /** Commit id of the batch that opened the question (token binding). */
+      openedCommitId: string | null;
+      /** Tail sequence at commit time (nothing should be inferred from it). */
+      expectedLastSequence: number | null;
+      /** Original (question-bound) WorkItem identity — both modes. */
+      originalWorkItemId: string | null;
+      /** Answer successor identity (mode answer only). */
+      replacementWorkItemId: string | null;
+      deliveryId: string | null;
+      attemptId: string | null;
+      leaseEpoch: number | null;
+      logicalAssignmentId: string | null;
+      reviewAssignmentId: string | null;
+      sessionKind: StructuredSessionKindV2 | null;
+      /** Leased agent identity (display-node owner; both modes). */
+      agentId: string | null;
+      answerDigest: string | null;
       authorityBaseRef: BlobRefV2;
+      /** Create carriers of the answer replacement workitem (mode answer). */
+      kind: WorkItemKindV2 | null;
+      roleBinding: string | null;
+      agentExecutionKind: 'structured_session' | 'generic_turn' | null;
+      roundId: string | null;
+      grantSpecRef: BlobRefV2 | null;
+      inputArtifactDeliveryId: string | null;
+      payloadRef: BlobRefV2 | null;
+      initialLeaseEpoch: number | null;
+      maxAutomaticRetries: number | null;
+      /**
+       * The terminal-failure identity of the attempt the question OPEN closes
+       * (mode open): the attempt's own terminal event needs the full carrier
+       * set to be rebuildable.
+       */
+      failureCode: string | null;
+      failureDigest: string | null;
     }
   | {
+      /**
+       * Task 11 extension (constraint A round 2): the recovery family now
+       * carries the operator-owned reopen facts (operatorId/reason/track) and
+       * the exact tail, so every §10.3.1 recipe is byte-rebuildable. The
+       * frozen server-fixed principal `task_owner` supplies operatorId; the
+       * body can never name an operator (spec §10.3.1).
+       */
       family: 'recovery';
       operationId: string;
       taskId: string;
+      expectedLastSequence: number;
+      operatorId: string;
+      reason: string;
       recipeKey: 'retry_system_command' | 'restart_map_review_cycle' | 'restart_content_review_cycle' | 'rebuild_missing_work';
+      track: 'map' | 'content' | null;
       failureRecoveryPayloadRef: BlobRefV2;
       overrideRef: BlobRefV2 | null;
+      /** The replacement WorkItem created in the SAME batch (§10.3.1). */
+      replacementWorkItemId: string | null;
+      replacementKind: WorkItemKindV2 | null;
+      replacementRoleBinding: string | null;
+      replacementAgentExecutionKind: 'structured_session' | 'generic_turn' | null;
+      replacementSessionKind: StructuredSessionKindV2 | null;
+      replacementRoundId: string | null;
+      replacementLogicalAssignmentId: string | null;
+      replacementReviewAssignmentId: string | null;
+      replacementGrantSpecRef: BlobRefV2 | null;
+      replacementInputArtifactDeliveryId: string | null;
+      replacementPayloadRef: BlobRefV2 | null;
+      replacementAuthorityBaseRef: BlobRefV2 | null;
+      replacementLeaseEpoch: number | null;
+      replacementMaxAutomaticRetries: number | null;
     }
   | {
       family: 'delete';

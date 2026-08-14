@@ -17,22 +17,39 @@
  * Business content exists only in fixtures and request values, never here
  * (iron rule 1).
  */
-import { randomUUID } from 'node:crypto';
-import { copyFile, mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import {
+  copyFile,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+} from 'node:fs/promises';
+import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { InputField, TaskSummary } from '../../shared/contracts';
 import {
   structuredProtocolOf,
+  type BlobRefV2,
   type StructuredProtocol,
 } from '../../shared/authoritative-review-v2';
 import type { CorePaths } from './core-paths';
 import { CorePathError } from './core-paths';
-import { STORAGE_ERROR_CODES, StorageError, writeNewAtomic } from './atomic-file';
+import { STORAGE_ERROR_CODES, StorageError, writeNewAtomic, writeNewAtomicDurable, syncDirectory } from './atomic-file';
 import { loadTemplateDirectory } from '../template/template-loader';
 import { TEMPLATE_ERROR_CODES, TemplateError, type FrozenTemplate } from '../template/template-schema';
 import type { StructuredRuntimeEnvironmentV1 } from '../structured-slots/runtime-capability';
 import type { AuthoritativeReviewRuntimeEnvironmentV1 } from '../structured-slots/authoritative-review-capability';
 import type { TemplateCatalog } from '../template/template-catalog';
+import { AuthoritativeReviewProfileArchive, type ProfileArchiveByteStore } from '../structured-slots/authoritative-review-profile-archive';
+import { canonicalJson, canonicalJsonSha256 } from '../structured-slots/canonical-json';
+import { refOfBlob } from '../authoritative-review/object-registry';
+import type { AuthoritativeTaskIndexV1 } from './authoritative-task-index';
+import { TaskIndexError } from './authoritative-task-index';
+import type { AuthoritativeReviewProfileBindingV1 } from '../structured-slots/authoritative-review-profile';
+import type { AuthoritativeReviewProfileSnapshotV1Body } from '../structured-slots/authoritative-review-profile';
 
 export interface CreateTaskRequest {
   templateId: string;
@@ -60,6 +77,9 @@ export interface CreatedTask extends TaskSummary {
 const FULL_VERSION_HASH = /^[0-9a-f]{64}$/;
 
 const INCOMPLETE_PREFIX = '.incomplete-';
+
+/** The 64-hex SHA-256 naming rule of v2 blob digests (listing filter). */
+const BLOB_DIGEST = /^[0-9a-f]{64}$/;
 
 function invalidInput(message: string, action: string): StorageError {
   return new StorageError(STORAGE_ERROR_CODES.INVALID_INPUT, message, null, action);
@@ -179,6 +199,16 @@ export class TaskStore {
   private readonly authoritativeReviewEnvironment: AuthoritativeReviewRuntimeEnvironmentV1;
 
   /**
+   * The installation task index (Task 11, spec §10.5): TaskStore.create is the
+   * SOLE ID/root publisher and holds the index dependency so the prepared
+   * entry, the complete temp root (with the task-frozen profile blob) and the
+   * activation advance under the SAME installation store fence. V1/basic
+   * creates never touch the index. CoreService must NOT add the index after
+   * `tasks.create()` returns — it is wired here, at construction.
+   */
+  private readonly index: AuthoritativeTaskIndexV1 | undefined;
+
+  /**
    * In-memory frozen-snapshot cache (plan 2026-08-06): a task snapshot is
    * immutable once frozen, so repeated reads may serve the cached object.
    * The scheduler consults it every guard iteration; without the cache each
@@ -187,17 +217,33 @@ export class TaskStore {
    */
   private readonly frozenCache = new Map<string, FrozenTemplate>();
 
-  constructor(paths: CorePaths, catalog: TemplateCatalog) {
+  constructor(
+    paths: CorePaths,
+    catalog: TemplateCatalog,
+    index?: AuthoritativeTaskIndexV1,
+  ) {
     this.paths = paths;
     this.catalog = catalog;
     this.runtimeEnvironment = catalog.runtimeEnvironment;
     this.authoritativeReviewEnvironment = catalog.authoritativeReviewEnvironment;
+    // Wired at construction (spec §10.5: "TaskStore.create ... receives an
+    // AuthoritativeTaskIndexV1 dependency"). V1/basic creates never read it.
+    this.index = index;
   }
 
   /**
    * Creates one immutable task directory from a validated request and the
    * exact cached template version. Failed creations are isolated and never
    * exposed through listing.
+   *
+   * V2 creations run the spec §10.5 choreography under the installation store
+   * fence: prepared index entry FIRST (outside the task root), then the
+   * complete temp root whose v2 blob store carries the task-FROZEN profile
+   * snapshot (constraint B — the blob store always gets the frozen profile,
+   * never the current one) and the frozen-template alias, then the atomic
+   * rename with parent fsync, then the prepared→active promotion before the
+   * fence releases. A crash after ANY phase is repaired by
+   * `runCreationRecovery` at startup.
    */
   async create(request: CreateTaskRequest): Promise<CreatedTask> {
     const frozen = this.catalog.getFrozen(request.templateId);
@@ -233,8 +279,134 @@ export class TaskStore {
       frozenInput,
       createdAt,
     };
-    await this.publishTaskDirectory(taskId, record, frozen);
+    const isV2 = frozen.authoritativeReviewProfile !== null;
+    if (!isV2) {
+      // V1/basic creates keep the legacy path byte-for-byte.
+      await this.publishTaskDirectory(taskId, record, frozen, []);
+      return { ...toSummary(record, structuredProtocolOf(frozen)), templateVersion: record.templateVersion };
+    }
+    return this.createV2(taskId, record, frozen);
+  }
+
+  /**
+   * The fenced v2 create (spec §10.5 steps 1–5; constraint B profile
+   * choreography). The task-frozen profile bytes land INSIDE the temp root
+   * BEFORE the rename, so a complete root always resolves its own archived
+   * profile — create-before-start followed by any number of GC generations
+   * keeps both root refs alive (they are index rows from the moment the
+   * prepared entry is durable).
+   */
+  private async createV2(
+    taskId: string,
+    record: TaskRecord,
+    frozen: FrozenTemplate,
+  ): Promise<CreatedTask> {
+    const profile = this.frozenProfileSnapshot(frozen);
+    const alias = this.frozenTemplateAlias(frozen, profile);
+    if (this.index === undefined) {
+      throw new StorageError(
+        STORAGE_ERROR_CODES.INVALID_INPUT,
+        'contract v2 任务创建需要安装任务索引。',
+        null,
+        '联系平台检查服务装配。',
+      );
+    }
+    await this.index.withFence(async () => {
+      await this.index?.prepareTaskUnderFence({
+        taskId,
+        templateSnapshotHash: record.templateVersion,
+        profileSnapshotRef: profile.ref,
+        templateSnapshotRef: alias.ref,
+      });
+      await this.publishTaskDirectory(taskId, record, frozen, [
+        { kind: 'profile_snapshot', ref: profile.ref, bytes: profile.bytes },
+        { kind: 'content_value', ref: alias.ref, bytes: alias.bytes },
+      ]);
+      await this.index?.activateTaskUnderFence(taskId);
+    });
     return { ...toSummary(record, structuredProtocolOf(frozen)), templateVersion: record.templateVersion };
+  }
+
+  /**
+   * The EXACT task-frozen profile snapshot (constraint B): canonical bytes +
+   * complete-object ref computed through the environment archive (single
+   * derivation). The ref must equal the binding frozen into the snapshot's
+   * version hash — the current deployment profile is never substituted and a
+   * mismatch fails closed (the template cache would be torn mid-reload).
+   */
+  private frozenProfileSnapshot(frozen: FrozenTemplate): { ref: BlobRefV2; bytes: Buffer } {
+    const binding = frozen.authoritativeReviewProfile;
+    if (binding === null) {
+      throw new StorageError(
+        STORAGE_ERROR_CODES.INVALID_INPUT,
+        '该任务模板没有冻结的 authoritative profile。',
+        null,
+        '重新加载模板后创建任务。',
+      );
+    }
+    const environment = this.authoritativeReviewEnvironment;
+    const profile = environment.profile;
+    const archive = environment.archive;
+    if (profile === null) {
+      throw new TemplateError(
+        TEMPLATE_ERROR_CODES.TEMPLATE_RUNTIME_UNAVAILABLE,
+        'authoritative review 能力未就绪，无法创建 contract v2 任务。',
+        null,
+        '等待 authoritative review 能力就绪后重新创建。',
+      );
+    }
+    const ref = archive.refOf(profile);
+    if (ref.digest !== binding.profileSnapshotRef.digest || ref.byteLength !== binding.profileSnapshotRef.byteLength) {
+      throw new StorageError(
+        STORAGE_ERROR_CODES.INVALID_INPUT,
+        '当前部署 profile 与冻结的任务 profile 不一致，无法创建任务。',
+        null,
+        '刷新模板列表后重新创建。',
+      );
+    }
+    return { ref, bytes: Buffer.from(archive.canonicalBytesOf(profile)) };
+  }
+
+  /**
+   * The frozen-template ALIAS blob (a registered `content_value` whose text
+   * canonicalizes the snapshot identity): the index row references it as a
+   * formal GC root, so the frozen snapshot stays reachable through deletion's
+   * detached-quarantine retention without ever resolving a directory. The
+   * alias is deterministic — identical template + profile produce identical
+   * bytes (idempotent same-address writes).
+   */
+  private frozenTemplateAlias(
+    frozen: FrozenTemplate,
+    profile: { ref: BlobRefV2 },
+  ): { ref: BlobRefV2; bytes: Buffer } {
+    const binding = frozen.authoritativeReviewProfile;
+    if (binding === null) {
+      throw new StorageError(
+        STORAGE_ERROR_CODES.INVALID_INPUT,
+        '该任务模板没有冻结的 authoritative profile。',
+        null,
+        '重新加载模板后创建任务。',
+      );
+    }
+    const text = canonicalJson({
+      protocolVersion: 2,
+      kind: 'authoritative_frozen_template_alias',
+      snapshotHash: frozen.versionHash,
+      profileIdentity: binding.profileIdentity,
+      profileDigest: binding.profileDigest,
+      profileSnapshotRef: profile.ref,
+    });
+    const without = {
+      slotId: 'snapshot-alias',
+      contentSchemaDigest: '0'.repeat(64),
+      taskContentRevision: 1,
+      mediaType: 'text/plain',
+      text,
+    };
+    const value = { ...without, selfDigest: canonicalJsonSha256(without) };
+    const ref = refOfBlob('content_value', value);
+    const bytes = Buffer.from(canonicalJson(value), 'utf8');
+    return { ref, bytes };
   }
 
   /**
@@ -242,6 +414,13 @@ export class TaskStore {
    * load in historical mode (spec §7.3): a legacy snapshot without a
    * supported turn contract stays readable (contract folds to null and the
    * scheduler gates the task), never corrupt.
+   *
+   * Contract-v2 snapshots reopen against the task-FROZEN archived profile
+   * (spec §4.3 / constraint B): the current deployment profile (B or disabled)
+   * is NEVER substituted — the snapshot's own `profile_snapshot` blob under
+   * `structured-slots/v2/blobs/` is the authority, so reads stay available
+   * across profile changes and the version hash still verifies against the
+   * immutable task record.
    */
   async readFrozenTemplate(taskId: string): Promise<FrozenTemplate> {
     // Cache check BEFORE readTaskRecord: a deleted task must observe the
@@ -258,6 +437,9 @@ export class TaskStore {
         historicalSnapshot: true,
         runtimeEnvironment: this.runtimeEnvironment,
         authoritativeReviewEnvironment: this.authoritativeReviewEnvironment,
+        // Task 11 constraint-B: v2 snapshots carry their own archived profile;
+        // a task without one (v1/basic) resolves to null and takes the old path.
+        frozenAuthoritativeProfile: (await this.archivedFrozenProfile(taskId)) ?? undefined,
       });
     } catch (error) {
       // A structured snapshot whose host runtime is unavailable must surface
@@ -325,6 +507,88 @@ export class TaskStore {
       );
     }
     return parsed;
+  }
+
+  /**
+   * Constraint-B: resolves the task-FROZEN archived profile binding of a v2
+   * snapshot from the task's OWN v2 blob store (`blobs/profile_snapshot/`,
+   * written at create under the fence — the current deployment profile is
+   * never consulted). Exactly one canonical body must exist: zero candidates
+   * means a v1/basic task (null — the loader takes the legacy reopen path),
+   * more than one means a tampered root (fail closed). The body is
+   * re-validated through the registered profile_snapshot parser and its
+   * complete-object ref + profileDigest alias form the binding.
+   */
+  private async archivedFrozenProfile(
+    taskId: string,
+  ): Promise<{ binding: AuthoritativeReviewProfileBindingV1; profile: AuthoritativeReviewProfileSnapshotV1Body } | null> {
+    const profileKindsRoot = join(this.paths.taskStructuredV2BlobsRoot(taskId), 'profile_snapshot');
+    let prefixes: string[];
+    try {
+      prefixes = readdirSync(profileKindsRoot);
+    } catch {
+      return null; // No v2 blobs at all: v1/basic task.
+    }
+    const digests: string[] = [];
+    for (const prefix of prefixes) {
+      if (!/^[0-9a-f]{2}$/.test(prefix)) {
+        throw corruptedTask('profile_snapshot 目录存在非法的摘要前缀。');
+      }
+      let names: string[];
+      try {
+        names = readdirSync(join(profileKindsRoot, prefix));
+      } catch {
+        continue;
+      }
+      for (const name of names) {
+        if (!BLOB_DIGEST.test(name)) {
+          throw corruptedTask('profile_snapshot 目录存在非法的摘要文件。');
+        }
+        digests.push(name);
+      }
+    }
+    if (digests.length === 0) {
+      return null; // A v2 root always carries its profile blob; an absent one
+      // is indistinguishable from a v1/basic root here and fails as corrupt
+      // snapshot later (never guessed as v2).
+    }
+    if (digests.length > 1) {
+      throw corruptedTask('任务根目录存在多个 frozen profile 快照。');
+    }
+    const digest = digests[0] as string;
+    const archive = new AuthoritativeReviewProfileArchive(
+      new TaskProfileArchiveByteStore(this.paths, taskId),
+    );
+    let bytes: Uint8Array;
+    try {
+      bytes = readFileSync(this.paths.taskStructuredV2BlobFile(taskId, 'profile_snapshot', digest));
+    } catch {
+      throw corruptedTask('frozen profile 快照缺失。');
+    }
+    let body: AuthoritativeReviewProfileSnapshotV1Body | null;
+    try {
+      body = archive.resolve({
+        kind: 'profile_snapshot',
+        digest,
+        byteLength: bytes.byteLength,
+        mediaType: 'application/json',
+        schemaVersion: 1,
+      });
+    } catch {
+      throw corruptedTask('frozen profile 快照不可解析。');
+    }
+    if (body === null) {
+      throw corruptedTask('frozen profile 快照缺失。');
+    }
+    const ref = archive.refOf(body);
+    return {
+      binding: {
+        profileIdentity: body.profileIdentity,
+        profileDigest: body.profileDigest,
+        profileSnapshotRef: ref,
+      },
+      profile: body,
+    };
   }
 
   /**
@@ -461,6 +725,7 @@ export class TaskStore {
     taskId: string,
     record: TaskRecord,
     frozen: FrozenTemplate,
+    v2Blobs: ReadonlyArray<{ kind: string; ref: BlobRefV2; bytes: Buffer }>,
   ): Promise<void> {
     await mkdir(this.paths.tasksRoot, { recursive: true });
     const stageDir = join(this.paths.tasksRoot, `.tmp-task-${taskId}`);
@@ -474,6 +739,18 @@ export class TaskStore {
       await copyTree(cacheVersionRoot, snapshotRoot);
       const reopened = await loadTemplateDirectory(snapshotRoot, {
         runtimeEnvironment: this.runtimeEnvironment,
+        authoritativeReviewEnvironment: this.authoritativeReviewEnvironment,
+        // V2 staged snapshots revalidate against the SAME frozen profile the
+        // template bound (the create-time env IS the frozen one — the
+        // byte-exact ref was verified before any write); v1/basic stay on the
+        // legacy reopen path.
+        frozenAuthoritativeProfile:
+          v2Blobs.length > 0 && frozen.authoritativeReviewProfile !== null && this.authoritativeReviewEnvironment.profile !== null
+            ? {
+                binding: frozen.authoritativeReviewProfile,
+                profile: this.authoritativeReviewEnvironment.profile,
+              }
+            : undefined,
       });
       if (reopened.versionHash !== frozen.versionHash) {
         throw new TemplateError(
@@ -489,10 +766,24 @@ export class TaskStore {
       // private and custody stores populate it on demand and deleteTask removes
       // the whole task root (and therefore this subtree) with it.
       await mkdir(join(stageDir, 'structured-slots'), { recursive: true });
+      // V2 choreography step 3 (spec §10.5): the task-frozen profile snapshot
+      // and the frozen-template alias land INSIDE the temp root with the same
+      // durable write discipline (file + parent fsync), BEFORE the rename — a
+      // complete root always carries the blobs its index row references.
+      if (v2Blobs.length > 0) {
+        const blobsRoot = join(stageDir, 'structured-slots', 'v2', 'blobs');
+        for (const blob of v2Blobs) {
+          const destination = this.paths.taskStructuredV2BlobFileUnder(blobsRoot, blob.kind, blob.ref.digest);
+          await writeNewAtomicDurable(destination, blob.bytes);
+        }
+      }
       await rename(stageDir, this.paths.taskRoot(taskId));
+      // Spec §10.5 step 4: fsync the tasks parent so the rename is durable
+      // before the index entry advances to active.
+      await syncDirectory(this.paths.tasksRoot);
     } catch (error) {
       await this.isolate(stageDir, taskId);
-      if (error instanceof TemplateError || error instanceof StorageError) {
+      if (error instanceof TemplateError || error instanceof StorageError || error instanceof TaskIndexError) {
         throw error;
       }
       throw new TemplateError(
@@ -512,4 +803,37 @@ export class TaskStore {
       await rm(stageDir, { recursive: true, force: true }).catch(() => undefined);
     }
   }
+}
+
+/** Read-only archive byte store backed by ONE task's v2 blob store (constraint B). */
+class TaskProfileArchiveByteStore implements ProfileArchiveByteStore {
+  private readonly paths: CorePaths;
+
+  private readonly taskId: string;
+
+  constructor(paths: CorePaths, taskId: string) {
+    this.paths = paths;
+    this.taskId = taskId;
+  }
+
+  read(digest: string): Uint8Array | null {
+    try {
+      return readFileSync(this.paths.taskStructuredV2BlobFile(this.taskId, 'profile_snapshot', digest));
+    } catch {
+      return null;
+    }
+  }
+
+  put(_digest: string, _bytes: Uint8Array): void {
+    throw new Error('task profile archive is read-only');
+  }
+}
+
+function corruptedTask(message: string): StorageError {
+  return new StorageError(
+    STORAGE_ERROR_CODES.TASK_CORRUPTED,
+    `任务数据损坏: ${message}`,
+    null,
+    '检查该任务的本地任务目录。',
+  );
 }

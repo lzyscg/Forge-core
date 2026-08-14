@@ -498,6 +498,20 @@ export interface LoadTemplateDirectoryOptions {
    * Threaded from CoreService construction only — never a second default.
    */
   authoritativeReviewEnvironment?: AuthoritativeReviewRuntimeEnvironmentV1;
+  /**
+   * Task 11 constraint-B seam (spec §4.3 "archived task-bound profile"): the
+   * FROZEN archived profile binding + body of a v2 task snapshot, resolved by
+   * the TaskStore from the task's OWN v2 blob store. A historical reopen
+   * (current environment disabled or pointing at profile B) validates the
+   * snapshot against THIS frozen profile — never the current deployment
+   * profile — and the resulting version hash must still match the task
+   * record. Supplied only with `historicalSnapshot: true`; mutually exclusive
+   * with the current-environment v2 gate.
+   */
+  frozenAuthoritativeProfile?: {
+    binding: AuthoritativeReviewProfileBindingV1;
+    profile: AuthoritativeReviewProfileSnapshotV1Body;
+  };
 }
 
 /** True when `slots/contract.yaml` exists under the template root. */
@@ -519,33 +533,38 @@ type ResolvedStructuredSlots =
       profileBinding: AuthoritativeReviewProfileBindingV1;
     };
 
-/** Exact match of one contract implementation identity against the installed registry (§6.5). */
-function isInstalledValidator(
+/**
+ * Exact match of one contract implementation identity against the INSTALLED
+ * identities of one profile body (spec §6.5). The environment's registry is
+ * guaranteed identical to the current profile's installedHandlers (the
+ * environment constructor verifies registry identity equality), so both the
+ * current path and the Task 11 frozen-archived reopen share this check.
+ */
+function isInstalledValidatorIdentity(
   entry: ImplementationIdentityClosureEntryV2,
-  environment: AuthoritativeReviewRuntimeEnvironmentV1,
+  installed: AuthoritativeReviewProfileSnapshotV1Body['installedHandlers']['validators'],
 ): boolean {
   if (entry.kind !== 'validator') {
     return false;
   }
-  return environment.handlerRegistry.validators.some(
-    (installed) =>
-      installed.handlerKey === entry.handlerKey &&
-      installed.implementationDigest === entry.implementationDigest &&
-      installed.moduleId === entry.moduleId &&
-      installed.exportName === entry.exportName &&
-      installed.trigger === entry.trigger &&
-      installed.executionPhase === entry.executionPhase,
+  return installed.some(
+    (candidate) =>
+      candidate.handlerKey === entry.handlerKey &&
+      candidate.implementationDigest === entry.implementationDigest &&
+      candidate.moduleId === entry.moduleId &&
+      candidate.exportName === entry.exportName &&
+      candidate.trigger === entry.trigger &&
+      candidate.executionPhase === entry.executionPhase,
   );
 }
 
-function isInstalledAssembler(
+function isInstalledAssemblerIdentity(
   entry: ImplementationIdentityClosureEntryV2,
-  environment: AuthoritativeReviewRuntimeEnvironmentV1,
+  installed: AuthoritativeReviewProfileSnapshotV1Body['installedHandlers']['assembler'],
 ): boolean {
   if (entry.kind !== 'assembler') {
     return false;
   }
-  const installed = environment.handlerRegistry.assembler;
   return (
     installed.handlerKey === entry.handlerKey &&
     installed.implementationDigest === entry.implementationDigest &&
@@ -568,6 +587,7 @@ async function resolveStructuredSlots(
   options: {
     runtimeEnvironment?: StructuredRuntimeEnvironmentV1;
     authoritativeReviewEnvironment?: AuthoritativeReviewRuntimeEnvironmentV1;
+    frozenAuthoritativeProfile?: LoadTemplateDirectoryOptions['frozenAuthoritativeProfile'];
   },
 ): Promise<ResolvedStructuredSlots | null> {
   if (mode === 'basic') {
@@ -623,10 +643,20 @@ async function resolveStructuredSlots(
 async function resolveAuthoritativeStructuredSlots(
   sourcePath: string,
   options: {
+    historicalSnapshot?: boolean;
     authoritativeReviewEnvironment?: AuthoritativeReviewRuntimeEnvironmentV1;
+    frozenAuthoritativeProfile?: LoadTemplateDirectoryOptions['frozenAuthoritativeProfile'];
   },
 ): Promise<Extract<ResolvedStructuredSlots, { protocol: 'v2' }>> {
+  // Task 11 constraint-B: a HISTORICAL reopen resolves the task-frozen
+  // archived profile (never the current deployment profile). The current
+  // environment's capability gate is deliberately skipped — reads must stay
+  // available while the capability is disabled or points at profile B.
+  const frozen = options.frozenAuthoritativeProfile ?? null;
   const reviewEnv = options.authoritativeReviewEnvironment;
+  if (frozen !== null) {
+    return resolveAuthoritativeWithProfile(sourcePath, frozen.profile, frozen.binding);
+  }
   // Both capability gates must pass for v2 (spec §17): the base structured
   // capability checked by the caller AND the authoritative capability here.
   if (reviewEnv === undefined || !isAuthoritativeReviewRunnable(reviewEnv)) {
@@ -640,10 +670,30 @@ async function resolveAuthoritativeStructuredSlots(
   // isAuthoritativeReviewRunnable guarantees a non-null profile + snapshot ref.
   const profile = reviewEnv.profile as AuthoritativeReviewProfileSnapshotV1Body;
   const profileSnapshotRef = reviewEnv.profileSnapshotRef as BlobRefV2;
+  const binding: AuthoritativeReviewProfileBindingV1 = {
+    profileIdentity: profile.profileIdentity,
+    profileDigest: profile.profileDigest,
+    profileSnapshotRef,
+  };
+  return resolveAuthoritativeWithProfile(sourcePath, profile, binding);
+}
+
+/**
+ * Validates a v2 contract against ONE profile (current or frozen-archived) and
+ * derives the profile binding. Single implementation for both the current
+ * environment and the Task 11 historical reopen: the same installed-identity,
+ * budget and ceiling checks that ran at create re-run against the FROZEN
+ * profile — the archived profile is the authority, never the current one.
+ */
+async function resolveAuthoritativeWithProfile(
+  sourcePath: string,
+  profile: AuthoritativeReviewProfileSnapshotV1Body,
+  binding: AuthoritativeReviewProfileBindingV1,
+): Promise<Extract<ResolvedStructuredSlots, { protocol: 'v2' }>> {
   const contract = await compileStructuredSlotContractV2(sourcePath);
 
   // Templates can only tighten (design §22.2): every contract limit and the
-  // review policy must sit within the frozen profile.
+  // review policy must sit within the profile (the frozen one on reopen).
   assertTemplateLimitsWithinProfile(
     contract.limits as unknown as Record<string, Record<string, number>>,
     profile,
@@ -657,11 +707,12 @@ async function resolveAuthoritativeStructuredSlots(
 
   // Every implementation identity must match exactly one installed registry
   // entry (spec §6.5); budget profiles and assembler budget resolve in the
-  // frozen profile. There is no temporary validation bypass at this seam.
+  // profile. The installed identities live INSIDE the profile body, so the
+  // frozen archived profile re-runs the identical check byte-for-byte.
   for (const entry of contract.implementationIdentityClosure) {
     const installed = entry.kind === 'validator'
-      ? isInstalledValidator(entry, reviewEnv)
-      : isInstalledAssembler(entry, reviewEnv);
+      ? isInstalledValidatorIdentity(entry, profile.installedHandlers.validators)
+      : isInstalledAssemblerIdentity(entry, profile.installedHandlers.assembler);
     if (!installed) {
       throw new TemplateError(
         TEMPLATE_ERROR_CODES.TEMPLATE_INVALID,
@@ -695,13 +746,7 @@ async function resolveAuthoritativeStructuredSlots(
       RELOAD_ACTION,
     );
   }
-
-  const profileBinding: AuthoritativeReviewProfileBindingV1 = {
-    profileIdentity: profile.profileIdentity,
-    profileDigest: profile.profileDigest,
-    profileSnapshotRef,
-  };
-  return { protocol: 'v2', contract, profileBinding };
+  return { protocol: 'v2', contract, profileBinding: binding };
 }
 
 /** Serializes the compiled phase contract into the frozen snapshot. */
@@ -719,6 +764,7 @@ async function loadValidated(
     historicalSnapshot: boolean;
     runtimeEnvironment?: StructuredRuntimeEnvironmentV1;
     authoritativeReviewEnvironment?: AuthoritativeReviewRuntimeEnvironmentV1;
+    frozenAuthoritativeProfile?: LoadTemplateDirectoryOptions['frozenAuthoritativeProfile'];
   },
 ): Promise<FrozenTemplate> {
   const template = validateTemplateFile(
@@ -934,6 +980,7 @@ export async function loadTemplateDirectory(
       historicalSnapshot: options.historicalSnapshot ?? false,
       runtimeEnvironment: options.runtimeEnvironment,
       authoritativeReviewEnvironment: options.authoritativeReviewEnvironment,
+      frozenAuthoritativeProfile: options.frozenAuthoritativeProfile,
     });
   } catch (error) {
     if (error instanceof TemplateError) {
