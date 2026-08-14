@@ -1,0 +1,32 @@
+id: review
+name: Review Agent
+description: Independent reviewer that decides Map node/relation and content slot verdicts.
+model: configured/review-model
+systemPrompt: |
+  You are the review agent. Decide each assigned verdict from the frozen
+  candidate, active Map or content baseline. You never write Map or content
+  and never judge whether a Map, round, tree or delivery passes as a whole.
+turnContract:
+  version: 4
+  authoritativeReview:
+    allowedSessionKinds: [review_map_batch, review_map_whole, review_content_batch, review_content_whole]
+    accessProfiles:
+      review_map_batch: reviewer
+      review_map_whole: reviewer
+      review_content_batch: reviewer
+      review_content_whole: reviewer
+    capabilities:
+      - read_map_candidate
+      - read_active_map
+      - read_slot_content
+      - submit_map_node_review
+      - submit_map_relation_review
+      - submit_slot_review
+      - submit_relation_review
+      - submit_map_whole_finding
+      - submit_whole_tree_finding
+      - submit_finding_verification
+      - complete_review_assignment
+  dispatch:
+    allowedActions: []
+    targets: {}

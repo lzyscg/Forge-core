@@ -20,6 +20,9 @@ import type { PublicCoreError } from '../../shared/errors';
 import { CorePathError, CorePaths } from '../storage/core-paths';
 import type { StructuredRuntimeEnvironmentV1 } from '../structured-slots/runtime-capability';
 import { createProductionRuntimeEnvironment } from '../structured-slots/runtime-capability';
+import type { AuthoritativeReviewRuntimeEnvironmentV1 } from '../structured-slots/authoritative-review-capability';
+import { createProductionAuthoritativeReviewEnvironment } from '../structured-slots/authoritative-review-capability';
+import { isAuthoritativeReviewRunnable } from '../structured-slots/authoritative-review-capability';
 import { cacheTemplate, loadLastValidCached, type CachedVersion } from './template-cache';
 import { loadTemplateDirectory } from './template-loader';
 import { TEMPLATE_ERROR_CODES, TemplateError, type FrozenTemplate } from './template-schema';
@@ -113,6 +116,13 @@ export class TemplateCatalog {
    */
   readonly runtimeEnvironment: StructuredRuntimeEnvironmentV1;
 
+  /**
+   * The ONE immutable authoritative review runtime environment (spec §17 /
+   * design O05, Task 5): threaded from CoreService construction only. A
+   * contract-v2 template is exposed only when BOTH capabilities pass.
+   */
+  readonly authoritativeReviewEnvironment: AuthoritativeReviewRuntimeEnvironmentV1;
+
   private readonly entries = new Map<string, CatalogEntry>();
 
   /** Source ids observed at startup; lets reload operate on known sources. */
@@ -129,10 +139,15 @@ export class TemplateCatalog {
 
   constructor(
     paths: CorePaths,
-    options: { runtimeEnvironment?: StructuredRuntimeEnvironmentV1 } = {},
+    options: {
+      runtimeEnvironment?: StructuredRuntimeEnvironmentV1;
+      authoritativeReviewEnvironment?: AuthoritativeReviewRuntimeEnvironmentV1;
+    } = {},
   ) {
     this.paths = paths;
     this.runtimeEnvironment = options.runtimeEnvironment ?? createProductionRuntimeEnvironment();
+    this.authoritativeReviewEnvironment =
+      options.authoritativeReviewEnvironment ?? createProductionAuthoritativeReviewEnvironment();
   }
 
   /** True when the structured runtime may execute structured templates. */
@@ -141,6 +156,22 @@ export class TemplateCatalog {
       this.runtimeEnvironment.capability.status === 'enabled' &&
       this.runtimeEnvironment.profile !== null
     );
+  }
+
+  /** True when the authoritative runtime may execute contract-v2 templates. */
+  private isAuthoritativeRunnable(): boolean {
+    return isAuthoritativeReviewRunnable(this.authoritativeReviewEnvironment);
+  }
+
+  /** A v2 template needs BOTH capability gates (spec §17). */
+  private isReviewProtocolRunnable(frozen: FrozenTemplate | undefined): boolean {
+    if (frozen === undefined || frozen.productionMode !== 'structured_slots' || frozen.structuredSlots === null) {
+      return true;
+    }
+    if (frozen.structuredSlots.version === 2) {
+      return this.isStructuredRunnable() && this.isAuthoritativeRunnable();
+    }
+    return this.isStructuredRunnable();
   }
 
   async initialize(): Promise<void> {
@@ -231,8 +262,14 @@ export class TemplateCatalog {
     try {
       const frozen = await loadTemplateDirectory(sourcePath, {
         runtimeEnvironment: this.runtimeEnvironment,
+        authoritativeReviewEnvironment: this.authoritativeReviewEnvironment,
       });
-      const cached = await cacheTemplate(this.paths, frozen, this.runtimeEnvironment);
+      const cached = await cacheTemplate(
+        this.paths,
+        frozen,
+        this.runtimeEnvironment,
+        this.authoritativeReviewEnvironment,
+      );
       const detail = toDetail(cached.frozen, 'valid', cached.cachedAt);
       this.entries.set(templateId, { detail, frozen: cached.frozen, diagnostic: null });
       this.unavailable.delete(templateId);
@@ -279,8 +316,14 @@ export class TemplateCatalog {
     try {
       const frozen = await loadTemplateDirectory(this.paths.templateSource(templateId), {
         runtimeEnvironment: this.runtimeEnvironment,
+        authoritativeReviewEnvironment: this.authoritativeReviewEnvironment,
       });
-      const cached = await cacheTemplate(this.paths, frozen, this.runtimeEnvironment);
+      const cached = await cacheTemplate(
+        this.paths,
+        frozen,
+        this.runtimeEnvironment,
+        this.authoritativeReviewEnvironment,
+      );
       this.adopt(templateId, cached, 'valid', null);
       return;
     } catch (error) {
@@ -303,9 +346,10 @@ export class TemplateCatalog {
       cached = null;
     }
     if (cached !== null) {
-      if (cached.frozen.productionMode === 'structured_slots' && !this.isStructuredRunnable()) {
-        // A structured cache exists but the runtime cannot execute it while
-        // disabled: retain the availability diagnostic, never expose it.
+      if (!this.isReviewProtocolRunnable(cached.frozen)) {
+        // A structured cache exists but the runtime cannot execute it while a
+        // required capability is disabled (design O05 / spec §17): retain the
+        // availability diagnostic, never expose it.
         this.unavailable.set(templateId, {
           code: TEMPLATE_ERROR_CODES.TEMPLATE_RUNTIME_UNAVAILABLE,
           message: '结构化运行时能力未就绪，无法使用该模板。',

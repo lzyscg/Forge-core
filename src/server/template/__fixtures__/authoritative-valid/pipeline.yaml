@@ -1,0 +1,31 @@
+# Platform-neutral v2 pipeline (design §9 / spec §6.3, frozen).
+# Authoritative lifecycle: four role bindings — orchestrator (structure),
+# generator (fill), independent reviewer (review) and a generic Submitter.
+# Seal is a SYSTEM phase: there is no seal Agent, there are no Routes, and the
+# artifact producer is the explicit system branch `{ system: structured_seal }`.
+productionMode: structured_slots
+agents:
+  - structure
+  - fill
+  - review
+  - submitter
+structuredReviewLifecycle:
+  protocol: authoritative_review_v1
+  roleBindings:
+    orchestrator: structure
+    generator: fill
+    reviewer: review
+    submitter: submitter
+  systemArtifactProducer: system:structured_seal
+routes: []
+artifactSchema:
+  files:
+    - name: chapter.md
+      required: true
+      producer:
+        system: structured_seal
+      extract: content
+      phase: create
+finalOutput:
+  submitters:
+    - submitter

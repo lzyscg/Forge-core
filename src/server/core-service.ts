@@ -53,6 +53,8 @@ import { projectStructuredSlotState } from './storage/structured-slot-state';
 import { TraceStore } from './storage/trace-store';
 import { TemplateCatalog } from './template/template-catalog';
 import type { StructuredRuntimeEnvironmentV1 } from './structured-slots/runtime-capability';
+import type { AuthoritativeReviewRuntimeEnvironmentV1 } from './structured-slots/authoritative-review-capability';
+import { createProductionAuthoritativeReviewEnvironment } from './structured-slots/authoritative-review-capability';
 import type { AgentRuntime, AgentTurnInput } from './runtime/agent-runtime';
 import type { AcceptanceStopHook } from './acceptance-boundary';
 import {
@@ -96,6 +98,14 @@ export interface CoreServiceOptions {
    * production manifest (disabled, no profile).
    */
   runtimeEnvironment?: StructuredRuntimeEnvironmentV1;
+  /**
+   * The ONE authoritative review runtime environment (spec §17 / design O05,
+   * Task 5): threaded from production manifest load in main.ts through the
+   * Catalog, cache, TaskStore snapshot reopen, scheduler, runner and every v2
+   * service. Defaults to the checked-in disabled production manifest; no
+   * module may re-read a default or build a second environment.
+   */
+  authoritativeReviewEnvironment?: AuthoritativeReviewRuntimeEnvironmentV1;
   /**
    * Acceptance-only boundary seam (plan Phase D Task 4), threaded into the
    * scheduler; production entry points leave it undefined.
@@ -202,6 +212,14 @@ export class CoreService {
   readonly runtimeEnvironment: StructuredRuntimeEnvironmentV1;
 
   /**
+   * The ONE authoritative review runtime environment (spec §17, Task 5): the
+   * same immutable reference the TemplateCatalog holds, threaded into the
+   * Scheduler/Runner for the v2 dispatch gates. No module may accept a second
+   * independently constructed environment.
+   */
+  readonly authoritativeReviewEnvironment: AuthoritativeReviewRuntimeEnvironmentV1;
+
+  /**
    * Memory-only live-preview buffer behind `TaskWorkspace.activeTurn` (plan
    * C realtime streaming). Strictly in-memory: streamed thinking/text never
    * touches files or events.
@@ -220,11 +238,14 @@ export class CoreService {
     this.paths = paths;
     // The catalog owns ONE structured runtime environment; TaskStore derives
     // it from the catalog and the Scheduler/Runner reuse the same reference
-    // (design O05).
+    // (design O05). The authoritative review environment follows the exact
+    // same discipline (spec §17, Task 5).
     this.templates = new TemplateCatalog(paths, {
       runtimeEnvironment: options.runtimeEnvironment,
+      authoritativeReviewEnvironment: options.authoritativeReviewEnvironment,
     });
     this.runtimeEnvironment = this.templates.runtimeEnvironment;
+    this.authoritativeReviewEnvironment = this.templates.authoritativeReviewEnvironment;
     this.tasks = new TaskStore(paths, this.templates);
     this.events = new EventStore(paths);
     this.artifacts = new ArtifactStore(paths, this.events);
@@ -331,6 +352,7 @@ export class CoreService {
       traces: this.traces,
       paths: this.paths,
       runtimeEnvironment: this.runtimeEnvironment,
+      authoritativeReviewEnvironment: this.authoritativeReviewEnvironment,
       liveSink: (taskId, patch) => this.live.merge(taskId, patch),
     });
     // Fill the mutable structured-slot seam now that the runner exists: the Pi
@@ -357,6 +379,7 @@ export class CoreService {
       runner: this.runner,
       runtime: this.runtime,
       runtimeEnvironment: this.runtimeEnvironment,
+      authoritativeReviewEnvironment: this.authoritativeReviewEnvironment,
       ...(options.acceptanceStopAfterCommit !== undefined
         ? { acceptanceStopAfterCommit: options.acceptanceStopAfterCommit }
         : {}),
@@ -814,6 +837,16 @@ export class CoreService {
         '该任务未启用结构槽。',
         'CoreService.structuredRead',
         '查看基本任务画布。',
+      );
+    }
+    if (frozen.structuredSlots.version !== 1) {
+      // The v1 owner read APIs never interpret a contract-v2 snapshot (spec
+      // §4.4): v2 tasks get the future authoritative read routes.
+      throw new StructuredSlotReadError(
+        'STRUCTURED_NOT_ACTIVE',
+        '该任务使用 contract v2 协议，请使用权威评审视图查看。',
+        'CoreService.structuredRead',
+        '使用权威评审阅读视图。',
       );
     }
     const blobStore = new StructuredSlotBlobStore(this.paths, taskId);

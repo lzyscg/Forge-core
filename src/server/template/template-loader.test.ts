@@ -23,6 +23,18 @@ import { CorePaths } from '../storage/core-paths';
 import { validateTaskEvent } from '../storage/task-events';
 import { PROGRESS_POLICY_CEILING } from '../runtime/progress-guard';
 import { createTestRuntimeEnvironment } from '../structured-slots/runtime-capability';
+import { createProductionAuthoritativeReviewEnvironment } from '../structured-slots/authoritative-review-capability';
+import {
+  createAuthoritativeReviewTestEnvironment,
+} from '../structured-slots/test-support/authoritative-review-test-registry';
+import type { AuthoritativeReviewProfileSnapshotV1Body } from '../structured-slots/authoritative-review-profile';
+import {
+  profileCanonicalDigest,
+  validateAuthoritativeReviewProfile,
+} from '../structured-slots/authoritative-review-profile';
+import { createAuthoritativeReviewRuntimeEnvironment } from '../structured-slots/authoritative-review-capability';
+import { isArtifactSystemProducerRef, TEMPLATE_ERROR_CODES } from './template-schema';
+import { cacheTemplate, readCurrentHash } from './template-cache';
 import { loadTemplateDirectory } from './template-loader';
 import { TemplateCatalog } from './template-catalog';
 import {
@@ -1117,3 +1129,319 @@ describe('structured slot v1 compatibility fence (plan 2026-08-14 Task 1)', () =
     expect(validateTaskEvent(v1SealEvent)).toEqual(v1SealEvent);
   });
 });
+
+describe('authoritative (v2) template loading (Task 5)', () => {
+  const V2_FIXTURE = 'authoritative-valid';
+  const V1_STRUCTURED_HASH_PIN = 'c38455b92b3c3529b020fc6195a17d1321918a46bc5ca0ba95a12397c7aac60b';
+
+  function makeTempCorePathsWith(): { paths: CorePaths; templateRoot: string } {
+    const root = makeTempDir('forge-core-v2catalog-');
+    const templateRoot = join(root, 'templates');
+    return {
+      paths: CorePaths.create({ dataRoot: join(root, 'data'), templateRoot }),
+      templateRoot,
+    };
+  }
+
+  async function loadV2(templateRoot: string, env?: ReturnType<typeof createAuthoritativeReviewTestEnvironment>) {
+    const root = makeTempDir('forge-core-v2load-');
+    copyFixture(V2_FIXTURE, 'authoritative-valid', root);
+    return loadTemplateDirectory(join(root, 'authoritative-valid'), {
+      runtimeEnvironment: createTestRuntimeEnvironment(),
+      authoritativeReviewEnvironment: env ?? createAuthoritativeReviewTestEnvironment(),
+    });
+  }
+
+  it('loads the full v2 fixture with the test environment (first valid v2 FrozenTemplate)', async () => {
+    const frozen = await loadV2(makeTempDir('forge-core-v2-'));
+    expect(frozen.productionMode).toBe('structured_slots');
+    expect(frozen.structuredSlots?.version).toBe(2);
+    expect(frozen.structuredReviewLifecycle).toEqual({
+      protocol: 'authoritative_review_v1',
+      roleBindings: { orchestrator: 'structure', generator: 'fill', reviewer: 'review', submitter: 'submitter' },
+      systemArtifactProducer: 'system:structured_seal',
+    });
+    expect(frozen.authoritativeReviewProfile?.profileIdentity).toBe('forge-authoritative-review/v1');
+    expect(frozen.authoritativeReviewProfile?.profileDigest).toMatch(/^[0-9a-f]{64}$/);
+    expect(frozen.authoritativeReviewProfile?.profileSnapshotRef?.kind).toBe('profile_snapshot');
+    // profileDigest and snapshot-ref digest are distinct identities
+    expect(frozen.authoritativeReviewProfile?.profileDigest).not.toBe(
+      frozen.authoritativeReviewProfile?.profileSnapshotRef?.digest,
+    );
+    // the explicit system producer is frozen as a discriminated ref
+    expect(frozen.artifactSchema.files[0].producer).toEqual({ kind: 'system', systemId: 'structured_seal' });
+    // the reviewer is NOT the orchestrator/generator and has no write session kind
+    const review = frozen.agents.find((agent) => agent.id === 'review');
+    expect(review?.turnContract?.version).toBe(4);
+    if (review?.turnContract?.version === 4) {
+      expect(review.turnContract.authoritativeReview.allowedSessionKinds).not.toContain('structure_chunk');
+      expect(review.turnContract.authoritativeReview.allowedSessionKinds).not.toContain('generation_batch');
+    }
+  });
+
+  it('keeps the v1 structured version hash byte-identical (no new defaults)', async () => {
+    const root = makeTempDir('forge-core-v1pin-');
+    copyFixture('structured-valid', 'pin', root);
+    const frozen = await loadTemplateDirectory(join(root, 'pin'), {
+      runtimeEnvironment: createTestRuntimeEnvironment(),
+    });
+    expect(frozen.versionHash).toBe(V1_STRUCTURED_HASH_PIN);
+  });
+
+  it('refuses a v2 source while the authoritative capability is disabled (production env)', async () => {
+    const root = makeTempDir('forge-core-v2disabled-');
+    copyFixture(V2_FIXTURE, 'authoritative-valid', root);
+    await expect(
+      loadTemplateDirectory(join(root, 'authoritative-valid'), {
+        runtimeEnvironment: createTestRuntimeEnvironment(),
+        authoritativeReviewEnvironment: createProductionAuthoritativeReviewEnvironment(),
+      }),
+    ).rejects.toMatchObject({ code: 'TEMPLATE_RUNTIME_UNAVAILABLE' });
+  });
+
+  it('refuses a v2 source without an authoritative environment (fail closed)', async () => {
+    const root = makeTempDir('forge-core-v2noenv-');
+    copyFixture(V2_FIXTURE, 'authoritative-valid', root);
+    await expect(
+      loadTemplateDirectory(join(root, 'authoritative-valid'), {
+        runtimeEnvironment: createTestRuntimeEnvironment(),
+      }),
+    ).rejects.toMatchObject({ code: 'TEMPLATE_RUNTIME_UNAVAILABLE' });
+  });
+
+  it('hashes deterministically across copies and changes when the contract changes', async () => {
+    const env = createAuthoritativeReviewTestEnvironment();
+    const rootA = makeTempDir('forge-core-v2hasha-');
+    const rootB = makeTempDir('forge-core-v2hashb-');
+    copyFixture(V2_FIXTURE, 'authoritative-valid', rootA);
+    copyFixture(V2_FIXTURE, 'authoritative-valid', rootB);
+    const options = { runtimeEnvironment: createTestRuntimeEnvironment(), authoritativeReviewEnvironment: env };
+    const hashA = (await loadTemplateDirectory(join(rootA, 'authoritative-valid'), options)).versionHash;
+    expect((await loadTemplateDirectory(join(rootB, 'authoritative-valid'), options)).versionHash).toBe(hashA);
+    // contract change re-versions the template
+    const contractFile = join(rootB, 'authoritative-valid', 'slots', 'contract.yaml');
+    writeFileSync(
+      contractFile,
+      readFileSync(contractFile, 'utf8').replace('maxRounds: 8', 'maxRounds: 12'),
+      'utf8',
+    );
+    expect((await loadTemplateDirectory(join(rootB, 'authoritative-valid'), options)).versionHash).not.toBe(hashA);
+  });
+
+  it('changes the hash when the profile changes (same identity, different bytes)', async () => {
+    const envA = createAuthoritativeReviewTestEnvironment();
+    const profile = envA.profile as AuthoritativeReviewProfileSnapshotV1Body;
+    const revised = { ...profile, profileVersion: profile.profileVersion + 1 };
+    const revisedComplete = validateAuthoritativeReviewProfile({
+      ...revised,
+      profileDigest: profileCanonicalDigest(revised),
+    });
+    const envB = createAuthoritativeReviewRuntimeEnvironment(
+      {
+        version: 1,
+        status: 'enabled',
+        profileIdentity: 'forge-authoritative-review/v1',
+        profileDigest: profileCanonicalDigest(revisedComplete),
+        evidenceDigest: '0'.repeat(64),
+        requiredAbis: ['forge-validator/v2', 'forge-assembler/v2'],
+      },
+      revisedComplete,
+      envA.handlerRegistry,
+    );
+    expect(envB.profileSnapshotRef?.digest).not.toBe(envA.profileSnapshotRef?.digest);
+    const rootA = makeTempDir('forge-core-v2profa-');
+    copyFixture(V2_FIXTURE, 'authoritative-valid', rootA);
+    const hashA = (
+      await loadTemplateDirectory(join(rootA, 'authoritative-valid'), {
+        runtimeEnvironment: createTestRuntimeEnvironment(),
+        authoritativeReviewEnvironment: envA,
+      })
+    ).versionHash;
+    const hashB = (
+      await loadTemplateDirectory(join(rootA, 'authoritative-valid'), {
+        runtimeEnvironment: createTestRuntimeEnvironment(),
+        authoritativeReviewEnvironment: envB,
+      })
+    ).versionHash;
+    expect(hashB).not.toBe(hashA);
+  });
+
+  it('artifacts: scalar v1 producers stay strings; the system mapping is the frozen v2 ref', async () => {
+    const f = isArtifactSystemProducerRef;
+    expect(f({ kind: 'system', systemId: 'structured_seal' })).toBe(true);
+    expect(f('seal')).toBe(false);
+    expect(f({ kind: 'agent', agentId: 'seal' })).toBe(false);
+    // v1 scalar producers are untouched strings
+    const root = makeTempDir('forge-core-v2prod-');
+    copyFixture('structured-valid', 'prod', root);
+    const v1 = await loadTemplateDirectory(join(root, 'prod'), { runtimeEnvironment: createTestRuntimeEnvironment() });
+    expect(v1.artifactSchema.files[0].producer).toBe('seal');
+    // v2 with a scalar (non-system) producer fails the system-producer rule
+    const root2 = makeTempDir('forge-core-v2prod2-');
+    copyFixture(V2_FIXTURE, 'authoritative-valid', root2);
+    const pipeline = join(root2, 'authoritative-valid', 'pipeline.yaml');
+    writeFileSync(
+      pipeline,
+      readFileSync(pipeline, 'utf8')
+        .replace('producer:\n        system: structured_seal', 'producer: fill'),
+      'utf8',
+    );
+    await expect(
+      loadTemplateDirectory(join(root2, 'authoritative-valid'), {
+        runtimeEnvironment: createTestRuntimeEnvironment(),
+        authoritativeReviewEnvironment: createAuthoritativeReviewTestEnvironment(),
+      }),
+    ).rejects.toMatchObject({ code: 'TEMPLATE_INVALID' });
+  });
+
+  it('rejects the system producer mapping on a v1/basic template', async () => {
+    const root = makeTempDir('forge-core-v2prodv1-');
+    copyFixture('structured-valid', 'prodv1', root);
+    const pipeline = join(root, 'prodv1', 'pipeline.yaml');
+    writeFileSync(
+      pipeline,
+      readFileSync(pipeline, 'utf8').replace('producer: seal', 'producer:\n        system: structured_seal'),
+      'utf8',
+    );
+    await expect(
+      loadTemplateDirectory(join(root, 'prodv1'), { runtimeEnvironment: createTestRuntimeEnvironment() }),
+    ).rejects.toMatchObject({ code: 'TEMPLATE_INVALID' });
+  });
+
+  it('rejects a colon-bearing producer scalar (the safe Agent-ID regex never relaxes)', async () => {
+    const root = makeTempDir('forge-core-v2prodcolon-');
+    copyFixture('structured-valid', 'prodcolon', root);
+    const pipeline = join(root, 'prodcolon', 'pipeline.yaml');
+    writeFileSync(
+      pipeline,
+      readFileSync(pipeline, 'utf8').replace('producer: seal', 'producer: system:structured_seal'),
+      'utf8',
+    );
+    await expect(
+      loadTemplateDirectory(join(root, 'prodcolon'), { runtimeEnvironment: createTestRuntimeEnvironment() }),
+    ).rejects.toMatchObject({ code: 'TEMPLATE_INVALID' });
+  });
+
+  it('rejects the v2 lifecycle block on a contract-v1 template and on a basic template', async () => {
+    const env = createAuthoritativeReviewTestEnvironment();
+    // contract v1 + lifecycle block
+    const root = makeTempDir('forge-core-v2lcv1-');
+    copyFixture('structured-valid', 'lcv1', root);
+    const pipeline = join(root, 'lcv1', 'pipeline.yaml');
+    const lifecycleYaml = [
+      '',
+      'structuredReviewLifecycle:',
+      '  protocol: authoritative_review_v1',
+      '  roleBindings:',
+      '    orchestrator: structure',
+      '    generator: fill',
+      '    reviewer: review',
+      '    submitter: submitter',
+      '  systemArtifactProducer: system:structured_seal',
+    ].join('\n');
+    writeFileSync(pipeline, `${readFileSync(pipeline, 'utf8').trimEnd()}${lifecycleYaml}`, 'utf8');
+    await expect(
+      loadTemplateDirectory(join(root, 'lcv1'), {
+        runtimeEnvironment: createTestRuntimeEnvironment(),
+        authoritativeReviewEnvironment: env,
+      }),
+    ).rejects.toMatchObject({ code: 'TEMPLATE_INVALID' });
+    // basic template + lifecycle block (block only belongs to structured mode)
+    const rootBasic = makeTempDir('forge-core-v2lcbasic-');
+    copyFixture('valid', 'lcbasic', rootBasic);
+    const basicPipeline = join(rootBasic, 'lcbasic', 'pipeline.yaml');
+    writeFileSync(
+      basicPipeline,
+      `${readFileSync(basicPipeline, 'utf8').trimEnd()}${lifecycleYaml}`,
+      'utf8',
+    );
+    await expect(loadTemplateDirectory(join(rootBasic, 'lcbasic'))).rejects.toMatchObject({
+      code: 'TEMPLATE_INVALID',
+    });
+  });
+
+  it('rejects contract implementations that are not installed in the registry', async () => {
+    const root = makeTempDir('forge-core-v2reg-');
+    copyFixture(V2_FIXTURE, 'authoritative-valid', root);
+    const contractFile = join(root, 'authoritative-valid', 'slots', 'contract.yaml');
+    writeFileSync(
+      contractFile,
+      readFileSync(contractFile, 'utf8').replace(
+        'handlerKey: authoritative.review.completeness',
+        'handlerKey: ghost.handler',
+      ),
+      'utf8',
+    );
+    await expect(
+      loadTemplateDirectory(join(root, 'authoritative-valid'), {
+        runtimeEnvironment: createTestRuntimeEnvironment(),
+        authoritativeReviewEnvironment: createAuthoritativeReviewTestEnvironment(),
+      }),
+    ).rejects.toMatchObject({ code: 'TEMPLATE_INVALID' });
+  });
+
+  it('rejects template limits above the profile ceiling', async () => {
+    const root = makeTempDir('forge-core-v2ceiling-');
+    copyFixture(V2_FIXTURE, 'authoritative-valid', root);
+    const contractFile = join(root, 'authoritative-valid', 'slots', 'contract.yaml');
+    writeFileSync(
+      contractFile,
+      readFileSync(contractFile, 'utf8').replace('maxSlots: 2500', 'maxSlots: 20000'),
+      'utf8',
+    );
+    await expect(
+      loadTemplateDirectory(join(root, 'authoritative-valid'), {
+        runtimeEnvironment: createTestRuntimeEnvironment(),
+        authoritativeReviewEnvironment: createAuthoritativeReviewTestEnvironment(),
+      }),
+    ).rejects.toMatchObject({ code: 'TEMPLATE_INVALID' });
+  });
+
+  it('the catalog stays on the prior valid cache while the v2 capability is disabled', async () => {
+    const { paths, templateRoot } = makeTempCorePathsWith();
+    copyFixture(V2_FIXTURE, 'authoritative-valid', templateRoot);
+    const enabledEnv = createAuthoritativeReviewTestEnvironment();
+    const enabledCatalog = new TemplateCatalog(paths, {
+      runtimeEnvironment: createTestRuntimeEnvironment(),
+      authoritativeReviewEnvironment: enabledEnv,
+    });
+    await enabledCatalog.initialize();
+    const detail = enabledCatalog.get('authoritative-valid');
+    expect(detail?.status).toBe('valid');
+    const cachedHash = await readCurrentHash(paths, 'authoritative-valid');
+    expect(cachedHash?.length).toBe(64);
+    // the catalog version is the 12-char display prefix of the full hash
+    expect(detail?.version).toBe(cachedHash?.slice(0, 12));
+    // Disabled production env: source load gates, prior cache pointer survives.
+    const disabledCatalog = new TemplateCatalog(paths, {
+      runtimeEnvironment: createTestRuntimeEnvironment(),
+      authoritativeReviewEnvironment: createProductionAuthoritativeReviewEnvironment(),
+    });
+    await disabledCatalog.initialize();
+    expect(disabledCatalog.get('authoritative-valid')).toBeUndefined();
+    expect(disabledCatalog.getDiagnostic('authoritative-valid')?.code).toBe(
+      TEMPLATE_ERROR_CODES.TEMPLATE_RUNTIME_UNAVAILABLE,
+    );
+    expect(await readCurrentHash(paths, 'authoritative-valid')).toBe(cachedHash);
+    // Re-enabled: the exact same source revalidates with the identical hash.
+    const reEnabled = new TemplateCatalog(paths, {
+      runtimeEnvironment: createTestRuntimeEnvironment(),
+      authoritativeReviewEnvironment: enabledEnv,
+    });
+    await reEnabled.initialize();
+    expect(reEnabled.get('authoritative-valid')?.version).toBe(cachedHash?.slice(0, 12));
+  });
+
+  it('cacheTemplate stores a v2 template with the unified environment seam', async () => {
+    const { paths, templateRoot } = makeTempCorePathsWith();
+    copyFixture(V2_FIXTURE, 'authoritative-valid', templateRoot);
+    const env = createAuthoritativeReviewTestEnvironment();
+    const frozen = await loadTemplateDirectory(join(templateRoot, 'authoritative-valid'), {
+      runtimeEnvironment: createTestRuntimeEnvironment(),
+      authoritativeReviewEnvironment: env,
+    });
+    const cached = await cacheTemplate(paths, frozen, createTestRuntimeEnvironment(), env);
+    expect(cached.frozen.versionHash).toBe(frozen.versionHash);
+  });
+});
+

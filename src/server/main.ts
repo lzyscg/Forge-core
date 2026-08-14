@@ -26,6 +26,7 @@
 import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import { CoreService } from './core-service';
+import { createProductionAuthoritativeReviewEnvironment } from './structured-slots/authoritative-review-capability';
 import {
   BOUNDARY_SHUTDOWN_FILE_NAME,
   createAcceptanceBoundaryHook,
@@ -133,11 +134,15 @@ async function main(): Promise<void> {
       : undefined;
 
   // One explicit CoreService so the runtime selection stays visible at the
-  // entry point; the server receives it pre-initialized.
+  // entry point; the server receives it pre-initialized. The ONE authoritative
+  // review environment comes from the checked-in production manifest load
+  // (disabled until promotion) and threads through Catalog/cache/TaskStore/
+  // scheduler/runner (spec §17) — never a second default.
   const paths = CorePaths.create({ dataRoot, templateRoot });
   const coreService = new CoreService(paths, {
     ...(runtimeKind === 'fake' ? { runtime: buildRuntime('fake', paths) } : {}),
     ...(acceptanceStopAfterCommit !== undefined ? { acceptanceStopAfterCommit } : {}),
+    authoritativeReviewEnvironment: createProductionAuthoritativeReviewEnvironment(),
   });
   serviceHolder.service = coreService;
   await coreService.initialize();

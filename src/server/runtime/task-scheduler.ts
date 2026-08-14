@@ -66,6 +66,7 @@ import type { CommittedEvent } from '../storage/event-store';
 import type { TaskEvent } from '../storage/task-events';
 import { isTurnContractSupported, TEMPLATE_ERROR_CODES, type FrozenTemplate } from '../template/template-schema';
 import type { StructuredRuntimeEnvironmentV1 } from '../structured-slots/runtime-capability';
+import type { AuthoritativeReviewRuntimeEnvironmentV1 } from '../structured-slots/authoritative-review-capability';
 import { isStructuredRuntimeEnabled } from '../structured-slots/runtime-capability';
 import { STORAGE_ERROR_CODES, StorageError } from '../storage/atomic-file';
 import { StructuredSlotPrivateStore } from '../storage/structured-slot-private-store';
@@ -293,6 +294,12 @@ export interface TaskSchedulerOptions {
    * and never an environment-variable fallback.
    */
   runtimeEnvironment?: StructuredRuntimeEnvironmentV1;
+  /**
+   * The ONE authoritative review runtime environment (spec §17, Task 5): the
+   * same immutable reference frozen in CoreService construction. V2 gates
+   * recheck it; never a second default.
+   */
+  authoritativeReviewEnvironment?: AuthoritativeReviewRuntimeEnvironmentV1;
   /** Retry timing hooks; production defaults unless tests inject their own. */
   retryPolicy?: RetryPolicyHooks;
   /**
@@ -459,6 +466,8 @@ export class TaskScheduler {
 
   readonly #runtimeEnvironment: StructuredRuntimeEnvironmentV1 | undefined;
 
+  readonly #authoritativeReviewEnvironment: AuthoritativeReviewRuntimeEnvironmentV1 | undefined;
+
   readonly #maxAutoRetries: number;
 
   readonly #retryDelayMs: (retryNumber: number) => number;
@@ -478,6 +487,7 @@ export class TaskScheduler {
     this.#runner = options.runner;
     this.runtime = options.runtime;
     this.#runtimeEnvironment = options.runtimeEnvironment;
+    this.#authoritativeReviewEnvironment = options.authoritativeReviewEnvironment;
     const policy = options.retryPolicy ?? {};
     this.#maxAutoRetries = policy.maxAutoRetries ?? MAX_AUTO_RETRIES;
     this.#retryDelayMs = policy.delayMs ?? ((retryNumber) => autoRetryDelayMs(retryNumber));

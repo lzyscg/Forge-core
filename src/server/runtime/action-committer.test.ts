@@ -822,6 +822,8 @@ function forwardChainFrozen(): FrozenTemplate {
     productionMode: 'basic',
     structuredSlots: null,
     structuredPhases: null,
+    structuredReviewLifecycle: null,
+    authoritativeReviewProfile: null,
     inputFields: [],
     agents: [
       { id: 'writer', name: '写作 Agent', description: '', systemPrompt: '', model: 'configured/writer-model', skills: [], gate: null, slotCapabilities: [], turnContract: writerContract },

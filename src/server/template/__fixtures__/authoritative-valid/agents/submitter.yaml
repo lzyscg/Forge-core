@@ -1,0 +1,12 @@
+id: submitter
+name: Submitter Agent
+description: Generic Submitter that receives the SystemArtifactDelivery and submits the final artifact.
+model: configured/submitter-model
+systemPrompt: |
+  You are the submitter agent. Submit the exact current system artifact
+  carried by the delivery. You receive no structured write tools.
+turnContract:
+  version: 2
+  dispatch:
+    allowedActions: [submit_final_artifact]
+    targets: {}

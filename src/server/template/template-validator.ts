@@ -10,12 +10,17 @@
 import { parse } from 'yaml';
 import type { InputField } from '../../shared/contracts';
 import { PROGRESS_POLICY_CEILING, type ProgressPolicy } from '../runtime/progress-guard';
+import type { SlotCapabilityV2, StructuredSessionKindV2 } from './structured-slot-contract-v2';
 import {
   TEMPLATE_ERROR_CODES,
   TemplateError,
+  type ArtifactSystemProducerRef,
+  type AuthoritativeReviewLifecycleV1,
+  type AuthoritativeStructuredTurnContractV4,
   type SlotCapabilityV1,
   type StructuredTurnContractV3,
 } from './template-schema';
+import { SLOT_CAPABILITIES_V2 } from './structured-slot-contract-v2';
 
 const RELOAD_ACTION = '修正模板文件后重新加载模板。';
 
@@ -207,7 +212,8 @@ export interface ValidatedRoute {
 export interface ValidatedArtifactFile {
   name: string;
   required: boolean;
-  producer: string;
+  /** Agent producer (safe id) or the v2 system producer reference (spec §6.3). */
+  producer: string | ArtifactSystemProducerRef;
   extract: string;
   phase: 'create' | 'annotate';
 }
@@ -227,6 +233,11 @@ export interface ValidatedPipelineFile {
   submitters: string[];
   artifactSchema: ValidatedArtifactSchema;
   /**
+   * The v2 pipeline lifecycle block (spec §6.3); null on basic and contract-v1
+   * templates. Its presence is what admits the system artifact producer.
+   */
+  structuredReviewLifecycle: AuthoritativeReviewLifecycleV1 | null;
+  /**
    * Optional per-template progress budget (plan 2026-08-06): overrides the
    * scheduler-injected progress policy for every task frozen from this
    * template. Null when the pipeline declares none.
@@ -234,10 +245,35 @@ export interface ValidatedPipelineFile {
   budget: ProgressPolicy | null;
 }
 
+/** Exact YAML shape of the explicit system producer branch (spec §6.3). */
+function parseArtifactProducer(
+  fileName: string,
+  raw: unknown,
+  where: string,
+  options: { allowSystemProducer: boolean },
+): string | ArtifactSystemProducerRef {
+  if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
+    const record = raw as Record<string, unknown>;
+    const keys = Object.keys(record);
+    if (keys.length === 1 && keys[0] === 'system') {
+      if (record['system'] !== 'structured_seal') {
+        invalid(fileName, `${where}.system 必须是 structured_seal。`);
+      }
+      if (!options.allowSystemProducer) {
+        invalid(fileName, `${where} 的系统生产者仅适用于声明了 structuredReviewLifecycle 的 contract v2 模板。`);
+      }
+      return { kind: 'system', systemId: 'structured_seal' };
+    }
+    invalid(fileName, `${where} 必须是声明过的 Agent 或 { system: structured_seal }。`);
+  }
+  return asSafeId(fileName, raw, `${where}`);
+}
+
 function validateArtifactSchema(
   fileName: string,
   raw: unknown,
   agents: ReadonlySet<string>,
+  options: { allowSystemProducer: boolean },
 ): ValidatedArtifactSchema {
   const root = asRecord(fileName, raw, 'artifactSchema');
   const entries = asArray(fileName, root.files, 'artifactSchema.files');
@@ -248,8 +284,15 @@ function validateArtifactSchema(
     const name = asSafeId(fileName, item.name, `artifactSchema.files[${index}].name`);
     if (seen.has(name)) invalid(fileName, `artifactSchema.files 中 ${name} 重复。`);
     seen.add(name);
-    const producer = asSafeId(fileName, item.producer, `artifactSchema.files[${index}].producer`);
-    if (!agents.has(producer)) invalid(fileName, `artifactSchema.files[${index}].producer 未声明。`);
+    const producer = parseArtifactProducer(
+      fileName,
+      item.producer,
+      `artifactSchema.files[${index}].producer`,
+      options,
+    );
+    if (typeof producer === 'string' && !agents.has(producer)) {
+      invalid(fileName, `artifactSchema.files[${index}].producer 未声明。`);
+    }
     const phase = asEnum(fileName, item.phase, `artifactSchema.files[${index}].phase`, ['create', 'annotate']);
     return {
       name,
@@ -274,6 +317,53 @@ function validateInject(fileName: string, raw: unknown, index: number): Validate
   };
 }
 
+/** Exact shape of the v2 pipeline lifecycle block (spec §6.3, frozen). */
+const REVIEW_LIFECYCLE_FIELDS = ['protocol', 'roleBindings', 'systemArtifactProducer'] as const;
+const ROLE_BINDING_FIELDS = ['orchestrator', 'generator', 'reviewer', 'submitter'] as const;
+const AUTHORITATIVE_PROTOCOL = 'authoritative_review_v1';
+const SYSTEM_ARTIFACT_PRODUCER_LITERAL = 'system:structured_seal';
+
+/**
+ * Parses the optional `structuredReviewLifecycle` block. Only structured
+ * templates may carry it; the block is REQUIRED for contract-v2 templates
+ * (load-time rule) and forbidden on basic/v1 templates (fail-closed
+ * cross-version field). The system producer literal `system:structured_seal`
+ * is NOT a safe Agent id and never becomes an Agent/Route target.
+ */
+function parseReviewLifecycle(fileName: string, raw: unknown): AuthoritativeReviewLifecycleV1 | null {
+  if (raw === undefined || raw === null) {
+    return null;
+  }
+  const block = asRecord(fileName, raw, 'structuredReviewLifecycle');
+  for (const key of Object.keys(block)) {
+    if (!(REVIEW_LIFECYCLE_FIELDS as readonly string[]).includes(key)) {
+      invalid(fileName, `structuredReviewLifecycle 存在未知字段 ${key}。`);
+    }
+  }
+  const protocol = asEnum(fileName, block.protocol, 'structuredReviewLifecycle.protocol', [AUTHORITATIVE_PROTOCOL]);
+  if (block.systemArtifactProducer !== SYSTEM_ARTIFACT_PRODUCER_LITERAL) {
+    invalid(fileName, `structuredReviewLifecycle.systemArtifactProducer 必须精确等于 ${SYSTEM_ARTIFACT_PRODUCER_LITERAL}。`);
+  }
+  const roleBindingsRaw = asRecord(fileName, block.roleBindings, 'structuredReviewLifecycle.roleBindings');
+  for (const key of Object.keys(roleBindingsRaw)) {
+    if (!(ROLE_BINDING_FIELDS as readonly string[]).includes(key)) {
+      invalid(fileName, `structuredReviewLifecycle.roleBindings 存在未知角色 ${key}。`);
+    }
+  }
+  const requireBinding = (role: string): string =>
+    asSafeId(fileName, roleBindingsRaw[role], `structuredReviewLifecycle.roleBindings.${role}`);
+  return {
+    protocol,
+    roleBindings: {
+      orchestrator: requireBinding('orchestrator'),
+      generator: requireBinding('generator'),
+      reviewer: requireBinding('reviewer'),
+      submitter: requireBinding('submitter'),
+    },
+    systemArtifactProducer: SYSTEM_ARTIFACT_PRODUCER_LITERAL,
+  };
+}
+
 /** Validates pipeline.yaml: deterministic Agent order, routes and final submitters. */
 export function validatePipelineFile(fileName: string, raw: unknown): ValidatedPipelineFile {
   const root = asRecord(fileName, raw, 'pipeline.yaml');
@@ -293,9 +383,17 @@ export function validatePipelineFile(fileName: string, raw: unknown): ValidatedP
     seenAgents.add(agentId);
   }
 
-  const artifactSchema = root.artifactSchema === undefined || root.artifactSchema === null
-    ? { files: [{ name: 'content.md', required: true, producer: agents[0]!, extract: 'content', phase: 'create' as const }] }
-    : validateArtifactSchema(fileName, root.artifactSchema, seenAgents);
+  const structuredReviewLifecycle = parseReviewLifecycle(fileName, root.structuredReviewLifecycle);
+  if (structuredReviewLifecycle !== null && productionMode !== 'structured_slots') {
+    invalid(fileName, 'structuredReviewLifecycle 仅适用于 productionMode: structured_slots 模板。');
+  }
+
+  const artifactSchema =
+    root.artifactSchema === undefined || root.artifactSchema === null
+      ? { files: [{ name: 'content.md', required: true, producer: agents[0]!, extract: 'content', phase: 'create' as const }] }
+      : validateArtifactSchema(fileName, root.artifactSchema, seenAgents, {
+          allowSystemProducer: structuredReviewLifecycle !== null,
+        });
   const routes = asArray(fileName, root.routes, 'routes').map((entry, index) => {
     const route = asRecord(fileName, entry, `routes[${index}]`);
     const inject = route.inject === undefined || route.inject === null
@@ -332,7 +430,15 @@ export function validatePipelineFile(fileName: string, raw: unknown): ValidatedP
     if (turns < 1 || turns > PROGRESS_POLICY_CEILING) invalid(fileName, `budget.maxTurnsSinceHumanAnswer 必须在 1 到 ${PROGRESS_POLICY_CEILING} 之间。`);
     budget = Object.freeze({ maxTurnsSinceHumanAnswer: turns });
   }
-  return { productionMode, agents, routes, submitters, artifactSchema, budget };
+  return {
+    productionMode,
+    agents,
+    routes,
+    submitters,
+    artifactSchema,
+    structuredReviewLifecycle,
+    budget,
+  };
 }
 export interface ValidatedAgentSkill {
   id: string;
@@ -373,7 +479,22 @@ export interface ValidatedBasicTurnContract {
 /** Structural shape of one validated v3 structured turn contract (spec §3.2). */
 export type ValidatedTurnContractV3 = StructuredTurnContractV3;
 
-export type ValidatedTurnContract = ValidatedBasicTurnContract | ValidatedTurnContractV3;
+/** Structural shape of one validated v4 authoritative turn contract (spec §6.4). */
+export type ValidatedTurnContractV4 = AuthoritativeStructuredTurnContractV4;
+
+export type ValidatedTurnContract = ValidatedBasicTurnContract | ValidatedTurnContractV3 | ValidatedTurnContractV4;
+
+/** The eight closed v2 session kinds (design §9, frozen in the Task 4 compiler). */
+const V4_SESSION_KINDS: readonly StructuredSessionKindV2[] = [
+  'structure_chunk',
+  'review_map_batch',
+  'review_map_whole',
+  'generation_batch',
+  'review_content_batch',
+  'review_content_whole',
+  'map_repair',
+  'content_repair',
+];
 
 /** The ten closed slot capabilities v1 (design §10.2). */
 export const SLOT_CAPABILITIES_V1: readonly SlotCapabilityV1[] = [
@@ -392,6 +513,7 @@ export const SLOT_CAPABILITIES_V1: readonly SlotCapabilityV1[] = [
 const PRODUCTION_SOURCES = ['inline', 'workspace_file', 'current_input_artifact'] as const;
 const DISPATCH_INTENTS = ['send_message', 'publish_artifact', 'submit_final_artifact', 'forward_input_version', 'request_human_input'] as const;
 const V3_DISPATCH_INTENTS = ['send_message', 'publish_artifact', 'submit_final_artifact', 'request_human_input'] as const;
+const V4_DISPATCH_INTENTS = ['request_human_input'] as const;
 const V3_SESSION_KINDS = ['structure', 'fill', 'seal'] as const;
 const V3_COMPLETIONS = [
   'structure_commit_candidate_created',
@@ -498,6 +620,102 @@ function validateTurnContractV3(
   };
 }
 
+/**
+ * Validates a v4 authoritative turn contract (spec §6.4). Shape-only: session
+ * kinds, access profiles and capabilities are closed-union members; the
+ * cross-agent role/capability matrix runs in the v2 pipeline validator.
+ */
+function validateTurnContractV4(
+  fileName: string,
+  contract: Record<string, unknown>,
+): ValidatedTurnContractV4 {
+  if (contract.production !== undefined && contract.production !== null) {
+    invalid(fileName, 'v4 turnContract 不能声明 production。');
+  }
+  if (contract.annotate !== undefined && contract.annotate !== null) {
+    invalid(fileName, 'v4 turnContract 不能声明 annotate。');
+  }
+  const authoritativeReview = asRecord(fileName, contract.authoritativeReview, 'turnContract.authoritativeReview');
+
+  const sessionRaw = authoritativeReview.allowedSessionKinds;
+  const allowedSessionKinds = asArray(
+    fileName,
+    sessionRaw,
+    'turnContract.authoritativeReview.allowedSessionKinds',
+  ).map((entry, index) =>
+    asEnum(fileName, entry, `turnContract.authoritativeReview.allowedSessionKinds[${index}]`, V4_SESSION_KINDS),
+  );
+  if (allowedSessionKinds.length === 0) {
+    invalid(fileName, 'turnContract.authoritativeReview.allowedSessionKinds 至少需要一个会话类型。');
+  }
+  const seenKinds = new Set<StructuredSessionKindV2>();
+  for (const kind of allowedSessionKinds) {
+    if (seenKinds.has(kind)) invalid(fileName, `会话类型 ${kind} 重复。`);
+    seenKinds.add(kind);
+  }
+
+  const capabilities: SlotCapabilityV2[] = [];
+  const seenCapabilities = new Set<string>();
+  for (const entry of asArray(
+    fileName,
+    authoritativeReview.capabilities,
+    'turnContract.authoritativeReview.capabilities',
+  )) {
+    const capability = asString(fileName, entry, 'turnContract.authoritativeReview.capabilities 成员', {
+      required: true,
+    });
+    if (!(SLOT_CAPABILITIES_V2 as readonly string[]).includes(capability)) {
+      invalid(fileName, `能力 ${capability} 不属于封闭的 SlotCapabilityV2 联合。`);
+    }
+    if (seenCapabilities.has(capability)) {
+      invalid(fileName, `能力 ${capability} 重复。`);
+    }
+    seenCapabilities.add(capability);
+    capabilities.push(capability as SlotCapabilityV2);
+  }
+  if (capabilities.length === 0) {
+    invalid(fileName, 'turnContract.authoritativeReview.capabilities 至少需要一个能力。');
+  }
+
+  let accessProfiles: AuthoritativeStructuredTurnContractV4['authoritativeReview']['accessProfiles'] = {};
+  if (authoritativeReview.accessProfiles !== undefined && authoritativeReview.accessProfiles !== null) {
+    const map = asRecord(fileName, authoritativeReview.accessProfiles, 'turnContract.authoritativeReview.accessProfiles');
+    for (const [kind, profile] of Object.entries(map)) {
+      if (!(V4_SESSION_KINDS as readonly string[]).includes(kind)) {
+        invalid(fileName, `turnContract.authoritativeReview.accessProfiles 包含未知会话类型 ${kind}。`);
+      }
+      accessProfiles[kind as StructuredSessionKindV2] =
+        profile === null ? null : asSafeId(fileName, profile, `turnContract.authoritativeReview.accessProfiles.${kind}`);
+    }
+  }
+  for (const kind of allowedSessionKinds) {
+    if (!(kind in accessProfiles)) {
+      invalid(fileName, `turnContract.authoritativeReview.accessProfiles 必须覆盖会话类型 ${kind}。`);
+    }
+  }
+
+  const dispatch = asRecord(fileName, contract.dispatch, 'turnContract.dispatch');
+  const allowedActions = asArray(
+    fileName,
+    dispatch.allowedActions,
+    'turnContract.dispatch.allowedActions',
+  ).map((entry, index) =>
+    asEnum(fileName, entry, `turnContract.dispatch.allowedActions[${index}]`, V4_DISPATCH_INTENTS),
+  );
+  if (new Set(allowedActions).size !== allowedActions.length) {
+    invalid(fileName, 'turnContract.dispatch.allowedActions 存在重复。');
+  }
+  const targets = asRecord(fileName, dispatch.targets, 'turnContract.dispatch.targets');
+  if (Object.keys(targets).length !== 0) {
+    invalid(fileName, 'v4 turnContract.dispatch.targets 必须为空。');
+  }
+  return {
+    version: 4,
+    authoritativeReview: { allowedSessionKinds, accessProfiles, capabilities },
+    dispatch: { allowedActions, targets: {} },
+  };
+}
+
 /** Validates the required `turnContract` block of one agent file (spec §6). */
 function validateTurnContract(fileName: string, raw: unknown): ValidatedTurnContract {
   const contract = asRecord(fileName, raw, 'turnContract');
@@ -505,7 +723,10 @@ function validateTurnContract(fileName: string, raw: unknown): ValidatedTurnCont
   if (version === 3) {
     return validateTurnContractV3(fileName, contract);
   }
-  if (version !== 1 && version !== 2) invalid(fileName, 'turnContract.version 仅支持 1、2 或 3。');
+  if (version === 4) {
+    return validateTurnContractV4(fileName, contract);
+  }
+  if (version !== 1 && version !== 2) invalid(fileName, 'turnContract.version 仅支持 1、2、3 或 4。');
 
   let production: ValidatedBasicTurnContract['production'];
   if (contract.production !== undefined && contract.production !== null) {

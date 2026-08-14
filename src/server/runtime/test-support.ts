@@ -717,6 +717,8 @@ export function frozenSnapshotFixture(): FrozenTemplate {
     productionMode: 'basic',
     structuredSlots: null,
     structuredPhases: null,
+    structuredReviewLifecycle: null,
+    authoritativeReviewProfile: null,
     inputFields: [],
     agents: [
       {

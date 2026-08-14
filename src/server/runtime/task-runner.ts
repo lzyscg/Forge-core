@@ -47,10 +47,13 @@ import { StructuredSlotBlobStore } from '../storage/structured-slot-blob-store';
 import { StructuredSlotPrivateStore } from '../storage/structured-slot-private-store';
 import type { MergeCommitCandidate, StructureCommitCandidate } from '../storage/structured-slot-private-store';
 import { projectStructuredSlotState } from '../storage/structured-slot-state';
-import type { FrozenAgentConfig, FrozenTemplate, StructuredTurnContractV3 } from '../template/template-schema';
-import { isStructuredTurnContractV3, TEMPLATE_ERROR_CODES, TemplateError } from '../template/template-schema';
+import type { BasicTurnContractV1, BasicTurnContractV2, FrozenAgentConfig, FrozenTemplate, StructuredTurnContractV3 } from '../template/template-schema';
+import type { FrozenStructuredSlotContractV1 } from '../template/structured-slot-contract';
+import { isAuthoritativeStructuredTurnContractV4, isStructuredTurnContractV3, TEMPLATE_ERROR_CODES, TemplateError } from '../template/template-schema';
 import type { StructuredRuntimeEnvironmentV1 } from '../structured-slots/runtime-capability';
+import type { AuthoritativeReviewRuntimeEnvironmentV1 } from '../structured-slots/authoritative-review-capability';
 import { isStructuredRuntimeEnabled } from '../structured-slots/runtime-capability';
+import { isAuthoritativeReviewRunnable as isAuthoritativeReviewRuntimeRunnable } from '../structured-slots/authoritative-review-capability';
 import type {
   FillSessionGrantV1,
   SealSessionGrantV1,
@@ -166,6 +169,12 @@ export interface TaskRunnerOptions {
    * turns fail closed with `TEMPLATE_RUNTIME_UNAVAILABLE` when it is disabled.
    */
   runtimeEnvironment?: StructuredRuntimeEnvironmentV1;
+  /**
+   * The ONE authoritative review runtime environment (spec §17, Task 5): the
+   * same immutable reference frozen in CoreService construction. V2 dispatch
+   * gates recheck it; never a second default.
+   */
+  authoritativeReviewEnvironment?: AuthoritativeReviewRuntimeEnvironmentV1;
 }
 
 /** Per-call retry context the scheduler supplies (plan Task 5 Step 3). */
@@ -613,18 +622,20 @@ export function buildTurnChecklist(agent: FrozenAgentConfig, frozen: FrozenTempl
   }
   // v3 slot-session contracts run on the structured runNext path (Task 17),
   // which carries its own corrective completion prompt; the basic checklist
-  // never applies to them.
-  if (isStructuredTurnContractV3(contract)) {
+  // never applies to them. v4 authoritative contracts likewise never run the
+  // basic checklist — v2 turns are system-coordinated (Task 10+).
+  if (isStructuredTurnContractV3(contract) || isAuthoritativeStructuredTurnContractV4(contract)) {
     return '';
   }
   const agentNameOf = (agentId: string): string =>
     frozen.agents.find((candidate) => candidate.id === agentId)?.name ?? agentId;
   const lines: string[] = ['【本回合任务清单】'];
 
-  const isProduction = contract.production !== undefined;
-  const isOperate = contract.annotate !== undefined;
+  const basic = contract as BasicTurnContractV1 | BasicTurnContractV2;
+  const isProduction = basic.production !== undefined;
+  const isOperate = basic.annotate !== undefined;
   const targetsOf = (action: string): string[] => {
-    const map = contract.dispatch.targets as Record<string, string[] | undefined>;
+    const map = basic.dispatch.targets as Record<string, string[] | undefined>;
     return map[action] ?? [];
   };
   const renderTargets = (action: string): string | null => {
@@ -636,7 +647,7 @@ export function buildTurnChecklist(agent: FrozenAgentConfig, frozen: FrozenTempl
   };
 
   if (isProduction) {
-    const sourceLabels = (contract.production!.output.sources ?? []).map(
+    const sourceLabels = (basic.production!.output.sources ?? []).map(
       (source) => PRODUCTION_SOURCE_LABELS[source] ?? source,
     );
     lines.push('1. 产出本回合的内容。');
@@ -652,7 +663,7 @@ export function buildTurnChecklist(agent: FrozenAgentConfig, frozen: FrozenTempl
     lines.push('1. 执行恰好一次分发（见下方行动）。');
   }
 
-  const dispatchLines = contract.dispatch.allowedActions
+  const dispatchLines = basic.dispatch.allowedActions
     .filter((action) => action !== 'request_human_input')
     .map((action) => {
       const targetNames = renderTargets(action);
@@ -720,6 +731,8 @@ export class TaskRunner {
 
   private readonly runtimeEnvironment: StructuredRuntimeEnvironmentV1 | undefined;
 
+  private readonly authoritativeReviewEnvironment: AuthoritativeReviewRuntimeEnvironmentV1 | undefined;
+
   /**
    * Per-task pagination cursor signers (wiring note 9): ONE signer per task so
    * a model-held cursor keeps verifying across requests and turns within the
@@ -752,6 +765,7 @@ export class TaskRunner {
     this.clock = options.clock ?? (() => new Date());
     this.paths = options.paths;
     this.runtimeEnvironment = options.runtimeEnvironment;
+    this.authoritativeReviewEnvironment = options.authoritativeReviewEnvironment;
   }
 
   /**
@@ -1138,9 +1152,11 @@ ${checklist}`;
     autoRetryExhausted: boolean,
   ): Promise<RunNextResult> {
     const inputNodeId = input.id;
-    // Recheck the SAME runtime environment frozen in CoreService construction
+    // Recheck the SAME runtime environments frozen in CoreService construction
     // (design O05): the scheduler gates first; the runner rechecks so a
-    // structured Turn never runs under a disabled/defaulted environment.
+    // structured Turn never runs under a disabled/defaulted environment. A v2
+    // protocol turn needs the authoritative gate too (spec §17) and is not
+    // runnable through this v1 structured path at all.
     if (!isStructuredRuntimeEnabled(this.runtimeEnvironment)) {
       throw new TemplateError(
         TEMPLATE_ERROR_CODES.TEMPLATE_RUNTIME_UNAVAILABLE,
@@ -1155,6 +1171,21 @@ ${checklist}`;
         'STRUCTURED_CONTRACT_REQUIRED',
         '结构化模板缺少已冻结的结构槽契约。',
       );
+    }
+    if (contract.version === 2) {
+      // Contract-v2 turns run under the authoritative runtime (Task 10+); the
+      // v1 structured path must never interpret them (spec §4.4), and the
+      // authoritative gate is rechecked from the SAME frozen environment
+      // reference (spec §17) — never a second default.
+      if (!isAuthoritativeReviewRuntimeRunnable(this.authoritativeReviewEnvironment)) {
+        throw new TemplateError(
+          TEMPLATE_ERROR_CODES.TEMPLATE_RUNTIME_UNAVAILABLE,
+          'authoritative review 能力未就绪，无法运行该 v2 回合。',
+          null,
+          '等待 authoritative review 能力就绪后重试。',
+        );
+      }
+      throw RuntimeFailure.permanent('STRUCTURED_TURN_NOT_RUNNABLE', 'v2 回合需要权威评审运行路径。');
     }
     const turnContract = agent.turnContract;
     if (!isStructuredTurnContractV3(turnContract)) {
@@ -1454,7 +1485,7 @@ ${checklist}`;
       attemptEpoch,
       sessionKind,
       snapshotHash: bundle.snapshotHash,
-      contract: frozen.structuredSlots as NonNullable<FrozenTemplate['structuredSlots']>,
+      contract: frozen.structuredSlots as FrozenStructuredSlotContractV1,
       events: this.events,
       blobStore: bundle.blobStore,
       privateStore: bundle.privateStore,
@@ -1582,7 +1613,7 @@ ${checklist}`;
     snapshotHash: string;
     frozen: FrozenTemplate;
     v3Contract: StructuredTurnContractV3;
-    contract: NonNullable<FrozenTemplate['structuredSlots']>;
+    contract: FrozenStructuredSlotContractV1;
     blobStore: StructuredSlotBlobStore;
     privateStore: StructuredSlotPrivateStore;
     events: readonly TaskEvent[];

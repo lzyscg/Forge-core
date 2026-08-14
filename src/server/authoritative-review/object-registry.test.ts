@@ -22,6 +22,7 @@ import {
   refOfBlob,
   registeredKinds,
 } from './object-registry';
+import { createAuthoritativeReviewTestEnvironment } from '../structured-slots/test-support/authoritative-review-test-registry';
 
 describe('registry exhaustiveness (§7.1)', () => {
   it('registers every member of the closed 59-kind union', () => {
@@ -55,18 +56,17 @@ describe('registry exhaustiveness (§7.1)', () => {
 });
 
 describe('profile_snapshot (§4.3/§7.1)', () => {
+  /**
+   * The complete canonical profile body (Task 5 extension): the registered
+   * parser accepts the envelope PLUS the exact runtime/template/installed
+   * handlers/budget/assembler groups, keeping the digest rule intact (Task 3
+   * comment: "Task 5 extends the limit body while keeping this envelope
+   * contract").
+   */
   function profileValue(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    const { profile } = createAuthoritativeReviewTestEnvironment();
     return {
-      schemaVersion: 1,
-      profileIdentity: 'forge-authoritative-review/v1',
-      profileVersion: 3,
-      qualificationState: 'provisional',
-      profileDigest: '',
-      abi: {
-        validatorAbi: 'forge-validator/v2',
-        assemblerAbi: 'forge-assembler/v2',
-        profileAbi: 'forge-authoritative-review/v1',
-      },
+      ...(profile as unknown as Record<string, unknown>),
       ...overrides,
     };
   }

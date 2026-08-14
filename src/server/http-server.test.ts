@@ -1,7 +1,13 @@
 // @vitest-environment node
+import { cpSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createForgeCoreServer } from './http-server';
-import { disposeAllTestRoots, testServerOptions } from './test-support';
+import { disposeAllTestRoots, makeTempCorePaths, testServerOptions } from './test-support';
+import { CoreService } from './core-service';
+import { TEMPLATE_ERROR_CODES } from './template/template-schema';
 
 afterEach(() => {
   disposeAllTestRoots();
@@ -64,5 +70,39 @@ describe('ForgeCoreServer', () => {
     const baseUrl = await server.listen(0);
     await server.close();
     await expect(fetch(`${baseUrl}/api/health`)).rejects.toThrow();
+  });
+
+  it('boots with the disabled authoritative production capability and gates v2 templates (Task 5)', async () => {
+    const { paths, templateRoot } = makeTempCorePaths('forge-core-http-auth-');
+    cpSync(
+      fileURLToPath(new URL('template/__fixtures__/authoritative-valid', import.meta.url)),
+      join(templateRoot, 'authoritative-valid'),
+      { recursive: true },
+    );
+    const coreService = new CoreService(paths);
+    await coreService.initialize();
+    const server = await createForgeCoreServer({
+      mode: 'test',
+      dataRoot: paths.dataRoot,
+      templateRoot,
+      coreService,
+    });
+    const baseUrl = await server.listen(0);
+    try {
+      // The production authoritative env loads (disabled) and the server is
+      // healthy; the contract-v2 source is never exposed while disabled.
+      expect(await (await fetch(`${baseUrl}/api/health`)).json()).toEqual({
+        ok: true,
+        service: 'forge-core',
+        mode: 'http',
+      });
+      const templates = await (await fetch(`${baseUrl}/api/templates`)).json();
+      expect(templates).toEqual([]);
+      expect(coreService.templates.getDiagnostic('authoritative-valid')?.code).toBe(
+        TEMPLATE_ERROR_CODES.TEMPLATE_RUNTIME_UNAVAILABLE,
+      );
+    } finally {
+      await server.close();
+    }
   });
 });

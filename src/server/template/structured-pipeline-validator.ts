@@ -191,6 +191,12 @@ function assertV2PostSeal(agent: FrozenAgentConfig): void {
   if (tc === null || tc.version === 3) {
     return;
   }
+  if (tc.version === 4) {
+    pipelineInvalid(
+      agentFile(agent.id),
+      `v1 structured 模板不能携带 v4 回合契约（${agent.id} 的 v4 契约属于 contract v2 协议）。`,
+    );
+  }
   if (tc.production !== undefined) {
     pipelineInvalid(
       agentFile(agent.id),
@@ -309,13 +315,22 @@ function computeTypestate(frozen: FrozenTemplate): Map<string, ReadonlySet<Scaff
 /**
  * Validates one structured pipeline and returns the compiled phase contract.
  * Throws a `TemplateError` (TEMPLATE_INVALID) on any capability, dispatch or
- * typestate violation. Only meaningful for `productionMode: 'structured_slots'`.
+ * typestate violation. Only meaningful for `productionMode: 'structured_slots'`
+ * CONTRACT V1 templates: v4 turn contracts and the v2 lifecycle block belong
+ * to the authoritative (v2) pipeline validator (spec §4.2 — v1 receives no
+ * new defaults; cross-version fields fail rather than being ignored).
  */
 export function validateStructuredPipeline(
   frozen: FrozenTemplate,
 ): Map<string, ReadonlySet<ScaffoldPhase>> {
   if (frozen.productionMode !== 'structured_slots' || frozen.structuredSlots === null) {
     pipelineInvalid('pipeline.yaml', '结构化流水线校验仅适用于 structured_slots 模板。');
+  }
+  if (frozen.structuredSlots.version !== 1) {
+    pipelineInvalid('pipeline.yaml', 'v1 结构化流水线校验仅适用于 contract version 1 模板。');
+  }
+  if (frozen.structuredReviewLifecycle !== null) {
+    pipelineInvalid('pipeline.yaml', 'structuredReviewLifecycle 仅适用于 contract v2 模板。');
   }
   assertAgentMatrices(frozen, frozen.structuredSlots);
   return computeTypestate(frozen);

@@ -1,0 +1,29 @@
+id: structure
+name: Structure Agent
+description: Orchestrator that appends MapBuild chunks and submits Map repair patches.
+model: configured/structure-model
+systemPrompt: |
+  You are the structure agent. Append map build chunks against the frontier
+  key ledger and submit map patches inside repair scopes. Finish only proposes
+  a candidate; the system finalizes and reviews it.
+turnContract:
+  version: 4
+  authoritativeReview:
+    allowedSessionKinds: [structure_chunk, map_repair]
+    accessProfiles:
+      structure_chunk: builder
+      map_repair: builder
+    capabilities:
+      - read_structure_contract
+      - read_map_build_frontier
+      - append_map_candidate_chunk
+      - finish_map_build
+      - read_active_map
+      - read_slot_content
+      - read_map_repair_staging
+      - write_map_patch
+      - submit_map_patch
+      - request_scope_expansion
+  dispatch:
+    allowedActions: []
+    targets: {}

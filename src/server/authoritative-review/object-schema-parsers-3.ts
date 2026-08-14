@@ -5,7 +5,18 @@
  * combinations with `SchemaError`.
  */
 import type { BlobRefV2 } from '../../shared/authoritative-review-v2';
+import { AUTHORITATIVE_BLOB_KINDS_V2 } from '../../shared/authoritative-review-v2';
 import { canonicalJsonSha256 } from '../structured-slots/canonical-json';
+import {
+  AUTHORITATIVE_REVIEW_PROFILE_SNAPSHOT_MAX_BYTES,
+  PROFILE_ASSEMBLER_BUDGET_FIELDS,
+  PROFILE_ASSEMBLER_IDENTITY_FIELDS,
+  PROFILE_BUDGET_PROFILE_FIELDS,
+  PROFILE_RUNTIME_FIELDS,
+  PROFILE_SNAPSHOT_GROUP_KEYS,
+  PROFILE_TEMPLATE_GROUPS,
+  PROFILE_VALIDATOR_IDENTITY_FIELDS,
+} from './object-schema-parsers-3-constants';
 import {
   SchemaError,
   type AssignmentLedgerBlobV2,
@@ -39,7 +50,6 @@ import {
   everyEmbeddedRef,
   hs,
   hx,
-  oInt,
   onn,
   parseEvidenceList,
   rec,
@@ -53,15 +63,17 @@ import {
   assertRefsSortedByDigest,
   assertSortedStrings,
 } from './schema-common';
-import { AUTHORITATIVE_REVIEW_PROFILE_SNAPSHOT_MAX_BYTES } from './object-schema-parsers-3-constants';
 
 /* ---- profile_snapshot (§4.3/§7.1) ------------------------------ */
 /**
  * Exact profile envelope: identity/version/qualification/ABIs plus
  * `profileDigest = sha256(canonical bytes with that field omitted)`. The
  * BlobRef digest is separately computed over the COMPLETE canonical object
- * bytes; the two identities never equal. Task 5 extends the limit body while
- * keeping this envelope contract.
+ * bytes; the two identities never equal. Task 5 extends the limit body
+ * (runtime/template/installedHandlers/budgetProfiles/assemblerBudget groups,
+ * field lists owned by object-schema-parsers-3-constants) while keeping this
+ * envelope contract and the digest rule. Semantic cross-group consistency is
+ * the profile module's job; this parser enforces the exact shape.
  */
 export function parseProfileSnapshotObject(value: unknown): {
   schemaVersion: 1;
@@ -72,7 +84,7 @@ export function parseProfileSnapshotObject(value: unknown): {
   abi: { validatorAbi: 'forge-validator/v2'; assemblerAbi: 'forge-assembler/v2'; profileAbi: 'forge-authoritative-review/v1' };
 } {
   const o = rec(value, 'profile_snapshot');
-  ex(o, ['schemaVersion', 'profileIdentity', 'profileVersion', 'qualificationState', 'profileDigest', 'abi'], 'profile_snapshot');
+  ex(o, ['schemaVersion', 'profileIdentity', 'profileVersion', 'qualificationState', 'profileDigest', 'abi', ...PROFILE_SNAPSHOT_GROUP_KEYS], 'profile_snapshot');
   if (o.schemaVersion !== 1) throw new SchemaError('profile_snapshot.schemaVersion must be 1');
   const qual = str(o.qualificationState, 'qualificationState');
   if (qual !== 'test_only' && qual !== 'provisional' && qual !== 'final') throw new SchemaError('profile_snapshot.qualificationState unknown');
@@ -81,6 +93,7 @@ export function parseProfileSnapshotObject(value: unknown): {
   if (abi.validatorAbi !== 'forge-validator/v2' || abi.assemblerAbi !== 'forge-assembler/v2' || abi.profileAbi !== 'forge-authoritative-review/v1') {
     throw new SchemaError('profile_snapshot.abi literals mismatch');
   }
+  parseProfileGroups(o);
   const copy = { ...o } as Record<string, unknown>;
   delete copy.profileDigest;
   const computed = canonicalJsonSha256(copy);
@@ -100,6 +113,102 @@ export function parseProfileSnapshotObject(value: unknown): {
       profileAbi: 'forge-authoritative-review/v1',
     },
   };
+}
+
+/** Exact closed shape of the five profile groups (Task 5 body extension). */
+function parseProfileGroups(o: Record<string, unknown>): void {
+  if (o.runtime === undefined || o.template === undefined || o.installedHandlers === undefined || o.budgetProfiles === undefined || o.assemblerBudget === undefined) {
+    throw new SchemaError('profile_snapshot must carry the runtime/template/installedHandlers/budgetProfiles/assemblerBudget groups');
+  }
+  parseProfileRuntimeGroup(rec(o.runtime, 'runtime'));
+  parseProfileTemplateGroup(rec(o.template, 'template'));
+  parseProfileInstalledHandlers(rec(o.installedHandlers, 'installedHandlers'));
+  parseProfileBudgetProfiles(rec(o.budgetProfiles, 'budgetProfiles'));
+  parseProfileAssemblerBudget(rec(o.assemblerBudget, 'assemblerBudget'));
+}
+
+/** Profile limits are positive finite integers (design §22.2, Task 4 convention). */
+function posInt(v: unknown, w: string): number {
+  const n = onn(v, w);
+  if (n < 1) throw new SchemaError(`${w} must be a positive integer`);
+  return n;
+}
+
+function parseProfileRuntimeGroup(runtime: Record<string, unknown>): void {
+  ex(runtime, PROFILE_RUNTIME_FIELDS, 'runtime');
+  const bytesByKind = rec(runtime.maxBytesByKind, 'runtime.maxBytesByKind');
+  for (const kind of AUTHORITATIVE_BLOB_KINDS_V2) {
+    posInt(bytesByKind[kind], `runtime.maxBytesByKind.${kind}`);
+  }
+  if (Object.keys(bytesByKind).length !== AUTHORITATIVE_BLOB_KINDS_V2.length) {
+    throw new SchemaError('runtime.maxBytesByKind must cover exactly the closed blob kind registry');
+  }
+  for (const field of PROFILE_RUNTIME_FIELDS) {
+    if (field === 'maxBytesByKind') continue;
+    posInt(runtime[field], `runtime.${field}`);
+  }
+}
+
+function parseProfileTemplateGroup(template: Record<string, unknown>): void {
+  if (Object.keys(template).length !== Object.keys(PROFILE_TEMPLATE_GROUPS).length) {
+    throw new SchemaError('template group key set mismatch');
+  }
+  for (const [group, fields] of Object.entries(PROFILE_TEMPLATE_GROUPS)) {
+    const groupValue = rec(template[group], `template.${group}`);
+    ex(groupValue, fields, `template.${group}`);
+    for (const field of fields) posInt(groupValue[field], `template.${group}.${field}`);
+  }
+}
+
+function parseProfileInstalledHandlers(handlers: Record<string, unknown>): void {
+  ex(handlers, ['validators', 'assembler'], 'installedHandlers');
+  const validators = (handlers.validators as unknown[]).map((v, i) => {
+    const entry = rec(v, `installedHandlers.validators[${i}]`);
+    ex(entry, PROFILE_VALIDATOR_IDENTITY_FIELDS, `installedHandlers.validators[${i}]`);
+    const trigger = str(entry.trigger, `installedHandlers.validators[${i}].trigger`);
+    if (!(TRIGGER_ENUM as readonly string[]).includes(trigger)) {
+      throw new SchemaError(`installedHandlers.validators[${i}].trigger unknown`);
+    }
+    const phase = entry.executionPhase;
+    if (phase !== null && phase !== 'batch_commit' && phase !== 'plan_finalize') {
+      throw new SchemaError(`installedHandlers.validators[${i}].executionPhase must be null|batch_commit|plan_finalize`);
+    }
+    if (trigger !== 'content_commit' && phase !== null) {
+      throw new SchemaError(`installedHandlers.validators[${i}].executionPhase is only legal for content_commit`);
+    }
+    return {
+      handlerKey: str(entry.handlerKey, `installedHandlers.validators[${i}].handlerKey`),
+      implementationDigest: hx(entry.implementationDigest, `installedHandlers.validators[${i}].implementationDigest`),
+      moduleId: str(entry.moduleId, `installedHandlers.validators[${i}].moduleId`),
+      exportName: str(entry.exportName, `installedHandlers.validators[${i}].exportName`),
+      trigger,
+      executionPhase: phase,
+    };
+  });
+  const keys = validators.map((e) => `${e.handlerKey}:${e.implementationDigest}:${e.trigger}:${String(e.executionPhase)}`);
+  for (let i = 1; i < keys.length; i++) {
+    if (keys[i - 1] >= keys[i]) throw new SchemaError('installedHandlers.validators must be sorted by identity');
+  }
+  const assembler = rec(handlers.assembler, 'installedHandlers.assembler');
+  ex(assembler, PROFILE_ASSEMBLER_IDENTITY_FIELDS, 'installedHandlers.assembler');
+  str(assembler.handlerKey, 'installedHandlers.assembler.handlerKey');
+  hx(assembler.implementationDigest, 'installedHandlers.assembler.implementationDigest');
+  str(assembler.moduleId, 'installedHandlers.assembler.moduleId');
+  str(assembler.exportName, 'installedHandlers.assembler.exportName');
+}
+
+function parseProfileBudgetProfiles(budgets: Record<string, unknown>): void {
+  if (Object.keys(budgets).length < 1) throw new SchemaError('budgetProfiles must declare at least one budget profile');
+  for (const [id, raw] of Object.entries(budgets)) {
+    const entry = rec(raw, `budgetProfiles.${id}`);
+    ex(entry, PROFILE_BUDGET_PROFILE_FIELDS, `budgetProfiles.${id}`);
+    for (const field of PROFILE_BUDGET_PROFILE_FIELDS) posInt(entry[field], `budgetProfiles.${id}.${field}`);
+  }
+}
+
+function parseProfileAssemblerBudget(budget: Record<string, unknown>): void {
+  ex(budget, PROFILE_ASSEMBLER_BUDGET_FIELDS, 'assemblerBudget');
+  for (const field of PROFILE_ASSEMBLER_BUDGET_FIELDS) posInt(budget[field], `assemblerBudget.${field}`);
 }
 
 /* ---- projection_checkpoint (§4.2/§16.2) ------------------------- */

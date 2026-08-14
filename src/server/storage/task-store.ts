@@ -31,6 +31,7 @@ import { STORAGE_ERROR_CODES, StorageError, writeNewAtomic } from './atomic-file
 import { loadTemplateDirectory } from '../template/template-loader';
 import { TEMPLATE_ERROR_CODES, TemplateError, type FrozenTemplate } from '../template/template-schema';
 import type { StructuredRuntimeEnvironmentV1 } from '../structured-slots/runtime-capability';
+import type { AuthoritativeReviewRuntimeEnvironmentV1 } from '../structured-slots/authoritative-review-capability';
 import type { TemplateCatalog } from '../template/template-catalog';
 
 export interface CreateTaskRequest {
@@ -170,6 +171,14 @@ export class TaskStore {
   private readonly runtimeEnvironment: StructuredRuntimeEnvironmentV1;
 
   /**
+   * The ONE authoritative review runtime environment (spec §17, Task 5),
+   * obtained from the same catalog: contract-v2 snapshot reopens revalidate
+   * against the identical capability/profile/registry reference. The store
+   * never reads or accepts a second default.
+   */
+  private readonly authoritativeReviewEnvironment: AuthoritativeReviewRuntimeEnvironmentV1;
+
+  /**
    * In-memory frozen-snapshot cache (plan 2026-08-06): a task snapshot is
    * immutable once frozen, so repeated reads may serve the cached object.
    * The scheduler consults it every guard iteration; without the cache each
@@ -182,6 +191,7 @@ export class TaskStore {
     this.paths = paths;
     this.catalog = catalog;
     this.runtimeEnvironment = catalog.runtimeEnvironment;
+    this.authoritativeReviewEnvironment = catalog.authoritativeReviewEnvironment;
   }
 
   /**
@@ -247,6 +257,7 @@ export class TaskStore {
       frozen = await loadTemplateDirectory(snapshotRoot, {
         historicalSnapshot: true,
         runtimeEnvironment: this.runtimeEnvironment,
+        authoritativeReviewEnvironment: this.authoritativeReviewEnvironment,
       });
     } catch (error) {
       // A structured snapshot whose host runtime is unavailable must surface

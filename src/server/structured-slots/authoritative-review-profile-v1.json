@@ -1,0 +1,205 @@
+{
+  "schemaVersion": 1,
+  "profileIdentity": "forge-authoritative-review/v1",
+  "profileVersion": 1,
+  "qualificationState": "test_only",
+  "profileDigest": "7e8e3fa1292c01e35ee09e3f87e65cd6171503ff45d5d74165a6ac9d163eb8a3",
+  "abi": {
+    "validatorAbi": "forge-validator/v2",
+    "assemblerAbi": "forge-assembler/v2",
+    "profileAbi": "forge-authoritative-review/v1"
+  },
+  "runtime": {
+    "maxBytesByKind": {
+      "artifact": 4194304,
+      "assignment_dispatch": 4194304,
+      "authority_base_set": 4194304,
+      "content_compatibility_proof": 4194304,
+      "content_plan_finalize_core": 4194304,
+      "content_revision_commit_core": 4194304,
+      "content_revision_manifest": 4194304,
+      "content_review_coverage_core": 4194304,
+      "content_review_settlement_core": 4194304,
+      "content_value": 4194304,
+      "content_version": 4194304,
+      "contribution_manifest": 4194304,
+      "failure_recovery_payload": 4194304,
+      "finding": 4194304,
+      "finding_set": 4194304,
+      "finding_stage_root": 4194304,
+      "finding_verification_record": 4194304,
+      "generation_plan_spec": 4194304,
+      "grant_instance": 4194304,
+      "local_validator_equivalence_proof": 4194304,
+      "map_build_chunk": 4194304,
+      "map_build_key_ledger": 4194304,
+      "map_build_manifest": 4194304,
+      "map_build_spec": 4194304,
+      "map_candidate": 4194304,
+      "map_candidate_validation_core": 4194304,
+      "map_review_bundle": 4194304,
+      "map_review_coverage_core": 4194304,
+      "map_review_settlement_core": 4194304,
+      "map_snapshot": 4194304,
+      "migration_activation_decision": 4194304,
+      "migration_intent_core": 4194304,
+      "migration_settlement_core": 4194304,
+      "migration_spec": 4194304,
+      "migration_validation_batch_result": 4194304,
+      "migration_validation_plan_spec": 4194304,
+      "profile_snapshot": 4194304,
+      "projection_checkpoint": 4194304,
+      "proposed_map_core": 4194304,
+      "publication_operation_payload": 4194304,
+      "repair_key_ledger": 4194304,
+      "repair_plan_spec": 4194304,
+      "repair_staging_root": 4194304,
+      "review_adoption_ledger": 4194304,
+      "review_adoption_root": 4194304,
+      "review_assignment_ledger": 4194304,
+      "review_bundle": 4194304,
+      "review_fact": 4194304,
+      "round_budget_override": 4194304,
+      "seal_record": 4194304,
+      "seal_validation_bundle": 4194304,
+      "system_artifact_delivery": 4194304,
+      "validation_receipt": 4194304,
+      "validation_warning_custody_root": 4194304,
+      "validation_warning_root": 4194304,
+      "validator_aggregate": 4194304,
+      "validator_failure": 4194304,
+      "validator_input_envelope": 4194304,
+      "write_grant_spec": 4194304
+    },
+    "maxSlots": 10000,
+    "maxRelationTotal": 4000,
+    "maxRelationsPerSlot": 64,
+    "maxRelationHops": 8,
+    "maxClosureNodes": 512,
+    "assignmentMaxPrimaryTargets": 256,
+    "assignmentMaxTotalObjects": 1024,
+    "maxFindingsPerPrimaryTarget": 64,
+    "maxFindingsPerRound": 4000,
+    "evidenceMaxBytesPerItem": 8192,
+    "evidenceMaxBytesTotal": 4194304,
+    "maxRepairGrantWriteSlots": 256,
+    "maxScopeExpansionsPerRound": 16,
+    "maxRoundsPerTrack": 32,
+    "maxPlannedWorkItemsPerRound": 16000,
+    "maxConsecutiveAttemptsWithoutProgress": 12,
+    "maxActiveLeasesPerTask": 1,
+    "mapChunkMaxNodes": 1024,
+    "mapChunkMaxRelations": 256
+  },
+  "template": {
+    "schema": {
+      "maxSchemaDepth": 8,
+      "maxSchemaNodes": 4096,
+      "maxEnumItems": 128,
+      "maxPatternLength": 512
+    },
+    "structure": {
+      "maxSlots": 10000,
+      "maxTreeDepth": 32,
+      "maxChildrenPerSlot": 1000
+    },
+    "payload": {
+      "maxSpecBytesPerSlot": 65536,
+      "maxContentBytesPerSlot": 1048576,
+      "maxScaffoldPayloadBytes": 67108864
+    },
+    "draft": {
+      "maxChangedSlots": 2000,
+      "maxDraftBytes": 16777216
+    },
+    "attempt": {
+      "maxSlotToolCallsPerAttempt": 512,
+      "maxValidationRunsPerAttempt": 16,
+      "maxValidatorInvocationsPerAttempt": 40000,
+      "maxAggregateValidatorCpuMsPerAttempt": 240000,
+      "maxAggregateValidatorWallClockMsPerAttempt": 480000,
+      "maxValidatorOutputBytesPerAttempt": 16777216,
+      "maxAttemptWallClockMs": 600000
+    },
+    "validation": {
+      "maxValidators": 64,
+      "maxValidatorInvocationsPerGate": 10000,
+      "maxAggregateValidatorCpuMsPerGate": 60000,
+      "maxAggregateValidatorWallClockMsPerGate": 120000,
+      "maxValidatorOutputBytesPerGate": 4194304,
+      "maxIssuesPerRun": 500
+    },
+    "output": {
+      "maxArtifactFiles": 64,
+      "maxArtifactBytesPerFile": 16777216,
+      "maxTotalArtifactBytes": 67108864
+    },
+    "relations": {
+      "maxRelationsPerMap": 4000,
+      "maxRelationsPerSlot": 64,
+      "maxRelationImpactHops": 8,
+      "maxRelationClosureNodes": 512
+    },
+    "authoritative": {
+      "maxAssignmentsPerRound": 1024,
+      "maxPlannedWorkItemsPerRound": 16000,
+      "maxConsecutiveAttemptsWithoutProgress": 12,
+      "maxFindingsPerSlot": 64,
+      "maxFindingsPerRelation": 32,
+      "maxFindingsPerRound": 4000,
+      "maxEvidenceBytesPerItem": 8192,
+      "maxEvidenceBytesTotal": 4194304,
+      "maxWriteSlotsPerRepairGrant": 256,
+      "maxScopeExpansionsPerRound": 16
+    }
+  },
+  "installedHandlers": {
+    "validators": [
+      {
+        "handlerKey": "authoritative.review.completeness",
+        "implementationDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "moduleId": "@forge/authoritative-review",
+        "exportName": "completeness",
+        "trigger": "map_candidate_commit",
+        "executionPhase": null
+      },
+      {
+        "handlerKey": "authoritative.review.coverage",
+        "implementationDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "moduleId": "@forge/authoritative-review",
+        "exportName": "coverage",
+        "trigger": "content_commit",
+        "executionPhase": "plan_finalize"
+      },
+      {
+        "handlerKey": "authoritative.review.slotSchema",
+        "implementationDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "moduleId": "@forge/authoritative-review",
+        "exportName": "slotSchema",
+        "trigger": "content_commit",
+        "executionPhase": "batch_commit"
+      }
+    ],
+    "assembler": {
+      "handlerKey": "authoritative.seal.render",
+      "implementationDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "moduleId": "@forge/authoritative-review",
+      "exportName": "renderSeal"
+    }
+  },
+  "budgetProfiles": {
+    "authoritative-validator-default": {
+      "maxInputBytes": 16777216,
+      "maxSelectedTargets": 256,
+      "maxDurationMs": 30000,
+      "maxOutputBytes": 4194304,
+      "maxIssues": 125,
+      "maxMemoryMiB": 256
+    }
+  },
+  "assemblerBudget": {
+    "maxTimeoutMs": 60000,
+    "maxInputBytes": 268435456,
+    "maxOutputBytes": 134217728
+  }
+}

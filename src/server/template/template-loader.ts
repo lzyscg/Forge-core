@@ -14,6 +14,12 @@ import { createHash } from 'node:crypto';
 import { readFile, readdir, realpath, stat } from 'node:fs/promises';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { StructuredRuntimeEnvironmentV1 } from '../structured-slots/runtime-capability';
+import type { AuthoritativeReviewRuntimeEnvironmentV1 } from '../structured-slots/authoritative-review-capability';
+import { isAuthoritativeReviewRunnable } from '../structured-slots/authoritative-review-capability';
+import type { AuthoritativeReviewProfileBindingV1 } from '../structured-slots/authoritative-review-profile';
+import { assertTemplateLimitsWithinProfile } from '../structured-slots/authoritative-review-profile';
+import type { AuthoritativeReviewProfileSnapshotV1Body } from '../structured-slots/authoritative-review-profile';
+import type { BlobRefV2 } from '../../shared/authoritative-review-v2';
 import {
   TEMPLATE_ERROR_CODES,
   TemplateError,
@@ -38,7 +44,14 @@ import {
   loadStructuredSlotContract,
   type FrozenStructuredSlotContractV1,
 } from './structured-slot-contract';
+import {
+  compileStructuredSlotContractV2,
+  peekStructuredSlotContractVersion,
+  type FrozenStructuredSlotContractV2,
+  type ImplementationIdentityClosureEntryV2,
+} from './structured-slot-contract-v2';
 import { validateStructuredPipeline } from './structured-pipeline-validator';
+import { validateAuthoritativeReviewPipeline } from './authoritative-review-pipeline-validator';
 
 const RELOAD_ACTION = '修正模板文件后重新加载模板。';
 
@@ -278,7 +291,10 @@ function hashCanonicalContract(contract: ValidatedTurnContract): unknown {
  * canonical form deliberately OMITS the `productionMode` default: a template
  * without (or with) `productionMode: basic` hashes identically to the
  * pre-change form, so old basic version hashes stay byte-for-byte identical
- * (spec §3.2 / design A03).
+ * (spec §3.2 / design A03). The v2 `structuredReviewLifecycle` block and a
+ * system artifact producer enter the hash ONLY when present — v1/basic
+ * payloads without them keep their exact legacy hashes (spec §4.2: no new
+ * default fields are injected into v1 normalization).
  */
 function buildBasicCanonical(source: CanonicalSource): unknown {
   return canonicalize({
@@ -292,6 +308,10 @@ function buildBasicCanonical(source: CanonicalSource): unknown {
       // template omits the key so legacy hashes stay reproducible (mirrors
       // the turnContract omission trick below).
       ...(source.pipeline.budget !== null ? { budget: source.pipeline.budget } : {}),
+      // The v2 lifecycle block is only hashed when declared (contract v2).
+      ...(source.pipeline.structuredReviewLifecycle !== null
+        ? { structuredReviewLifecycle: source.pipeline.structuredReviewLifecycle }
+        : {}),
     },
     agents: source.agents.map((agent) => ({
       id: agent.id,
@@ -353,7 +373,7 @@ function computeVersionHash(source: CanonicalSource): string {
  * Structured mode hash (design A03): the basic canonical plus the production
  * mode and the slot contract's semantic digest — which itself covers the
  * normalized contract, the sorted resource digest and the ABI/profile identity
- * (computed by the Task 4 contract compiler).
+ * (computed by the Task 4 contract compiler). V1 formula unchanged.
  */
 function computeStructuredVersionHash(source: CanonicalSource, semanticDigest: string): string {
   return createHash('sha256')
@@ -363,6 +383,39 @@ function computeStructuredVersionHash(source: CanonicalSource, semanticDigest: s
           productionMode: 'structured_slots',
           base: buildBasicCanonical(source),
           structuredContract: semanticDigest,
+        }),
+      ),
+      'utf8',
+    )
+    .digest('hex');
+}
+
+/**
+ * Authoritative (v2) semantic template hash (spec §4.2/§4.3): the basic
+ * canonical, the v2 contract semantic digest (over the compiler's OWN exported
+ * canonical bytes — never re-derived), the sorted implementation identity
+ * closure (the v2 resource surface), and the exact profile identity + digest +
+ * snapshot ref. Distinct formula from the v1 hash — no new default fields are
+ * ever injected into v1 normalization.
+ */
+function computeAuthoritativeVersionHash(
+  source: CanonicalSource,
+  contract: FrozenStructuredSlotContractV2,
+  binding: AuthoritativeReviewProfileBindingV1,
+): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify(
+        canonicalize({
+          productionMode: 'structured_slots',
+          base: buildBasicCanonical(source),
+          structuredContract: contract.semanticDigest,
+          implementationIdentities: contract.implementationIdentityClosure,
+          authoritativeReviewProfile: {
+            profileIdentity: binding.profileIdentity,
+            profileDigest: binding.profileDigest,
+            profileSnapshotRef: binding.profileSnapshotRef,
+          },
         }),
       ),
       'utf8',
@@ -437,6 +490,14 @@ export interface LoadTemplateDirectoryOptions {
    * when missing/disabled), ignored for basic templates.
    */
   runtimeEnvironment?: StructuredRuntimeEnvironmentV1;
+  /**
+   * The ONE authoritative review runtime environment (spec §17/§4.3): its
+   * capability/profile/registry gate every contract-v2 load. Required for
+   * contract-v2 templates (fail closed with `TEMPLATE_RUNTIME_UNAVAILABLE`
+   * when missing/disabled), ignored for basic and contract-v1 templates.
+   * Threaded from CoreService construction only — never a second default.
+   */
+  authoritativeReviewEnvironment?: AuthoritativeReviewRuntimeEnvironmentV1;
 }
 
 /** True when `slots/contract.yaml` exists under the template root. */
@@ -449,17 +510,66 @@ async function slotsContractExists(sourcePath: string): Promise<boolean> {
   }
 }
 
+/** Resolved structured slots: v1 keeps its exact formula, v2 adds the profile. */
+type ResolvedStructuredSlots =
+  | { protocol: 'v1'; contract: FrozenStructuredSlotContractV1; semanticDigest: string }
+  | {
+      protocol: 'v2';
+      contract: FrozenStructuredSlotContractV2;
+      profileBinding: AuthoritativeReviewProfileBindingV1;
+    };
+
+/** Exact match of one contract implementation identity against the installed registry (§6.5). */
+function isInstalledValidator(
+  entry: ImplementationIdentityClosureEntryV2,
+  environment: AuthoritativeReviewRuntimeEnvironmentV1,
+): boolean {
+  if (entry.kind !== 'validator') {
+    return false;
+  }
+  return environment.handlerRegistry.validators.some(
+    (installed) =>
+      installed.handlerKey === entry.handlerKey &&
+      installed.implementationDigest === entry.implementationDigest &&
+      installed.moduleId === entry.moduleId &&
+      installed.exportName === entry.exportName &&
+      installed.trigger === entry.trigger &&
+      installed.executionPhase === entry.executionPhase,
+  );
+}
+
+function isInstalledAssembler(
+  entry: ImplementationIdentityClosureEntryV2,
+  environment: AuthoritativeReviewRuntimeEnvironmentV1,
+): boolean {
+  if (entry.kind !== 'assembler') {
+    return false;
+  }
+  const installed = environment.handlerRegistry.assembler;
+  return (
+    installed.handlerKey === entry.handlerKey &&
+    installed.implementationDigest === entry.implementationDigest &&
+    installed.moduleId === entry.moduleId &&
+    installed.exportName === entry.exportName
+  );
+}
+
 /**
  * Resolves the mode split (spec §3.2 / §15): basic rejects a slots contract or
- * any v3 binding; structured requires the runtime environment's profile and
- * compiles the slots contract. Returns `null` for basic.
+ * any v3/v4 binding; structured peeks the contract version and dispatches —
+ * v1 keeps the existing compiler/formula, v2 runs the authoritative branch
+ * (registry identities, profile ceilings, profile binding, implementation
+ * identities all fail closed). Returns `null` for basic.
  */
 async function resolveStructuredSlots(
   sourcePath: string,
   mode: 'basic' | 'structured_slots',
   agents: CanonicalSource['agents'],
-  options: { runtimeEnvironment?: StructuredRuntimeEnvironmentV1 },
-): Promise<{ contract: FrozenStructuredSlotContractV1; semanticDigest: string } | null> {
+  options: {
+    runtimeEnvironment?: StructuredRuntimeEnvironmentV1;
+    authoritativeReviewEnvironment?: AuthoritativeReviewRuntimeEnvironmentV1;
+  },
+): Promise<ResolvedStructuredSlots | null> {
   if (mode === 'basic') {
     if (await slotsContractExists(sourcePath)) {
       throw new TemplateError(
@@ -477,6 +587,14 @@ async function resolveStructuredSlots(
         RELOAD_ACTION,
       );
     }
+    if (agents.some((agent) => agent.turnContract !== null && agent.turnContract.version === 4)) {
+      throw new TemplateError(
+        TEMPLATE_ERROR_CODES.TEMPLATE_INVALID,
+        'basic 模板不能声明 v4 回合契约。',
+        'pipeline.yaml',
+        RELOAD_ACTION,
+      );
+    }
     return null;
   }
   const env = options.runtimeEnvironment;
@@ -488,8 +606,102 @@ async function resolveStructuredSlots(
       '等待结构化运行时就绪后重新加载。',
     );
   }
+  // Version peek FIRST (spec §4.1): only the `version` field decides the
+  // protocol before any v1/v2-specific parsing.
+  let version: 1 | 2 | null = null;
+  if (await slotsContractExists(sourcePath)) {
+    version = peekStructuredSlotContractVersion(await readYamlFile(sourcePath, 'slots/contract.yaml'));
+  }
+  if (version === 2) {
+    return resolveAuthoritativeStructuredSlots(sourcePath, options);
+  }
   const contract = await loadStructuredSlotContract(sourcePath, env.profile.limits);
-  return { contract, semanticDigest: contract.semanticDigest };
+  return { protocol: 'v1', contract, semanticDigest: contract.semanticDigest };
+}
+
+/** The contract-v2 authoritative branch (spec §6.3/§6.4/§6.5/§4.3). */
+async function resolveAuthoritativeStructuredSlots(
+  sourcePath: string,
+  options: {
+    authoritativeReviewEnvironment?: AuthoritativeReviewRuntimeEnvironmentV1;
+  },
+): Promise<Extract<ResolvedStructuredSlots, { protocol: 'v2' }>> {
+  const reviewEnv = options.authoritativeReviewEnvironment;
+  // Both capability gates must pass for v2 (spec §17): the base structured
+  // capability checked by the caller AND the authoritative capability here.
+  if (reviewEnv === undefined || !isAuthoritativeReviewRunnable(reviewEnv)) {
+    throw new TemplateError(
+      TEMPLATE_ERROR_CODES.TEMPLATE_RUNTIME_UNAVAILABLE,
+      'authoritative review 能力未就绪，无法加载 contract v2 模板。',
+      null,
+      '等待 authoritative review 能力就绪后重新加载。',
+    );
+  }
+  // isAuthoritativeReviewRunnable guarantees a non-null profile + snapshot ref.
+  const profile = reviewEnv.profile as AuthoritativeReviewProfileSnapshotV1Body;
+  const profileSnapshotRef = reviewEnv.profileSnapshotRef as BlobRefV2;
+  const contract = await compileStructuredSlotContractV2(sourcePath);
+
+  // Templates can only tighten (design §22.2): every contract limit and the
+  // review policy must sit within the frozen profile.
+  assertTemplateLimitsWithinProfile(
+    contract.limits as unknown as Record<string, Record<string, number>>,
+    profile,
+    {
+      assignmentSoftLimit: contract.reviewPolicy.assignmentSoftLimit,
+      mapBatchTargetSlots: contract.reviewPolicy.mapBatchTargetSlots,
+      contentBatchTargetSlots: contract.reviewPolicy.contentBatchTargetSlots,
+      maxRounds: contract.reviewPolicy.maxRounds,
+    },
+  );
+
+  // Every implementation identity must match exactly one installed registry
+  // entry (spec §6.5); budget profiles and assembler budget resolve in the
+  // frozen profile. There is no temporary validation bypass at this seam.
+  for (const entry of contract.implementationIdentityClosure) {
+    const installed = entry.kind === 'validator'
+      ? isInstalledValidator(entry, reviewEnv)
+      : isInstalledAssembler(entry, reviewEnv);
+    if (!installed) {
+      throw new TemplateError(
+        TEMPLATE_ERROR_CODES.TEMPLATE_INVALID,
+        `contract v2 引用未安装的实现身份 ${entry.handlerKey}（${entry.implementationDigest}）。`,
+        'slots/contract.yaml',
+        RELOAD_ACTION,
+      );
+    }
+  }
+  for (const validator of contract.validators) {
+    if (!(validator.budgetProfileId in profile.budgetProfiles)) {
+      throw new TemplateError(
+        TEMPLATE_ERROR_CODES.TEMPLATE_INVALID,
+        `validator ${validator.validatorId} 引用了未知的 budgetProfileId ${validator.budgetProfileId}。`,
+        'slots/contract.yaml',
+        RELOAD_ACTION,
+      );
+    }
+  }
+  const assemblerBudget = profile.assemblerBudget;
+  const assembler = contract.assembler;
+  if (
+    assembler.budget.timeoutMs > assemblerBudget.maxTimeoutMs ||
+    assembler.budget.maxInputBytes > assemblerBudget.maxInputBytes ||
+    assembler.budget.maxOutputBytes > assemblerBudget.maxOutputBytes
+  ) {
+    throw new TemplateError(
+      TEMPLATE_ERROR_CODES.TEMPLATE_INVALID,
+      'assembler 预算超出 profile 的 assemblerBudget 上限。',
+      'slots/contract.yaml',
+      RELOAD_ACTION,
+    );
+  }
+
+  const profileBinding: AuthoritativeReviewProfileBindingV1 = {
+    profileIdentity: profile.profileIdentity,
+    profileDigest: profile.profileDigest,
+    profileSnapshotRef,
+  };
+  return { protocol: 'v2', contract, profileBinding };
 }
 
 /** Serializes the compiled phase contract into the frozen snapshot. */
@@ -503,7 +715,11 @@ function toPhasesRecord(phases: Map<string, ReadonlySet<ScaffoldPhase>>): Record
 
 async function loadValidated(
   sourcePath: string,
-  options: { historicalSnapshot: boolean; runtimeEnvironment?: StructuredRuntimeEnvironmentV1 },
+  options: {
+    historicalSnapshot: boolean;
+    runtimeEnvironment?: StructuredRuntimeEnvironmentV1;
+    authoritativeReviewEnvironment?: AuthoritativeReviewRuntimeEnvironmentV1;
+  },
 ): Promise<FrozenTemplate> {
   const template = validateTemplateFile(
     'template.yaml',
@@ -545,12 +761,30 @@ async function loadValidated(
     agentsWithContents.push({ ...agent, skillContents, skillSections, gateValidatorContent });
   }
 
-  const structured = await resolveStructuredSlots(sourcePath, pipeline.productionMode, agentsWithContents, options);
+  const structured = await resolveStructuredSlots(
+    sourcePath,
+    pipeline.productionMode,
+    agentsWithContents,
+    options,
+  );
 
-  const versionHash =
-    structured === null
-      ? computeVersionHash({ template, pipeline, agents: agentsWithContents })
-      : computeStructuredVersionHash({ template, pipeline, agents: agentsWithContents }, structured.semanticDigest);
+  let versionHash: string;
+  let additiveStructured: { contract: FrozenStructuredSlotContractV2; profileBinding: AuthoritativeReviewProfileBindingV1 } | null = null;
+  if (structured === null) {
+    versionHash = computeVersionHash({ template, pipeline, agents: agentsWithContents });
+  } else if (structured.protocol === 'v1') {
+    versionHash = computeStructuredVersionHash(
+      { template, pipeline, agents: agentsWithContents },
+      structured.semanticDigest,
+    );
+  } else {
+    additiveStructured = { contract: structured.contract, profileBinding: structured.profileBinding };
+    versionHash = computeAuthoritativeVersionHash(
+      { template, pipeline, agents: agentsWithContents },
+      structured.contract,
+      structured.profileBinding,
+    );
+  }
   const frozenAgents: FrozenAgentConfig[] = agentsWithContents.map((agent) => ({
     id: agent.id,
     name: agent.name,
@@ -603,11 +837,26 @@ async function loadValidated(
       productionMode: 'basic',
       structuredSlots: null,
       structuredPhases: null,
+      structuredReviewLifecycle: null,
+      authoritativeReviewProfile: null,
       sourcePath,
     };
   }
+  if (structured.protocol === 'v1' && pipeline.structuredReviewLifecycle !== null) {
+    // Cross-version fields fail rather than being ignored (spec §4.2): the
+    // v2 lifecycle block cannot ride on a contract-v1 template.
+    throw new TemplateError(
+      TEMPLATE_ERROR_CODES.TEMPLATE_INVALID,
+      'structuredReviewLifecycle 仅适用于 contract v2 模板。',
+      'pipeline.yaml',
+      RELOAD_ACTION,
+    );
+  }
 
-  const baseFrozen: Omit<FrozenTemplate, 'productionMode' | 'structuredSlots' | 'structuredPhases'> = {
+  const baseFrozen: Omit<
+    FrozenTemplate,
+    'productionMode' | 'structuredSlots' | 'structuredPhases' | 'structuredReviewLifecycle' | 'authoritativeReviewProfile'
+  > = {
     id: basename(sourcePath),
     name: template.name,
     description: template.description,
@@ -630,20 +879,38 @@ async function loadValidated(
     budget: pipeline.budget,
     sourcePath,
   };
+  if (structured.protocol === 'v2') {
+    // The first valid full v2 load: roles/v4 matrix, then the frozen profile
+    // binding enters the snapshot (spec §6.3/§6.4/§4.3).
+    const v2Frozen: FrozenTemplate = {
+      ...baseFrozen,
+      productionMode: 'structured_slots',
+      structuredSlots: structured.contract,
+      structuredPhases: null,
+      structuredReviewLifecycle: pipeline.structuredReviewLifecycle,
+      authoritativeReviewProfile: structured.profileBinding,
+    };
+    validateAuthoritativeReviewPipeline(v2Frozen);
+    return v2Frozen;
+  }
   // Typestate + capability + dispatch matrices run on the frozen pipeline; the
   // compiled phase contract is stored in the frozen template (and thus the
-  // task snapshot).
+  // task snapshot). v1 receives no new defaults.
   const phases = validateStructuredPipeline({
     ...baseFrozen,
     productionMode: 'structured_slots',
     structuredSlots: structured.contract,
     structuredPhases: null,
+    structuredReviewLifecycle: null,
+    authoritativeReviewProfile: null,
   });
   return {
     ...baseFrozen,
     productionMode: 'structured_slots',
     structuredSlots: structured.contract,
     structuredPhases: toPhasesRecord(phases),
+    structuredReviewLifecycle: null,
+    authoritativeReviewProfile: null,
   };
 }
 
@@ -666,6 +933,7 @@ export async function loadTemplateDirectory(
     return await loadValidated(sourcePath, {
       historicalSnapshot: options.historicalSnapshot ?? false,
       runtimeEnvironment: options.runtimeEnvironment,
+      authoritativeReviewEnvironment: options.authoritativeReviewEnvironment,
     });
   } catch (error) {
     if (error instanceof TemplateError) {

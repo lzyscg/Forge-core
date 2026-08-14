@@ -30,6 +30,7 @@ import {
 import { dirname, join } from 'node:path';
 import type { CorePaths } from '../storage/core-paths';
 import type { StructuredRuntimeEnvironmentV1 } from '../structured-slots/runtime-capability';
+import type { AuthoritativeReviewRuntimeEnvironmentV1 } from '../structured-slots/authoritative-review-capability';
 import { loadTemplateDirectory } from './template-loader';
 import {
   TEMPLATE_ERROR_CODES,
@@ -157,7 +158,8 @@ function isManifestFrozen(value: unknown): value is ManifestJson {
 /**
  * Normalizes one frozen contract's dispatch targets into candidate sets.
  * Legacy manifests store scalar ids; coerce them to one-element candidate sets
- * so downstream consumers always see arrays. Handles the v3 union by branch.
+ * so downstream consumers always see arrays. Handles the v3 union and the v4
+ * (empty targets) shapes by branch.
  */
 function normalizeContractTargets(contract: TurnContract): TurnContract {
   const rawTargets = contract.dispatch.targets;
@@ -170,6 +172,9 @@ function normalizeContractTargets(contract: TurnContract): TurnContract {
       }
     }
     return { ...contract, dispatch: { ...contract.dispatch, targets } };
+  }
+  if (contract.version === 4) {
+    return { ...contract, dispatch: { ...contract.dispatch, targets: {} } };
   }
   const targets: BasicTurnContractV1['dispatch']['targets'] = {};
   for (const [intent, value] of Object.entries(rawTargets)) {
@@ -198,6 +203,8 @@ function normalizeManifestFrozen(frozen: FrozenTemplate): FrozenTemplate {
     productionMode: legacy.productionMode ?? 'basic',
     structuredSlots: legacy.structuredSlots ?? null,
     structuredPhases: legacy.structuredPhases ?? null,
+    structuredReviewLifecycle: legacy.structuredReviewLifecycle ?? null,
+    authoritativeReviewProfile: legacy.authoritativeReviewProfile ?? null,
     agents: legacy.agents.map((agent) => {
       const contract = agent.turnContract;
       return {
@@ -292,14 +299,16 @@ export async function loadLastValidCached(
 /**
  * Caches a validated frozen template and atomically repoints current.json.
  * Never overwrites an existing hash directory; failures leave current.json
- * untouched. The runtime environment is threaded into the cache reopen so a
+ * untouched. The runtime environments are threaded into the cache reopen so a
  * structured template re-validates against the same capability/profile the
- * Catalog uses (spec §5 / design O05).
+ * Catalog uses (spec §5 / design O05) — including the authoritative review
+ * environment for contract-v2 templates (spec §17).
  */
 export async function cacheTemplate(
   paths: CorePaths,
   frozen: FrozenTemplate,
   runtimeEnvironment?: StructuredRuntimeEnvironmentV1,
+  authoritativeReviewEnvironment?: AuthoritativeReviewRuntimeEnvironmentV1,
 ): Promise<CachedVersion> {
   const versionRoot = paths.templateCacheVersionRoot(frozen.id, frozen.versionHash);
   const templateCacheDir = dirname(versionRoot);
@@ -309,7 +318,10 @@ export async function cacheTemplate(
     const stageDir = join(templateCacheDir, `${TMP_PREFIX}stage-${randomUUID()}`);
     try {
       await copyTemplateFiles(frozen.sourcePath, stageDir);
-      const reopened = await loadTemplateDirectory(stageDir, { runtimeEnvironment });
+      const reopened = await loadTemplateDirectory(stageDir, {
+        runtimeEnvironment,
+        authoritativeReviewEnvironment,
+      });
       if (reopened.versionHash !== frozen.versionHash) {
         throw new TemplateError(
           TEMPLATE_ERROR_CODES.TEMPLATE_INVALID,

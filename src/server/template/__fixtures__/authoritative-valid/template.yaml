@@ -1,0 +1,14 @@
+# Platform-neutral structured output fixture v2 (data only).
+# Authoritative per-slot review lifecycle: system-owned WorkItems, Map
+# pre-review, per-slot facts and System Seal. No business story vocabulary.
+name: Authoritative Output Template
+description: Neutral authoritative per-slot review document production fixture.
+inputFields:
+  - id: source-text
+    label: Source Text
+    kind: textarea
+    required: true
+    description: The source material for the output document.
+finalArtifact:
+  name: output
+  format: markdown

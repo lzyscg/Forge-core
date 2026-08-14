@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "status": "disabled",
+  "profileIdentity": null,
+  "profileDigest": null,
+  "evidenceDigest": null,
+  "requiredAbis": ["forge-validator/v2", "forge-assembler/v2"]
+}

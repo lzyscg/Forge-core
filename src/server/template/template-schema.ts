@@ -13,6 +13,9 @@ import type { InputField } from '../../shared/contracts';
 import type { ProgressPolicy } from '../runtime/progress-guard';
 import type { PublicCoreError } from '../../shared/errors';
 import type { FrozenStructuredSlotContractV1 } from './structured-slot-contract';
+import type { FrozenStructuredSlotContractV2 } from './structured-slot-contract-v2';
+import type { StructuredSessionKindV2, SlotCapabilityV2 } from './structured-slot-contract-v2';
+import type { AuthoritativeReviewProfileBindingV1 } from '../structured-slots/authoritative-review-profile';
 
 /**
  * Closed ten-value Slot capability enum v1 (spec §3.2 / design §10.2 D01).
@@ -68,6 +71,27 @@ export interface StructuredTurnContractV3 {
       'send_message' | 'publish_artifact' | 'submit_final_artifact' | 'request_human_input'
     >;
     targets: Partial<Record<'send_message' | 'publish_artifact', string[]>>;
+  };
+}
+
+/**
+ * Structured TurnContract v4 (spec §6.4): the v2 structured Agent contract.
+ * `authoritativeReview` binds the closed v2 session kinds, per-kind access
+ * profiles and the closed `SlotCapabilityV2` ceiling; `dispatch` carries NO
+ * sending intents — v2 completion is system-coordinated, only the human
+ * interrupt may be requested. V1 Agents retain `StructuredTurnContractV3`;
+ * the Submitter stays a generic BasicTurnContractV2.
+ */
+export interface AuthoritativeStructuredTurnContractV4 {
+  version: 4;
+  authoritativeReview: {
+    allowedSessionKinds: StructuredSessionKindV2[];
+    accessProfiles: Partial<Record<StructuredSessionKindV2, string | null>>;
+    capabilities: SlotCapabilityV2[];
+  };
+  dispatch: {
+    allowedActions: Array<'request_human_input'>;
+    targets: Record<string, never>;
   };
 }
 
@@ -131,7 +155,11 @@ export interface BasicTurnContractV2 extends BasicTurnContractFields {
 }
 
 /** Every supported turn contract (spec §3.2 / design §11.4). */
-export type TurnContract = BasicTurnContractV1 | BasicTurnContractV2 | StructuredTurnContractV3;
+export type TurnContract =
+  | BasicTurnContractV1
+  | BasicTurnContractV2
+  | StructuredTurnContractV3
+  | AuthoritativeStructuredTurnContractV4;
 
 /** True when the contract is a v1/v2 basic contract (production/annotate shape). */
 export function isBasicTurnContract(
@@ -145,6 +173,13 @@ export function isStructuredTurnContractV3(
   contract: TurnContract | null,
 ): contract is StructuredTurnContractV3 {
   return contract !== null && contract.version === 3;
+}
+
+/** True when the contract is the v2 structured Agent contract (spec §6.4). */
+export function isAuthoritativeStructuredTurnContractV4(
+  contract: TurnContract | null,
+): contract is AuthoritativeStructuredTurnContractV4 {
+  return contract !== null && contract.version === 4;
 }
 
 /**
@@ -209,13 +244,55 @@ export interface FrozenAgentConfig {
 export interface ArtifactSchemaFile {
   name: string;
   required: boolean;
-  producer: string;
+  /**
+   * Agent producers stay plain safe-id strings (basic/v1 normalize and hash
+   * EXACTLY as before); v2 uses the explicit system branch frozen as
+   * `{kind:'system', systemId:'structured_seal'}` (spec §6.3). The safe
+   * Agent-ID regex is never relaxed to admit `system:structured_seal`.
+   */
+  producer: string | ArtifactSystemProducerRef;
   extract: string;
   phase: 'create' | 'annotate';
 }
 
+/** The discriminated system producer reference (spec §6.3). */
+export interface ArtifactSystemProducerRef {
+  kind: 'system';
+  systemId: 'structured_seal';
+}
+
+export type ArtifactProducerRef = { kind: 'agent'; agentId: string } | ArtifactSystemProducerRef;
+
+/** True when the producer is the frozen system producer reference. */
+export function isArtifactSystemProducerRef(value: unknown): value is ArtifactSystemProducerRef {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    (value as Record<string, unknown>)['kind'] === 'system' &&
+    (value as Record<string, unknown>)['systemId'] === 'structured_seal' &&
+    Object.keys(value as Record<string, unknown>).length === 2
+  );
+}
+
 export interface ArtifactSchema {
   files: ArtifactSchemaFile[];
+}
+
+/**
+ * The authoritative v2 pipeline lifecycle (spec §6.3): exact protocol, the
+ * four role bindings and the system artifact producer literal. Null on basic
+ * and contract-v1 templates; required on contract-v2 templates.
+ */
+export interface AuthoritativeReviewLifecycleV1 {
+  protocol: 'authoritative_review_v1';
+  roleBindings: {
+    orchestrator: string;
+    generator: string;
+    reviewer: string;
+    submitter: string;
+  };
+  systemArtifactProducer: 'system:structured_seal';
 }
 
 export interface FrozenTemplate {
@@ -241,16 +318,29 @@ export interface FrozenTemplate {
    */
   productionMode: 'basic' | 'structured_slots';
   /**
-   * The compiled structured-slot contract v1 (spec §3.4); null for basic
-   * templates and historical manifests.
+   * The compiled structured-slot contract (spec §3.4/§6.1); null for basic
+   * templates and historical manifests. The version discriminates the
+   * protocol: v1 keeps the current semantics, v2 is the authoritative
+   * per-slot review contract.
    */
-  structuredSlots: FrozenStructuredSlotContractV1 | null;
+  structuredSlots: FrozenStructuredSlotContractV1 | FrozenStructuredSlotContractV2 | null;
   /**
    * The compiled pipeline scaffold-phase contract (spec §6 / design §11.6):
    * each agent id maps to the set of input `ScaffoldPhase`s it may run under.
    * Null for basic templates.
    */
   structuredPhases: Record<string, readonly ScaffoldPhase[]> | null;
+  /**
+   * The v2 pipeline lifecycle block (spec §6.3); null on basic and v1
+   * templates. Contract-v2 templates REQUIRE it.
+   */
+  structuredReviewLifecycle: AuthoritativeReviewLifecycleV1 | null;
+  /**
+   * The frozen profile binding of a v2 template (spec §4.3): exact profile
+   * identity + the object-field digest + the byte-exact snapshot BlobRef.
+   * Null on basic and v1 templates; bound into the v2 semantic template hash.
+   */
+  authoritativeReviewProfile: AuthoritativeReviewProfileBindingV1 | null;
   sourcePath: string;
 }
 

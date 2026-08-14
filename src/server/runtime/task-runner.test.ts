@@ -41,6 +41,7 @@ import {
   validTaskRequest,
 } from '../test-support';
 import type { FrozenTemplate } from '../template/template-schema';
+import type { FrozenStructuredSlotContractV1 } from '../template/structured-slot-contract';
 import { RuntimeAbortedError, RuntimeFailure } from './agent-runtime';
 import type { AgentRuntime, AgentTurnInput, AgentTurnResult } from './agent-runtime';
 import { ActionCommitter } from './action-committer';
@@ -1665,7 +1666,7 @@ describe('TaskRunner structured v3 runNext (Task 17)', () => {
     const proposalService = new StructuredSlotProposalService({
       taskId: h.taskId,
       snapshotHash: h.frozen.versionHash,
-      contract: h.frozen.structuredSlots as NonNullable<FrozenTemplate['structuredSlots']>,
+      contract: h.frozen.structuredSlots as FrozenStructuredSlotContractV1,
       store: privateStore,
       events: async () => committedEvents(h),
     });

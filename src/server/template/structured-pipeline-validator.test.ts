@@ -169,6 +169,8 @@ async function validFrozen(overrides: {
     productionMode: 'structured_slots',
     structuredSlots: contract,
     structuredPhases: null,
+    structuredReviewLifecycle: null,
+    authoritativeReviewProfile: null,
     budget: null,
     inputFields: [],
     agents: overrides.agents ?? [
