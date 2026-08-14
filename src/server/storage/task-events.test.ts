@@ -794,3 +794,98 @@ describe('v1 seal-path acceptance fence (plan 2026-08-14 Task 1)', () => {
     expect(validateTaskEvent(v1SealEvent)).toEqual(v1SealEvent);
   });
 });
+
+describe('v2 dispatch via validateTaskEvent (plan 2026-08-14 Task 7)', () => {
+  function v2Ref(): Record<string, unknown> {
+    return {
+      kind: 'authority_base_set',
+      digest: HASH64,
+      byteLength: 12,
+      mediaType: 'application/json',
+      schemaVersion: 1,
+    };
+  }
+
+  it('dispatches a v2 member through the union with the exact payload', () => {
+    const { id, at } = base();
+    const event = validateTaskEvent({
+      id,
+      at,
+      protocolVersion: 2,
+      type: 'structured_work_item_created',
+      workItemId: 'wi-1',
+      kind: 'agent_assignment',
+      roleBinding: 'orchestrator',
+      agentExecutionKind: 'structured_session',
+      sessionKind: 'structure_chunk',
+      roundId: 'round-1',
+      logicalAssignmentId: 'la-1',
+      reviewAssignmentId: null,
+      grantSpecRef: { ...v2Ref(), kind: 'write_grant_spec' },
+      inputArtifactDeliveryId: null,
+      authorityBaseRef: v2Ref(),
+      payloadRef: { ...v2Ref(), kind: 'map_build_spec' },
+      initialLeaseEpoch: 0,
+      maxAutomaticRetries: 3,
+    });
+    expect(event).toMatchObject({ id, at, protocolVersion: 2, type: 'structured_work_item_created' });
+    expect((event as { type: string }).type).toBe('structured_work_item_created');
+  });
+
+  it('rejects a v2 member with a bad payload through the union', () => {
+    const { id, at } = base();
+    expectInvalid(() =>
+      validateTaskEvent({
+        id,
+        at,
+        protocolVersion: 2,
+        type: 'structured_task_failed_v2',
+        workItemId: 'wi-1',
+        attemptId: null,
+        commandId: null,
+        leaseEpoch: 1,
+        failureCode: 'X',
+        failureDigest: HASH64,
+        failureRecoveryPayloadRef: null,
+        authorityBaseRef: v2Ref(),
+      }),
+    );
+  });
+
+  it('keeps v1 members closed: a v1 name never accepts v2 framing', () => {
+    const { id, at } = base();
+    // `structured_slot_attempt_started` stays a v1-only member: adding the v2
+    // protocolVersion field is an unknown-field rejection, not a silent v1 →
+    // v2 migration.
+    expectInvalid(() =>
+      validateTaskEvent({
+        id,
+        at,
+        protocolVersion: 2,
+        type: 'structured_slot_attempt_started',
+        inputNodeId: 'in-seal',
+        agentId: 'seal',
+        attemptEpoch: 1,
+        turnId: 'turn-seal-1',
+        sessionKind: 'seal',
+      }),
+    );
+  });
+
+  it('never rewrites a v2 event in normalizeLegacyEvent', () => {
+    const v2 = {
+      protocolVersion: 2,
+      id: 'e1',
+      at: '2026-08-14T00:00:00.000Z',
+      type: 'structured_work_item_leased',
+      workItemId: 'wi-1',
+      leaseEpoch: 1,
+      leaseOwner: 'agent-1',
+      leaseExpiresAt: '2026-08-14T00:05:00.000Z',
+      expectedLastSequence: 4,
+      authorityBaseRef: v2Ref(),
+    };
+    expect(normalizeLegacyEvent(v2)).toBe(v2);
+    expect(validateTaskEvent(normalizeLegacyEvent(v2))).toEqual(v2);
+  });
+});

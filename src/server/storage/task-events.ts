@@ -37,6 +37,11 @@
  * platform identifiers and payloads carry opaque node/route/artifact data.
  */
 import type { NodeKind, RouteKind } from '../../shared/contracts';
+import {
+  AUTHORITATIVE_REVIEW_EVENT_NAMES_V2,
+  validateAuthoritativeReviewEventV2,
+  type AuthoritativeReviewEventV2,
+} from './authoritative-review-events';
 import { STORAGE_ERROR_CODES, StorageError } from './atomic-file';
 
 /** Event ids become part of committed filenames; safe segment, no traversal. */
@@ -184,7 +189,8 @@ interface EventBase {
   at: string;
 }
 
-export type TaskEvent =
+/** Legacy v1 event members (kept byte-for-byte; v2 members live in the union below). */
+export type LegacyTaskEvent =
   | (EventBase & { type: 'task_started' })
   | (EventBase & { type: 'task_stopped' })
   | (EventBase & { type: 'task_resumed' })
@@ -316,6 +322,16 @@ export type TaskEvent =
       artifactId: string;
       artifactVersion: number;
     });
+
+/**
+ * The canonical task event union: legacy v1 members (unchanged, normalized by
+ * `normalizeLegacyEvent`) plus the closed v2 protocol
+ * `AuthoritativeReviewEventV2` (spec §9.1). Every v2 member carries
+ * `protocolVersion: 2` and its own closed identity/ref fields; the v2
+ * validator runs before append and during replay exactly like legacy
+ * validation, and the legacy normalizer never rewrites a v2 event.
+ */
+export type TaskEvent = LegacyTaskEvent | AuthoritativeReviewEventV2;
 
 function invalidEvent(message: string): StorageError {
   return new StorageError(STORAGE_ERROR_CODES.EVENT_INVALID, message, null, '修正事件内容后重试。');
@@ -490,6 +506,9 @@ function validateEventArtifact(value: unknown, where: string): EventArtifact {
 
 const BASE_KEYS = ['id', 'at', 'type'] as const;
 
+/** Closed v2 member names (from the authoritative review event protocol). */
+const V2_EVENT_TYPES: ReadonlySet<string> = new Set(AUTHORITATIVE_REVIEW_EVENT_NAMES_V2);
+
 function baseAnd(...fields: string[]): ReadonlySet<string> {
   return new Set([...BASE_KEYS, ...fields]);
 }
@@ -614,6 +633,11 @@ export function validateTaskEvent(candidate: unknown): TaskEvent {
   }
   if (typeof candidate.type !== 'string') {
     throw invalidEvent('事件 type 必须是字符串。');
+  }
+  // v2 members dispatch to the closed v2 union validator before the legacy
+  // key lookup, so v1 names never widen and v2 names never fall through.
+  if (V2_EVENT_TYPES.has(candidate.type)) {
+    return validateAuthoritativeReviewEventV2(candidate);
   }
   const allowed = MEMBER_KEYS[candidate.type];
   if (allowed === undefined) {
@@ -884,6 +908,11 @@ const LEGACY_CONTENT_FILE: Record<'markdown' | 'text', string> = {
  */
 export function normalizeLegacyEvent(candidate: unknown): unknown {
   if (!isPlainObject(candidate)) {
+    return candidate;
+  }
+  // The legacy normalizer never rewrites a v2 event (spec §9.1): v2 members
+  // are already canonical and go straight to the v2 validator.
+  if (typeof candidate.type === 'string' && V2_EVENT_TYPES.has(candidate.type)) {
     return candidate;
   }
   if (candidate.type === 'agent_input' || candidate.type === 'agent_result') {

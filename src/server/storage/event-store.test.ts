@@ -16,7 +16,7 @@
  * (spec §8.3, plan Task 4).
  */
 import { randomUUID } from 'node:crypto';
-import { mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   disposeAllTestRoots,
@@ -28,6 +28,7 @@ import type { CorePaths } from './core-paths';
 import { formatBatchFileName, formatEventFileName } from './core-paths';
 import { EventStore } from './event-store';
 import type { TaskEvent } from './task-events';
+import type { BlobRefV2 } from '../../shared/authoritative-review-v2';
 
 afterEach(() => {
   disposeAllTestRoots();
@@ -541,5 +542,136 @@ describe('EventStore.readBatchByCommitId and crash windows', () => {
       committed[0].fileName,
       committed[0].fileName,
     ]);
+  });
+});
+
+describe('EventStore v2 protocol members (plan 2026-08-14 Task 7)', () => {
+  const HASH64 = 'a'.repeat(64);
+
+  function ref(kind: BlobRefV2['kind']): BlobRefV2 {
+    return {
+      kind,
+      digest: HASH64,
+      byteLength: 12,
+      mediaType: 'application/json',
+      schemaVersion: 1,
+    };
+  }
+
+  function v2WorkItemCreated(id: string): TaskEvent {
+    return {
+      protocolVersion: 2,
+      id,
+      at: '2026-08-14T00:00:00.000Z',
+      type: 'structured_work_item_created',
+      workItemId: 'wi-1',
+      kind: 'agent_assignment',
+      roleBinding: 'orchestrator',
+      agentExecutionKind: 'structured_session',
+      sessionKind: 'structure_chunk',
+      roundId: 'round-1',
+      logicalAssignmentId: 'la-1',
+      reviewAssignmentId: null,
+      grantSpecRef: ref('write_grant_spec'),
+      inputArtifactDeliveryId: null,
+      authorityBaseRef: ref('authority_base_set'),
+      payloadRef: ref('map_build_spec'),
+      initialLeaseEpoch: 0,
+      maxAutomaticRetries: 3,
+    };
+  }
+
+  function v2AttemptStarted(id: string): TaskEvent {
+    return {
+      protocolVersion: 2,
+      id,
+      at: '2026-08-14T00:01:00.000Z',
+      type: 'structured_agent_attempt_started_v2',
+      workItemId: 'wi-1',
+      logicalAssignmentId: 'la-1',
+      reviewAssignmentId: null,
+      attemptId: 'att-1',
+      sessionKind: 'structure_chunk',
+      leaseEpoch: 1,
+      authorityBaseRef: ref('authority_base_set'),
+    };
+  }
+
+  it('commits a v2 member and mixed legacy/v2 batches as one atomic envelope', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    const first = await store.append(taskId, started());
+    const v2Batch = [v2WorkItemCreated(randomUUID()), v2AttemptStarted(randomUUID())];
+    const mixed = v2Batch.concat(result());
+
+    const committed = await store.appendBatch(taskId, 'commit-v2-a', mixed, {
+      expectedLastSequence: 1,
+    });
+
+    expect(committed.map((entry) => entry.sequence)).toEqual([2, 3, 4]);
+    expect(committed[0].fileName).toBe(formatBatchFileName(2, 4, 'commit-v2-a'));
+    const all = await store.read(taskId);
+    expect(all.map((entry) => entry.event)).toEqual([first.event, ...mixed]);
+    // The v2 member keeps its protocolVersion through commit and replay.
+    const replayed = all.map((entry) => entry.event)[1];
+    expect(replayed).toMatchObject({ protocolVersion: 2, type: 'structured_work_item_created' });
+    expect((replayed as Extract<TaskEvent, { type: 'structured_work_item_created' }>).kind).toBe(
+      'agent_assignment',
+    );
+  });
+
+  it('rejects an invalid v2 member before writing anything (all-or-nothing)', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    const badV2: Record<string, unknown> = JSON.parse(JSON.stringify(v2WorkItemCreated(randomUUID())));
+    delete badV2.authorityBaseRef;
+    await expect(
+      store.appendBatch(taskId, 'commit-v2-bad', [started(), badV2 as unknown as TaskEvent], {
+        expectedLastSequence: 0,
+      }),
+    ).rejects.toMatchObject({ code: 'EVENT_INVALID' });
+    await expect(readdir(paths.taskEventsRoot(taskId))).rejects.toThrow();
+  });
+
+  it('replays an identical v2 commit and rejects a conflicting one', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    const events = [v2WorkItemCreated('ev-v2-1')];
+
+    const firstResult = await store.appendBatch(taskId, 'commit-v2-replay', events, {
+      expectedLastSequence: 0,
+    });
+    const replay = await store.appendBatch(taskId, 'commit-v2-replay', events, {
+      expectedLastSequence: 0,
+    });
+    expect(replay).toEqual(firstResult);
+
+    await expect(
+      store.appendBatch(taskId, 'commit-v2-replay', [v2AttemptStarted('ev-v2-1')], {
+        expectedLastSequence: 0,
+      }),
+    ).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+  });
+
+  it('fails loud as corruption when a v2 committed member no longer validates', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    await store.appendBatch(taskId, 'commit-v2-c', [v2WorkItemCreated('ev-v2-c')], {
+      expectedLastSequence: 0,
+    });
+    // Corrupt the committed bytes: drop the required payloadRef key while
+    // keeping valid JSON, then read — the union validator fails loud.
+    const names = (await readdir(paths.taskEventsRoot(taskId))).filter(
+      (name) => !name.startsWith('.tmp-'),
+    );
+    const envelopePath = paths.taskBatchEventFile(taskId, names[0]);
+    const envelope = JSON.parse(await readFile(envelopePath, 'utf8'));
+    delete envelope.events[0].payloadRef;
+    await writeFile(envelopePath, JSON.stringify(envelope), 'utf8');
+    await expect(store.read(taskId)).rejects.toMatchObject({ code: 'TASK_CORRUPTED' });
   });
 });
