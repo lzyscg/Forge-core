@@ -748,3 +748,104 @@ describe('deriveOwnerIssues (spec §14 owner-visible issues)', () => {
     expect(deriveOwnerIssues([generationEvent(), mergedDraftEvent(1), sealedEvent()])).toEqual([]);
   });
 });
+
+describe('task-projector contract-v2 branch (spec §4.4, Task 9)', () => {
+  it('projects a v2-snapshot task with v2 event-derived status and no v1 structured summary', async () => {
+    const created = await service.createTask(validTaskRequest());
+    const record = await service.tasks.readTaskRecord(created.id);
+    const frozen = await service.tasks.readFrozenTemplate(created.id);
+    // Task 5+ freeze structuredSlots version 2 in the snapshot.
+    const v2Frozen = {
+      ...frozen,
+      productionMode: 'structured_slots' as const,
+      structuredSlots: { version: 2 },
+    } as unknown as Parameters<typeof projectTask>[0]['frozenTemplate'];
+
+    const { buildFullLifecycle } = await import('./authoritative-review-state.test');
+    const lifecycle = buildFullLifecycle('projector-v2');
+    const workspace = projectTask({ record, frozenTemplate: v2Frozen }, lifecycle, []);
+
+    expect(workspace.task.structuredProtocol).toBe('v2');
+    // Status derives from v2 events: the final submitter completed the chain.
+    expect(workspace.task.status).toBe('completed');
+    // NEVER the v1 structured summary (no inference from v1 generation fields).
+    expect(workspace.structuredSlots).toBeUndefined();
+    expect(workspace.pendingHumanQuestion).toBeNull();
+  });
+
+  it('M5: v2 summary status routes through the authoritative projector (legal histories match)', async () => {
+    const created = await service.createTask(validTaskRequest());
+    const record = await service.tasks.readTaskRecord(created.id);
+    const frozen = await service.tasks.readFrozenTemplate(created.id);
+    const v2Frozen = {
+      ...frozen,
+      productionMode: 'structured_slots' as const,
+      structuredSlots: { version: 2 },
+    } as unknown as Parameters<typeof projectTask>[0]['frozenTemplate'];
+    const { buildBudgetFlow, buildQuestionFlow, buildFullLifecycle } = await import('./authoritative-review-state.test');
+    const { projectAuthoritativeReviewState } = await import('./authoritative-review-state');
+
+    // A full legal lifecycle: the summary status equals the projector status.
+    const lifecycle = buildFullLifecycle('projector-m5a');
+    const lifecycleWorkspace = projectTask({ record, frozenTemplate: v2Frozen }, lifecycle, []);
+    const projectedLifecycle = await projectAuthoritativeReviewState(lifecycle);
+    expect(lifecycleWorkspace.task.status).toBe(projectedLifecycle.ok ? projectedLifecycle.state.taskStatus : 'corrupt');
+    expect(lifecycleWorkspace.task.status).toBe('completed');
+
+    // Suspension overlay wins over the underlying budget park.
+    const budget = buildBudgetFlow('projector-m5b');
+    const parkIndex = budget.findIndex((e) => e.type === 'structured_work_item_parked');
+    const { validateAuthoritativeReviewEventV2 } = await import('./authoritative-review-events');
+    const v2 = (input: Record<string, unknown>) =>
+      validateAuthoritativeReviewEventV2({ protocolVersion: 2, id: `evt-v2-${Math.random().toString(36).slice(2)}`, at: new Date().toISOString(), ...input });
+    const suspended = projectTask({ record, frozenTemplate: v2Frozen }, [
+      ...budget.slice(0, parkIndex + 1),
+      v2({ type: 'structured_task_suspension_applied_v2', suspensionId: 'sus-v2', reason: 'user_stop', operationId: 'op-v2' }),
+    ], []);
+    expect(suspended.task.status).toBe('stopped');
+
+    // Pending human question projects waiting_human.
+    const question = buildQuestionFlow('projector-m5c');
+    const questionOpenedAt = question.findIndex((e) => e.type === 'structured_human_question_opened_v2');
+    const waiting = projectTask({ record, frozenTemplate: v2Frozen }, question.slice(0, questionOpenedAt + 1), []);
+    expect(waiting.task.status).toBe('waiting_human');
+  });
+
+  it('M5: a corrupt v2 history projects corrupt instead of a plausible status', async () => {
+    const created = await service.createTask(validTaskRequest());
+    const record = await service.tasks.readTaskRecord(created.id);
+    const frozen = await service.tasks.readFrozenTemplate(created.id);
+    const v2Frozen = {
+      ...frozen,
+      productionMode: 'structured_slots' as const,
+      structuredSlots: { version: 2 },
+    } as unknown as Parameters<typeof projectTask>[0]['frozenTemplate'];
+    const { buildFullLifecycle } = await import('./authoritative-review-state.test');
+    const lifecycle = buildFullLifecycle('projector-corrupt');
+
+    // Mutate: a second lease while one is active (a semantic corruption the
+    // light v1-style status fold could NOT see).
+    const leaseEvent = lifecycle.find((e) => e.type === 'structured_work_item_leased');
+    const { validateAuthoritativeReviewEventV2 } = await import('./authoritative-review-events');
+    const dupLease = validateAuthoritativeReviewEventV2({
+      ...(leaseEvent as unknown as Record<string, unknown>),
+      id: 'evt-corrupt-dup-lease',
+    });
+    const corruptHistory = [...lifecycle.slice(0, 3), dupLease, ...lifecycle.slice(3)];
+
+    const corruptWorkspace = projectTask({ record, frozenTemplate: v2Frozen }, corruptHistory, []);
+    expect(corruptWorkspace.task.status).toBe('corrupt');
+    void dupLease;
+  });
+
+  it('keeps v1 projections and the v1 structured summary byte-identical under the branch', async () => {
+    const created = await service.createTask(validTaskRequest());
+    const record = await service.tasks.readTaskRecord(created.id);
+    const frozen = await service.tasks.readFrozenTemplate(created.id);
+    const v1Workspace = projectTask({ record, frozenTemplate: frozen }, [], []);
+    expect(v1Workspace.task.structuredProtocol).toBe('none');
+    expect(v1Workspace.task.status).toBe('ready');
+    // The v1 summary fold is untouched for non-v2 snapshots.
+    expect(v1Workspace).not.toHaveProperty('structuredSlots');
+  });
+});

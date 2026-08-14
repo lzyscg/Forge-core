@@ -266,14 +266,32 @@ async function readBatchFile(
   };
 }
 
+export interface EventStoreOptions {
+  /**
+   * Test seam: replaces the append-manifest writer. The manifest is a
+   * DISPOSABLE accelerator — a failing writer must never fail the already
+   * durably committed append (the next access rebuilds from the full
+   * validated scan). Production callers leave it undefined.
+   */
+  manifestWriter?: (taskId: string, manifest: AppendManifestV1) => Promise<void>;
+}
+
 export class EventStore {
   private readonly paths: CorePaths;
+
+  private readonly manifestWriter: (taskId: string, manifest: AppendManifestV1) => Promise<void>;
 
   /** Per-task append/read serialization within this single process. */
   private readonly queues = new Map<string, Promise<void>>();
 
-  constructor(paths: CorePaths) {
+  constructor(paths: CorePaths, options: EventStoreOptions = {}) {
     this.paths = paths;
+    this.manifestWriter = options.manifestWriter ?? (async (taskId, manifest) => {
+      const eventsRoot = this.paths.taskEventsRoot(taskId);
+      await mkdir0(eventsRoot);
+      const bytes = Buffer.from(JSON.stringify(manifest), 'utf8');
+      await writeFile(join(eventsRoot, this.manifestFileName()), bytes);
+    });
   }
 
   /**
@@ -320,10 +338,13 @@ export class EventStore {
 
   private async appendExclusive(taskId: string, event: TaskEvent): Promise<CommittedEvent> {
     const canonical = canonicalJson(event);
-    const committed = await this.scanCommitted(taskId);
-    const prior = committed.find((entry) => entry.event.id === event.id);
-    if (prior !== undefined) {
-      if (prior.canonical !== canonical) {
+    const index = await this.loadHistory(taskId);
+    const priorSequence = index.eventIds[event.id];
+    if (priorSequence !== undefined) {
+      // Idempotent replay: re-read the EXACT committed file of the hit and
+      // compare canonical bytes (the manifest index never decides content).
+      const prior = await this.readEntryForReplay(taskId, priorSequence, event.id);
+      if (prior === null || prior.canonical !== canonical) {
         throw new StorageError(
           STORAGE_ERROR_CODES.EVENT_ID_CONFLICT,
           '同一事件 id 提交了不同的内容。',
@@ -334,10 +355,12 @@ export class EventStore {
       const { canonical: _canonical, ...replay } = prior;
       return replay;
     }
-    const sequence = (committed[committed.length - 1]?.sequence ?? 0) + 1;
+    const sequence = index.tailSequence + 1;
     const fileName = `${String(sequence).padStart(6, '0')}-${event.id}.json`;
     const bytes = Buffer.from(canonical, 'utf8');
     await writeNewAtomic(this.paths.taskEventFile(taskId, fileName), bytes);
+    const envelopeDigest = createHash('sha256').update(bytes).digest('hex');
+    await this.maintainManifestAfterAppend(taskId, index, fileName, envelopeDigest, null, [event], sequence);
     const { canonical: _canonical, ...result } = {
       sequence,
       fileName,
@@ -346,6 +369,24 @@ export class EventStore {
       canonical,
     };
     return result;
+  }
+
+  /** Re-reads the single-event file of a manifest-flagged id (byte compare). */
+  private async readEntryForReplay(
+    taskId: string,
+    sequence: number,
+    eventId: string,
+  ): Promise<ScannedEvent | null> {
+    try {
+      const fileName = `${String(sequence).padStart(6, '0')}-${eventId}.json`;
+      const parsed = parseEventFileName(fileName);
+      if (parsed === null) {
+        return null;
+      }
+      return await readCommittedFile(this.paths.taskEventsRoot(taskId), fileName, parsed);
+    } catch {
+      return null; // the manifest flagged a hit the disk cannot confirm
+    }
   }
 
   /**
@@ -464,11 +505,18 @@ export class EventStore {
     hasV2: boolean,
     publicationPinId: string | undefined,
   ): Promise<CommittedEvent[]> {
-    const { events: committed, batches } = await this.scanHistory(taskId);
-    const existing = batches.get(commitId);
-    if (existing !== undefined) {
-      if (existing.canonicalPayloadSha256 === digest) {
-        return existing.committed.map(({ canonical: _canonical, ...result }) => result);
+    const index = await this.loadHistory(taskId);
+    const existingFileName = index.commitIds[commitId];
+    if (existingFileName !== undefined) {
+      const existingDigest = index.envelopes[existingFileName];
+      if (existingDigest === digest) {
+        // Idempotent replay: rebuild the committed entries by re-reading the
+        // named envelope (the index never decides content).
+        const parsed = parseBatchFileName(existingFileName);
+        if (parsed !== null) {
+          const validated = await readBatchFile(this.paths.taskEventsRoot(taskId), existingFileName, parsed, taskId);
+          return validated.committed.map(({ canonical: _canonical, ...result }) => result);
+        }
       }
       throw new StorageError(
         STORAGE_ERROR_CODES.IDEMPOTENCY_CONFLICT,
@@ -477,8 +525,7 @@ export class EventStore {
         '使用新的 commitId 提交不同的事件批次。',
       );
     }
-    const tail = committed[committed.length - 1]?.sequence ?? 0;
-    if (expectedLastSequence !== tail) {
+    if (expectedLastSequence !== index.tailSequence) {
       throw new StorageError(
         STORAGE_ERROR_CODES.EXPECTED_SEQUENCE_MISMATCH,
         '预期最后序列与当前已提交序列不一致。',
@@ -487,8 +534,7 @@ export class EventStore {
       );
     }
     for (const event of events) {
-      const prior = committed.find((entry) => entry.event.id === event.id);
-      if (prior !== undefined) {
+      if (index.eventIds[event.id] !== undefined) {
         throw new StorageError(
           STORAGE_ERROR_CODES.EVENT_ID_CONFLICT,
           '同一事件 id 已存在于任务历史。',
@@ -497,8 +543,8 @@ export class EventStore {
         );
       }
     }
-    const firstSequence = tail + 1;
-    const lastSequence = tail + events.length;
+    const firstSequence = index.tailSequence + 1;
+    const lastSequence = index.tailSequence + events.length;
     const fileName = formatBatchFileName(firstSequence, lastSequence, commitId);
     const envelope: TaskEventBatchEnvelopeV1 & { publicationPinId?: string } = {
       version: 1,
@@ -539,6 +585,7 @@ export class EventStore {
         }).catch(() => undefined);
       }
     }
+    await this.maintainManifestAfterAppend(taskId, index, fileName, digest, commitId, events, firstSequence);
     return events.map((event, index) => ({
       sequence: firstSequence + index,
       fileName,
@@ -701,8 +748,8 @@ export class EventStore {
     const scanned: ScannedEvent[] = [];
     const batches = new Map<string, ValidatedBatch>();
     for (const name of names) {
-      if (name.startsWith(TMP_PREFIX)) {
-        continue; // Temporary residue never counts as committed (spec §8.2).
+      if (name.startsWith(TMP_PREFIX) || name.startsWith('.')) {
+        continue; // Temporary residue and dotfile store metadata never count as committed (spec §8.2).
       }
       const batch = parseBatchFileName(name);
       if (batch !== null) {
@@ -753,4 +800,282 @@ export class EventStore {
       return { lastSequence: last.sequence, lastCommitId };
     });
   }
+
+  /**
+   * Validated tail-range access (spec §9.4): the committed events with
+   * sequence strictly greater than `throughSequence`, in sequence order.
+   * The range is FULLY validated from disk (a corrupt tail fails loud as
+   * TASK_CORRUPTED — corrupt authority is never masked); the checkpoint
+   * store replays from here and MUST never fall back past a corrupt event.
+   */
+  async readAfter(taskId: string, throughSequence: number): Promise<CommittedEvent[]> {
+    if (!Number.isInteger(throughSequence) || throughSequence < 0) {
+      throw new StorageError(
+        STORAGE_ERROR_CODES.EVENT_INVALID,
+        'throughSequence 必须是非负整数。',
+        null,
+        '修正参数后重试。',
+      );
+    }
+    return this.enqueue(taskId, async () => {
+      const events = await this.scanCommitted(taskId);
+      return events
+        .filter((entry) => entry.sequence > throughSequence)
+        .map(({ canonical: _canonical, ...committed }) => committed);
+    });
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Persistent per-task append manifest (spec §9.4, design §19.1)       */
+  /*                                                                    */
+  /* `events/.append-manifest.json`: a DISPOSABLE accelerator holding   */
+  /* the tail sequence, the commit-ID index, the event-ID index and     */
+  /* per-envelope digests, so the append CAS avoids rescanning the full */
+  /* history on normal writes. It is never authority: on ANY divergence */
+  /* from disk (missing/corrupt manifest, tail file mismatch) the store */
+  /* rebuilds it from the exact same validated full scan and retries,   */
+  /* and it can never override a committed file (the CAS stays the      */
+  /* single decision point).                                            */
+  /* ------------------------------------------------------------------ */
+
+  /** The append-manifest file name lives beside committed events (dotfile, invisible to scans). */
+  private manifestFileName(): string {
+    return '.append-manifest.json';
+  }
+
+  /** Reads the manifest; missing/corrupt/untrustworthy => null (rebuild). */
+  private async readManifest(taskId: string): Promise<AppendManifestV1 | null> {
+    let value: unknown;
+    try {
+      value = JSON.parse(await readFile(join(this.paths.taskEventsRoot(taskId), this.manifestFileName()), 'utf8'));
+    } catch {
+      return null;
+    }
+    if (!isPlainObject(value) || value.version !== 1 || value.taskId !== taskId) {
+      return null;
+    }
+    const record = value as Record<string, unknown>;
+    if (
+      typeof record.tailSequence !== 'number' ||
+      !Number.isInteger(record.tailSequence) ||
+      record.tailSequence < 0 ||
+      (record.tailFileName !== null && typeof record.tailFileName !== 'string') ||
+      (record.tailCommitId !== null && typeof record.tailCommitId !== 'string') ||
+      !isPlainObject(record.eventIds) ||
+      !isPlainObject(record.commitIds) ||
+      !isPlainObject(record.envelopes)
+    ) {
+      return null;
+    }
+    return record as unknown as AppendManifestV1;
+  }
+
+  private async writeManifest(taskId: string, manifest: AppendManifestV1): Promise<void> {
+    // Best-effort: the manifest is disposable. A failure here must never
+    // fail an already-durably-committed append — the write is caught by the
+    // callers, which invalidate the on-disk manifest so the next access
+    // rebuilds from the full validated scan.
+    try {
+      await this.manifestWriter(taskId, manifest);
+    } catch {
+      try {
+        await rm(join(this.paths.taskEventsRoot(taskId), this.manifestFileName()), { force: true });
+      } catch {
+        // the stale manifest will be rejected by the divergence guard
+      }
+    }
+  }
+
+  /**
+   * Loads the committed CAS index FAST when the manifest matches disk:
+   * the tail envelope is re-read and fully re-validated (the same
+   * readBatchFile/readCommittedFile validation the scan uses), and its
+   * digest must equal the manifest's recorded envelope digest. Anything
+   * else rebuilds the manifest from the authoritative full scan.
+   *
+   * The manifest index carries ONLY CAS metadata (tail, ids, digests);
+   * event bytes are re-validated on every read path, and the idempotent
+   * replay path re-reads the exact file of a hit. The manifest never
+   * overrides a committed file: it is disposable accelerator state and is
+   * rebuilt the moment disk disagrees.
+   */
+  private async loadHistory(taskId: string): Promise<HistoryIndex> {
+    const manifest = await this.readManifest(taskId);
+    if (manifest !== null && (await this.verifyManifestTail(taskId, manifest))) {
+      return indexFromManifest(manifest);
+    }
+    const scanned = await this.scanHistory(taskId);
+    const rebuilt = indexFromScan(taskId, scanned.events, scanned.batches);
+    await this.writeManifest(taskId, rebuilt.manifest); // best-effort (M7)
+    return rebuilt;
+  }
+
+  /** Re-validates the manifest tail envelope against disk (O(1) file). */
+  private async verifyManifestTail(taskId: string, manifest: AppendManifestV1): Promise<boolean> {
+    const tailFileName = manifest.tailFileName;
+    // Directory-level divergence guard: the manifest is trusted only when the
+    // number of committed envelopes on disk matches its index. An extra or
+    // missing envelope (out-of-band damage, a crashed foreign writer or a
+    // corrupted index) forces a full-scan rebuild — the accelerator never
+    // decides over disk.
+    let committedNames: string[] = [];
+    try {
+      const names = await readdir(this.paths.taskEventsRoot(taskId));
+      committedNames = names.filter(
+        (name) => !name.startsWith(TMP_PREFIX) && !name.startsWith('.') && (parseBatchFileName(name) !== null || parseEventFileName(name) !== null),
+      );
+    } catch {
+      return false;
+    }
+    if (committedNames.length !== Object.keys(manifest.envelopes).length) {
+      return false;
+    }
+    if (tailFileName === null || manifest.tailSequence === 0) {
+      return manifest.tailSequence === 0 && Object.keys(manifest.eventIds).length === 0;
+    }
+    try {
+      const eventsRoot = this.paths.taskEventsRoot(taskId);
+      const tailFile: string = tailFileName;
+      const batch = parseBatchFileName(tailFile);
+      if (batch !== null) {
+        if (batch.lastSequence !== manifest.tailSequence) return false;
+        const validated = await readBatchFile(eventsRoot, tailFile, batch, taskId);
+        return validated.canonicalPayloadSha256 === manifest.envelopes[tailFile];
+      }
+      const single = parseEventFileName(tailFile);
+      if (single !== null && single.sequence === manifest.tailSequence) {
+        const validated = await readCommittedFile(eventsRoot, tailFile, {
+          sequence: single.sequence,
+          eventId: single.eventId,
+        });
+        const digest = createHash('sha256')
+          .update(Buffer.from(validated.canonical, 'utf8'))
+          .digest('hex');
+        return digest === manifest.envelopes[tailFile];
+      }
+      return false;
+    } catch {
+      return false; // missing or unreadable tail envelope => rebuild/retry
+    }
+  }
+
+  /** Extends the manifest after one committed envelope (no rescan). */
+  private async maintainManifestAfterAppend(
+    taskId: string,
+    index: HistoryIndex,
+    fileName: string,
+    digest: string,
+    commitId: string | null,
+    events: readonly TaskEvent[],
+    firstSequence: number,
+  ): Promise<void> {
+    if (commitId === null) {
+      const entry = events[0];
+      if (entry === undefined) return;
+      index.manifest.eventIds[entry.id] = firstSequence;
+      index.manifest.envelopes[fileName] = digest;
+      index.manifest.tailFileName = fileName;
+      index.manifest.tailSequence = firstSequence;
+      index.manifest.tailCommitId = null;
+      await this.writeManifest(taskId, index.manifest);
+      return;
+    }
+    for (let offset = 0; offset < events.length; offset += 1) {
+      index.manifest.eventIds[events[offset]?.id ?? ''] = firstSequence + offset;
+    }
+    index.manifest.envelopes[fileName] = digest;
+    index.manifest.commitIds[commitId] = fileName;
+    index.manifest.tailFileName = fileName;
+    index.manifest.tailSequence = firstSequence + events.length - 1;
+    index.manifest.tailCommitId = commitId;
+    await this.writeManifest(taskId, index.manifest);
+  }
+}
+/** The CAS metadata view over a task history (manifest-fast or scan). */
+interface HistoryIndex {
+  tailSequence: number;
+  tailCommitId: string | null;
+  eventIds: Record<string, number>;
+  commitIds: Record<string, string>;
+  envelopes: Record<string, string>;
+  manifest: AppendManifestV1;
+}
+
+function indexFromManifest(manifest: AppendManifestV1): HistoryIndex {
+  return {
+    tailSequence: manifest.tailSequence,
+    tailCommitId: manifest.tailCommitId,
+    eventIds: { ...manifest.eventIds },
+    commitIds: { ...manifest.commitIds },
+    envelopes: { ...manifest.envelopes },
+    manifest,
+  };
+}
+
+function indexFromScan(
+  taskId: string,
+  events: readonly ScannedEvent[],
+  batches: ReadonlyMap<string, ValidatedBatch>,
+): HistoryIndex {
+  const envelopes: Record<string, string> = {};
+  const eventIds: Record<string, number> = {};
+  const commitIds: Record<string, string> = {};
+  let tailFileName: string | null = null;
+  let tailCommitId: string | null = null;
+  if (events.length > 0) {
+    const last = events[events.length - 1];
+    tailFileName = last?.fileName ?? null;
+    for (const batch of batches.values()) {
+      if (batch.committed[batch.committed.length - 1]?.sequence === last?.sequence) {
+        tailCommitId = batch.commitId;
+        break;
+      }
+    }
+  }
+  for (const entry of events) {
+    const batchCommitId = parseBatchFileName(entry.fileName)?.commitId ?? null;
+    const digest =
+      (batchCommitId !== null ? batches.get(batchCommitId)?.canonicalPayloadSha256 : undefined) ??
+      createHash('sha256').update(Buffer.from(entry.canonical, 'utf8')).digest('hex');
+    envelopes[entry.fileName] = digest;
+  }
+  for (const entry of events) {
+    eventIds[entry.event.id] = entry.sequence;
+  }
+  for (const batch of batches.values()) {
+    commitIds[batch.commitId] = batch.fileName;
+  }
+  const manifest: AppendManifestV1 = {
+    version: 1,
+    taskId,
+    tailSequence: events[events.length - 1]?.sequence ?? 0,
+    tailFileName,
+    tailCommitId,
+    envelopes,
+    eventIds,
+    commitIds,
+  };
+  return {
+    tailSequence: manifest.tailSequence,
+    tailCommitId,
+    eventIds,
+    commitIds,
+    envelopes,
+    manifest,
+  };
+}
+
+/** The append-manifest accelerator shape (spec §9.4). */
+interface AppendManifestV1 {
+  version: 1;
+  taskId: string;
+  tailSequence: number;
+  tailFileName: string | null;
+  tailCommitId: string | null;
+  /** envelope file name -> canonical payload digest (batch) or canonical event digest (single). */
+  envelopes: Record<string, string>;
+  /** eventId -> committed sequence. */
+  eventIds: Record<string, number>;
+  /** commitId -> envelope file name. */
+  commitIds: Record<string, string>;
 }

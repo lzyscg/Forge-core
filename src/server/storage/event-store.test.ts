@@ -17,6 +17,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   disposeAllTestRoots,
@@ -50,10 +51,10 @@ function result(sequence = 2): TaskEvent {
   });
 }
 
-/** Committed (non-temporary) event filenames as they exist on disk, sorted. */
+/** Committed (non-temporary, non-dotfile) event filenames on disk, sorted. */
 async function committedFileNames(paths: CorePaths, taskId: string): Promise<string[]> {
   return (await readdir(paths.taskEventsRoot(taskId)))
-    .filter((name) => !name.startsWith('.tmp-'))
+    .filter((name) => !name.startsWith('.tmp-') && !name.startsWith('.'))
     .sort();
 }
 
@@ -296,7 +297,7 @@ describe('EventStore.appendBatch', () => {
     expect(committed[0].size).toBeGreaterThan(0);
     // Exactly one batch envelope file exists alongside the legacy file.
     const names = (await readdir(paths.taskEventsRoot(taskId))).filter(
-      (name) => !name.startsWith('.tmp-'),
+      (name) => !name.startsWith('.tmp-') && !name.startsWith('.'),
     );
     expect(names.sort()).toEqual([legacy.fileName, formatBatchFileName(2, 4, 'commit-a')].sort());
     // The batch reads back flattened, no envelope visible to the projector.
@@ -704,7 +705,7 @@ describe('EventStore v2 protocol members (plan 2026-08-14 Task 7)', () => {
     // Corrupt the committed bytes: drop the required payloadRef key while
     // keeping valid JSON, then read — the union validator fails loud.
     const names = (await readdir(paths.taskEventsRoot(taskId))).filter(
-      (name) => !name.startsWith('.tmp-'),
+      (name) => !name.startsWith('.tmp-') && !name.startsWith('.'),
     );
     const envelopePath = paths.taskBatchEventFile(taskId, names[0]);
     const envelope = JSON.parse(await readFile(envelopePath, 'utf8'));
@@ -889,5 +890,176 @@ describe('EventStore v2 protocol members (plan 2026-08-14 Task 7)', () => {
     expect(await store.tail(taskId)).toEqual({ lastSequence: 2, lastCommitId: null });
     await store.appendBatch(taskId, 'tail-commit', [result(3)], { expectedLastSequence: 2 });
     expect(await store.tail(taskId)).toEqual({ lastSequence: 3, lastCommitId: 'tail-commit' });
+  });
+});
+
+describe('EventStore.append manifest and readAfter (Task 9, spec §9.4)', () => {
+  /** A persistent append manifest is durable beside the events. */
+  function manifestPath(paths: CorePaths, taskId: string): string {
+    return join(paths.taskEventsRoot(taskId), '.append-manifest.json');
+  }
+
+  it('readAfter returns the validated tail strictly after throughSequence', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    for (let index = 1; index <= 4; index += 1) {
+      await store.append(taskId, input(index));
+    }
+    const tail = await store.readAfter(taskId, 2);
+    expect(tail.map((entry) => entry.sequence)).toEqual([3, 4]);
+    expect(await store.readAfter(taskId, 0)).toHaveLength(4);
+    expect(await store.readAfter(taskId, 4)).toHaveLength(0);
+    expect(await store.readAfter(taskId, 9)).toHaveLength(0);
+  });
+
+  it('readAfter fails loud on a corrupt committed tail file (validated range access)', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    await store.append(taskId, started());
+    const first = await store.append(taskId, input());
+    await writeFile(paths.taskEventFile(taskId, first.fileName), 'garbage', 'utf8');
+    await expect(store.readAfter(taskId, 1)).rejects.toThrow(/TASK_CORRUPTED|已提交事件/);
+  });
+
+  it('writes a durable append manifest and keeps appends correct across rebuilds', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    await store.append(taskId, started());
+    await store.append(taskId, input());
+    const manifest = JSON.parse(await readFile(manifestPath(paths, taskId), 'utf8')) as {
+      version: number;
+      tailSequence: number;
+      eventIds: Record<string, number>;
+      envelopes: Record<string, string>;
+    };
+    expect(manifest.version).toBe(1);
+    expect(manifest.tailSequence).toBe(2);
+    expect(Object.keys(manifest.eventIds)).toHaveLength(2);
+    expect(Object.keys(manifest.envelopes)).toHaveLength(2);
+    // Duplicate ids are detected through the manifest index: re-appending the
+    // EXACT same event replays the committed entry without a full rescan.
+    const firstEntry = (await store.read(taskId))[0];
+    if (firstEntry !== undefined) {
+      const replay = await store.append(taskId, firstEntry.event);
+      expect(replay.sequence).toBe(firstEntry.sequence);
+    }
+    // A conflicting event id under a new id still appends a fresh sequence.
+    const second = await store.read(taskId);
+    expect(second).toHaveLength(2);
+  });
+
+  it('rebuilds the manifest from a full scan after corruption', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    await store.append(taskId, started());
+    await store.append(taskId, input());
+    await writeFile(manifestPath(paths, taskId), '{ not json', 'utf8');
+    const next = await store.append(taskId, result());
+    expect(next.sequence).toBe(3);
+    const manifest = JSON.parse(await readFile(manifestPath(paths, taskId), 'utf8')) as { tailSequence: number };
+    expect(manifest.tailSequence).toBe(3);
+    expect(await store.read(taskId)).toHaveLength(3);
+  });
+
+  it('detects manifest-vs-disk divergence and recovers with a full-scan rebuild', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    await store.append(taskId, started());
+    // Tamper: the manifest claims a tail the disk does not have.
+    const tampered = {
+      version: 1,
+      taskId,
+      tailSequence: 5,
+      tailFileName: '999999-never-committed.json',
+      envelopes: {},
+      eventIds: {},
+      commitIds: {},
+    };
+    await writeFile(manifestPath(paths, taskId), JSON.stringify(tampered), 'utf8');
+    const next = await store.append(taskId, input());
+    expect(next.sequence).toBe(2);
+    // The rebuilt manifest reflects the true disk state.
+    const manifest = JSON.parse(await readFile(manifestPath(paths, taskId), 'utf8')) as { tailSequence: number };
+    expect(manifest.tailSequence).toBe(2);
+    // And the committed history is untouched.
+    expect(await store.read(taskId)).toHaveLength(2);
+  });
+
+  it('keeps v2 appendBatch CAS semantics with the manifest present (batch-reserved ranges intact)', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    await store.append(taskId, started());
+    // v2 batch under a live fence proof exercises the manifest + reservation path.
+    const record: StoreFenceRecord = {
+      ownerPid: 9999,
+      processStartToken: 'token-1',
+      processStartTime: null,
+      bootId: 'boot-1',
+      leaseEpoch: 1,
+      acquisitionNonce: 'nonce-1',
+      durableGeneration: 0,
+      acquiredAt: new Date().toISOString(),
+    };
+    await writeFile(paths.storeFenceRecordFile(), JSON.stringify(record), 'utf8');
+    const proof: StoreFenceProof = {
+      ownerPid: 9999,
+      processStartToken: 'token-1',
+      leaseEpoch: 1,
+      acquisitionNonce: 'nonce-1',
+      durableGeneration: 0,
+    };
+    const v2: TaskEvent = {
+      protocolVersion: 2,
+      id: randomUUID(),
+      at: new Date().toISOString(),
+      type: 'structured_task_suspension_applied_v2',
+      suspensionId: 'sus-1',
+      reason: 'user_stop',
+      operationId: 'op-1',
+    };
+    const committed = await store.appendBatch(taskId, 'commit-1', [v2], { expectedLastSequence: 1, fenceProof: proof });
+    expect(committed[0]?.sequence).toBe(2);
+    const manifest = JSON.parse(await readFile(manifestPath(paths, taskId), 'utf8')) as {
+      tailSequence: number;
+      commitIds: Record<string, string>;
+    };
+    expect(manifest.tailSequence).toBe(2);
+    expect(manifest.commitIds['commit-1']).toBeTruthy();
+    // Replay of the same commit id through the manifest remains idempotent.
+    const replay = await store.appendBatch(taskId, 'commit-1', [v2], { expectedLastSequence: 1, fenceProof: proof });
+    expect(replay[0]?.sequence).toBe(2);
+  });
+});
+
+describe('EventStore manifest best-effort maintenance (Task 9 fix M7)', () => {
+  it('a failing manifest writer never fails the already-committed append', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths, {
+      manifestWriter: async () => {
+        throw new Error('simulated manifest write failure');
+      },
+    });
+    const taskId = randomUUID();
+    // Appends succeed and commit durably even though the (disposable)
+    // manifest can never be written.
+    const first = await store.append(taskId, started());
+    const second = await store.append(taskId, input());
+    expect(second.sequence).toBe(first.sequence + 1);
+    // The manifest file is never left behind in a half-written state.
+    await expect(readFile(join(paths.taskEventsRoot(taskId), '.append-manifest.json'))).rejects.toThrow();
+    // Reads rebuild from the full validated scan and stay correct.
+    const committed = await store.read(taskId);
+    expect(committed).toHaveLength(2);
+    expect(await store.tail(taskId)).toEqual({ lastSequence: 2, lastCommitId: null });
+    // Follow-up appends keep working (the full-scan path is authoritative).
+    const third = await store.append(taskId, result());
+    expect(third.sequence).toBe(3);
+    expect((await store.read(taskId)).map((e) => e.sequence)).toEqual([1, 2, 3]);
   });
 });

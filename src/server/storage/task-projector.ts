@@ -41,6 +41,8 @@ import type { TaskRecord } from './task-store';
 import type { EventNode, TaskEvent } from './task-events';
 import type { ArtifactEntry } from './artifact-store';
 import { projectStructuredSlotState } from './structured-slot-state';
+import type { AuthoritativeReviewEventV2 } from './authoritative-review-events';
+import { ProjectionCorruptionError, projectAuthoritativeReviewStateSync } from './authoritative-review-state';
 
 /** Identity inputs of one projection: immutable record + frozen snapshot. */
 export interface TaskProjectionTask {
@@ -399,6 +401,7 @@ export function projectTask(
   artifacts: readonly ArtifactEntry[],
   structuredContentRoot?: StructuredContentRootV1 | null,
 ): TaskWorkspace {
+  const isV2 = structuredProtocolOf(task.frozenTemplate) === 'v2';
   const state = fold(events);
   const orderIndex = new Map(state.nodeOrder.map((id, index) => [id, index]));
   const nodes = [...state.nodes.values()].sort(
@@ -427,6 +430,22 @@ export function projectTask(
       final: state.finalArtifactId !== null && entry.meta.id === state.finalArtifactId,
     }));
 
+  if (isV2) {
+    // Contract v2 (spec §4.4): the workspace keeps the shared shell but the
+    // summary status derives through the AUTHORITATIVE projector — a corrupt
+    // v2 history projects `corrupt` instead of a plausible status, and the
+    // v1 structured summary is never inferred from v1 generation fields.
+    try {
+      const projected = projectAuthoritativeReviewStateSync(events as AuthoritativeReviewEventV2[]);
+      state.status = projected.ok ? projected.state.taskStatus : 'corrupt';
+    } catch (error) {
+      if (error instanceof ProjectionCorruptionError) {
+        state.status = 'corrupt';
+      } else {
+        throw error;
+      }
+    }
+  }
   const workspace: TaskWorkspace = {
     task: buildSummary(task, state, artifacts),
     frozenInput: { ...task.record.frozenInput },
@@ -436,19 +455,24 @@ export function projectTask(
     nodes,
     executedRoutes,
     artifacts: inputVersions,
-    pendingHumanQuestion: state.pendingHumanQuestion,
-    pendingHumanSource: state.pendingHumanSource,
+    pendingHumanQuestion: isV2 ? null : state.pendingHumanQuestion,
+    pendingHumanSource: isV2 ? null : state.pendingHumanSource,
   };
   // Structured templates always carry the summary; basic workspaces omit the
   // field entirely (spec §14 / I01). The summary is a pure fold of
   // authoritative structured events plus the active content root and never
-  // embeds content, the full tree, Grants or private Drafts.
-  const structuredSlots = projectStructuredSlotsSummary(events, task.frozenTemplate, structuredContentRoot);
-  if (structuredSlots !== null) {
-    workspace.structuredSlots = structuredSlots;
+  // embeds content, the full tree, Grants or private Drafts. Contract v2
+  // tasks never carry the v1 summary (Task 11 exposes the v2 workspace).
+  if (!isV2) {
+    const structuredSlots = projectStructuredSlotsSummary(events, task.frozenTemplate, structuredContentRoot);
+    if (structuredSlots !== null) {
+      workspace.structuredSlots = structuredSlots;
+    }
   }
   return workspace;
 }
+
+
 
 /**
  * Owner-visible issues derived from authoritative structured events (spec §14

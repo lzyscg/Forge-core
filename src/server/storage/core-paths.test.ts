@@ -268,3 +268,29 @@ describe('CorePaths v2 blob layout (spec §8)', () => {
 function joinPaths(root: string, ...rel: string[]): string {
   return resolve(root, ...rel);
 }
+
+describe('CorePaths v2 projections and cursor keyring (Task 9)', () => {
+  it('derives per-task projection checkpoint files under structured-slots/v2/projections', () => {
+    const paths = CorePaths.create(ROOTS);
+    const digest = 'cd'.repeat(32);
+    expect(paths.taskStructuredV2ProjectionsRoot('task-9')).toBe(
+      joinPaths('D:/core-data', 'tasks/task-9/structured-slots/v2/projections'),
+    );
+    expect(paths.taskStructuredV2CheckpointFile('task-9', digest)).toBe(
+      joinPaths('D:/core-data', 'tasks/task-9/structured-slots/v2/projections/checkpoints', `${digest}.json`),
+    );
+    expect(paths.taskStructuredV2CheckpointLatestFile('task-9')).toBe(
+      joinPaths('D:/core-data', 'tasks/task-9/structured-slots/v2/projections/latest.json'),
+    );
+    expect(() => paths.taskStructuredV2CheckpointFile('task-9', 'xy')).toThrow(/CORE_PATH_INVALID/);
+    expect(() => paths.taskStructuredV2CheckpointFile('../task', digest)).toThrow(/CORE_PATH_INVALID/);
+  });
+
+  it('derives the installation cursor keyring files under the data root', () => {
+    const paths = CorePaths.create(ROOTS);
+    expect(paths.cursorKeyringRoot()).toBe(joinPaths('D:/core-data', 'cursor-keys'));
+    expect(paths.cursorKeyringActiveFile()).toBe(joinPaths('D:/core-data', 'cursor-keys/active.json'));
+    expect(paths.cursorKeyringRetiredFile()).toBe(joinPaths('D:/core-data', 'cursor-keys/retired.json'));
+    expect(paths.cursorKeyringCreatedMarkerFile()).toBe(joinPaths('D:/core-data', 'cursor-keys/created.json'));
+  });
+});

@@ -399,4 +399,52 @@ export class CorePaths {
   storeBootIdFile(): string {
     return resolve(this.dataRoot, '.store-boot-id.json');
   }
+
+  /* ---------------------------------------------------------------- */
+  /* Task 9: projection checkpoints and the installation cursor keyring*/
+  /* (spec §9.4/§14.2, design §19.1 — accelerators, never authority)   */
+  /* ---------------------------------------------------------------- */
+
+  /** structured-slots/v2/projections/ — checkpoint envelopes per task. */
+  taskStructuredV2ProjectionsRoot(taskId: string): string {
+    return resolve(this.taskStructuredV2Root(taskId), 'projections');
+  }
+
+  /** projections/checkpoints/<digest>.json — one immutable envelope per digest. */
+  taskStructuredV2CheckpointFile(taskId: string, checkpointDigest: string): string {
+    if (!STRUCTURED_SHA256.test(checkpointDigest)) {
+      throw new CorePathError('checkpointDigest');
+    }
+    return resolve(this.taskStructuredV2ProjectionsRoot(taskId), 'checkpoints', `${checkpointDigest}.json`);
+  }
+
+  /** projections/latest.json — the current tail pointer (throughSequence + digest). */
+  taskStructuredV2CheckpointLatestFile(taskId: string): string {
+    return resolve(this.taskStructuredV2ProjectionsRoot(taskId), 'latest.json');
+  }
+
+  /** cursor-keys/ — installation-level cursor signing keyring (spec §14.2). */
+  cursorKeyringRoot(): string {
+    return resolve(this.dataRoot, 'cursor-keys');
+  }
+
+  /** cursor-keys/active.json — the active signing key material. */
+  cursorKeyringActiveFile(): string {
+    return resolve(this.cursorKeyringRoot(), 'active.json');
+  }
+
+  /** cursor-keys/retired.json — retired keys kept through the retention window. */
+  cursorKeyringRetiredFile(): string {
+    return resolve(this.cursorKeyringRoot(), 'retired.json');
+  }
+
+  /**
+   * cursor-keys/created.json — durable bootstrap marker. Its presence proves
+   * the installation has ALREADY initialized a keyring, so a later
+   * missing/unreadable active key file fails closed instead of silently
+   * minting a replacement (which would invalidate every held cursor).
+   */
+  cursorKeyringCreatedMarkerFile(): string {
+    return resolve(this.cursorKeyringRoot(), 'created.json');
+  }
 }

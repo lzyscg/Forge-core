@@ -47,6 +47,8 @@ import { ArtifactStore, type ArtifactProposal } from './storage/artifact-store';
 import { EventStore, type CommittedEvent } from './storage/event-store';
 import { TaskStore, type CreateTaskRequest, type CreatedTask } from './storage/task-store';
 import { deriveOwnerIssues, projectTask } from './storage/task-projector';
+import { structuredProtocolOf } from '../shared/authoritative-review-v2';
+import { ReviewCursorKeyring } from './storage/review-cursor-keyring';
 import type { TaskEvent } from './storage/task-events';
 import { StructuredSlotBlobStore } from './storage/structured-slot-blob-store';
 import { projectStructuredSlotState } from './storage/structured-slot-state';
@@ -227,6 +229,14 @@ export class CoreService {
   readonly live: LiveStore;
 
   /**
+   * ONE installation-persistent cursor signing keyring for the v2 read APIs
+   * (spec §14.2, Task 9): cursors carry `keyId`, retired keys verify through
+   * the frozen retention window, and the v1 in-memory task-local signer stays
+   * v1-only and untouched (Task 11 reads it for the v2 snapshot cursors).
+   */
+  readonly cursorKeyring: ReviewCursorKeyring;
+
+  /**
    * ONE cursor signer per task (Task 10 note): the projection service binds
    * every cursor to a task-local in-memory HMAC secret, so pagination stays
    * coherent across REST requests and a process restart invalidates held
@@ -341,6 +351,7 @@ export class CoreService {
     // Live-preview buffer (plan C): the runner tags every runtime patch with
     // the task id and merges it here. Memory-only — never persisted.
     this.live = new LiveStore();
+    this.cursorKeyring = new ReviewCursorKeyring(paths);
     this.runner = new TaskRunner({
       tasks: this.tasks,
       events: this.events,
@@ -388,6 +399,9 @@ export class CoreService {
 
   async initialize(): Promise<void> {
     await this.templates.initialize();
+    // The v2 cursor keyring is created durably at service bootstrap
+    // (spec §14.2); fail-closed loading never mints a replacement key.
+    await this.cursorKeyring.initialize();
   }
 
   /** Creates a frozen task from a validated request (delegates to TaskStore). */
@@ -738,6 +752,7 @@ export class CoreService {
     const committed = await this.events.read(taskId);
     const artifacts = await this.artifacts.list(taskId);
     const events = committed.map((entry) => entry.event);
+    const isV2 = structuredProtocolOf(frozenTemplate) === 'v2';
     const workspace = projectTask(
       { record, frozenTemplate },
       events,
@@ -745,7 +760,8 @@ export class CoreService {
       // Exact filled-slot count from the ACTIVE generation's content root
       // (design §18.3 authoritative events + verifiable blob projection). Null
       // when none committed or unreadable → the summary reports 0 filled.
-      await this.structuredContentRootFor(taskId, frozenTemplate, events),
+      // Contract v2 never reads v1 content revisions (spec §4.4).
+      isV2 ? null : await this.structuredContentRootFor(taskId, frozenTemplate, events),
     );
     // Live-preview attachment (plan C): the in-memory buffer, when present,
     // rides along as activeTurn. Never persisted; display only.
