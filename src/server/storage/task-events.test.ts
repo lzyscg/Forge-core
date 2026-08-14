@@ -16,6 +16,7 @@ import {
   validateTaskEvent,
   type TaskEvent,
 } from './task-events';
+import { v1SealEvent } from '../template/v1-compatibility-support';
 
 function base(): { id: string; at: string } {
   return { id: randomUUID(), at: '2026-08-07T00:00:00.000Z' };
@@ -769,5 +770,27 @@ describe('normalizeLegacyEvent', () => {
       id: 'e',
       at: 't',
     });
+  });
+});
+
+describe('v1 seal-path acceptance fence (plan 2026-08-14 Task 1)', () => {
+  it('keeps the structured v1 Seal path accepted end to end', () => {
+    const { id, at } = base();
+    // The v1 Seal path: a seal-session attempt plus the authoritative
+    // scaffold seal event. Both stay accepted unchanged by the canonical
+    // validator — later Contract v2 work adds new closed members and never
+    // widens an existing v1 payload.
+    const started = validateTaskEvent({
+      id,
+      at,
+      type: 'structured_slot_attempt_started',
+      inputNodeId: 'in-seal',
+      agentId: 'seal',
+      attemptEpoch: 1,
+      turnId: 'turn-seal-1',
+      sessionKind: 'seal',
+    });
+    expect(started).toMatchObject({ id, at, sessionKind: 'seal' });
+    expect(validateTaskEvent(v1SealEvent)).toEqual(v1SealEvent);
   });
 });

@@ -20,10 +20,18 @@ import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { CorePaths } from '../storage/core-paths';
+import { validateTaskEvent } from '../storage/task-events';
 import { PROGRESS_POLICY_CEILING } from '../runtime/progress-guard';
 import { createTestRuntimeEnvironment } from '../structured-slots/runtime-capability';
 import { loadTemplateDirectory } from './template-loader';
 import { TemplateCatalog } from './template-catalog';
+import {
+  STRUCTURED_VALID_FIXTURE,
+  V1_PACKAGE_FIXTURE,
+  projectV1TemplateCompatibility,
+  readV1CompatibilitySnapshot,
+  v1SealEvent,
+} from './v1-compatibility-support';
 
 const tempRoots: string[] = [];
 
@@ -1076,5 +1084,36 @@ describe('structured production mode (Task 5, spec §3.2/§15)', () => {
     await expect(
       loadTemplateDirectory(dest, { runtimeEnvironment: createTestRuntimeEnvironment() }),
     ).rejects.toMatchObject({ code: 'TEMPLATE_INVALID', location: 'pipeline.yaml' });
+  });
+});
+
+describe('structured slot v1 compatibility fence (plan 2026-08-14 Task 1)', () => {
+  it('keeps historical v1 template and event semantics byte stable', async () => {
+    const env = createTestRuntimeEnvironment();
+    const snapshot = readV1CompatibilitySnapshot();
+    // The ARCHIVED production v1 package must keep loading byte-identically:
+    // frozen hash, Route list, v3 session union and Contract v1 top-level
+    // keys never drift once Task 1 lands. Later tasks migrate the production
+    // source to v2; this archived fixture is the machine-checked v1 boundary
+    // and stays untouched.
+    const archived = await loadTemplateDirectory(V1_PACKAGE_FIXTURE, { runtimeEnvironment: env });
+    expect(projectV1TemplateCompatibility(archived)).toEqual({
+      versionHash: snapshot.zhihuV1VersionHash,
+      routes: snapshot.zhihuV1Routes,
+      v3SessionKinds: snapshot.v3SessionUnion,
+      contractTopLevelKeys: snapshot.contractV1TopLevelKeys,
+    });
+    // The current structured fixture's compiled semantic digest is frozen too
+    // (the v2 compiler gets a separate digest branch; the v1 digest never
+    // changes).
+    const structuredValid = await loadTemplateDirectory(STRUCTURED_VALID_FIXTURE, {
+      runtimeEnvironment: env,
+    });
+    expect(structuredValid.structuredSlots?.semanticDigest).toBe(
+      snapshot.structuredValidSemanticDigest,
+    );
+    // The v1 Seal event bytes stay accepted unchanged by the canonical event
+    // validator (task-events retains every v1 member exactly).
+    expect(validateTaskEvent(v1SealEvent)).toEqual(v1SealEvent);
   });
 });

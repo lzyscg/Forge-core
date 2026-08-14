@@ -59,6 +59,10 @@ import { makeTempCorePaths, disposeAllTestRoots } from '../test-support';
 import type { FrozenStructuredSlotContractV1 } from './structured-slot-contract';
 import type { TaskEvent } from '../storage/task-events';
 import type { SlotCapabilityV1 } from '../../shared/structured-slots';
+import {
+  projectV1AcceptanceSummary,
+  readV1CompatibilitySnapshot,
+} from './v1-compatibility-support';
 
 const ACCEPTANCE_TEMPLATE_ID = 'structured-acceptance';
 
@@ -448,6 +452,15 @@ describe('structured-slot-template acceptance — end-to-end flow (Task 19)', ()
     expect(contentFile?.content).toContain('# Acceptance Title');
     expect(contentFile?.content).toContain('Acceptance body paragraph.');
 
+    // v1 acceptance fence (plan 2026-08-14 Task 1): the projected completed
+    // v1 acceptance summary must equal the frozen bytes. The summary only
+    // carries deterministic fold results (statuses, counts, revisions) — the
+    // Seal path, Draft lifecycle, Attempt pairing and replay result stay
+    // byte stable across runs and later v2 work.
+    expect(
+      projectV1AcceptanceSummary(committed, summary.status, finalArtifact?.version ?? null),
+    ).toEqual(readV1CompatibilitySnapshot().completedV1AcceptanceSummary);
+
     await service.shutdown();
   });
 
@@ -561,6 +574,31 @@ describe('structured-slot-template acceptance — end-to-end flow (Task 19)', ()
     if (!badSubject.ok) expect(badSubject.code).toBe('GRANT_INVALID');
     const unknown = await projection.listSlots({ kind: 'anonymous' as never }, null, 10);
     expect(unknown.ok).toBe(false);
+
+    // v1 cursor behavior fence (plan 2026-08-14 Task 1): the signed, bound
+    // cursor continues the IDENTICAL v1 projection and a tampered cursor
+    // fails closed with CURSOR_INVALID — the cursor protocol stays
+    // unchanged and v1-only.
+    const page = await projection.listSlots({ kind: 'task_owner' }, null, 2);
+    expect(page.ok).toBe(true);
+    if (page.ok) {
+      expect(page.entries).toHaveLength(2);
+      expect(page.nextCursor).not.toBeNull();
+      if (page.nextCursor !== null) {
+        const continued = await projection.listSlots({ kind: 'task_owner' }, page.nextCursor, 2);
+        expect(continued.ok).toBe(true);
+        if (continued.ok) {
+          // The scaffold tree is exactly three formal slots: two on the
+          // first page, the remaining one (depth-first pre-order) behind the
+          // signed cursor.
+          expect(continued.entries).toHaveLength(1);
+        }
+        const tampered = { ...page.nextCursor, signature: 'forged-signature' };
+        const rejected = await projection.listSlots({ kind: 'task_owner' }, tampered, 2);
+        expect(rejected.ok).toBe(false);
+        if (!rejected.ok) expect(rejected.code).toBe('CURSOR_INVALID');
+      }
+    }
 
     await service.shutdown();
   });

@@ -298,6 +298,24 @@ describe('TaskScheduler status validation', () => {
     await expect(harness.scheduler.answer(harness.taskId, '回答')).rejects.toMatchObject({
       code: 'INVALID_TRANSITION',
     });
+
+    // v1 stopped-task start fence (plan 2026-08-14 Task 1): a stopped task
+    // may START again from its last confirmed state (the start gate accepts
+    // 'stopped' — only ready or stopped tasks start) and a second
+    // task_started commits. The pending human question is never cleared by
+    // the stop/start cycle; the restarted loop never runs a Turn while a
+    // question is pending, so it parks VISIBLY (interrupted — never the
+    // historical silent 'running' dead end) and stays resumable.
+    const restarted = await harness.scheduler.start(harness.taskId);
+    expect(restarted.status).toBe('interrupted');
+    const startEvents = (await harness.environment.events.read(harness.taskId)).filter(
+      (entry) => entry.event.type === 'task_started',
+    );
+    expect(startEvents).toHaveLength(2);
+    const parkedWorkspace = await harness.environment.service.getWorkspace(harness.taskId);
+    expect(parkedWorkspace.pendingHumanQuestion).toBe('是否继续？');
+    const resumed = await harness.scheduler.resume(harness.taskId);
+    expect(resumed.status).toBe('waiting_human');
   });
 });
 

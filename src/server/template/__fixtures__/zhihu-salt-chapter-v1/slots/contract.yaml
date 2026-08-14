@@ -1,0 +1,184 @@
+version: 1
+slotTypes:
+  - id: chapter
+    name: 章节
+    description: 根容器，承载一章知乎盐选短故事正文。
+    specSchema:
+      type: object
+      additionalProperties: false
+    content:
+      presence: forbidden
+  - id: title
+    name: 标题
+    description: 章节标题，必须简洁并能承接本章核心变化。
+    specSchema:
+      type: object
+      additionalProperties: false
+      properties:
+        purpose: { type: string, minLength: 1, maxLength: 500 }
+        connective_requirement: { type: string, minLength: 1, maxLength: 500 }
+    content:
+      presence: required
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 120
+  - id: opening
+    name: 开场
+    description: 从正在发生的动作切入，让读者立即进入本章现场。
+    specSchema:
+      type: object
+      additionalProperties: false
+      properties:
+        action_to_advance: { type: string, minLength: 1, maxLength: 1000 }
+        character_state: { type: string, minLength: 1, maxLength: 1000 }
+        connective_requirement: { type: string, minLength: 1, maxLength: 1000 }
+        purpose: { type: string, minLength: 1, maxLength: 1000 }
+    content:
+      presence: required
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 12000
+  - id: scene_block
+    name: 场景段
+    description: 通过可见行动推进因果、人物关系或信息变化的正文场景。
+    specSchema:
+      type: object
+      additionalProperties: false
+      properties:
+        action_to_advance: { type: string, minLength: 1, maxLength: 1000 }
+        character_state: { type: string, minLength: 1, maxLength: 1000 }
+        connective_requirement: { type: string, minLength: 1, maxLength: 1000 }
+        information_not_to_reveal: { type: string, minLength: 1, maxLength: 1000 }
+        purpose: { type: string, minLength: 1, maxLength: 1000 }
+    content:
+      presence: required
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 24000
+  - id: emotional_closure
+    name: 情绪落点
+    description: 处理本章情绪回声，但不替后续章节提前总结。
+    specSchema:
+      type: object
+      additionalProperties: false
+      properties:
+        purpose: { type: string, minLength: 1, maxLength: 1000 }
+        tone: { type: string, minLength: 1, maxLength: 500 }
+    content:
+      presence: required
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 6000
+  - id: chapter_end
+    name: 章节结尾
+    description: 留下具体、可追踪、尚未兑现的问题或动作。
+    specSchema:
+      type: object
+      additionalProperties: false
+      properties:
+        concrete_unresolved_element: { type: string, minLength: 1, maxLength: 1000 }
+        purpose: { type: string, minLength: 1, maxLength: 1000 }
+        suspended_momentum: { type: string, minLength: 1, maxLength: 1000 }
+    content:
+      presence: required
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 6000
+layoutGrammar:
+  rootType: chapter
+  productions:
+    chapter:
+      children:
+        kind: sequence
+        items:
+          - kind: slot
+            type: title
+          - kind: slot
+            type: opening
+          - kind: repeat
+            min: 1
+            max: 16
+            item:
+              kind: slot
+              type: scene_block
+          - kind: slot
+            type: emotional_closure
+          - kind: slot
+            type: chapter_end
+    title:
+      children:
+        kind: empty
+    opening:
+      children:
+        kind: empty
+    scene_block:
+      children:
+        kind: empty
+    emotional_closure:
+      children:
+        kind: empty
+    chapter_end:
+      children:
+        kind: empty
+accessProfiles:
+  - id: editor
+    read:
+      - targets:
+          kind: all
+        targetLevel: content
+        context:
+          level: content
+          ancestors: 1
+          descendants: 1
+          directSiblings: false
+    writeContent:
+      - targets:
+          kind: all
+    continuity:
+      precedingFilled: true
+validators:
+  - id: chapter-structure-check
+    scope: scaffold
+    trigger: seal
+    enforcement: blocking
+    selector:
+      kind: root
+    implementation:
+      abi: forge-validator/v1
+      path: slots/validators/validate.cjs
+    budget: { cpuMs: 50, timeoutMs: 200, memoryMiB: 64 }
+assembler:
+  id: chapter-markdown
+  implementation:
+    abi: forge-assembler/v1
+    path: slots/assembler/render.cjs
+  budget: { cpuMs: 100, timeoutMs: 500, memoryMiB: 128 }
+  routes:
+    - id: chapter-md
+      artifactFile: chapter.md
+limits:
+  schema: { maxSchemaDepth: 4, maxSchemaNodes: 1024, maxEnumItems: 64, maxPatternLength: 128 }
+  structure: { maxSlots: 2500, maxTreeDepth: 8, maxChildrenPerSlot: 250 }
+  payload: { maxSpecBytesPerSlot: 16384, maxContentBytesPerSlot: 262144, maxScaffoldPayloadBytes: 16777216 }
+  draft: { maxChangedSlots: 500, maxDraftBytes: 4194304 }
+  attempt:
+    maxSlotToolCallsPerAttempt: 128
+    maxValidationRunsPerAttempt: 4
+    maxValidatorInvocationsPerAttempt: 10000
+    maxAggregateValidatorCpuMsPerAttempt: 60000
+    maxAggregateValidatorWallClockMsPerAttempt: 120000
+    maxValidatorOutputBytesPerAttempt: 4194304
+    maxAttemptWallClockMs: 150000
+  validation:
+    maxValidators: 16
+    maxValidatorInvocationsPerGate: 2500
+    maxAggregateValidatorCpuMsPerGate: 15000
+    maxAggregateValidatorWallClockMsPerGate: 30000
+    maxValidatorOutputBytesPerGate: 1048576
+    maxIssuesPerRun: 125
+  output: { maxArtifactFiles: 16, maxArtifactBytesPerFile: 4194304, maxTotalArtifactBytes: 16777216 }

@@ -190,4 +190,69 @@ describe('projectStructuredSlotState', () => {
     // A checkpoint never overrides event history: there is no checkpoint
     // input to this function, so the projection is identical every replay.
   });
+
+  it('replays a complete historical v1 history to the sealed projection (plan 2026-08-14 Task 1)', () => {
+    // The complete v1 lifecycle as a replay history: generation commit, one
+    // fill Draft (opened + merged), the Seal event, and one committed
+    // Attempt terminal per v3 session agent (structure/fill/seal). The
+    // projection is a pure fold of validated events, so this replay result
+    // is byte-stable forever — later Contract v2 work must never change it.
+    // The v2-contract submitter runs no structured attempt (parity with the
+    // live v1 acceptance flow).
+    const attempt = (
+      inputNodeId: string,
+      agentId: string,
+      sessionKind: 'structure' | 'fill' | 'seal',
+    ) => [
+      makeTaskEvent({
+        type: 'structured_slot_attempt_started',
+        inputNodeId,
+        agentId,
+        attemptEpoch: 1,
+        turnId: `turn-${agentId}`,
+        sessionKind,
+      }),
+      makeTaskEvent({
+        type: 'structured_slot_attempt_terminal',
+        inputNodeId,
+        attemptEpoch: 1,
+        turnId: `turn-${agentId}`,
+        status: 'committed',
+        reason: 'completion_dispatch',
+      }),
+    ];
+    const history = [
+      generationEvent(),
+      openedEvent('draft-1', 'turn-fill'),
+      terminalEvent('draft-1', 'turn-fill'),
+      makeTaskEvent({
+        type: 'structured_scaffold_sealed',
+        sealId: 'seal-1',
+        scaffoldId: 'scaffold-1',
+        generationId: 'gen-1',
+        scaffoldRevision: 1,
+        sealRecord: genRef('seal_record', 'e'),
+        artifactId: 'chapter',
+        artifactVersion: 1,
+      }),
+      ...attempt('in-structure', 'structure', 'structure'),
+      ...attempt('in-fill', 'fill', 'fill'),
+      ...attempt('in-seal', 'seal', 'seal'),
+    ];
+    const replayed = projectStructuredSlotState(history);
+    expect(replayed.sealStatus).toBe('sealed');
+    expect(replayed.structureStatus).toBe('active');
+    expect(replayed.contentRevision).toBe(2);
+    expect(replayed.drafts['draft-1']).toMatchObject({
+      status: 'merged',
+      resultRevision: 2,
+      changeCount: 3,
+    });
+    expect(
+      Object.values(replayed.attempts).map((attemptState) => attemptState.status),
+    ).toEqual(['committed', 'committed', 'committed']);
+    // Historical replay determinism: folding the same history again yields
+    // an identical state object.
+    expect(projectStructuredSlotState(history)).toEqual(replayed);
+  });
 });

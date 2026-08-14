@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "note": "Frozen v1 compatibility baseline. Generated once from main@f89d721 (authoritative per-slot review lifecycle plan Task 1 Step 1). Later tasks migrate the production Zhihu source to Contract v2; `__fixtures__/zhihu-salt-chapter-v1` and this file stay unchanged.",
+  "structuredValidSemanticDigest": "cdb81ab35f497c27a5fe01abc0778e5104e1d38350c94d8dfeeae8fe71be77d5",
+  "zhihuV1VersionHash": "32d0de02c8c34c1c3f4f8432663271d675112fd6241f63f198b19a2681d90f40",
+  "zhihuV1Routes": [
+    {
+      "from": "structure",
+      "to": "fill",
+      "kind": "message",
+      "label": "槽树已建立，开始填充"
+    },
+    {
+      "from": "fill",
+      "to": "seal",
+      "kind": "message",
+      "label": "草稿已提交，开始校验"
+    },
+    {
+      "from": "seal",
+      "to": "fill",
+      "kind": "message",
+      "label": "校验发现问题，定向返工"
+    },
+    {
+      "from": "seal",
+      "to": "submitter",
+      "kind": "artifact",
+      "label": "校验通过，交付 Markdown"
+    }
+  ],
+  "contractV1TopLevelKeys": [
+    "abiProfileIdentity",
+    "accessProfiles",
+    "assembler",
+    "layoutGrammar",
+    "limits",
+    "resourceManifest",
+    "semanticDigest",
+    "slotTypes",
+    "validators",
+    "version"
+  ],
+  "v3SessionUnion": [
+    "fill",
+    "seal",
+    "structure"
+  ],
+  "completedV1AcceptanceSummary": {
+    "taskStatus": "completed",
+    "structureStatus": "active",
+    "sealStatus": "sealed",
+    "contentRevision": 2,
+    "generationCommitCount": 1,
+    "sealEventCount": 1,
+    "finalSubmissionCount": 1,
+    "draftStatuses": [
+      "merged",
+      "merged",
+      "merged"
+    ],
+    "attemptStatuses": [
+      "committed",
+      "committed",
+      "committed",
+      "committed",
+      "committed",
+      "committed",
+      "committed"
+    ],
+    "finalArtifactVersion": 1
+  }
+}

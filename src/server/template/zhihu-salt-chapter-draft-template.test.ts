@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { loadTemplateDirectory } from './template-loader';
 import { createTestRuntimeEnvironment } from '../structured-slots/runtime-capability';
+import { readV1CompatibilitySnapshot } from './v1-compatibility-support';
 
 const require = createRequire(import.meta.url);
 const repoRoot = fileURLToPath(new URL('../../..', import.meta.url));
@@ -123,5 +124,18 @@ describe('zhihu-salt-chapter-draft template package', () => {
     expect(submitter).toContain('submit_final_artifact');
     expect(submitter).toContain('不要调用 send_message');
     expect(submitter).toContain('只调用一次 submit_final_artifact');
+  });
+
+  it('keeps the frozen v1 route list reachable and unchanged (plan 2026-08-14 Task 1)', async () => {
+    const frozen = await loadTemplateDirectory(templateRoot, {
+      runtimeEnvironment: createTestRuntimeEnvironment(),
+    });
+    const snapshot = readV1CompatibilitySnapshot();
+    // v1 Route reachability fence: every route references declared Agents
+    // (an unknown source/target fails the load before this assertion) and the
+    // Route ORDER matches the frozen v1 list. Task 1 archives the current
+    // package byte-identically; later v2 migration of the production source
+    // must keep this archived v1 route list unchanged.
+    expect(frozen.routes).toEqual(snapshot.zhihuV1Routes);
   });
 });
