@@ -19,11 +19,18 @@
  * stable platform identifiers; semantic folding belongs to the projection.
  */
 import { createHash } from 'node:crypto';
-import { readdir, readFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+
+async function mkdir0(path: string): Promise<void> {
+  await mkdir(path, { recursive: true });
+}
 import type { CorePaths } from './core-paths';
 import { formatBatchFileName, isSafeSegment, parseBatchFileName, parseEventFileName } from './core-paths';
-import { STORAGE_ERROR_CODES, StorageError, writeNewAtomic } from './atomic-file';
+import { STORAGE_ERROR_CODES, StorageError, writeNewAtomic, writeNewAtomicDurable } from './atomic-file';
 import { validateTaskEvent, normalizeLegacyEvent, type TaskEvent } from './task-events';
+import type { StoreFenceProof, StoreFenceRecord } from './authoritative-publication-store';
+import { parseStoreFenceRecord, fenceRecordMatchesProof } from './authoritative-publication-store';
 
 const TMP_PREFIX = '.tmp-';
 
@@ -55,6 +62,20 @@ export interface TaskEventBatchEnvelopeV1 {
 export interface AppendBatchOptions {
   /** The current logical tail the caller observed; mismatches fail the CAS. */
   expectedLastSequence: number;
+  /**
+   * Required for batches containing AuthoritativeReviewEventV2 members (spec
+   * §8.1): a store-fence proof minted under the current lock hold. Validated
+   * against the durable fence record/generation on disk; a stale or forged
+   * proof is rejected fail-closed before anything touches the filesystem.
+   */
+  fenceProof?: StoreFenceProof;
+  /**
+   * Audit-only: the publication pin id is recorded in the batch envelope for
+   * v2 batches (design §19.1 step 3). The envelope digest covers events
+   * only, so v1 replay/idempotency is unaffected and read paths keep
+   * accepting envelopes with or without the field.
+   */
+  publicationPinId?: string;
 }
 
 function corrupt(message: string): StorageError {
@@ -96,6 +117,11 @@ function canonicalJson(event: TaskEvent): string {
 /** SHA-256 of the canonical JSON of an events array (spec §7.3). */
 function canonicalPayloadSha256(events: readonly TaskEvent[]): string {
   return createHash('sha256').update(JSON.stringify(canonicalize(events))).digest('hex');
+}
+
+/** True for an AuthoritativeReviewEventV2 member (spec §9.1). */
+export function isV2Event(event: TaskEvent): boolean {
+  return (event as { protocolVersion?: unknown }).protocolVersion === 2;
 }
 
 interface ScannedEvent extends CommittedEvent {
@@ -254,10 +280,20 @@ export class EventStore {
    * Appends one committed event to the task history after validating it
    * against the canonical union (invalid payloads never touch the filesystem
    * and never advance the sequence). Duplicate ids replay the prior commit
-   * when canonical bytes match; conflicting bytes fail.
+   * when canonical bytes match; conflicting bytes fail. v2 events are
+   * rejected outright: every v2 mutation must flow through the
+   * AuthoritativeAppendFacadeV2 (spec §8.1), never raw single-file appends.
    */
   async append(taskId: string, event: TaskEvent): Promise<CommittedEvent> {
     const validated = validateTaskEvent(event);
+    if (isV2Event(validated)) {
+      throw new StorageError(
+        STORAGE_ERROR_CODES.EVENT_INVALID,
+        'v2 事件必须通过 AuthoritativeAppendFacadeV2 提交，禁止直接单事件追加。',
+        null,
+        '通过 v2 append facade 提交。',
+      );
+    }
     return this.enqueue(taskId, () => this.appendExclusive(taskId, validated));
   }
 
@@ -356,10 +392,67 @@ export class EventStore {
         '每个事件使用唯一的事件 id。',
       );
     }
+    const hasV2 = validated.some(isV2Event);
+    if (hasV2) {
+      await this.requireLiveFenceProof(options.fenceProof);
+    }
     const digest = canonicalPayloadSha256(validated);
     return this.enqueue(taskId, () =>
-      this.appendBatchExclusive(taskId, commitId, validated, digest, options.expectedLastSequence),
+      this.appendBatchExclusive(
+        taskId,
+        commitId,
+        validated,
+        digest,
+        options.expectedLastSequence,
+        hasV2,
+        options.publicationPinId,
+      ),
     );
+  }
+
+  /**
+   * Spec §8.1 fence enforcement: a batch carrying AuthoritativeReviewEventV2
+   * members is rejected unless the call presents a currently valid store-fence
+   * proof — exact field equality against the durable fence record written by
+   * the (lock-holding) publication facade. No record or any mismatch fails
+   * closed before anything touches the filesystem. v1 batches never reach
+   * this check.
+   */
+  private async requireLiveFenceProof(proof: StoreFenceProof | undefined): Promise<void> {
+    if (proof === undefined) {
+      throw new StorageError(
+        STORAGE_ERROR_CODES.EVENT_INVALID,
+        '包含 v2 事件的批次必须携带当前有效的 store fence 证明。',
+        null,
+        '通过 AuthoritativeAppendFacadeV2 提交 v2 批次。',
+      );
+    }
+    let value: unknown;
+    try {
+      value = JSON.parse(await readFile(this.paths.storeFenceRecordFile(), 'utf8'));
+    } catch {
+      value = null;
+    }
+    const record = parseStoreFenceRecord(value);
+    if (record === null) {
+      throw new StorageError(
+        STORAGE_ERROR_CODES.EVENT_INVALID,
+        '没有当前有效的 store fence 记录。',
+        null,
+        '重新通过 AuthoritativeAppendFacadeV2 获取当前证明。',
+      );
+    }
+    if (!fenceRecordMatchesProof(record, proof)) {
+      // The record we minted a proof against was replaced (e.g. a racing
+      // takeover) — TRANSIENT, retryable by the facade's commit loop, never a
+      // permanent validation failure.
+      throw new StorageError(
+        STORAGE_ERROR_CODES.LOCK_SUPERSEDED,
+        'store fence 证明与当前 fence 记录不匹配，本次持有已被替换。',
+        null,
+        '重新获取证明后重试。',
+      );
+    }
   }
 
   private async appendBatchExclusive(
@@ -368,6 +461,8 @@ export class EventStore {
     events: TaskEvent[],
     digest: string,
     expectedLastSequence: number,
+    hasV2: boolean,
+    publicationPinId: string | undefined,
   ): Promise<CommittedEvent[]> {
     const { events: committed, batches } = await this.scanHistory(taskId);
     const existing = batches.get(commitId);
@@ -405,7 +500,7 @@ export class EventStore {
     const firstSequence = tail + 1;
     const lastSequence = tail + events.length;
     const fileName = formatBatchFileName(firstSequence, lastSequence, commitId);
-    const envelope: TaskEventBatchEnvelopeV1 = {
+    const envelope: TaskEventBatchEnvelopeV1 & { publicationPinId?: string } = {
       version: 1,
       commitId,
       taskId,
@@ -413,15 +508,153 @@ export class EventStore {
       eventCount: events.length,
       events,
       canonicalPayloadSha256: digest,
+      // Audit-only for v2 batches (design §19.1 step 3): the digest still
+      // covers events only, so v1 replay/idempotency is byte-unchanged.
+      ...(publicationPinId !== undefined ? { publicationPinId } : {}),
     };
     const bytes = Buffer.from(JSON.stringify(canonicalize(envelope)), 'utf8');
-    await writeNewAtomic(this.paths.taskBatchEventFile(taskId, fileName), bytes);
+    // v2 batches are pinned by the publication facade: their batch file must
+    // be durable (renamed file PLUS parent-directory fsync, spec §8.1 step 4).
+    // v1 keeps the legacy byte/behavior write path untouched.
+    let reservedRange = false;
+    try {
+      if (hasV2) {
+        // Cross-process range reservation (spec §8.1 convergence, defense in
+        // depth over the per-instance CAS): the batch file name embeds the
+        // commitId, so two overlapping writes WOULD collide on sequence range
+        // without a range-keyed mutex. The reservation is keyed by the range
+        // ALONE; the record-keyed proof stamps it so a stale reservation
+        // (crashed committer) is provably removable while a live owner's
+        // reservation blocks the overlap.
+        await this.reserveBatchRange(taskId, firstSequence, lastSequence);
+        reservedRange = true;
+        await writeNewAtomicDurable(this.paths.taskBatchEventFile(taskId, fileName), bytes);
+      } else {
+        await writeNewAtomic(this.paths.taskBatchEventFile(taskId, fileName), bytes);
+      }
+    } finally {
+      if (reservedRange) {
+        await rm(join(this.paths.taskEventsRoot(taskId), this.rangeReservationName(firstSequence, lastSequence)), {
+          force: true,
+        }).catch(() => undefined);
+      }
+    }
     return events.map((event, index) => ({
       sequence: firstSequence + index,
       fileName,
       size: bytes.length,
       event,
     }));
+  }
+
+  /** `<first>-<last>.batch-reserved` — range-keyed, never a committed file. */
+  private rangeReservationName(firstSequence: number, lastSequence: number): string {
+    return `${String(firstSequence).padStart(6, '0')}-${String(lastSequence).padStart(6, '0')}.batch-reserved`;
+  }
+
+  /**
+   * O_EXCL range reservation for a v2 batch. On clash: a reservation that
+   * matches the CURRENTLY LIVE fence record means a real concurrent holder of
+   * the same range -> EXPECTED_SEQUENCE_MISMATCH (retryable at the operation
+   * level, never silent overlap); a reservation that no longer matches the
+   * record is a crashed committer's residue -> removed and retried once.
+   */
+  private async reserveBatchRange(taskId: string, firstSequence: number, lastSequence: number): Promise<void> {
+    const eventsRoot = this.paths.taskEventsRoot(taskId);
+    await mkdir0(eventsRoot);
+    for (let attempt = 0; ; attempt += 1) {
+      const reservationPath = join(eventsRoot, this.rangeReservationName(firstSequence, lastSequence));
+      let created = true;
+      try {
+        const payload = await this.currentReservationPayload();
+        await writeFile(reservationPath, JSON.stringify(payload), { flag: 'wx' });
+      } catch {
+        created = false;
+      }
+      if (created) return;
+      // Clash: decide stale-vs-live against the CURRENT fence record.
+      const current = await this.readFenceRecord();
+      const existing = await this.readReservation(reservationPath);
+      if (existing !== null && current !== null && this.reservationMatches(existing, current)) {
+        throw new StorageError(
+          STORAGE_ERROR_CODES.EXPECTED_SEQUENCE_MISMATCH,
+          '该序列区间已被并发的 v2 批次保留，出现重叠。',
+          null,
+          '在最新提交后重试。',
+        );
+      }
+      if (attempt < 1 && existing !== null) {
+        await rm(reservationPath, { force: true });
+        continue;
+      }
+      throw new StorageError(
+        STORAGE_ERROR_CODES.EXPECTED_SEQUENCE_MISMATCH,
+        '该序列区间被无法判定归属的 v2 保留占据。',
+        null,
+        '在最新提交后重试。',
+      );
+    }
+  }
+
+  private async readFenceRecord(): Promise<StoreFenceRecord | null> {
+    try {
+      return parseStoreFenceRecord(JSON.parse(await readFile(this.paths.storeFenceRecordFile(), 'utf8')));
+    } catch {
+      return null;
+    }
+  }
+
+  private async readReservation(path: string): Promise<StoreFenceProof | null> {
+    try {
+      const value = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+      if (
+        typeof value.ownerPid !== 'number' ||
+        typeof value.processStartToken !== 'string' ||
+        typeof value.leaseEpoch !== 'number' ||
+        typeof value.acquisitionNonce !== 'string' ||
+        typeof value.durableGeneration !== 'number'
+      ) {
+        return null;
+      }
+      return {
+        ownerPid: value.ownerPid,
+        processStartToken: value.processStartToken,
+        leaseEpoch: value.leaseEpoch,
+        acquisitionNonce: value.acquisitionNonce,
+        durableGeneration: value.durableGeneration,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private reservationMatches(reservation: StoreFenceProof, record: StoreFenceRecord): boolean {
+    return (
+      reservation.ownerPid === record.ownerPid &&
+      reservation.processStartToken === record.processStartToken &&
+      reservation.leaseEpoch === record.leaseEpoch &&
+      reservation.acquisitionNonce === record.acquisitionNonce
+    );
+  }
+
+  /** The reservation carries the fence-owner identity so staleness is provable. */
+  private async currentReservationPayload(): Promise<StoreFenceProof> {
+    const current = await this.readFenceRecord();
+    if (current === null) {
+      throw new StorageError(
+        STORAGE_ERROR_CODES.EVENT_INVALID,
+        '没有当前有效的 store fence 记录，无法保留 v2 序列区间。',
+        null,
+        '重新通过 AuthoritativeAppendFacadeV2 获取当前证明。',
+      );
+    }
+    return {
+      ownerPid: current.ownerPid,
+      processStartToken: current.processStartToken,
+      leaseEpoch: current.leaseEpoch,
+      acquisitionNonce: current.acquisitionNonce,
+      durableGeneration: current.durableGeneration,
+    };
   }
 
   /**
@@ -496,5 +729,28 @@ export class EventStore {
   /** Flattened committed events (legacy + batch) in contiguous sequence order. */
   private async scanCommitted(taskId: string): Promise<ScannedEvent[]> {
     return (await this.scanHistory(taskId)).events;
+  }
+
+  /**
+   * Fresh on-disk task tail identity (spec §8.1 step 1: reload from disk,
+   * never an instance cache): the current logical last sequence and the
+   * commitId of the batch that carries it (null when the tail was written by
+   * legacy single-event files). The publication facade verifies a pin's
+   * expectedTail* against this, and GC uses it for the delete recheck.
+   */
+  async tail(taskId: string): Promise<{ lastSequence: number; lastCommitId: string | null }> {
+    return this.enqueue(taskId, async () => {
+      const { events, batches } = await this.scanHistory(taskId);
+      const last = events[events.length - 1];
+      if (last === undefined) return { lastSequence: 0, lastCommitId: null };
+      let lastCommitId: string | null = null;
+      for (const batch of batches.values()) {
+        if (batch.committed[batch.committed.length - 1]?.sequence === last.sequence) {
+          lastCommitId = batch.commitId;
+          break;
+        }
+      }
+      return { lastSequence: last.sequence, lastCommitId };
+    });
   }
 }

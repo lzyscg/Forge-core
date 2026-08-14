@@ -29,6 +29,7 @@ import { formatBatchFileName, formatEventFileName } from './core-paths';
 import { EventStore } from './event-store';
 import type { TaskEvent } from './task-events';
 import type { BlobRefV2 } from '../../shared/authoritative-review-v2';
+import type { StoreFenceProof, StoreFenceRecord } from './authoritative-publication-store';
 
 afterEach(() => {
   disposeAllTestRoots();
@@ -597,16 +598,45 @@ describe('EventStore v2 protocol members (plan 2026-08-14 Task 7)', () => {
     };
   }
 
+  /**
+   * Mints a valid facade-style fence proof: the durable fence record file is
+   * written first, then a proof that exactly matches it. Only the (locked)
+   * publication facade normally holds such a proof; Task 8 tests mint them
+   * directly to exercise EventStore's fence validation in isolation.
+   */
+  async function mintFenceProof(paths: CorePaths): Promise<StoreFenceProof> {
+    const record: StoreFenceRecord = {
+      ownerPid: process.pid,
+      processStartToken: 'test-session',
+      processStartTime: null,
+      bootId: 'test-boot',
+      leaseEpoch: 1,
+      acquisitionNonce: randomUUID(),
+      durableGeneration: 0,
+      acquiredAt: '2026-08-14T00:00:00.000Z',
+    };
+    await writeFile(paths.storeFenceRecordFile(), JSON.stringify(record), 'utf8');
+    return {
+      ownerPid: record.ownerPid,
+      processStartToken: record.processStartToken,
+      leaseEpoch: record.leaseEpoch,
+      acquisitionNonce: record.acquisitionNonce,
+      durableGeneration: record.durableGeneration,
+    };
+  }
+
   it('commits a v2 member and mixed legacy/v2 batches as one atomic envelope', async () => {
     const { paths } = makeTempCorePaths();
     const store = new EventStore(paths);
     const taskId = randomUUID();
+    const fenceProof = await mintFenceProof(paths);
     const first = await store.append(taskId, started());
     const v2Batch = [v2WorkItemCreated(randomUUID()), v2AttemptStarted(randomUUID())];
     const mixed = v2Batch.concat(result());
 
     const committed = await store.appendBatch(taskId, 'commit-v2-a', mixed, {
       expectedLastSequence: 1,
+      fenceProof,
     });
 
     expect(committed.map((entry) => entry.sequence)).toEqual([2, 3, 4]);
@@ -625,11 +655,13 @@ describe('EventStore v2 protocol members (plan 2026-08-14 Task 7)', () => {
     const { paths } = makeTempCorePaths();
     const store = new EventStore(paths);
     const taskId = randomUUID();
+    const fenceProof = await mintFenceProof(paths);
     const badV2: Record<string, unknown> = JSON.parse(JSON.stringify(v2WorkItemCreated(randomUUID())));
     delete badV2.authorityBaseRef;
     await expect(
       store.appendBatch(taskId, 'commit-v2-bad', [started(), badV2 as unknown as TaskEvent], {
         expectedLastSequence: 0,
+        fenceProof,
       }),
     ).rejects.toMatchObject({ code: 'EVENT_INVALID' });
     await expect(readdir(paths.taskEventsRoot(taskId))).rejects.toThrow();
@@ -639,19 +671,23 @@ describe('EventStore v2 protocol members (plan 2026-08-14 Task 7)', () => {
     const { paths } = makeTempCorePaths();
     const store = new EventStore(paths);
     const taskId = randomUUID();
+    const fenceProof = await mintFenceProof(paths);
     const events = [v2WorkItemCreated('ev-v2-1')];
 
     const firstResult = await store.appendBatch(taskId, 'commit-v2-replay', events, {
       expectedLastSequence: 0,
+      fenceProof,
     });
     const replay = await store.appendBatch(taskId, 'commit-v2-replay', events, {
       expectedLastSequence: 0,
+      fenceProof,
     });
     expect(replay).toEqual(firstResult);
 
     await expect(
       store.appendBatch(taskId, 'commit-v2-replay', [v2AttemptStarted('ev-v2-1')], {
         expectedLastSequence: 0,
+        fenceProof,
       }),
     ).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
   });
@@ -660,8 +696,10 @@ describe('EventStore v2 protocol members (plan 2026-08-14 Task 7)', () => {
     const { paths } = makeTempCorePaths();
     const store = new EventStore(paths);
     const taskId = randomUUID();
+    const fenceProof = await mintFenceProof(paths);
     await store.appendBatch(taskId, 'commit-v2-c', [v2WorkItemCreated('ev-v2-c')], {
       expectedLastSequence: 0,
+      fenceProof,
     });
     // Corrupt the committed bytes: drop the required payloadRef key while
     // keeping valid JSON, then read — the union validator fails loud.
@@ -673,5 +711,183 @@ describe('EventStore v2 protocol members (plan 2026-08-14 Task 7)', () => {
     delete envelope.events[0].payloadRef;
     await writeFile(envelopePath, JSON.stringify(envelope), 'utf8');
     await expect(store.read(taskId)).rejects.toMatchObject({ code: 'TASK_CORRUPTED' });
+  });
+
+  it('rejects a v2 batch without a live fence proof and writes nothing', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    const events = [v2WorkItemCreated('ev-v2-nofence')];
+    await expect(
+      store.appendBatch(taskId, 'commit-v2-nofence', events, { expectedLastSequence: 0 }),
+    ).rejects.toMatchObject({ code: 'EVENT_INVALID' });
+    await expect(readdir(paths.taskEventsRoot(taskId))).rejects.toThrow();
+    // There is no fence record at all — even a well-formed proof cannot match.
+    const forged = await mintFenceProof(paths);
+    await rm(paths.storeFenceRecordFile());
+    await expect(
+      store.appendBatch(taskId, 'commit-v2-nofence', events, {
+        expectedLastSequence: 0,
+        fenceProof: forged,
+      }),
+    ).rejects.toMatchObject({ code: 'EVENT_INVALID' });
+  });
+
+  it('maps a record/proof mismatch to the retryable LOCK_SUPERSEDED (taxed takeover, Finding 4)', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    const proof = await mintFenceProof(paths);
+    await expect(
+      store.appendBatch(taskId, 'commit-v2-stale', [v2WorkItemCreated('ev-v2-stale')], {
+        expectedLastSequence: 0,
+        fenceProof: { ...proof, leaseEpoch: proof.leaseEpoch + 1 },
+      }),
+    ).rejects.toMatchObject({ code: 'LOCK_SUPERSEDED' });
+    await expect(
+      store.appendBatch(taskId, 'commit-v2-stale', [v2WorkItemCreated('ev-v2-stale-2')], {
+        expectedLastSequence: 0,
+        fenceProof: { ...proof, acquisitionNonce: 'other-nonce' },
+      }),
+    ).rejects.toMatchObject({ code: 'LOCK_SUPERSEDED' });
+    await expect(
+      store.appendBatch(taskId, 'commit-v2-stale', [v2WorkItemCreated('ev-v2-stale-3')], {
+        expectedLastSequence: 0,
+        fenceProof: { ...proof, durableGeneration: proof.durableGeneration + 9 },
+      }),
+    ).rejects.toMatchObject({ code: 'LOCK_SUPERSEDED' });
+  });
+
+  it('rejects a v2 event through the legacy single-event append (facade-only path)', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    await expect(store.append(taskId, v2WorkItemCreated('ev-v2-single'))).rejects.toMatchObject({
+      code: 'EVENT_INVALID',
+    });
+    await expect(readdir(paths.taskEventsRoot(taskId))).rejects.toThrow();
+    // Legacy single-event appends keep working untouched.
+    const legacy = await store.append(taskId, started());
+    expect(legacy.sequence).toBe(1);
+  });
+
+  it('writes the optional publicationPinId audit field only into v2 envelopes', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    const fenceProof = await mintFenceProof(paths);
+    await store.append(taskId, started());
+    const v2Committed = await store.appendBatch(
+      taskId,
+      'commit-v2-pin',
+      [v2WorkItemCreated('ev-v2-pin')],
+      { expectedLastSequence: 1, fenceProof, publicationPinId: 'pin-audit-1' },
+    );
+    // v1 batch: no audit field, byte-compatible envelope shape.
+    await store.appendBatch(taskId, 'commit-v1-pin', [result(2)], {
+      expectedLastSequence: 2,
+    });
+    const v2Envelope = JSON.parse(
+      await readFile(paths.taskBatchEventFile(taskId, v2Committed[0].fileName), 'utf8'),
+    );
+    expect(v2Envelope.publicationPinId).toBe('pin-audit-1');
+    expect(v2Envelope.canonicalPayloadSha256).toMatch(/^[0-9a-f]{64}$/);
+    // readback tolerates both with and without the field.
+    const readBack = await store.readBatchByCommitId(taskId, 'commit-v2-pin');
+    expect(readBack).toHaveLength(1);
+    const replayed = await store.appendBatch(taskId, 'commit-v2-pin', [v2WorkItemCreated('ev-v2-pin')], {
+      expectedLastSequence: 2,
+      fenceProof,
+      publicationPinId: 'pin-other',
+    });
+    expect(replayed.map((entry) => entry.event)).toEqual(readBack?.map((entry) => entry.event));
+  });
+
+  it('reserves the sequence range cross-process: two instances at one tail never overlap', async () => {
+    const { paths } = makeTempCorePaths();
+    const a = new EventStore(paths);
+    const b = new EventStore(paths);
+    const taskId = randomUUID();
+    const proofA = await mintFenceProof(paths);
+    // B re-mints from the same record (two concurrent holders of one fence).
+    const proofB = await mintFenceProof(paths);
+    const outcomes = await Promise.allSettled([
+      a.appendBatch(taskId, 'race-a', [v2WorkItemCreated('ev-race-a')], {
+        expectedLastSequence: 0,
+        fenceProof: proofA,
+      }),
+      b.appendBatch(taskId, 'race-b', [v2WorkItemCreated('ev-race-b')], {
+        expectedLastSequence: 0,
+        fenceProof: proofB,
+      }),
+    ]);
+    const won = outcomes.filter((r) => r.status === 'fulfilled');
+    const lost = outcomes.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+    // Exactly one commit; the loser fails CLOSED on the range reservation, the
+    // tail CAS, or a superseded fence — never a silent overlapping double
+    // write with both callers told success.
+    expect(won).toHaveLength(1);
+    if (lost.length === 1) {
+      expect(['EXPECTED_SEQUENCE_MISMATCH', 'LOCK_SUPERSEDED']).toContain(
+        (lost[0] as PromiseRejectedResult).reason.code,
+      );
+    }
+    const committed = await a.read(taskId);
+    expect(committed).toHaveLength(1);
+    // No reservation residue is left behind.
+    expect((await readdir(paths.taskEventsRoot(taskId))).some((n) => n.includes('.batch-reserved'))).toBe(false);
+  });
+
+  it('cleans a stale range reservation whose owner no longer matches the record', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    const proof = await mintFenceProof(paths);
+    // A crashed committer left a reservation stamped with an OLD era.
+    await mkdir(paths.taskEventsRoot(taskId), { recursive: true });
+    await writeFile(
+      `${paths.taskEventsRoot(taskId)}/000001-000001.batch-reserved`,
+      JSON.stringify({ ...proof, leaseEpoch: proof.leaseEpoch - 1, acquisitionNonce: 'stale-reservation' }),
+      'utf8',
+    );
+    const committed = await store.appendBatch(taskId, 'commit-after-stale', [v2WorkItemCreated('ev-after-stale')], {
+      expectedLastSequence: 0,
+      fenceProof: proof,
+    });
+    expect(committed).toHaveLength(1);
+    expect(
+      (await readdir(paths.taskEventsRoot(taskId))).some((n) => n.includes('.batch-reserved')),
+    ).toBe(false);
+  });
+
+  it('blocks a v2 append whose range is reserved by the CURRENT live record owner', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    const proof = await mintFenceProof(paths);
+    await mkdir(paths.taskEventsRoot(taskId), { recursive: true });
+    await writeFile(
+      `${paths.taskEventsRoot(taskId)}/000001-000001.batch-reserved`,
+      JSON.stringify(proof),
+      'utf8',
+    );
+    await expect(
+      store.appendBatch(taskId, 'commit-blocked', [v2WorkItemCreated('ev-blocked')], {
+        expectedLastSequence: 0,
+        fenceProof: proof,
+      }),
+    ).rejects.toMatchObject({ code: 'EXPECTED_SEQUENCE_MISMATCH' });
+  });
+
+  it('reports the current tail as sequence plus the last batch commit id', async () => {
+    const { paths } = makeTempCorePaths();
+    const store = new EventStore(paths);
+    const taskId = randomUUID();
+    expect(await store.tail(taskId)).toEqual({ lastSequence: 0, lastCommitId: null });
+    await store.append(taskId, started());
+    await store.append(taskId, input());
+    expect(await store.tail(taskId)).toEqual({ lastSequence: 2, lastCommitId: null });
+    await store.appendBatch(taskId, 'tail-commit', [result(3)], { expectedLastSequence: 2 });
+    expect(await store.tail(taskId)).toEqual({ lastSequence: 3, lastCommitId: 'tail-commit' });
   });
 });

@@ -39,6 +39,14 @@ export const STORAGE_ERROR_CODES = {
    * Never absorbed back into slot content.
    */
   ARTIFACT_INTEGRITY_FAILED: 'ARTIFACT_INTEGRITY_FAILED',
+  /** Same operationId placed a different publication payload (design §19.1). */
+  PIN_CONFLICT: 'PIN_CONFLICT',
+  /** The requested artifact version is already allocated (spec §13.5). */
+  ARTIFACT_VERSION_CONFLICT: 'ARTIFACT_VERSION_CONFLICT',
+  /** The cross-process store lock is held by a live owner (design §19.1). */
+  LOCK_BUSY: 'LOCK_BUSY',
+  /** This lock hold's fence record was superseded by a takeover (transient). */
+  LOCK_SUPERSEDED: 'LOCK_SUPERSEDED',
 } as const;
 
 export type StorageErrorCode = (typeof STORAGE_ERROR_CODES)[keyof typeof STORAGE_ERROR_CODES];
@@ -139,12 +147,43 @@ export async function writeNewAtomic(destination: string, bytes: Buffer): Promis
  * (or the one documented replace-refusal retry below).
  */
 export async function writeReplaceAtomic(destination: string, bytes: Buffer): Promise<void> {
+  await writeReplaceAtomicImpl(destination, bytes, false);
+}
+
+/**
+ * Durable fsync of one directory (file durability of renames, Task 8 spec
+ * §8: a committed file's rename is only durable once its parent directory
+ * entries are flushed). The directory metadata sync itself failing fails
+ * loud — durability is never silently downgraded. Public so delete paths
+ * (pin cleanup, GC sweeps) can make their removals durable too.
+ */
+export async function syncDirectory(directory: string): Promise<void> {
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
+  try {
+    handle = await open(directory, 'r');
+    await handle.sync();
+  } finally {
+    if (handle !== null) {
+      await handle.close().catch(() => undefined);
+    }
+  }
+}
+
+async function writeReplaceAtomicImpl(
+  destination: string,
+  bytes: Buffer,
+  durable: boolean,
+): Promise<void> {
   const directory = dirname(destination);
   await mkdir(directory, { recursive: true });
   // Scratch destinations may carry long names (workspace paths up to the
   // 512-char limit); the temp name stays bounded so it never trips the OS
   // filename limit. The uuid alone guarantees per-call uniqueness.
   const tempFile = join(directory, `.tmp-${basename(destination).slice(0, 32)}-${randomUUID()}`);
+  const commit = async (): Promise<void> => {
+    await rename(tempFile, destination);
+    await maybeSyncParent(directory, durable);
+  };
   let handle: Awaited<ReturnType<typeof open>> | null = null;
   try {
     handle = await open(tempFile, 'wx');
@@ -152,7 +191,7 @@ export async function writeReplaceAtomic(destination: string, bytes: Buffer): Pr
     await handle.sync();
     await handle.close();
     handle = null;
-    await rename(tempFile, destination);
+    await commit();
   } catch (error) {
     if (handle !== null) {
       await handle.close().catch(() => undefined);
@@ -168,7 +207,7 @@ export async function writeReplaceAtomic(destination: string, bytes: Buffer): Pr
     if (replaceRefused) {
       try {
         await rm(destination, { force: true });
-        await rename(tempFile, destination);
+        await commit();
         return;
       } catch {
         // Fall through: clean this call's temp file and surface the failure.
@@ -177,4 +216,33 @@ export async function writeReplaceAtomic(destination: string, bytes: Buffer): Pr
     await rm(tempFile, { force: true }).catch(() => undefined);
     throw error;
   }
+}
+
+async function maybeSyncParent(directory: string, durable: boolean): Promise<void> {
+  if (durable) {
+    await syncDirectory(directory);
+  }
+}
+
+/**
+ * Durable brand-new committed write (Task 8 spec §8): `writeNewAtomic` plus
+ * an fsync of the renamed file's parent directory, so the rename itself is
+ * durable before the caller learns the write succeeded. Used for v2
+ * publication pins, v2 blobs written under pins, batch event files referenced
+ * by pins, generation/lock metadata, and pin terminal markers. The legacy
+ * `writeNewAtomic` byte/behavior path stays intact for v1.
+ */
+export async function writeNewAtomicDurable(destination: string, bytes: Buffer): Promise<void> {
+  const directory = dirname(destination);
+  await mkdir(directory, { recursive: true });
+  await writeNewAtomic(destination, bytes);
+  await syncDirectory(directory);
+}
+
+/**
+ * Durable overwritable write (fence records, generation counters): the
+ * replace variant plus parent-directory fsync after rename.
+ */
+export async function writeReplaceAtomicDurable(destination: string, bytes: Buffer): Promise<void> {
+  await writeReplaceAtomicImpl(destination, bytes, true);
 }

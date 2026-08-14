@@ -351,4 +351,52 @@ export class CorePaths {
   taskStructuredCustodyRoot(taskId: string): string {
     return resolve(this.taskStructuredSlotsRoot(taskId), 'custody');
   }
+
+  /* ---------------------------------------------------------------- */
+  /* Task 8: data-root-scoped v2 publication pins, store lock, fence   */
+  /* record and GC generation counter (design §19.1, spec §8/§8.1)     */
+  /* ---------------------------------------------------------------- */
+
+  /** publication-pins/ — one durable pin file per publication. */
+  publicationPinsRoot(): string {
+    return resolve(this.dataRoot, 'publication-pins');
+  }
+
+  /** publication-pins/<pinId>.json — the pin id must be a safe segment. */
+  publicationPinFile(pinId: string): string {
+    assertSafeSegment('pinId', pinId);
+    return resolve(this.publicationPinsRoot(), `${pinId}.json`);
+  }
+
+  /**
+   * Cross-process exclusive store lock: an atomic `mkdir`-based lock
+   * directory. Existence of the directory means the lock is held.
+   */
+  storeLockDir(): string {
+    return resolve(this.dataRoot, '.store-lock');
+  }
+
+  /**
+   * Durable fencing record of the current lock owner (owner PID, process
+   * start token, lease epoch, acquisition nonce, durable generation). Written
+   * and fsynced before the lock directory is removed/created; takeover must
+   * prove the recorded owner is dead and atomically advance the epoch.
+   */
+  storeFenceRecordFile(): string {
+    return resolve(this.dataRoot, '.store-lock-record.json');
+  }
+
+  /** Durable monotonic GC/publication generation counter (spec §8/§8.1). */
+  v2GenerationFile(): string {
+    return resolve(this.dataRoot, '.v2-generation.json');
+  }
+
+  /**
+   * Durable per-installation boot identity used by the store lock fence: a
+   * fence record from a previous boot session is provably dead even when its
+   * PID is (re)used by a live process (design §19.1 epoch takeover rules).
+   */
+  storeBootIdFile(): string {
+    return resolve(this.dataRoot, '.store-boot-id.json');
+  }
 }

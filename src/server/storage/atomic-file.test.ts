@@ -12,7 +12,7 @@ import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { writeNewAtomic, writeReplaceAtomic } from './atomic-file';
+import { writeNewAtomic, writeReplaceAtomic, writeNewAtomicDurable, writeReplaceAtomicDurable } from './atomic-file';
 
 const tempRoots: string[] = [];
 
@@ -138,5 +138,58 @@ describe('writeReplaceAtomic', () => {
     await Promise.all(candidates.map((payload) => writeReplaceAtomic(path, Buffer.from(payload))));
     expect(candidates).toContain(await readFile(path, 'utf8'));
     expect(await tempResidue(dir)).toEqual([]);
+  });
+});
+
+describe('durable atomic writes (Task 8 spec §8)', () => {
+  it('writeNewAtomicDurable commits a new file and refuses to overwrite', async () => {
+    const dir = makeTempDir('forge-core-atomic-');
+    const path = join(dir, 'pin.json');
+    await writeNewAtomicDurable(path, Buffer.from('{"pin":true}'));
+    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual({ pin: true });
+    await expect(writeNewAtomicDurable(path, Buffer.from('other'))).rejects.toMatchObject({
+      code: 'FILE_EXISTS',
+    });
+    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual({ pin: true });
+    expect(await tempResidue(dir)).toEqual([]);
+  });
+
+  it('writeNewAtomicDurable creates missing parents and leaves no residue', async () => {
+    const dir = makeTempDir('forge-core-atomic-');
+    const path = join(dir, 'a', 'b', 'pin.json');
+    await writeNewAtomicDurable(path, Buffer.from('deep'));
+    expect(await readFile(path, 'utf8')).toBe('deep');
+    expect(await tempResidue(join(dir, 'a', 'b'))).toEqual([]);
+  });
+
+  it('writeNewAtomicDurable shares the legacy FILE_EXISTS contract for existing committed files', async () => {
+    const dir = makeTempDir('forge-core-atomic-');
+    const path = join(dir, 'pin.json');
+    await writeNewAtomic(path, Buffer.from('legacy'));
+    await expect(writeNewAtomicDurable(path, Buffer.from('durable'))).rejects.toMatchObject({
+      code: 'FILE_EXISTS',
+    });
+    expect(await readFile(path, 'utf8')).toBe('legacy');
+  });
+
+  it('writeReplaceAtomicDurable atomically replaces and survives concurrent replacers', async () => {
+    const dir = makeTempDir('forge-core-atomic-');
+    const path = join(dir, 'generation.json');
+    await writeReplaceAtomicDurable(path, Buffer.from('g-0'));
+    await writeReplaceAtomicDurable(path, Buffer.from('g-1'));
+    expect(await readFile(path, 'utf8')).toBe('g-1');
+    const races = Array.from({ length: 6 }, (_, index) => `g-${index}`);
+    await Promise.all(races.map((payload) => writeReplaceAtomicDurable(path, Buffer.from(payload))));
+    expect(races).toContain(await readFile(path, 'utf8'));
+    expect(await tempResidue(dir)).toEqual([]);
+  });
+
+  it('keeps the legacy writeNewAtomic byte/behavior path intact for v1', async () => {
+    const dir = makeTempDir('forge-core-atomic-');
+    const path = join(dir, 'legacy.json');
+    const bytes = Buffer.from([0, 1, 2, 127, 255]);
+    await writeNewAtomic(path, bytes);
+    expect(Buffer.compare(await readFile(path), bytes)).toBe(0);
+    await expect(writeNewAtomic(path, Buffer.from('x'))).rejects.toMatchObject({ code: 'FILE_EXISTS' });
   });
 });
