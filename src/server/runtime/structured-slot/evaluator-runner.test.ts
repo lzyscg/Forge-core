@@ -32,6 +32,7 @@ import {
   buildAssemblerEnvelope,
   buildValidatorEnvelope,
   EvaluatorRunner,
+  runValidatorV2,
 } from './evaluator-runner';
 
 const tempRoots: string[] = [];
@@ -439,5 +440,84 @@ describe('EvaluatorRunner — assembler ABI (Step 6)', () => {
     const strict = new EvaluatorRunner({ paths, taskId, limits });
     const result = await strict.runAssembler(assembler, envelope);
     expect(result.kind).toBe('resultInvalid');
+  });
+});
+
+describe('runValidatorV2 — Task 14 v2 evaluator adapter (spec §12)', () => {
+  const V2_BUDGET = { timeoutMs: 5000, memoryMiB: 64 };
+
+  it('runs an allowlisted builtin source against resolved ABI v2 data (never a snapshot path)', async () => {
+    const source = [
+      "'use strict';",
+      'module.exports = { validate(input) {',
+      "  return { status: 'valid', executionDigest: '' };",
+      '} };',
+    ].join('\n');
+    const result = await runValidatorV2({
+      source,
+      input: { version: 2, abi: 'forge-validator/v2', core: { nodes: [] } },
+      budget: V2_BUDGET,
+    });
+    expect(result.kind).toBe('ok');
+    if (result.kind !== 'ok') return;
+    expect(result.raw).toEqual({ status: 'valid', executionDigest: '' });
+    expect(result.outputBytes).toBeGreaterThan(0);
+    expect(result.deterministic).toBe(true);
+  });
+
+  it('a handler varying only its claimed executionDigest stays deterministic (engine overrides it)', async () => {
+    const source = [
+      "'use strict';",
+      'module.exports = { validate(input) {',
+      "  return { status: 'valid', executionDigest: String(Math.random()) + String(Date.now()) };",
+      '} };',
+    ].join('\n');
+    const result = await runValidatorV2({
+      source,
+      input: { version: 2, abi: 'forge-validator/v2' },
+      budget: V2_BUDGET,
+    });
+    expect(result.kind).toBe('ok');
+    if (result.kind !== 'ok') return;
+    // Date/Math.random are frozen by the hardened sandbox per isolate, but the
+    // seeded PRNG advances BETWEEN calls — the substantive part (status) is
+    // identical, so the probe strips the overridden executionDigest.
+    expect(result.deterministic).toBe(true);
+  });
+
+  it('a stateful handler with different substantive output across the double-run is nondeterministic', async () => {
+    const source = [
+      "'use strict';",
+      'let count = 0;',
+      'module.exports = { validate(input) {',
+      '  count = count + 1;',
+      "  if (count === 1) return { status: 'valid', executionDigest: '' };",
+      "  return { status: 'domain_invalid', issues: [], executionDigest: '' };",
+      '} };',
+    ].join('\n');
+    const result = await runValidatorV2({
+      source,
+      input: { version: 2, abi: 'forge-validator/v2' },
+      budget: V2_BUDGET,
+    });
+    expect(result.kind).toBe('ok');
+    if (result.kind !== 'ok') return;
+    expect(result.deterministic).toBe(false);
+  });
+
+  it('process/require/fetch access is impossible in the hardened isolate', async () => {
+    for (const body of ['process.exit(1);', 'require("node:fs");', 'globalThis.fetch("http://x");']) {
+      const source = ["'use strict';", 'module.exports = { validate(input) {', `  ${body}`, '} };'].join('\n');
+      const result = await runValidatorV2({ source, input: { version: 2 }, budget: V2_BUDGET });
+      expect(result.kind).toBe('unavailable');
+    }
+  });
+
+  it('an aborted signal is rejected before any execution', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const source = ["'use strict';", 'module.exports = { validate(input) { return { status: "valid", executionDigest: "" }; } };'].join('\n');
+    const result = await runValidatorV2({ source, input: { version: 2 }, budget: V2_BUDGET, signal: controller.signal });
+    expect(result).toEqual({ kind: 'unavailable', reason: 'aborted' });
   });
 });

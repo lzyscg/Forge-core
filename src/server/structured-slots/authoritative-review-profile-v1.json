@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "profileIdentity": "forge-authoritative-review/v1",
-  "profileVersion": 1,
-  "qualificationState": "test_only",
-  "profileDigest": "7e8e3fa1292c01e35ee09e3f87e65cd6171503ff45d5d74165a6ac9d163eb8a3",
+  "profileVersion": 2,
+  "qualificationState": "provisional",
+  "profileDigest": "f717be9d876bbf764adeda1c41896d7536acdab0e450aa60751ab4d67b1721f7",
   "abi": {
     "validatorAbi": "forge-validator/v2",
     "assemblerAbi": "forge-assembler/v2",
@@ -156,8 +156,16 @@
   "installedHandlers": {
     "validators": [
       {
+        "handlerKey": "authoritative.review.artifactPath",
+        "implementationDigest": "64d0dc74a15fef8f930c28c1cc071b444aa1db47f3656b6db326d5374fe7d7b2",
+        "moduleId": "@forge/authoritative-review",
+        "exportName": "artifactPath",
+        "trigger": "seal_output",
+        "executionPhase": null
+      },
+      {
         "handlerKey": "authoritative.review.completeness",
-        "implementationDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "implementationDigest": "fcc008b5609f90af4af77450451f2a74e77f33efa5082cc7dd7a8eeace46041a",
         "moduleId": "@forge/authoritative-review",
         "exportName": "completeness",
         "trigger": "map_candidate_commit",
@@ -165,7 +173,7 @@
       },
       {
         "handlerKey": "authoritative.review.coverage",
-        "implementationDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "implementationDigest": "378849932fbd97ac19b5624d38d6bd725bbe073c64b9397910291438d17a4854",
         "moduleId": "@forge/authoritative-review",
         "exportName": "coverage",
         "trigger": "content_commit",
@@ -173,7 +181,7 @@
       },
       {
         "handlerKey": "authoritative.review.slotSchema",
-        "implementationDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "implementationDigest": "6882bd50c5c33d0f0e3c6f442d8a4066aa7ffa601dc68f812059b356915e0046",
         "moduleId": "@forge/authoritative-review",
         "exportName": "slotSchema",
         "trigger": "content_commit",

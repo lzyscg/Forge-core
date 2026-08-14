@@ -25,7 +25,8 @@ import {
 import { refOfBlob } from '../authoritative-review/object-registry';
 import {
   createAuthoritativeReviewTestEnvironment,
-  AUTHORITATIVE_REVIEW_TEST_HANDLER_IDENTITIES,
+  AUTHORITATIVE_REVIEW_BUILTIN_HANDLER_IDENTITIES,
+  buildAuthoritativeReviewPriorTestOnlyProfileBody,
 } from './test-support/authoritative-review-test-registry';
 
 /** The canonical test-only profile body produced by the checked-in test support. */
@@ -74,7 +75,7 @@ describe('profile snapshot canonical identity (§4.3/§7.1)', () => {
     const body = testProfileBody();
     expect(body.schemaVersion).toBe(1);
     expect(body.profileIdentity).toBe(AUTHORITATIVE_REVIEW_PROFILE_IDENTITY);
-    expect(body.qualificationState).toBe('test_only');
+    expect(body.qualificationState).toBe('provisional');
     expect(body.abi).toEqual({
       validatorAbi: 'forge-validator/v2',
       assemblerAbi: 'forge-assembler/v2',
@@ -121,7 +122,7 @@ describe('profile snapshot canonical identity (§4.3/§7.1)', () => {
 describe('production readiness (spec §4.3/§17)', () => {
   it('production accepts only a final profile', () => {
     const body = testProfileBody();
-    expect(body.qualificationState).toBe('test_only');
+    expect(body.qualificationState).toBe('provisional');
     expect(() => validateProductionAuthoritativeReviewProfile(body)).toThrow('final');
     const provisional = validateAuthoritativeReviewProfile({
       ...body,
@@ -141,9 +142,9 @@ describe('production readiness (spec §4.3/§17)', () => {
     const body = testProfileBody();
     // The canonical profile carries the exact installed validator/assembler
     // registry identities — production manifest loading rejects the test-only
-    // registry (and its test_only qualification state) on every path.
-    expect(body.installedHandlers.validators).toEqual(AUTHORITATIVE_REVIEW_TEST_HANDLER_IDENTITIES.validators);
-    expect(body.installedHandlers.assembler).toEqual(AUTHORITATIVE_REVIEW_TEST_HANDLER_IDENTITIES.assembler);
+    // registry (and its provisional qualification state) on every path.
+    expect(body.installedHandlers.validators).toEqual(AUTHORITATIVE_REVIEW_BUILTIN_HANDLER_IDENTITIES.validators);
+    expect(body.installedHandlers.assembler).toEqual(AUTHORITATIVE_REVIEW_BUILTIN_HANDLER_IDENTITIES.assembler);
   });
 });
 
@@ -251,7 +252,7 @@ describe('profile file loading and placeholder identities', () => {
   });
 
   it('the checked-in profile file matches the canonical test profile body', async () => {
-    // Production manifest loading rejects the checked-in test-only profile,
+    // Production manifest loading rejects the checked-in provisional profile,
     // but the file must be a byte-identical canonical copy of the injected
     // test environment profile so tests and production share one shape.
     const { loadAuthoritativeReviewProfileFile } = await import('./authoritative-review-profile');
@@ -261,14 +262,30 @@ describe('profile file loading and placeholder identities', () => {
     expect(profileSnapshotRefOf(fromFile)).toEqual(profileSnapshotRefOf(testProfileBody()));
     expect(profileCanonicalDigest(fromFile)).toBe(profileCanonicalDigest(testProfileBody()));
   });
+
+  it('the PRIOR test-only profile is a distinct archived revision, not the checked-in file', () => {
+    const prior = buildAuthoritativeReviewPriorTestOnlyProfileBody();
+    expect(prior.qualificationState).toBe('test_only');
+    expect(prior.profileVersion).toBe(1);
+    expect(prior.profileDigest).not.toBe(testProfileBody().profileDigest);
+    expect(profileSnapshotRefOf(prior).digest).not.toBe(profileSnapshotRefOf(testProfileBody()).digest);
+    // the prior profile never loads a Contract naming the new production builtins
+    const newIdentity = testProfileBody().installedHandlers.validators[0]!;
+    expect(
+      prior.installedHandlers.validators.some(
+        (entry) =>
+          entry.handlerKey === newIdentity.handlerKey && entry.implementationDigest === newIdentity.implementationDigest,
+      ),
+    ).toBe(false);
+  });
 });
 
 describe('the checked-in v2 profile file is not a production profile', () => {
-  it('the checked-in file carries qualificationState test_only and is rejected by production validation', async () => {
+  it('the checked-in file carries qualificationState provisional and is rejected by production validation', async () => {
     const { loadAuthoritativeReviewProfileFile } = await import('./authoritative-review-profile');
     const { authoritativeReviewProfileFilePath } = await import('./authoritative-review-capability');
     const fromFile = loadAuthoritativeReviewProfileFile(authoritativeReviewProfileFilePath());
-    expect(fromFile.qualificationState).toBe('test_only');
+    expect(fromFile.qualificationState).toBe('provisional');
     expect(() => validateProductionAuthoritativeReviewProfile(fromFile)).toThrow('final');
   });
 });

@@ -227,7 +227,7 @@ const EXPECTED_CANONICAL_CONTRACT: Record<string, unknown> = {
     {
       validatorId: 'structure-root-order',
       handlerKey: 'authoritative.review.completeness',
-      implementationDigest: 'a'.repeat(64),
+      implementationDigest: 'fcc008b5609f90af4af77450451f2a74e77f33efa5082cc7dd7a8eeace46041a',
       implementationRef: {
         kind: 'builtin',
         moduleId: '@forge/authoritative-review',
@@ -245,7 +245,7 @@ const EXPECTED_CANONICAL_CONTRACT: Record<string, unknown> = {
     {
       validatorId: 'content-batch-schema',
       handlerKey: 'authoritative.review.slotSchema',
-      implementationDigest: 'b'.repeat(64),
+      implementationDigest: '6882bd50c5c33d0f0e3c6f442d8a4066aa7ffa601dc68f812059b356915e0046',
       implementationRef: {
         kind: 'builtin',
         moduleId: '@forge/authoritative-review',
@@ -263,7 +263,7 @@ const EXPECTED_CANONICAL_CONTRACT: Record<string, unknown> = {
     {
       validatorId: 'content-finalize-coverage',
       handlerKey: 'authoritative.review.coverage',
-      implementationDigest: 'c'.repeat(64),
+      implementationDigest: '378849932fbd97ac19b5624d38d6bd725bbe073c64b9397910291438d17a4854',
       implementationRef: {
         kind: 'builtin',
         moduleId: '@forge/authoritative-review',
@@ -352,7 +352,7 @@ const EXPECTED_IDENTITY_CLOSURE: ImplementationIdentityClosureEntryV2[] = [
     trigger: 'content_commit',
     executionPhase: 'batch_commit',
     handlerKey: 'authoritative.review.slotSchema',
-    implementationDigest: 'b'.repeat(64),
+    implementationDigest: '6882bd50c5c33d0f0e3c6f442d8a4066aa7ffa601dc68f812059b356915e0046',
     moduleId: '@forge/authoritative-review',
     exportName: 'slotSchema',
   },
@@ -362,7 +362,7 @@ const EXPECTED_IDENTITY_CLOSURE: ImplementationIdentityClosureEntryV2[] = [
     trigger: 'content_commit',
     executionPhase: 'plan_finalize',
     handlerKey: 'authoritative.review.coverage',
-    implementationDigest: 'c'.repeat(64),
+    implementationDigest: '378849932fbd97ac19b5624d38d6bd725bbe073c64b9397910291438d17a4854',
     moduleId: '@forge/authoritative-review',
     exportName: 'coverage',
   },
@@ -372,7 +372,7 @@ const EXPECTED_IDENTITY_CLOSURE: ImplementationIdentityClosureEntryV2[] = [
     trigger: 'map_candidate_commit',
     executionPhase: null,
     handlerKey: 'authoritative.review.completeness',
-    implementationDigest: 'a'.repeat(64),
+    implementationDigest: 'fcc008b5609f90af4af77450451f2a74e77f33efa5082cc7dd7a8eeace46041a',
     moduleId: '@forge/authoritative-review',
     exportName: 'completeness',
   },

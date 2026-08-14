@@ -1131,8 +1131,11 @@ export function parseValidatorAggregate(value: unknown): ValidatorAggregateV2 {
   assertRefsSortedByDigest(infra, 'infrastructureFailureRefs');
   const validDigests = sa(o.validExecutionDigests, 'validExecutionDigests');
   assertSortedStrings(validDigests, 'validExecutionDigests');
+  // Spec §12 outcome priority: infrastructure_failure > blocking_invalid > clear.
+  // Infra and blocking-invalid MAY co-occur on one aggregate (a sibling
+  // registration failing while another finds a domain violation) — the outcome
+  // is still derived by priority, never rejected.
   const derived: ValidatorAggregateV2['outcome'] = infra.length > 0 ? 'infrastructure_failure' : blocking.length > 0 ? 'blocking_invalid' : 'clear';
-  if (infra.length > 0 && blocking.length > 0) throw new SchemaError('infrastructure and blocking invalid outcomes cannot co-occur');
   if (str(o.outcome, 'outcome') !== derived) throw new SchemaError('validator_aggregate.outcome must be derived: infrastructure_failure > blocking_invalid > clear');
   const out: ValidatorAggregateV2 = {
     trigger: o.trigger as ValidatorAggregateV2['trigger'],

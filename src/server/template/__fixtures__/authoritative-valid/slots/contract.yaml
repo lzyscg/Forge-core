@@ -137,7 +137,7 @@ reviewPolicy:
 validators:
   - validatorId: structure-root-order
     handlerKey: authoritative.review.completeness
-    implementationDigest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    implementationDigest: fcc008b5609f90af4af77450451f2a74e77f33efa5082cc7dd7a8eeace46041a
     implementationRef:
       kind: builtin
       moduleId: '@forge/authoritative-review'
@@ -153,7 +153,7 @@ validators:
     budgetProfileId: authoritative-validator-default
   - validatorId: content-batch-schema
     handlerKey: authoritative.review.slotSchema
-    implementationDigest: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    implementationDigest: 6882bd50c5c33d0f0e3c6f442d8a4066aa7ffa601dc68f812059b356915e0046
     implementationRef:
       kind: builtin
       moduleId: '@forge/authoritative-review'
@@ -170,7 +170,7 @@ validators:
     budgetProfileId: authoritative-validator-default
   - validatorId: content-finalize-coverage
     handlerKey: authoritative.review.coverage
-    implementationDigest: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+    implementationDigest: 378849932fbd97ac19b5624d38d6bd725bbe073c64b9397910291438d17a4854
     implementationRef:
       kind: builtin
       moduleId: '@forge/authoritative-review'

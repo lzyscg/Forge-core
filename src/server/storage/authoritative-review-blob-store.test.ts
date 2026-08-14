@@ -367,7 +367,7 @@ describe('AuthoritativeReviewBlobStore frozen profile snapshot (§4.3/§7.1)', (
     // bytes (all five limit groups) stay immutable on disk.
     expect(readBack.profileIdentity).toBe(body.profileIdentity);
     expect(readBack.profileDigest).toBe(body.profileDigest);
-    expect(readBack.qualificationState).toBe('test_only');
+    expect(readBack.qualificationState).toBe('provisional');
     expect(canonicalJsonBytes(body)).toEqual(
       await readFile(
         join(

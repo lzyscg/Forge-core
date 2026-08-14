@@ -562,3 +562,124 @@ export class EvaluatorRunner {
     }
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* Task 14 v2 evaluator adapter (spec §12/design §9)                   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * One installed builtin v2 validator execution. The source is INSTALLED
+ * platform code (never a snapshot path); the input is the RESOLVED canonical
+ * ABI v2 data (the engine already resolved every envelope ref). The closed v2
+ * result shape is interpreted by the validator engine — this primitive only
+ * runs the allowlisted source in the shared hardened isolate and returns the
+ * raw output with a determinism verdict. The v1 `{pass, issues}` interpretation
+ * is NEVER reused.
+ */
+export interface ValidatorV2ExecutionInput {
+  source: string;
+  input: JsonValue;
+  budget: { timeoutMs: number; memoryMiB: number };
+  signal?: AbortSignal;
+}
+
+/** A successful v2 run: raw output, measured bytes, and the double-run verdict. */
+export interface ValidatorV2RawOutcome {
+  kind: 'ok';
+  /** The RAW return value of the FIRST call (before any v2 normalization). */
+  raw: unknown;
+  /** UTF-8 bytes of the canonical serialization of the raw return. */
+  outputBytes: number;
+  /** Two runs in the SAME isolate produced byte-identical raw outputs. */
+  deterministic: boolean;
+  cpuMs: number;
+  wallMs: number;
+}
+
+export type ValidatorV2Result = ValidatorV2RawOutcome | EvaluatorUnavailable | EvaluatorResultInvalid;
+
+/**
+ * The closed v2 ABI result carries an `executionDigest` that the validator
+ * engine OVERRIDES with the engine-computed canonical result digest (the
+ * sandbox has no hashing primitive). Determinism therefore compares the
+ * SUBSTANTIVE parts (status + issues) with the overridden field stripped —
+ * a handler that varies only its claimed executionDigest stays deterministic.
+ */
+function stripExecutionDigest(raw: unknown): unknown {
+  if (raw !== null && typeof raw === 'object' && !Array.isArray(raw)) {
+    const record = { ...(raw as Record<string, unknown>) };
+    delete record.executionDigest;
+    return record;
+  }
+  return raw;
+}
+
+/**
+ * Runs one allowlisted builtin source twice (fresh isolate, serial double-run
+ * inside ONE isolate so module-level state persists) against the resolved ABI
+ * v2 input. Reuses the shared hardened isolate creation and per-call budget
+ * enforcement; never reads a task snapshot path; never interprets `{pass,
+ * issues}`. `deterministic` is false when the two SUBSTANTIVE raw outputs
+ * differ — the engine records that as `NONDETERMINISTIC_RESULT`.
+ */
+export async function runValidatorV2(input: ValidatorV2ExecutionInput): Promise<ValidatorV2Result> {
+  if (input.signal?.aborted) {
+    return { kind: 'unavailable', reason: 'aborted' };
+  }
+  let inputJson: string;
+  try {
+    inputJson = canonicalJson(input.input);
+  } catch {
+    return { kind: 'unavailable', reason: 'input' };
+  }
+  let sandbox: CompiledSandbox;
+  try {
+    sandbox = compileModuleSandbox(input.source, {
+      memoryLimitMb: input.budget.memoryMiB,
+      timeoutMs: input.budget.timeoutMs,
+      hardened: true,
+      exportName: 'validate',
+      globalName: '__validate',
+    });
+  } catch (error) {
+    return { kind: 'unavailable', reason: compileReason(error) };
+  }
+  try {
+    const cpuBefore = Number(sandbox.cpuTimeNs());
+    const wallBefore = performance.now();
+    let raw1: unknown;
+    let raw2: unknown;
+    try {
+      raw1 = sandbox.call(`__validate(${inputJson})`, input.budget.timeoutMs);
+      // Bound the DOUBLE-RUN to a single budget window: the second determinism
+      // probe gets only the remaining CPU budget, so a near-budget handler can
+      // never consume 2× maxDurationMs (M-8c).
+      const cpuMsAfterFirst = (Number(sandbox.cpuTimeNs()) - cpuBefore) / 1_000_000;
+      const secondBudget = Math.max(1, Math.floor(input.budget.timeoutMs - cpuMsAfterFirst));
+      raw2 = sandbox.call(`__validate(${inputJson})`, secondBudget);
+    } catch (error) {
+      return { kind: 'unavailable', reason: callReason(error) };
+    }
+    const cpuMs = (Number(sandbox.cpuTimeNs()) - cpuBefore) / 1_000_000;
+    const wallMs = performance.now() - wallBefore;
+
+    let outputBytes: number;
+    try {
+      outputBytes = canonicalJsonBytes(raw1).length;
+    } catch {
+      return { kind: 'resultInvalid', reason: 'return value is not canonical JSON' };
+    }
+    let substantive1: Buffer;
+    let substantive2: Buffer;
+    try {
+      substantive1 = canonicalJsonBytes(stripExecutionDigest(raw1));
+      substantive2 = canonicalJsonBytes(stripExecutionDigest(raw2));
+    } catch {
+      return { kind: 'resultInvalid', reason: 'return value is not canonical JSON' };
+    }
+    const deterministic = substantive1.length === substantive2.length && substantive1.equals(substantive2);
+    return { kind: 'ok', raw: raw1, outputBytes, deterministic, cpuMs, wallMs };
+  } finally {
+    sandbox.dispose();
+  }
+}

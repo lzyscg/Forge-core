@@ -18,6 +18,7 @@ import {
 import { AuthoritativeReviewProfileArchive, type ProfileArchiveByteStore } from './authoritative-review-profile-archive';
 import {
   AUTHORITATIVE_REVIEW_TEST_HANDLER_IDENTITIES,
+  buildAuthoritativeReviewPriorTestOnlyProfileBody,
   createAuthoritativeReviewTestEnvironment,
 } from './test-support/authoritative-review-test-registry';
 
@@ -134,14 +135,13 @@ describe('profile archive (bytes by digest)', () => {
     const envA = createAuthoritativeReviewTestEnvironment({ archive });
     const refA = envA.profileSnapshotRef as NonNullable<typeof envA.profileSnapshotRef>;
     expect(archive.resolve(refA)).toEqual(envA.profile);
-    const bodyB = validateAuthoritativeReviewProfile({
-      ...revisedBody(),
-      installedHandlers: AUTHORITATIVE_REVIEW_TEST_HANDLER_IDENTITIES,
-    });
+    // Profile B = the PRIOR test-only revision (distinct installed identities).
+    const bodyB = buildAuthoritativeReviewPriorTestOnlyProfileBody();
     const refB = archive.put(bodyB);
     expect(refB.digest).not.toBe(refA.digest);
     // env A's archived profile survives the arrival of profile B
     expect(archive.resolve(refA)).toEqual(envA.profile);
+    expect(archive.resolve(refB)).toEqual(bodyB);
   });
 });
 

@@ -38,6 +38,10 @@ import {
   AUTHORITATIVE_REVIEW_TEST_ASSEMBLER_IDENTITY,
   AUTHORITATIVE_REVIEW_TEST_VALIDATOR_IDENTITIES,
 } from './authoritative-review-test-handlers';
+import {
+  AUTHORITATIVE_REVIEW_BUILTIN_VALIDATOR_IDENTITIES,
+  AUTHORITATIVE_REVIEW_BUILTIN_BUDGET_PROFILE_ID,
+} from '../../runtime/authoritative-review/builtin-validators';
 
 /** The single checked-in test-only validator budget profile (design §9). */
 export const AUTHORITATIVE_REVIEW_TEST_VALIDATOR_DEFAULT_BUDGET: ValidatorBudgetProfileV1 = {
@@ -111,7 +115,7 @@ export function defaultAuthoritativeReviewTestTemplateCeilings(): TemplateLimitC
   };
 }
 
-/** The checked-in test installed-handler identities (exact registry identities). */
+/** The checked-in test-only installed-handler identities (exact registry identities). */
 export const AUTHORITATIVE_REVIEW_TEST_HANDLER_IDENTITIES: InstalledHandlerIdentitiesV1 = {
   validators: [...AUTHORITATIVE_REVIEW_TEST_VALIDATOR_IDENTITIES].sort((a, b) => {
     const keyA = `${a.handlerKey}:${a.implementationDigest}:${a.trigger}:${String(a.executionPhase)}`;
@@ -121,20 +125,39 @@ export const AUTHORITATIVE_REVIEW_TEST_HANDLER_IDENTITIES: InstalledHandlerIdent
   assembler: AUTHORITATIVE_REVIEW_TEST_ASSEMBLER_IDENTITY,
 };
 
-/** The test-only handler registry (loading is not part of it — no bypass). */
+/**
+ * The installed PROVISIONAL handler identities (Task 14 rotation): the real
+ * platform builtin validator identities + the still-test assembler identity.
+ * The assembler is not part of this rotation (no assembler builtin exists yet);
+ * its identity stays the test `renderSeal` entry so the fixture assembler
+ * registration keeps resolving.
+ */
+export const AUTHORITATIVE_REVIEW_BUILTIN_HANDLER_IDENTITIES: InstalledHandlerIdentitiesV1 = {
+  validators: [...AUTHORITATIVE_REVIEW_BUILTIN_VALIDATOR_IDENTITIES].sort((a, b) => {
+    const keyA = `${a.handlerKey}:${a.implementationDigest}:${a.trigger}:${String(a.executionPhase)}`;
+    const keyB = `${b.handlerKey}:${b.implementationDigest}:${b.trigger}:${String(b.executionPhase)}`;
+    return keyA < keyB ? -1 : keyA > keyB ? 1 : 0;
+  }) as typeof AUTHORITATIVE_REVIEW_BUILTIN_VALIDATOR_IDENTITIES,
+  assembler: AUTHORITATIVE_REVIEW_TEST_ASSEMBLER_IDENTITY,
+};
+
+/**
+ * The PROVISIONAL handler registry (loading is not part of it — no bypass).
+ * Matches the provisional profile's installedHandlers exactly.
+ */
 export function createAuthoritativeReviewTestHandlerRegistry(): AuthoritativeReviewHandlerRegistryV1 {
   return {
-    validators: [...AUTHORITATIVE_REVIEW_TEST_HANDLER_IDENTITIES.validators],
-    assembler: AUTHORITATIVE_REVIEW_TEST_HANDLER_IDENTITIES.assembler,
+    validators: [...AUTHORITATIVE_REVIEW_BUILTIN_HANDLER_IDENTITIES.validators],
+    assembler: AUTHORITATIVE_REVIEW_BUILTIN_HANDLER_IDENTITIES.assembler,
   };
 }
 
-/**
- * Builds the exact canonical test profile body (qualificationState: test_only).
- * The checked-in `authoritative-review-profile-v1.json` is a byte-identical
- * copy of this body — nothing may diverge without failing the profile tests.
- */
-export function buildAuthoritativeReviewTestProfileBody(): AuthoritativeReviewProfileSnapshotV1Body {
+/** Shared profile-body construction for both the prior and provisional revisions. */
+function buildAuthoritativeReviewProfileBody(options: {
+  qualificationState: 'test_only' | 'provisional';
+  profileVersion: number;
+  installedHandlers: InstalledHandlerIdentitiesV1;
+}): AuthoritativeReviewProfileSnapshotV1Body {
   const runtime = {
     maxBytesByKind: defaultAuthoritativeReviewMaxBytesByKind() as AuthoritativeReviewProfileSnapshotV1Body['runtime']['maxBytesByKind'],
     maxSlots: 10_000,
@@ -160,8 +183,8 @@ export function buildAuthoritativeReviewTestProfileBody(): AuthoritativeReviewPr
   const body: Record<string, unknown> = {
     schemaVersion: 1,
     profileIdentity: AUTHORITATIVE_REVIEW_PROFILE_IDENTITY,
-    profileVersion: 1,
-    qualificationState: 'test_only',
+    profileVersion: options.profileVersion,
+    qualificationState: options.qualificationState,
     profileDigest: '',
     abi: {
       validatorAbi: 'forge-validator/v2',
@@ -170,7 +193,7 @@ export function buildAuthoritativeReviewTestProfileBody(): AuthoritativeReviewPr
     },
     runtime,
     template: defaultAuthoritativeReviewTestTemplateCeilings(),
-    installedHandlers: AUTHORITATIVE_REVIEW_TEST_HANDLER_IDENTITIES,
+    installedHandlers: options.installedHandlers,
     budgetProfiles: {
       'authoritative-validator-default': AUTHORITATIVE_REVIEW_TEST_VALIDATOR_DEFAULT_BUDGET,
     },
@@ -185,16 +208,40 @@ export function buildAuthoritativeReviewTestProfileBody(): AuthoritativeReviewPr
 }
 
 /**
- * Test/dev-only enabled environment (spec §4.3: development fixtures inject an
- * enabled provisional/test environment explicitly). Production callers never
- * use this — explicit injection only, never an implicit fallback and never an
- * environment-variable bypass. `archive` may be shared across environments to
- * prove archived task-bound profiles survive current-profile changes.
+ * The CURRENT canonical enabled profile body (Task 14 rotation):
+ * `qualificationState: provisional` with the REAL installed platform builtin
+ * validator identities. The checked-in `authoritative-review-profile-v1.json`
+ * is a byte-identical copy of this body — nothing may diverge without failing
+ * the profile tests.
  */
-export function createAuthoritativeReviewTestEnvironment(
-  options: { archive?: AuthoritativeReviewProfileArchive } = {},
+export function buildAuthoritativeReviewTestProfileBody(): AuthoritativeReviewProfileSnapshotV1Body {
+  return buildAuthoritativeReviewProfileBody({
+    qualificationState: 'provisional',
+    profileVersion: 2,
+    installedHandlers: AUTHORITATIVE_REVIEW_BUILTIN_HANDLER_IDENTITIES,
+  });
+}
+
+/**
+ * The PRIOR immutable profile revision (Task 5, all-aaaa test-only identities,
+ * `qualificationState: test_only`, version 1). Task 14 rotates it out of the
+ * checked-in file: its exact bytes stay archived (never edited) and it can no
+ * longer load a Contract naming the production builtins.
+ */
+export function buildAuthoritativeReviewPriorTestOnlyProfileBody(): AuthoritativeReviewProfileSnapshotV1Body {
+  return buildAuthoritativeReviewProfileBody({
+    qualificationState: 'test_only',
+    profileVersion: 1,
+    installedHandlers: AUTHORITATIVE_REVIEW_TEST_HANDLER_IDENTITIES,
+  });
+}
+
+/** Builds a runnable enabled environment from one profile body. */
+function environmentFrom(
+  profile: AuthoritativeReviewProfileSnapshotV1Body,
+  registry: AuthoritativeReviewHandlerRegistryV1,
+  archive?: AuthoritativeReviewProfileArchive,
 ): ReturnType<typeof createAuthoritativeReviewRuntimeEnvironment> {
-  const profile = buildAuthoritativeReviewTestProfileBody();
   const capability: AuthoritativeReviewCapabilityV1 = {
     version: 1,
     status: 'enabled',
@@ -207,11 +254,46 @@ export function createAuthoritativeReviewTestEnvironment(
   const environment = createAuthoritativeReviewRuntimeEnvironment(
     capability,
     profile,
-    createAuthoritativeReviewTestHandlerRegistry(),
-    options.archive ?? new AuthoritativeReviewProfileArchive(),
+    registry,
+    archive ?? new AuthoritativeReviewProfileArchive(),
   );
   if (!isAuthoritativeReviewRunnable(environment)) {
     throw new Error('test support: the injected test environment must be runnable');
   }
   return environment;
+}
+
+/**
+ * Test/dev-only enabled environment (spec §4.3: development fixtures inject an
+ * enabled provisional/test environment explicitly). Production callers never
+ * use this — explicit injection only, never an implicit fallback and never an
+ * environment-variable bypass. `archive` may be shared across environments to
+ * prove archived task-bound profiles survive current-profile changes.
+ */
+export function createAuthoritativeReviewTestEnvironment(
+  options: { archive?: AuthoritativeReviewProfileArchive } = {},
+): ReturnType<typeof createAuthoritativeReviewRuntimeEnvironment> {
+  return environmentFrom(
+    buildAuthoritativeReviewTestProfileBody(),
+    createAuthoritativeReviewTestHandlerRegistry(),
+    options.archive,
+  );
+}
+
+/**
+ * The PRIOR test-only environment (Task 14 rotation proof): a runnable enabled
+ * environment frozen to the OLD all-aaaa test-only registry. A Contract naming
+ * the new production builtin digests MUST fail to load under it.
+ */
+export function createAuthoritativeReviewPriorTestOnlyEnvironment(
+  options: { archive?: AuthoritativeReviewProfileArchive } = {},
+): ReturnType<typeof createAuthoritativeReviewRuntimeEnvironment> {
+  return environmentFrom(
+    buildAuthoritativeReviewPriorTestOnlyProfileBody(),
+    {
+      validators: [...AUTHORITATIVE_REVIEW_TEST_HANDLER_IDENTITIES.validators],
+      assembler: AUTHORITATIVE_REVIEW_TEST_HANDLER_IDENTITIES.assembler,
+    },
+    options.archive,
+  );
 }

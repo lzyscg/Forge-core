@@ -26,6 +26,7 @@ import { createTestRuntimeEnvironment } from '../structured-slots/runtime-capabi
 import { createProductionAuthoritativeReviewEnvironment } from '../structured-slots/authoritative-review-capability';
 import {
   createAuthoritativeReviewTestEnvironment,
+  createAuthoritativeReviewPriorTestOnlyEnvironment,
 } from '../structured-slots/test-support/authoritative-review-test-registry';
 import type { AuthoritativeReviewProfileSnapshotV1Body } from '../structured-slots/authoritative-review-profile';
 import {
@@ -1372,6 +1373,58 @@ describe('authoritative (v2) template loading (Task 5)', () => {
       ),
       'utf8',
     );
+    await expect(
+      loadTemplateDirectory(join(root, 'authoritative-valid'), {
+        runtimeEnvironment: createTestRuntimeEnvironment(),
+        authoritativeReviewEnvironment: createAuthoritativeReviewTestEnvironment(),
+      }),
+    ).rejects.toMatchObject({ code: 'TEMPLATE_INVALID' });
+  });
+
+  it('the PRIOR test-only profile cannot load a Contract naming the new production builtins (rotation proof)', async () => {
+    // The authoritative-valid fixture now names the real production builtin
+    // digests. The prior (Task 5, all-aaaa) test-only profile must reject it —
+    // the digest mismatch proves the immutable rotation: the prior profile can
+    // never load a Contract naming the new installed handlers.
+    const root = makeTempDir('forge-core-v2rotate-');
+    copyFixture(V2_FIXTURE, 'authoritative-valid', root);
+    await expect(
+      loadTemplateDirectory(join(root, 'authoritative-valid'), {
+        runtimeEnvironment: createTestRuntimeEnvironment(),
+        authoritativeReviewEnvironment: createAuthoritativeReviewPriorTestOnlyEnvironment(),
+      }),
+    ).rejects.toMatchObject({ code: 'TEMPLATE_INVALID' });
+    // The CURRENT provisional profile loads the same fixture.
+    const frozen = await loadTemplateDirectory(join(root, 'authoritative-valid'), {
+      runtimeEnvironment: createTestRuntimeEnvironment(),
+      authoritativeReviewEnvironment: createAuthoritativeReviewTestEnvironment(),
+    });
+    expect(frozen.productionMode).toBe('structured_slots');
+    expect(frozen.structuredSlots?.version).toBe(2);
+  });
+
+  it('the disabled production capability still prevents v2 use after the rotation', async () => {
+    const root = makeTempDir('forge-core-v2disabledpost-');
+    copyFixture(V2_FIXTURE, 'authoritative-valid', root);
+    await expect(
+      loadTemplateDirectory(join(root, 'authoritative-valid'), {
+        runtimeEnvironment: createTestRuntimeEnvironment(),
+        authoritativeReviewEnvironment: createProductionAuthoritativeReviewEnvironment(),
+      }),
+    ).rejects.toMatchObject({ code: 'TEMPLATE_RUNTIME_UNAVAILABLE' });
+  });
+
+  it('the CURRENT provisional profile rejects a Contract naming the OLD test-only digests (rotation direction proof, M-8b)', async () => {
+    const root = makeTempDir('forge-core-v2rotateback-');
+    copyFixture(V2_FIXTURE, 'authoritative-valid', root);
+    const contractFile = join(root, 'authoritative-valid', 'slots', 'contract.yaml');
+    // Replace the real production builtin digests with the OLD all-aaaa
+    // test-only digests — the current provisional profile must reject them.
+    let contract = readFileSync(contractFile, 'utf8');
+    contract = contract.replace('fcc008b5609f90af4af77450451f2a74e77f33efa5082cc7dd7a8eeace46041a', 'a'.repeat(64));
+    contract = contract.replace('6882bd50c5c33d0f0e3c6f442d8a4066aa7ffa601dc68f812059b356915e0046', 'b'.repeat(64));
+    contract = contract.replace('378849932fbd97ac19b5624d38d6bd725bbe073c64b9397910291438d17a4854', 'c'.repeat(64));
+    writeFileSync(contractFile, contract, 'utf8');
     await expect(
       loadTemplateDirectory(join(root, 'authoritative-valid'), {
         runtimeEnvironment: createTestRuntimeEnvironment(),
