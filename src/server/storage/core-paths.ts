@@ -222,6 +222,25 @@ export class CorePaths {
     return resolve(this.taskRoot(taskId), 'structured-slots');
   }
 
+  /** structured-slots/v2/ — root of the authoritative review protocol v2 (spec §8). */
+  taskStructuredV2Root(taskId: string): string {
+    return resolve(this.taskStructuredSlotsRoot(taskId), 'v2');
+  }
+
+  /** structured-slots/v2/blobs/ — immutable content-addressed v2 blobs (spec §8). */
+  taskStructuredV2BlobsRoot(taskId: string): string {
+    return resolve(this.taskStructuredV2Root(taskId), 'blobs');
+  }
+
+  /** blobs/<kind>/<first2>/<digest> (spec §8) — the 64-hex digest is the filename. */
+  taskStructuredV2BlobFile(taskId: string, kind: string, digest: string): string {
+    assertSafeSegment('kind', kind);
+    if (!STRUCTURED_SHA256.test(digest)) {
+      throw new CorePathError('digest');
+    }
+    return resolve(this.taskStructuredV2BlobsRoot(taskId), kind, digest.slice(0, 2), digest);
+  }
+
   /** structured-slots/blobs/ — content-addressed immutable blobs. */
   taskStructuredBlobsRoot(taskId: string): string {
     return resolve(this.taskStructuredSlotsRoot(taskId), 'blobs');

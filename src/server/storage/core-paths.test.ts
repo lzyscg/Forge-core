@@ -222,6 +222,49 @@ describe('CorePaths structured-slots layout', () => {
   });
 });
 
+describe('CorePaths v2 blob layout (spec §8)', () => {
+  it('derives the v2 blob directory tree under structured-slots/v2', () => {
+    const paths = CorePaths.create(ROOTS);
+    const root = resolve('D:/core-data/tasks/task-1/structured-slots');
+    expect(paths.taskStructuredV2Root('task-1')).toBe(joinPaths(root, 'v2'));
+    expect(paths.taskStructuredV2BlobsRoot('task-1')).toBe(joinPaths(root, 'v2/blobs'));
+  });
+
+  it('derives content-addressed v2 blob files: blobs/<kind>/<first2>/<digest>', () => {
+    const paths = CorePaths.create(ROOTS);
+    const root = resolve('D:/core-data/tasks/task-1/structured-slots');
+    const digest = 'ab'.repeat(32);
+    expect(paths.taskStructuredV2BlobFile('task-1', 'review_fact', digest)).toBe(
+      joinPaths(root, 'v2/blobs/review_fact/ab', digest),
+    );
+    const other = `cd${'12'.repeat(31)}`;
+    expect(paths.taskStructuredV2BlobFile('task-1', 'profile_snapshot', other)).toBe(
+      joinPaths(root, 'v2/blobs/profile_snapshot/cd', other),
+    );
+  });
+
+  it('rejects unsafe v2 kinds and malformed digests', () => {
+    const paths = CorePaths.create(ROOTS);
+    const digest = 'ab'.repeat(32);
+    expect(() => paths.taskStructuredV2BlobFile('task-1', '../evil', digest)).toThrow(
+      /CORE_PATH_INVALID/,
+    );
+    expect(() => paths.taskStructuredV2BlobFile('task-1', 'review/fact', digest)).toThrow(
+      /CORE_PATH_INVALID/,
+    );
+    expect(() => paths.taskStructuredV2BlobFile('task-1', '', digest)).toThrow(/CORE_PATH_INVALID/);
+    expect(() => paths.taskStructuredV2BlobFile('task-1', 'review_fact', 'xy')).toThrow(
+      /CORE_PATH_INVALID/,
+    );
+    expect(() => paths.taskStructuredV2BlobFile('task-1', 'review_fact', 'GG'.repeat(32))).toThrow(
+      /CORE_PATH_INVALID/,
+    );
+    expect(() => paths.taskStructuredV2BlobFile('../task', 'review_fact', digest)).toThrow(
+      /CORE_PATH_INVALID/,
+    );
+  });
+});
+
 function joinPaths(root: string, ...rel: string[]): string {
   return resolve(root, ...rel);
 }
