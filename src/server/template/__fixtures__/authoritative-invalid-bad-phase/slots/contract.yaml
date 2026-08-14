@@ -1,0 +1,257 @@
+# Invalid v2 contract variant: map_candidate_commit validator declares executionPhase batch_commit.
+# Only content_commit may use a non-null execution phase (spec §6.5).
+version: 2
+slotTypes:
+  - id: document
+    name: Document
+    description: Root container slot whose children follow the layout grammar.
+    specSchema:
+      type: object
+      additionalProperties: false
+    content:
+      presence: forbidden
+  - id: title
+    name: Title
+    description: Leaf slot holding a short required title string.
+    specSchema:
+      type: object
+      additionalProperties: false
+    content:
+      presence: required
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 200
+  - id: body
+    name: Body
+    description: Leaf slot holding a required length-bounded body string.
+    specSchema:
+      type: object
+      additionalProperties: false
+    content:
+      presence: required
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 10000
+layoutGrammar:
+  rootType: document
+  productions:
+    document:
+      children:
+        kind: sequence
+        items:
+          - kind: slot
+            type: title
+          - kind: repeat
+            min: 1
+            max: 64
+            item:
+              kind: slot
+              type: body
+    title:
+      children:
+        kind: empty
+    body:
+      children:
+        kind: empty
+accessProfiles:
+  - id: builder
+    capabilities:
+      - read_structure_contract
+      - read_map_build_frontier
+      - append_map_candidate_chunk
+      - finish_map_build
+      - read_active_map
+      - read_slot_content
+      - read_related_context
+      - write_slot_content
+      - submit_content_draft
+      - read_map_repair_staging
+      - submit_map_patch
+      - write_map_patch
+      - request_scope_expansion
+  - id: reviewer
+    capabilities:
+      - read_map_candidate
+      - read_active_map
+      - read_slot_content
+      - read_relation_context
+      - submit_map_node_review
+      - submit_map_relation_review
+      - submit_slot_review
+      - submit_relation_review
+      - submit_map_whole_finding
+      - submit_whole_tree_finding
+      - submit_finding_verification
+      - complete_review_assignment
+relationTypes:
+  - id: sequence
+    direction: directed
+    fromSlotTypes:
+      - body
+    toSlotTypes:
+      - body
+    attributesSchema: {}
+    semanticCriterion: A later event must follow naturally from the earlier event in
+      document order.
+    enforcement: blocking
+    invalidation:
+      direction: downstream
+      maxHops: 2
+  - id: causal
+    direction: directed
+    fromSlotTypes:
+      - body
+    toSlotTypes:
+      - body
+    attributesSchema:
+      type: object
+      additionalProperties: false
+      properties:
+        explanation:
+          type: string
+          minLength: 1
+          maxLength: 2000
+      required:
+        - explanation
+    semanticCriterion: A later event must be sufficiently explained by the earlier event.
+    enforcement: advisory
+    invalidation:
+      direction: downstream
+      maxHops: 3
+relationshipPolicy:
+  mode: optional
+reviewPolicy:
+  mapReview: required
+  contentSelector: content_bearing
+  mapBatchTargetSlots: 24
+  contentBatchTargetSlots: 24
+  assignmentSoftLimit: 64
+  wholeMapObservation: required
+  wholeContentTreeObservation: required
+  reviewAdvisoryRelations: true
+  maxRounds: 8
+validators:
+  - validatorId: structure-root-order
+    handlerKey: authoritative.review.completeness
+    implementationDigest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    implementationRef:
+      kind: builtin
+      moduleId: "@forge/authoritative-review"
+      exportName: completeness
+    trigger: map_candidate_commit
+    executionPhase: batch_commit
+    selector:
+      kind: all
+    enforcement: blocking
+    deterministic: true
+    inputContractVersion: 2
+    outputContractVersion: 2
+    budgetProfileId: authoritative-validator-default
+  - validatorId: content-batch-schema
+    handlerKey: authoritative.review.slotSchema
+    implementationDigest: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    implementationRef:
+      kind: builtin
+      moduleId: "@forge/authoritative-review"
+      exportName: slotSchema
+    trigger: content_commit
+    executionPhase: batch_commit
+    selector:
+      kind: types
+      typeIds:
+        - title
+        - body
+    enforcement: blocking
+    deterministic: true
+    inputContractVersion: 2
+    outputContractVersion: 2
+    budgetProfileId: authoritative-validator-default
+  - validatorId: content-finalize-coverage
+    handlerKey: authoritative.review.coverage
+    implementationDigest: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+    implementationRef:
+      kind: builtin
+      moduleId: "@forge/authoritative-review"
+      exportName: coverage
+    trigger: content_commit
+    executionPhase: plan_finalize
+    selector:
+      kind: all
+    enforcement: advisory
+    deterministic: true
+    inputContractVersion: 2
+    outputContractVersion: 2
+    budgetProfileId: authoritative-validator-default
+assembler:
+  abi: forge-assembler/v2
+  handlerKey: authoritative.seal.render
+  implementationDigest: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+  implementationRef:
+    kind: builtin
+    moduleId: "@forge/authoritative-review"
+    exportName: renderSeal
+  budget:
+    timeoutMs: 30000
+    maxInputBytes: 67108864
+    maxOutputBytes: 33554432
+  routes:
+    - id: chapter
+      artifactFile: chapter.md
+      mediaType: text/markdown
+    - id: chapter-json
+      artifactFile: chapter.json
+      mediaType: application/json
+limits:
+  schema:
+    maxSchemaDepth: 4
+    maxSchemaNodes: 1024
+    maxEnumItems: 64
+    maxPatternLength: 128
+  structure:
+    maxSlots: 2500
+    maxTreeDepth: 8
+    maxChildrenPerSlot: 250
+  payload:
+    maxSpecBytesPerSlot: 16384
+    maxContentBytesPerSlot: 262144
+    maxScaffoldPayloadBytes: 16777216
+  draft:
+    maxChangedSlots: 500
+    maxDraftBytes: 4194304
+  attempt:
+    maxSlotToolCallsPerAttempt: 128
+    maxValidationRunsPerAttempt: 4
+    maxValidatorInvocationsPerAttempt: 10000
+    maxAggregateValidatorCpuMsPerAttempt: 60000
+    maxAggregateValidatorWallClockMsPerAttempt: 120000
+    maxValidatorOutputBytesPerAttempt: 4194304
+    maxAttemptWallClockMs: 150000
+  validation:
+    maxValidators: 16
+    maxValidatorInvocationsPerGate: 2500
+    maxAggregateValidatorCpuMsPerGate: 15000
+    maxAggregateValidatorWallClockMsPerGate: 30000
+    maxValidatorOutputBytesPerGate: 1048576
+    maxIssuesPerRun: 125
+  output:
+    maxArtifactFiles: 16
+    maxArtifactBytesPerFile: 4194304
+    maxTotalArtifactBytes: 16777216
+  relations:
+    maxRelationsPerMap: 2000
+    maxRelationsPerSlot: 32
+    maxRelationImpactHops: 3
+    maxRelationClosureNodes: 256
+  authoritative:
+    maxAssignmentsPerRound: 1000
+    maxPlannedWorkItemsPerRound: 4000
+    maxConsecutiveAttemptsWithoutProgress: 8
+    maxFindingsPerSlot: 16
+    maxFindingsPerRelation: 8
+    maxFindingsPerRound: 1000
+    maxEvidenceBytesPerItem: 4096
+    maxEvidenceBytesTotal: 1048576
+    maxWriteSlotsPerRepairGrant: 64
+    maxScopeExpansionsPerRound: 8
