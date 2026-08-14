@@ -64,6 +64,12 @@ import {
   assertSortedStrings,
 } from './schema-common';
 
+/** Task 13: the eight closed structured session kinds (review_observation spec). */
+const WRITE_GRANT_SESSION_KINDS: readonly string[] = [
+  'structure_chunk', 'review_map_batch', 'review_map_whole', 'generation_batch',
+  'review_content_batch', 'review_content_whole', 'map_repair', 'content_repair',
+];
+
 /* ---- profile_snapshot (§4.3/§7.1) ------------------------------ */
 /**
  * Exact profile envelope: identity/version/qualification/ABIs plus
@@ -1269,5 +1275,32 @@ export function parseWriteGrantSpec(value: unknown): WriteGrantSpecV2 {
     hs(out, o.specDigest, 'specDigest', 'write_grant_spec');
     return { ...out, specDigest: hx(o.specDigest, 'specDigest') } as WriteGrantSpecV2;
   }
-  throw new SchemaError('write_grant_spec.kind must be initial_structure_chunk|initial_generation_batch|map_repair_batch|content_repair_batch');
+  if (kind === 'review_observation') {
+    ex(o, ['grantSpecId', 'workItemId', 'kind', 'snapshotHash', 'authorityBaseRef', 'sessionKind', 'reviewAssignmentId', 'roundId', 'roundKind', 'readScope', 'specDigest'], 'write_grant_spec');
+    const session = o.sessionKind === null ? null : str(o.sessionKind, 'sessionKind');
+    if (session !== null && !WRITE_GRANT_SESSION_KINDS.includes(session)) {
+      throw new SchemaError('write_grant_spec.sessionKind must be a structured session kind or null');
+    }
+    const roundKind = o.roundKind === null ? null : str(o.roundKind, 'roundKind');
+    if (roundKind !== null && roundKind !== 'map' && roundKind !== 'content') {
+      throw new SchemaError('write_grant_spec.roundKind must be map|content|null');
+    }
+    const rs = rec(o.readScope, 'readScope');
+    ex(rs, ['maxContextBytes'], 'readScope');
+    const out: Record<string, unknown> = {
+      grantSpecId: str(o.grantSpecId, 'grantSpecId'),
+      workItemId: str(o.workItemId, 'workItemId'),
+      kind,
+      snapshotHash: str(o.snapshotHash, 'snapshotHash'),
+      authorityBaseRef: rfKind(o.authorityBaseRef, 'authority_base_set', 'authorityBaseRef'),
+      sessionKind: session,
+      reviewAssignmentId: o.reviewAssignmentId === null ? null : str(o.reviewAssignmentId, 'reviewAssignmentId'),
+      roundId: o.roundId === null ? null : str(o.roundId, 'roundId'),
+      roundKind,
+      readScope: { maxContextBytes: onn(rs.maxContextBytes, 'maxContextBytes') },
+    };
+    hs(out, o.specDigest, 'specDigest', 'write_grant_spec');
+    return { ...out, specDigest: hx(o.specDigest, 'specDigest') } as WriteGrantSpecV2;
+  }
+  throw new SchemaError('write_grant_spec.kind must be initial_structure_chunk|initial_generation_batch|map_repair_batch|content_repair_batch|review_observation');
 }

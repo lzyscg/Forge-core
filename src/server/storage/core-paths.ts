@@ -433,6 +433,44 @@ export class CorePaths {
     return resolve(this.taskStructuredV2ProjectionsRoot(taskId), 'latest.json');
   }
 
+  /* ---------------------------------------------------------------- */
+  /* Task 13: attempt-bound PRIVATE journals and repair staging        */
+  /* (design §12.4/§19.1 — never publicly visible, never blob kinds)   */
+  /* ---------------------------------------------------------------- */
+
+  /** structured-slots/v2/private/ — private draft/staging journals (design §19.1). */
+  taskStructuredV2PrivateRoot(taskId: string): string {
+    return resolve(this.taskStructuredV2Root(taskId), 'private');
+  }
+
+  /** private/review/<workItemId>/<attemptId>/journal.ndjson — attempt-bound review draft. */
+  taskV2ReviewDraftJournalFile(taskId: string, workItemId: string, attemptId: string): string {
+    assertSafeSegment('workItemId', workItemId);
+    assertSafeSegment('attemptId', attemptId);
+    return resolve(
+      this.taskStructuredV2PrivateRoot(taskId),
+      'review',
+      workItemId,
+      attemptId,
+      'journal.ndjson',
+    );
+  }
+
+  /** private/repair/<planRevisionId>/<batchOrdinal>/journal.ndjson — plan-scoped staging. */
+  taskV2RepairStagingJournalFile(taskId: string, planRevisionId: string, batchOrdinal: number): string {
+    assertSafeSegment('planRevisionId', planRevisionId);
+    if (!Number.isInteger(batchOrdinal) || batchOrdinal < 0) {
+      throw new CorePathError('batchOrdinal');
+    }
+    return resolve(
+      this.taskStructuredV2PrivateRoot(taskId),
+      'repair',
+      planRevisionId,
+      String(batchOrdinal),
+      'journal.ndjson',
+    );
+  }
+
   /** cursor-keys/ — installation-level cursor signing keyring (spec §14.2). */
   cursorKeyringRoot(): string {
     return resolve(this.dataRoot, 'cursor-keys');

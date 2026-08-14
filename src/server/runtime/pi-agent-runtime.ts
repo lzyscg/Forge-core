@@ -219,6 +219,20 @@ export interface PiV2ToolRuntime {
 }
 
 /**
+ * Task 13 additive adapter: wires a V2ToolFactory (which implements the
+ * `{ createContext(input) }` shape structurally) into the Pi v2Tools seam so
+ * real sessions receive the closed per-session tool set. Purely structural —
+ * no import of the factory keeps this constrained module free of runtime
+ * dependencies. V1/basic/v3 turns are unaffected (the seam is only consulted
+ * when `AgentTurnInput.v2Session` is set).
+ */
+export function createPiV2ToolRuntime(factory: {
+  createContext(input: AgentTurnInput): Promise<{ toolDefinitions: ToolDefinition[] } | null>;
+}): PiV2ToolRuntime {
+  return { createContext: (input) => factory.createContext(input) };
+}
+
+/**
  * The per-turn structured slot runtime context the Pi adapter consumes (Task
  * 14). `signal` is the composite Attempt signal carried by
  * `AgentTurnInput.slotSession.signal` (deadline/resource closure ∪ scheduler
@@ -805,6 +819,66 @@ export class PiAgentRuntime implements AgentRuntime {
         systemPrompt: input.agent.systemPrompt,
       });
 
+      // M-5: a STRUCTURED v2 session (v2Ctx carries its closed per-session tool
+      // set) receives ONLY those tools — the base Forge dispatch/workspace/
+      // skill/artifact tools are EXCLUDED, so a reviewer session can never see
+      // publish_artifact / submit_final_artifact / send_message /
+      // request_human_input / finish_production. The generic Submitter
+      // (v2Session set but empty v2 tool set) KEEPS the base forge surface so
+      // submit_final_artifact + workspace reads stay available (§13.5 delivery).
+      const isStructuredV2 = v2Ctx !== null && v2Ctx.toolDefinitions.length > 0;
+      const v2ForgeDispatchGuard = (): { ok: false; code: string; reason: string } => ({
+        ok: false,
+        code: 'V2_FORGE_ACTION_FORBIDDEN',
+        reason: 'v2 结构化会话仅使用封闭工具，禁止基础 Forge 动作。',
+      });
+      const forgeTools = isStructuredV2
+        ? []
+        : [
+            ...createForgeToolDefinitions(buffer, {
+              readSkillContent: (skillId) =>
+                this.#skillReader === null
+                  ? Promise.resolve(null)
+                  : this.#skillReader(input.taskId, input.agent.id, skillId),
+              // Task 14: the structured dispatch guard (design §11.3 matrix)
+              // runs before any forge action is buffered; M-5: a structured v2
+              // session's guard rejects every base Forge dispatch action.
+              beforePropose: structuredCtx?.beforePropose ?? (isStructuredV2 ? v2ForgeDispatchGuard : undefined),
+            }),
+            ...createWorkspaceToolDefinitions({
+              workspaces: this.#workspaces,
+              taskId: input.taskId,
+              agentId: input.agent.id,
+              // Review F1: the SAME Turn buffer gates workspace writes — once
+              // the package is sealed or dispatched the sealed content (e.g. a
+              // sealed workspace_file) must stay immutable.
+              isProductionPhase: () => buffer.phase === 'production',
+            }),
+            ...createSkillSectionToolDefinitions({
+              readSection: (skillId, sectionPath) =>
+                this.#skillSectionReader === null
+                  ? Promise.reject(
+                      new RuntimeFailure(
+                        'SKILL_SECTION_NOT_AUTHORIZED',
+                        '该技能无子文件授权。',
+                        false,
+                      ),
+                    )
+                  : this.#skillSectionReader(input.taskId, input.agent.id, skillId, sectionPath),
+            }),
+            // Template-declared artifact gate self-check (plan 2026-08-07 Phase
+            // 2): registers validate_artifact only when a runner is wired AND the
+            // agent's gate mode includes self_check; otherwise the factory
+            // returns the empty set, so the closed tool count stays stable.
+            ...createValidateArtifactToolDefinitions({
+              gateRunner: this.#gateRunner,
+              workspaces: this.#workspaces,
+              agent: input.agent,
+              taskId: input.taskId,
+              agentId: input.agent.id,
+            }),
+          ];
+
       const session = await this.#createSession({
         cwd: this.#coreCwd,
         model: binding.model,
@@ -814,47 +888,7 @@ export class PiAgentRuntime implements AgentRuntime {
         resourceLoader,
         noTools: 'builtin',
         customTools: [
-          ...createForgeToolDefinitions(buffer, {
-            readSkillContent: (skillId) =>
-              this.#skillReader === null
-                ? Promise.resolve(null)
-                : this.#skillReader(input.taskId, input.agent.id, skillId),
-            // Task 14: the structured dispatch guard (design §11.3 matrix)
-            // runs before any forge action is buffered.
-            beforePropose: structuredCtx?.beforePropose,
-          }),
-          ...createWorkspaceToolDefinitions({
-            workspaces: this.#workspaces,
-            taskId: input.taskId,
-            agentId: input.agent.id,
-            // Review F1: the SAME Turn buffer gates workspace writes — once
-            // the package is sealed or dispatched the sealed content (e.g. a
-            // sealed workspace_file) must stay immutable.
-            isProductionPhase: () => buffer.phase === 'production',
-          }),
-          ...createSkillSectionToolDefinitions({
-            readSection: (skillId, sectionPath) =>
-              this.#skillSectionReader === null
-                ? Promise.reject(
-                    new RuntimeFailure(
-                      'SKILL_SECTION_NOT_AUTHORIZED',
-                      '该技能无子文件授权。',
-                      false,
-                    ),
-                  )
-                : this.#skillSectionReader(input.taskId, input.agent.id, skillId, sectionPath),
-          }),
-          // Template-declared artifact gate self-check (plan 2026-08-07 Phase
-          // 2): registers validate_artifact only when a runner is wired AND the
-          // agent's gate mode includes self_check; otherwise the factory
-          // returns the empty set, so the closed tool count stays stable.
-          ...createValidateArtifactToolDefinitions({
-            gateRunner: this.#gateRunner,
-            workspaces: this.#workspaces,
-            agent: input.agent,
-            taskId: input.taskId,
-            agentId: input.agent.id,
-          }),
+          ...forgeTools,
           // Task 14: the closed per-kind Slot Tool set (structure/fill/seal)
           // for a structured v3 turn; an empty spread for basic turns.
           ...(structuredCtx?.toolDefinitions ?? []),

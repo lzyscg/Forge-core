@@ -1749,6 +1749,58 @@ describe('authoritative v2 seam (Task 12)', () => {
     expect(result.publicText).toBe('v2 output');
   });
 
+  it('FIX-M4: a structured v2 session receives ONLY its closed tools — no forge/workspace/skill/artifact tools; a generic-submitter v2 turn retains them', async () => {
+    const v2Tool = (name: string) => ({
+      name,
+      label: name,
+      description: name,
+      executionMode: 'sequential' as const,
+      parameters: Type.Object({}),
+      execute: async (): Promise<{ content: { type: 'text'; text: string }[]; details: { ok: boolean } }> => ({ content: [{ type: 'text', text: '{}' }], details: { ok: true } }),
+    });
+    const v2Tools = {
+      createContext: async (input: { v2Session?: unknown; v2Namespace?: string | null }) =>
+        input.v2Session !== null && input.v2Session !== undefined && input.v2Namespace?.includes('review')
+          ? { toolDefinitions: [v2Tool('submit_slot_review'), v2Tool('complete_review_assignment')] }
+          : { toolDefinitions: [] }, // generic submitter → empty v2 set
+    };
+    const FORGE_FORBIDDEN = ['publish_artifact', 'submit_final_artifact', 'send_message', 'request_human_input', 'finish_production'];
+    // Structured reviewer turn: ONLY the closed v2 tools.
+    const structuredHarness = createPiHarness({
+      coreCwd: tempCwd(),
+      script: [{ text: 'ok' }, { text: 'ok' }, { text: 'ok' }],
+      v2Tools,
+    });
+    await structuredHarness.runtime.run(
+      sampleTurnInput({
+        v2Session: { signal: new AbortController().signal },
+        v2Namespace: 'structured/review/wi-1/att-1',
+      }),
+      freshSignal(),
+    );
+    const structuredNames = structuredHarness.sessionOptions.customTools.map((tool) => tool.name);
+    expect(structuredNames).toEqual(['submit_slot_review', 'complete_review_assignment']);
+    for (const forbidden of FORGE_FORBIDDEN) {
+      expect(structuredNames).not.toContain(forbidden);
+    }
+    // Generic submitter turn: v2 set empty → base forge tools retained.
+    const submitterHarness = createPiHarness({
+      coreCwd: tempCwd(),
+      script: [{ text: 'ok' }, { text: 'ok' }, { text: 'ok' }],
+      v2Tools,
+    });
+    await submitterHarness.runtime.run(
+      sampleTurnInput({
+        v2Session: { signal: new AbortController().signal },
+        v2Namespace: 'generic/submitter/wi-2/att-2',
+      }),
+      freshSignal(),
+    );
+    const submitterNames = submitterHarness.sessionOptions.customTools.map((tool) => tool.name);
+    expect(submitterNames).toContain('submit_final_artifact');
+    expect(submitterNames).toContain('publish_artifact');
+  });
+
   it('runs a v2 turn under the isolated namespace (session key never the bare agent id)', async () => {
     const harness = createPiHarness({ coreCwd: tempCwd(), script: [{ text: 'ok' }, { text: 'ok' }, { text: 'ok' }] });
     const result = await harness.runtime.run(

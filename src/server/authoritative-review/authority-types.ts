@@ -1094,11 +1094,87 @@ export interface RepairBatchGrantSpecV2 {
   specDigest: string;
 }
 
-/** §11.11 closed three-branch WriteGrantSpec union. */
+/**
+ * Task 13 GRANT-SPEC TENSION RESOLUTION (Task 10 review ruling carried here):
+ * the frozen Task 7 created-event validator mandates `grantSpecRef !== null`
+ * on EVERY `agent_assignment` workitem, but design §11.11 defined WriteGrantSpec
+ * kinds only for the four write sessions (initial_structure_chunk /
+ * initial_generation_batch / map_repair_batch / content_repair_batch). The
+ * reviewer and submitter workitems therefore need a LEGAL, registrable spec
+ * whose write authority is EMPTY. This branch is that spec: it carries NO
+ * write-scope field at all (the exact-key parser can never accept a write
+ * target), grants read-only + verification + bounded evidence, and is bound to
+ * the review assignment/round. It satisfies the frozen validator while
+ * preserving design §7/§11.11 "审核 Agent 不能获得结构槽写 Grant". Task 10's
+ * `shouldSignGrantInstance` predicate continues to gate MATERIALIZATION: the
+ * reviewer/submitter spec is never signed into a GrantInstance (its dispatch
+ * `grantInstanceRef` stays null) — the tool closure reads the SPEC only.
+ */
+export const REVIEW_OBSERVATION_GRANT_KIND = 'review_observation' as const;
+
+export interface ReviewObservationGrantSpecV2 {
+  grantSpecId: string;
+  workItemId: string;
+  kind: typeof REVIEW_OBSERVATION_GRANT_KIND;
+  snapshotHash: string;
+  authorityBaseRef: BlobRefV2;
+  /** null for the generic submitter (never a structured reviewer). */
+  sessionKind: StructuredSessionKindV2 | null;
+  reviewAssignmentId: string | null;
+  roundId: string | null;
+  roundKind: 'map' | 'content' | null;
+  /** bounded full-tree/assignment read scope (profile byte cap). */
+  readScope: { maxContextBytes: number };
+  specDigest: string;
+}
+
+/**
+ * §11.11 closed WriteGrantSpec union — Task 13 EXTENDED with the
+ * `review_observation` branch (the grant-spec tension resolution). schemaVersion
+ * stays 1: the capability is disabled, zero production payload blobs exist, and
+ * the four original branches parse byte-identically.
+ */
 export type WriteGrantSpecV2 =
   | InitialStructureGrantSpecV2
   | InitialGenerationGrantSpecV2
-  | RepairBatchGrantSpecV2;
+  | RepairBatchGrantSpecV2
+  | ReviewObservationGrantSpecV2;
+
+/** Write-authority classification of a spec (empty for reviewer/submitter). */
+export type GrantWriteAuthorityV2 = 'structure' | 'generation' | 'map_repair' | 'content_repair' | 'none';
+
+export function grantWriteAuthority(spec: WriteGrantSpecV2): GrantWriteAuthorityV2 {
+  switch (spec.kind) {
+    case 'initial_structure_chunk':
+      return 'structure';
+    case 'initial_generation_batch':
+      return 'generation';
+    case 'map_repair_batch':
+      return 'map_repair';
+    case 'content_repair_batch':
+      return 'content_repair';
+    case REVIEW_OBSERVATION_GRANT_KIND:
+      return 'none';
+  }
+}
+
+/** The write-slot ids of a content write spec (empty for every other kind). */
+export function grantSpecWriteSlotIds(spec: WriteGrantSpecV2): readonly string[] {
+  switch (spec.kind) {
+    case 'initial_generation_batch':
+      return spec.writeSlotIds;
+    case 'content_repair_batch':
+      return 'writeSlotIds' in spec.writeScope ? spec.writeScope.writeSlotIds : [];
+    default:
+      return [];
+  }
+}
+
+/** The Map-write scope of a map write spec (null for every other kind). */
+export function grantSpecMapWriteScope(spec: WriteGrantSpecV2): MapWriteScopeV2 | null {
+  if (spec.kind !== 'map_repair_batch') return null;
+  return 'mapWriteScope' in spec.writeScope ? spec.writeScope.mapWriteScope : null;
+}
 
 export interface GrantInstanceV2 {
   grantInstanceId: string;
