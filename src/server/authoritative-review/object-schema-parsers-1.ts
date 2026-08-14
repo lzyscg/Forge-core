@@ -167,6 +167,12 @@ export function parseAuthorityBaseSet(value: unknown): AuthorityBaseSetV2 {
       throw new SchemaError(`authority_base_set.displayDigests.${key} does not equal the ${field} ref digest`);
     }
   }
+  // The parsed object keeps the REAL aliases (design §17.2 carries them in the
+  // canonical object and logs/UI read them back); the self-digest therefore
+  // covers bytes WITH the aliases. Task 10 fixed a latent writer/validator
+  // mismatch (the parser previously dropped the aliases, so a writer's digest
+  // over the aliased bytes could never validate).
+  out.displayDigests = dd as Record<string, string>;
   hs(out, o.baseSetDigest, 'baseSetDigest', 'authority_base_set');
   return { ...out, baseSetDigest: hx(o.baseSetDigest, 'authority_base_set.baseSetDigest') };
 }

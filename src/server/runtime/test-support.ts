@@ -49,7 +49,7 @@ import type { TaskWorkspace } from '../../shared/contracts';
 import { CoreService } from '../core-service';
 import { CorePaths } from '../storage/core-paths';
 import type { ArtifactStore } from '../storage/artifact-store';
-import type { EventStore } from '../storage/event-store';
+import { EventStore } from '../storage/event-store';
 import type { TaskStore } from '../storage/task-store';
 import type { TaskEvent } from '../storage/task-events';
 import type { FrozenTemplate, TurnContract } from '../template/template-schema';
@@ -76,6 +76,24 @@ import {
 } from './pi-agent-runtime';
 import { autoRetryDelayMs, classifyRuntimeError } from './retry-policy';
 import { WorkspaceStore } from './workspace-store';
+// Task 10 coordinator environment: real storage-backed facade wiring over
+// temporary data roots with a deterministic frozen clock. The coordinator
+// itself is imported here (server build compiles this module, so the
+// coordinator must stay free of vitest imports — it does).
+import { WorkItemCoordinatorV2 } from './authoritative-review/work-item-coordinator';
+import { AuthoritativeAppendFacadeV2 } from '../storage/authoritative-append-facade';
+import { AuthoritativeReviewBlobStore } from '../storage/authoritative-review-blob-store';
+import { AuthoritativePublicationStore } from '../storage/authoritative-publication-store';
+import { AuthoritativeReviewCheckpointStore } from '../storage/authoritative-review-checkpoint-store';
+import { PublicationIntentRegistry } from '../storage/authoritative-publication-intent-registry';
+import { fullProfileForTests } from '../authoritative-review/object-registry';
+import { buildAuthoritativeReviewTestProfileBody } from '../structured-slots/test-support/authoritative-review-test-registry';
+import { canonicalJsonSha256 } from '../structured-slots/canonical-json';
+import type { AuthoritativeReviewProjectionV2 } from '../storage/authoritative-review-state';
+import type { AuthoritativeReviewEventV2 } from '../storage/authoritative-review-events';
+import type { ValidatedEventSource } from '../storage/authoritative-review-checkpoint-store';
+import type { WriteGrantSpecV2 } from '../authoritative-review/authority-types';
+import type { BlobRefV2 } from '../../shared/authoritative-review-v2';
 
 /** The narrowed `send_message` member of the ForgeAction union. */
 export type SendMessageAction = Extract<ForgeAction, { type: 'send_message' }>;
@@ -1469,4 +1487,219 @@ export async function schedulerWithFailures(
       });
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Phase C Task 10: WorkItem coordinator / authority-base environments
+// (deterministic frozen clocks, injected worker ids, facade wiring over
+// temporary data roots, a real profile snapshot blob, and tiny legal
+// domain blobs for work-item payloads / grant specs).
+// ---------------------------------------------------------------------------
+
+/**
+ * A legal `content_value` object whose selfDigest really covers its canonical
+ * bytes (the registry parser verifies the self-digest). Used as the neutral
+ * WorkItem payload blob of coordinator tests — Task 11+ systems publish real
+ * domain payloads (map_build_spec, …) through the same pin path.
+ */
+export function authoritativeTestContentValue(text: string): Record<string, unknown> {
+  const without = {
+    slotId: 's-1',
+    contentSchemaDigest: '0'.repeat(64),
+    taskContentRevision: 1,
+    mediaType: 'text/plain',
+    text,
+  };
+  return { ...without, selfDigest: canonicalJsonSha256(without) };
+}
+
+/** Every environment surface a Task 10 coordinator test observes. */
+export interface WorkItemCoordinatorEnvironment {
+  paths: CorePaths;
+  eventStore: EventStore;
+  blobStore: AuthoritativeReviewBlobStore;
+  publicationStore: AuthoritativePublicationStore;
+  facade: AuthoritativeAppendFacadeV2;
+  coordinator: WorkItemCoordinatorV2;
+  /** Mutable frozen clock — tests advance it to simulate lease expiry / retry due. */
+  now: { value: string };
+  /** The real published profile snapshot blob ref (profileSnapshotRef). */
+  profileSnapshotRef: BlobRefV2;
+  /** A legal published blob ref standing in for the frozen template snapshot. */
+  templateSnapshotRef: BlobRefV2;
+  /** Deterministic worker identities (worker-a, worker-b, …). */
+  worker: { next(): string };
+  /** Reproduces the frozen clock exactly for assertion strings. */
+  iso(offsetMs?: number): string;
+  readProjection(taskId: string): Promise<AuthoritativeReviewProjectionV2>;
+  /** Publishes one legal content_value blob for WorkItem payloads. */
+  publishContentValue(taskId: string, text: string): Promise<BlobRefV2>;
+  /** Publishes a legal minimal map_build_spec blob (grant-spec child). */
+  publishMapBuildSpec(taskId: string): Promise<BlobRefV2>;
+  /** Builds a legal initial_structure_chunk WriteGrantSpec for the base ref. */
+  structureChunkGrantSpec(
+    authorityBaseRef: BlobRefV2,
+    mapBuildSpecRef: BlobRefV2,
+  ): WriteGrantSpecV2;
+  /** Resolver that fails closed through the real blob store. */
+  resolverFor(taskId: string): (ref: BlobRefV2) => Promise<unknown>;
+}
+
+let coordinatorWorkerCounter = 0;
+
+/**
+ * Temporary-root coordinator environment over REAL storage: EventStore +
+ * blob store + publication store + append facade + checkpoint store, a frozen
+ * mutable clock and deterministic worker ids. `registry` may be supplied to
+ * inject test-only rebuildable handlers (question-park seeding).
+ */
+export async function createWorkItemCoordinatorEnvironment(options: {
+  now?: string;
+  leaseDurationMs?: number;
+  registry?: PublicationIntentRegistry;
+  /** Shared data root (two-instance race tests); fresh temp roots otherwise. */
+  paths?: CorePaths;
+} = {}): Promise<WorkItemCoordinatorEnvironment> {
+  const paths =
+    options.paths ??
+    CorePaths.create({
+      dataRoot: mkdtempSync(join(tmpdir(), 'forge-core-coordinator-data-')),
+      templateRoot: mkdtempSync(join(tmpdir(), 'forge-core-coordinator-templates-')),
+    });
+  if (options.paths === undefined) {
+    registerRuntimeTestRoot(paths.dataRoot);
+    registerRuntimeTestRoot(paths.templateRoot);
+  }
+  const eventStore = new EventStore(paths);
+  const blobStore = new AuthoritativeReviewBlobStore(paths, fullProfileForTests());
+  const now = { value: options.now ?? '2026-08-14T10:00:00.000Z' };
+  const publicationStore = new AuthoritativePublicationStore(paths, {
+    bootId: 'coordinator-test-boot',
+    ownerPid: process.pid,
+    processAlive: () => true,
+    clock: () => now.value,
+    retrySleepMs: 0,
+  });
+  const registry = options.registry ?? new PublicationIntentRegistry();
+  const facade = new AuthoritativeAppendFacadeV2({
+    eventStore,
+    blobStore,
+    publicationStore,
+    profile: fullProfileForTests(),
+    paths,
+    registry,
+    clock: () => now.value,
+  });
+  // The checkpoint store's ValidatedEventSource type narrows events to v2,
+  // but the FOLD tolerates legacy members (skipped by protocolVersion) and
+  // needs them IN POSITION so computed sequences equal store sequences — a
+  // cast-only adapter, never a filter.
+  const checkpointSource: ValidatedEventSource = {
+    read: async (id: string) =>
+      (await eventStore.read(id)).map((entry) => ({
+        sequence: entry.sequence,
+        fileName: entry.fileName,
+        size: entry.size,
+        event: entry.event as AuthoritativeReviewEventV2,
+      })),
+    readAfter: async (id: string, throughSequence: number) =>
+      (await eventStore.readAfter(id, throughSequence)).map((entry) => ({
+        sequence: entry.sequence,
+        fileName: entry.fileName,
+        size: entry.size,
+        event: entry.event as AuthoritativeReviewEventV2,
+      })),
+  };
+  const checkpointStore = new AuthoritativeReviewCheckpointStore(paths, checkpointSource);
+
+  const taskId = 'task-coordinator-support';
+  const profileSnapshotRef = await facade.prepareBlob(
+    taskId,
+    'profile_snapshot',
+    buildAuthoritativeReviewTestProfileBody(),
+  );
+  const templateSnapshotRef = await facade.prepareBlob(
+    taskId,
+    'content_value',
+    authoritativeTestContentValue('template snapshot stand-in (exact-ref equality only)'),
+  );
+
+  const workerNouns = ['worker-a', 'worker-b', 'worker-c', 'worker-d', 'worker-e'];
+  const environment: WorkItemCoordinatorEnvironment = {
+    paths,
+    eventStore,
+    blobStore,
+    publicationStore,
+    facade,
+    coordinator: new WorkItemCoordinatorV2({
+      facade,
+      checkpointStore,
+      resolver: (id: string, ref: BlobRefV2) => blobStore.readJson(id, ref, ref.kind),
+      tail: (id: string) => eventStore.tail(id),
+      committedOperation: (id: string, operationId: string) =>
+        eventStore.readBatchByCommitId(id, operationId).then((entries) =>
+          entries === null ? null : entries.map((entry) => ({ sequence: entry.sequence, event: entry.event })),
+        ),
+      clock: () => now.value,
+      leaseDurationMs: options.leaseDurationMs ?? 30 * 60 * 1000,
+    }),
+    now,
+    profileSnapshotRef,
+    templateSnapshotRef,
+    worker: {
+      next(): string {
+        coordinatorWorkerCounter += 1;
+        return workerNouns[(coordinatorWorkerCounter - 1) % workerNouns.length] ?? `worker-${coordinatorWorkerCounter}`;
+      },
+    },
+    iso(offsetMs = 0): string {
+      return new Date(new Date(now.value).getTime() + offsetMs).toISOString();
+    },
+    async readProjection(id: string) {
+      const read = await checkpointStore.readState(id, (ref) => blobStore.readJson(id, ref, ref.kind));
+      return read.projection;
+    },
+    publishContentValue: (id: string, text: string) =>
+      facade.prepareBlob(id, 'content_value', authoritativeTestContentValue(text)),
+    publishMapBuildSpec: async (id: string) => {
+      const body = {
+        mapBuildId: 'mb-1',
+        revision: 1,
+        supersedesMapBuildId: null,
+        sourceValidationReceiptRef: null,
+        snapshotHash: '0'.repeat(64),
+        plannedChunkPolicy: { maxChunks: 8, maxNodesPerChunk: 512, maxRelationsPerChunk: 64 },
+      };
+      return facade.prepareBlob(id, 'map_build_spec', { ...body, specDigest: canonicalJsonSha256(body) });
+    },
+    structureChunkGrantSpec: (authorityBaseRef, mapBuildSpecRef) =>
+      buildStructureChunkGrantSpecFixture(authorityBaseRef, mapBuildSpecRef),
+    resolverFor: (id: string) => (ref: BlobRefV2) => blobStore.readJson(id, ref, ref.kind),
+  };
+  return environment;
+}
+
+/** Deterministic initial_structure_chunk write-grant-spec fixture (real specDigest). */
+function buildStructureChunkGrantSpecFixture(
+  authorityBaseRef: BlobRefV2,
+  mapBuildSpecRef: BlobRefV2,
+): WriteGrantSpecV2 {
+  const body = {
+    grantSpecId: 'grant-spec-1',
+    workItemId: 'wi-grant-1',
+    kind: 'initial_structure_chunk',
+    snapshotHash: '0'.repeat(64),
+    authorityBaseRef,
+    mapBuildSpecRef,
+    expectedFrontierDigest: '0'.repeat(64),
+    structureChunkScope: {
+      chunkOrdinal: 1,
+      parentFrontierDigest: '0'.repeat(64),
+      maxNodes: 512,
+      maxRelations: 64,
+    },
+  };
+  const without = { ...body };
+  delete (without as { specDigest?: string }).specDigest;
+  return { ...body, specDigest: canonicalJsonSha256(without) } as WriteGrantSpecV2;
 }

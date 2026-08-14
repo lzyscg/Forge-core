@@ -236,8 +236,19 @@ const PUBLISH_KINDS = [
   'review_assignment_commit', 'map_review_settlement', 'content_review_settlement', 'map_activation',
   'generation_finalize', 'repair_finalize', 'migration_settlement', 'seal_publish',
 ] as const;
-const EVENT_BUILDERS = ['work_item_leased', 'work_item_requeued', 'work_item_lease_reclaimed'] as const;
+/** Task 10 extended builder set (see authority-types.ts union doc). */
+const EVENT_BUILDERS = [
+  'work_item_created', 'work_item_leased', 'work_item_retryable_failed',
+  'work_item_requeued', 'work_item_lease_reclaimed', 'work_item_parked',
+] as const;
 const LIFECYCLE_KINDS = ['stop', 'resume', 'manual_retry', 'run_migration_batch'] as const;
+const RECLAIM_REASONS = ['lease_expired', 'crash_recovery', 'user_stop', 'operator_interrupt'] as const;
+const SUSPENSION_REASONS = ['user_stop', 'operator_interrupt'] as const;
+const ATTEMPT_FAMILIES = ['structured', 'generic', 'command'] as const;
+const SYSTEM_COMMAND_KINDS = [
+  'map_finalize', 'generation_finalize', 'repair_finalize',
+  'migration_validation_batch', 'review_settlement', 'seal',
+] as const;
 const RECIPE_KEYS = ['retry_system_command', 'restart_map_review_cycle', 'restart_content_review_cycle', 'rebuild_missing_work'] as const;
 
 export function parsePublicationOperationPayload(value: unknown): PublicationOperationPayloadV2 {
@@ -256,8 +267,26 @@ export function parsePublicationOperationPayload(value: unknown): PublicationOpe
     } as PublicationOperationPayloadV2;
   }
   if (family === 'lease_or_retry') {
-    ex(o, ['family', 'operationId', 'taskId', 'workItemId', 'leaseEpoch', 'eventBuilder', 'authorityBaseRef'], 'publication_operation_payload');
+    ex(o, [
+      'family', 'operationId', 'taskId', 'workItemId', 'leaseEpoch', 'eventBuilder', 'authorityBaseRef',
+      'kind', 'roleBinding', 'agentExecutionKind', 'sessionKind', 'roundId', 'logicalAssignmentId',
+      'reviewAssignmentId', 'grantSpecRef', 'inputArtifactDeliveryId', 'payloadRef',
+      'initialLeaseEpoch', 'maxAutomaticRetries', 'leaseOwner', 'leaseExpiresAt',
+      'expectedLastSequence', 'attemptFamily', 'attemptId', 'commandId', 'agentId', 'commandKind',
+      'dispatchRef', 'grantInstanceRef', 'reason', 'failureCode', 'failureDigest', 'retryOrdinal',
+      'retryNotBefore', 'validatorAggregateRef', 'budgetPolicyDigest',
+    ], 'publication_operation_payload');
     if (!(EVENT_BUILDERS as readonly string[]).includes(str(o.eventBuilder, 'eventBuilder'))) throw new SchemaError('eventBuilder unknown');
+    const attemptFamily = o.attemptFamily === null ? null : str(o.attemptFamily, 'attemptFamily');
+    if (attemptFamily !== null && !(ATTEMPT_FAMILIES as readonly string[]).includes(attemptFamily)) throw new SchemaError('attemptFamily unknown');
+    const reason = o.reason === null ? null : str(o.reason, 'reason');
+    if (reason !== null && !(RECLAIM_REASONS as readonly string[]).includes(reason)) throw new SchemaError('reason unknown');
+    const agentExecutionKind = o.agentExecutionKind === null ? null : str(o.agentExecutionKind, 'agentExecutionKind');
+    if (agentExecutionKind !== null && agentExecutionKind !== 'structured_session' && agentExecutionKind !== 'generic_turn') {
+      throw new SchemaError('agentExecutionKind must be structured_session|generic_turn|null');
+    }
+    const commandKind = o.commandKind === null ? null : str(o.commandKind, 'commandKind');
+    if (commandKind !== null && !(SYSTEM_COMMAND_KINDS as readonly string[]).includes(commandKind)) throw new SchemaError('commandKind unknown');
     return {
       family,
       operationId: str(o.operationId, 'operationId'),
@@ -266,11 +295,42 @@ export function parsePublicationOperationPayload(value: unknown): PublicationOpe
       leaseEpoch: onn(o.leaseEpoch, 'leaseEpoch'),
       eventBuilder: str(o.eventBuilder, 'eventBuilder') as PublicationOperationPayloadV2 extends infer _ ? never : never,
       authorityBaseRef: rf(o.authorityBaseRef, 'authorityBaseRef'),
+      kind: o.kind === null ? null : (str(o.kind, 'kind') as PublicationOperationPayloadV2 extends infer _ ? never : never),
+      roleBinding: o.roleBinding === null ? null : str(o.roleBinding, 'roleBinding'),
+      agentExecutionKind,
+      sessionKind: o.sessionKind === null ? null : (str(o.sessionKind, 'sessionKind') as PublicationOperationPayloadV2 extends infer _ ? never : never),
+      roundId: o.roundId === null ? null : str(o.roundId, 'roundId'),
+      logicalAssignmentId: o.logicalAssignmentId === null ? null : str(o.logicalAssignmentId, 'logicalAssignmentId'),
+      reviewAssignmentId: o.reviewAssignmentId === null ? null : str(o.reviewAssignmentId, 'reviewAssignmentId'),
+      grantSpecRef: rfn(o.grantSpecRef, 'grantSpecRef'),
+      inputArtifactDeliveryId: o.inputArtifactDeliveryId === null ? null : str(o.inputArtifactDeliveryId, 'inputArtifactDeliveryId'),
+      payloadRef: rfn(o.payloadRef, 'payloadRef'),
+      initialLeaseEpoch: o.initialLeaseEpoch === null ? null : onn(o.initialLeaseEpoch, 'initialLeaseEpoch'),
+      maxAutomaticRetries: o.maxAutomaticRetries === null ? null : onn(o.maxAutomaticRetries, 'maxAutomaticRetries'),
+      leaseOwner: o.leaseOwner === null ? null : str(o.leaseOwner, 'leaseOwner'),
+      leaseExpiresAt: o.leaseExpiresAt === null ? null : str(o.leaseExpiresAt, 'leaseExpiresAt'),
+      expectedLastSequence: o.expectedLastSequence === null ? null : onn(o.expectedLastSequence, 'expectedLastSequence'),
+      attemptFamily,
+      attemptId: o.attemptId === null ? null : str(o.attemptId, 'attemptId'),
+      commandId: o.commandId === null ? null : str(o.commandId, 'commandId'),
+      agentId: o.agentId === null ? null : str(o.agentId, 'agentId'),
+      commandKind,
+      dispatchRef: rfn(o.dispatchRef, 'dispatchRef'),
+      grantInstanceRef: rfn(o.grantInstanceRef, 'grantInstanceRef'),
+      reason,
+      failureCode: o.failureCode === null ? null : str(o.failureCode, 'failureCode'),
+      failureDigest: o.failureDigest === null ? null : hx(o.failureDigest, 'failureDigest'),
+      retryOrdinal: o.retryOrdinal === null ? null : onn(o.retryOrdinal, 'retryOrdinal'),
+      retryNotBefore: o.retryNotBefore === null ? null : str(o.retryNotBefore, 'retryNotBefore'),
+      validatorAggregateRef: rfn(o.validatorAggregateRef, 'validatorAggregateRef'),
+      budgetPolicyDigest: o.budgetPolicyDigest === null ? null : hx(o.budgetPolicyDigest, 'budgetPolicyDigest'),
     } as PublicationOperationPayloadV2;
   }
   if (family === 'lifecycle') {
-    ex(o, ['family', 'operationId', 'taskId', 'kind', 'suspensionId', 'workItemId'], 'publication_operation_payload');
+    ex(o, ['family', 'operationId', 'taskId', 'kind', 'suspensionId', 'workItemId', 'reason', 'leaseEpoch', 'expectedLastSequence', 'authorityBaseRef'], 'publication_operation_payload');
     if (!(LIFECYCLE_KINDS as readonly string[]).includes(str(o.kind, 'kind'))) throw new SchemaError('kind unknown');
+    const reason = o.reason === null ? null : str(o.reason, 'reason');
+    if (reason !== null && !(SUSPENSION_REASONS as readonly string[]).includes(reason)) throw new SchemaError('reason unknown');
     return {
       family,
       operationId: str(o.operationId, 'operationId'),
@@ -278,6 +338,10 @@ export function parsePublicationOperationPayload(value: unknown): PublicationOpe
       kind: str(o.kind, 'kind') as PublicationOperationPayloadV2 extends infer _ ? never : never,
       suspensionId: o.suspensionId === null ? null : str(o.suspensionId, 'suspensionId'),
       workItemId: o.workItemId === null ? null : str(o.workItemId, 'workItemId'),
+      reason,
+      leaseEpoch: o.leaseEpoch === null ? null : onn(o.leaseEpoch, 'leaseEpoch'),
+      expectedLastSequence: o.expectedLastSequence === null ? null : onn(o.expectedLastSequence, 'expectedLastSequence'),
+      authorityBaseRef: rfn(o.authorityBaseRef, 'authorityBaseRef'),
     } as PublicationOperationPayloadV2;
   }
   if (family === 'question') {

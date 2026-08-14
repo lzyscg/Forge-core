@@ -109,6 +109,10 @@ describe('PublicationIntentRegistry deterministic builders', () => {
       kind: 'stop',
       suspensionId: 'sus-1',
       workItemId: null,
+      reason: 'user_stop',
+      leaseEpoch: null,
+      expectedLastSequence: null,
+      authorityBaseRef: null,
     };
     const at = '2026-08-14T10:00:00.000Z';
     const first = registration.buildEvents(payload, at);
@@ -146,6 +150,10 @@ describe('PublicationIntentRegistry deterministic builders', () => {
       kind: 'resume',
       suspensionId: 'sus-1',
       workItemId: 'wi-2',
+      reason: null,
+      leaseEpoch: null,
+      expectedLastSequence: null,
+      authorityBaseRef: null,
     };
     const events = stampIds(registration, payload, registration.buildEvents(payload, '2026-08-14T10:00:00.000Z'));
     expect(events).toHaveLength(1);
@@ -208,19 +216,6 @@ describe('PublicationIntentRegistry deterministic builders', () => {
   it('fails closed (NotRebuildableError) for registered families whose payload cannot rebuild the event byte-identically', () => {
     const cases: ReadonlyArray<[string, number, PublicationOperationPayloadV2]> = [
       [
-        'work_item_leased',
-        1,
-        {
-          family: 'lease_or_retry',
-          operationId: 'd44f5f50-0000-4000-8000-000000000000',
-          taskId: 'task-1',
-          workItemId: 'wi-1',
-          leaseEpoch: 1,
-          eventBuilder: 'work_item_leased',
-          authorityBaseRef: H_REF('authority_base_set', H1),
-        },
-      ],
-      [
         'human_answer',
         1,
         {
@@ -281,11 +276,11 @@ describe('publication_operation_payload child-ref extraction', () => {
         [H_REF('map_build_spec', H2)],
       ],
       [
-        { family: 'lease_or_retry', operationId: 'op-1', taskId: 't', workItemId: 'w', leaseEpoch: 1, eventBuilder: 'work_item_leased', authorityBaseRef: authority },
+        { family: 'lease_or_retry', operationId: 'op-1', taskId: 't', workItemId: 'w', leaseEpoch: 1, eventBuilder: 'work_item_leased', authorityBaseRef: authority, kind: null, roleBinding: null, agentExecutionKind: null, sessionKind: null, roundId: null, logicalAssignmentId: null, reviewAssignmentId: null, grantSpecRef: null, inputArtifactDeliveryId: null, payloadRef: null, initialLeaseEpoch: null, maxAutomaticRetries: null, leaseOwner: null, leaseExpiresAt: null, expectedLastSequence: null, attemptFamily: null, attemptId: null, commandId: null, agentId: null, commandKind: null, dispatchRef: null, grantInstanceRef: null, reason: null, failureCode: null, failureDigest: null, retryOrdinal: null, retryNotBefore: null, validatorAggregateRef: null, budgetPolicyDigest: null },
         [authority],
       ],
       [
-        { family: 'lifecycle', operationId: 'op-1', taskId: 't', kind: 'stop', suspensionId: null, workItemId: null },
+        { family: 'lifecycle', operationId: 'op-1', taskId: 't', kind: 'stop', suspensionId: null, workItemId: null, reason: null, leaseEpoch: null, expectedLastSequence: null, authorityBaseRef: null },
         [],
       ],
       [
@@ -331,6 +326,85 @@ describe('PublicationIntentRegistry isolation', () => {
     instance.register(makeRegistration('test/isolated'));
     expect(instance.resolve('test/isolated', 1)).not.toBeNull();
     expect(resolvePublicationIntent('test/isolated', 1)).toBeNull();
+  });
+
+  it('marks every Task 10 workitem-mutation handler byte-rebuildable (constraint A)', () => {
+    const rebuildable: ReadonlyArray<[string, number]> = [
+      ['work_item_created', 1],
+      ['work_item_leased', 1],
+      ['work_item_retryable_failed', 1],
+      ['work_item_requeued', 1],
+      ['work_item_lease_reclaimed', 1],
+      ['work_item_parked', 1],
+      ['lifecycle/manual_retry', 1],
+      ['lifecycle/stop', 1],
+      ['lifecycle/resume', 1],
+    ];
+    for (const [handlerKind, handlerVersion] of rebuildable) {
+      const registration = resolvePublicationIntent(handlerKind, handlerVersion);
+      expect(registration?.rebuildable).toBe(true);
+      expect(registration?.missingInputs).toEqual([]);
+    }
+    // The Task 11+ burdens stay registered but NON-rebuildable.
+    for (const handlerKind of ['human_answer', 'retry_system_command', 'task_delete']) {
+      expect(resolvePublicationIntent(handlerKind, 1)?.rebuildable).toBe(false);
+    }
+  });
+
+  it('rejects half-state cycle builders whose attemptFamily is null (designated §9.2 admission gate)', () => {
+    const authority = H_REF('authority_base_set', H1);
+    const leaseLike = (eventBuilder: 'work_item_leased' | 'work_item_retryable_failed' | 'work_item_lease_reclaimed' | 'work_item_parked'): PublicationOperationPayloadV2 => ({
+      family: 'lease_or_retry',
+      operationId: 'op-family-null',
+      taskId: 't',
+      workItemId: 'w',
+      leaseEpoch: 1,
+      eventBuilder,
+      authorityBaseRef: authority,
+      kind: 'agent_assignment',
+      roleBinding: 'orchestrator',
+      agentExecutionKind: 'structured_session',
+      sessionKind: 'structure_chunk',
+      roundId: null,
+      logicalAssignmentId: 'la-1',
+      reviewAssignmentId: null,
+      grantSpecRef: null,
+      inputArtifactDeliveryId: null,
+      payloadRef: null,
+      initialLeaseEpoch: 0,
+      maxAutomaticRetries: 2,
+      leaseOwner: 'worker-a',
+      leaseExpiresAt: '2026-08-14T10:30:00.000Z',
+      expectedLastSequence: 0,
+      attemptFamily: null,
+      attemptId: null,
+      commandId: null,
+      agentId: null,
+      commandKind: null,
+      dispatchRef: null,
+      grantInstanceRef: null,
+      reason: 'lease_expired',
+      failureCode: 'HANDLER_FAILED',
+      failureDigest: H1,
+      retryOrdinal: 1,
+      retryNotBefore: '2026-08-14T10:00:05.000Z',
+      validatorAggregateRef: null,
+      budgetPolicyDigest: H2,
+    });
+    for (const builder of ['work_item_leased', 'work_item_retryable_failed', 'work_item_lease_reclaimed', 'work_item_parked'] as const) {
+      const registration = resolvePublicationIntent(builder, 1);
+      expect(registration).not.toBeNull();
+      expect(() => registration?.buildEvents(leaseLike(builder), '2026-08-14T10:00:00.000Z')).toThrowError(
+        NotRebuildableError,
+      );
+    }
+    // requeue carries no execution family at all — it must stay legal.
+    const requeued = resolvePublicationIntent('work_item_requeued', 1);
+    const requeuePayload = {
+      ...leaseLike('work_item_leased'),
+      eventBuilder: 'work_item_requeued' as const,
+    } as PublicationOperationPayloadV2;
+    expect(() => requeued?.buildEvents(requeuePayload, '2026-08-14T10:00:00.000Z')).not.toThrow();
   });
 
   it('exposes exact event-schema identity per registration', () => {

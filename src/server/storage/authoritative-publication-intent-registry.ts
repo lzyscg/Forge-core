@@ -19,19 +19,33 @@
  *
  * The state-only families (lease_or_retry, lifecycle, question, recovery,
  * delete) and the artifact_publish version-allocation family are registered
- * NOW; `rebuildable` entries today are lifecycle stop/resume and
- * artifact_publish. Later tasks (10-22) extend the allowlist through
- * `registerPublicationIntent`, never by runtime payload content.
+ * NOW. Task 10 extended the `PublicationOperationPayloadV2` union (exact
+ * runtime lease/retry/lifecycle fields) so EVERY workitem state-machine
+ * mutation the coordinator commits — create/lease/retryable-failure/requeue/
+ * reclaim/park plus lifecycle stop/resume/manual_retry — is byte-identically
+ * rebuildable through this allowlist. `question` (answer delivery), `recovery`
+ * and `delete` remain non-rebuildable Task 11+ burdens. Later tasks extend
+ * the allowlist through `registerPublicationIntent`, never by runtime payload
+ * content.
  */
 import { createHash } from 'node:crypto';
 import { canonicalJson } from '../structured-slots/canonical-json';
 import { parsePublicationOperationPayload } from '../authoritative-review/object-schema-parsers-3';
-import type { PublicationOperationPayloadV2 } from '../authoritative-review/authority-types';
+import type {
+  PublicationOperationPayloadV2,
+  WorkItemReclaimReasonV2,
+} from '../authoritative-review/authority-types';
+import type { WorkItemKindV2 } from '../../shared/authoritative-review-v2';
 import type { AuthoritativeReviewEventV2 } from './authoritative-review-events';
 import type { BlobRefV2 } from '../../shared/authoritative-review-v2';
 
 /** An event envelope before the facade stamps the deterministic id. */
-export type AuthoritativeReviewEventEnvelopeV2 = Omit<AuthoritativeReviewEventV2, 'id'>;
+export type AuthoritativeReviewEventEnvelopeV2 =
+  AuthoritativeReviewEventV2 extends infer _Self
+    ? _Self extends AuthoritativeReviewEventV2
+      ? Omit<_Self, 'id'>
+      : never
+    : never;
 
 /** The exact closed publication payload families (design §19.1, frozen union). */
 export type PublicationPayloadFamilyV2 =
@@ -205,7 +219,12 @@ export class PublicationIntentRegistry {
 
   private seedLifecycle(): void {
     const family: PublicationPayloadFamilyV2 = 'lifecycle';
-    const childRefs = (): readonly BlobRefV2[] => [];
+    const childRefs = (parsed: PublicationOperationPayloadV2): readonly BlobRefV2[] => {
+      if (parsed.family !== 'lifecycle') return [];
+      const refs: BlobRefV2[] = [];
+      if (parsed.authorityBaseRef !== null) refs.push(parsed.authorityBaseRef);
+      return refs;
+    };
     const resolveRefs = (): readonly PublicationIntentResolvedRef[] => [];
     this.register({
       handlerKind: 'lifecycle/stop',
@@ -233,7 +252,9 @@ export class PublicationIntentRegistry {
             at,
             type: 'structured_task_suspension_applied_v2',
             suspensionId: p.suspensionId,
-            reason: 'user_stop',
+            // Task 10 extension: the payload may name the interrupt reason; the
+            // Task 8 default (payloads without the field) stays user_stop.
+            reason: p.reason ?? 'user_stop',
             operationId: p.operationId,
           },
         ];
@@ -272,38 +293,584 @@ export class PublicationIntentRegistry {
       },
       expectedResultIdentity: (_payload, events) => sha256OfEvents(events),
     });
+    // Task 10: the v2 manual-retry command (spec §10.3 / design §17.2) — the
+    // ONLY command that clears a retry_budget_exhausted park.
+    this.register({
+      handlerKind: 'lifecycle/manual_retry',
+      handlerVersion: 1,
+      payloadFamily: family,
+      expectedEventTypes: ['structured_task_retry_resumed_v2'],
+      rebuildable: true,
+      missingInputs: [],
+      parsePayload: parsePublicationOperationPayload,
+      childRefsOf: (p) => childRefsOfChecked(p, family, childRefs),
+      resolveRefs,
+      buildEvents: (payload, at) => {
+        const p = payload as Extract<PublicationOperationPayloadV2, { family: 'lifecycle' }>;
+        if (p.kind !== 'manual_retry') {
+          throw new NotRebuildableError('lifecycle/manual_retry', [`payload kind '${p.kind}' is not manual_retry`]);
+        }
+        const missing: string[] = [];
+        if (p.workItemId === null) missing.push('workItemId');
+        if (p.leaseEpoch === null) missing.push('leaseEpoch');
+        if (p.expectedLastSequence === null) missing.push('expectedLastSequence');
+        if (p.authorityBaseRef === null) missing.push('authorityBaseRef');
+        if (missing.length > 0) {
+          throw new NotRebuildableError('lifecycle/manual_retry', missing);
+        }
+        return [
+          {
+            protocolVersion: 2,
+            at,
+            type: 'structured_task_retry_resumed_v2',
+            workItemId: p.workItemId as string,
+            leaseEpoch: p.leaseEpoch as number,
+            expectedLastSequence: p.expectedLastSequence as number,
+            authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+          },
+        ];
+      },
+      expectedResultIdentity: (_payload, events) => sha256OfEvents(events),
+    });
   }
 
+  /** Task 10 rebuilt lease/retry family: EVERY member is now byte-rebuildable. */
   private seedLeaseOrRetry(): void {
     const family: PublicationPayloadFamilyV2 = 'lease_or_retry';
-    const builders = ['work_item_leased', 'work_item_requeued', 'work_item_lease_reclaimed'] as const;
-    for (const builder of builders) {
-      this.register({
-        handlerKind: builder === 'work_item_leased' ? 'work_item_leased' : builder === 'work_item_requeued' ? 'work_item_requeued' : 'work_item_lease_reclaimed',
-        handlerVersion: 1,
-        payloadFamily: family,
-        expectedEventTypes: [builder === 'work_item_leased' ? 'structured_work_item_leased' : builder === 'work_item_requeued' ? 'structured_work_item_requeued' : 'structured_work_item_lease_reclaimed'],
-        rebuildable: false,
-        missingInputs:
-          builder === 'work_item_lease_reclaimed'
-            ? ['reason is not carried by the frozen lease_or_retry payload']
-            : ['leaseOwner/leaseExpiresAt/expectedLastSequence are runtime lease facts absent from the frozen payload'],
-        parsePayload: parsePublicationOperationPayload,
-        childRefsOf: (p) => childRefsOfChecked(p, family, (parsed) =>
-          parsed.family === 'lease_or_retry' ? [parsed.authorityBaseRef] : [],
-        ),
-        resolveRefs: (p) =>
-          p.family === 'lease_or_retry' ? [{ key: 'authorityBase', ref: p.authorityBaseRef }] : [],
-        buildEvents: () => {
-          throw new NotRebuildableError(handlerKindForLease(builder), [
-            builder === 'work_item_lease_reclaimed' ? 'reason' : 'leaseOwner, leaseExpiresAt, expectedLastSequence',
+    const childRefs = (parsed: PublicationOperationPayloadV2): readonly BlobRefV2[] => {
+      if (parsed.family !== 'lease_or_retry') return [];
+      const refs: BlobRefV2[] = [parsed.authorityBaseRef];
+      if (parsed.dispatchRef !== null) refs.push(parsed.dispatchRef);
+      if (parsed.grantInstanceRef !== null) refs.push(parsed.grantInstanceRef);
+      if (parsed.validatorAggregateRef !== null) refs.push(parsed.validatorAggregateRef);
+      return refs;
+    };
+    const resolveRefs = (): readonly PublicationIntentResolvedRef[] => [];
+    type LeaseOrRetryPayload = Extract<PublicationOperationPayloadV2, { family: 'lease_or_retry' }>;
+    // The facade re-parses every payload under the closed union and verifies
+    // the family before buildEvents runs; the builder re-verifies the exact
+    // eventBuilder and fails closed (NotRebuildableError) on anything else.
+    const lease = (p: PublicationOperationPayloadV2): LeaseOrRetryPayload => {
+      if (p.family !== 'lease_or_retry') {
+        throw new NotRebuildableError('lease_or_retry', [`payload family '${p.family}' is not lease_or_retry`]);
+      }
+      return p;
+    };
+
+    // work_item_created
+    this.register({
+      handlerKind: 'work_item_created',
+      handlerVersion: 1,
+      payloadFamily: family,
+      expectedEventTypes: ['structured_work_item_created'],
+      rebuildable: true,
+      missingInputs: [],
+      parsePayload: parsePublicationOperationPayload,
+      childRefsOf: (p) => childRefsOfChecked(p, family, childRefs),
+      resolveRefs,
+      buildEvents: (payload, at) => {
+        const p = lease(payload);
+        const missing: string[] = [];
+        if (p.eventBuilder !== 'work_item_created') missing.push('eventBuilder');
+        if (p.kind === null) missing.push('kind');
+        if (p.payloadRef === null) missing.push('payloadRef');
+        if (p.maxAutomaticRetries === null) missing.push('maxAutomaticRetries');
+        if (missing.length > 0) throw new NotRebuildableError('work_item_created', missing);
+        return [
+          {
+            protocolVersion: 2,
+            at,
+            type: 'structured_work_item_created',
+            workItemId: p.workItemId as string,
+            kind: p.kind as WorkItemKindV2,
+            roleBinding: p.roleBinding,
+            agentExecutionKind: p.agentExecutionKind,
+            sessionKind: p.sessionKind,
+            roundId: p.roundId,
+            logicalAssignmentId: p.logicalAssignmentId as string,
+            reviewAssignmentId: p.reviewAssignmentId,
+            grantSpecRef: p.grantSpecRef,
+            inputArtifactDeliveryId: p.inputArtifactDeliveryId as string,
+            authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+            payloadRef: p.payloadRef as BlobRefV2,
+            initialLeaseEpoch: p.initialLeaseEpoch ?? 0,
+            maxAutomaticRetries: p.maxAutomaticRetries as number,
+          },
+        ];
+      },
+      expectedResultIdentity: (_payload, events) => sha256OfEvents(events),
+    });
+
+    // work_item_leased — the full §9.2 envelope: lease + dispatch + attempt/command start.
+    this.register({
+      handlerKind: 'work_item_leased',
+      handlerVersion: 1,
+      payloadFamily: family,
+      expectedEventTypes: [
+        'structured_work_item_leased',
+        'structured_assignment_dispatched',
+        'structured_agent_attempt_started_v2',
+        'structured_generic_agent_attempt_started',
+        'structured_system_command_started',
+      ],
+      rebuildable: true,
+      missingInputs: [],
+      parsePayload: parsePublicationOperationPayload,
+      childRefsOf: (p) => childRefsOfChecked(p, family, childRefs),
+      resolveRefs,
+      buildEvents: (payload, at) => {
+        const p = lease(payload);
+        if (p.eventBuilder !== 'work_item_leased') {
+          throw new NotRebuildableError('work_item_leased', ['eventBuilder']);
+        }
+        // §9.2: a lease with NO execution carrier is a projector-legal half
+        // state from which no later reclaim can ever succeed
+        // (attempt_not_abandoned) — the admission surface must reject it here.
+        if (p.attemptFamily === null) {
+          throw new NotRebuildableError('work_item_leased', [
+            'attemptFamily must name the execution carrier (structured|generic|command)',
           ]);
-        },
-        expectedResultIdentity: () => {
-          throw new NotRebuildableError(handlerKindForLease(builder), ['not rebuildable']);
-        },
-      });
-    }
+        }
+        const missing: string[] = [];
+        if (p.leaseOwner === null) missing.push('leaseOwner');
+        if (p.leaseExpiresAt === null) missing.push('leaseExpiresAt');
+        if (p.expectedLastSequence === null) missing.push('expectedLastSequence');
+        if (p.attemptFamily === 'structured' || p.attemptFamily === 'generic') {
+          if (p.dispatchRef === null) missing.push('dispatchRef');
+          if (p.attemptId === null) missing.push('attemptId');
+          if (p.logicalAssignmentId === null) missing.push('logicalAssignmentId');
+          if (p.attemptFamily === 'structured' && p.sessionKind === null) missing.push('sessionKind');
+          if (p.attemptFamily === 'generic') {
+            if (p.agentId === null) missing.push('agentId');
+            if (p.inputArtifactDeliveryId === null) missing.push('inputArtifactDeliveryId');
+          }
+        } else if (p.attemptFamily === 'command') {
+          if (p.commandId === null) missing.push('commandId');
+          if (p.commandKind === null) missing.push('commandKind');
+        }
+        if (missing.length > 0) throw new NotRebuildableError('work_item_leased', missing);
+        const envelopes: AuthoritativeReviewEventEnvelopeV2[] = [
+          {
+            protocolVersion: 2,
+            at,
+            type: 'structured_work_item_leased',
+            workItemId: p.workItemId as string,
+            leaseEpoch: p.leaseEpoch as number,
+            leaseOwner: p.leaseOwner as string,
+            leaseExpiresAt: p.leaseExpiresAt as string,
+            expectedLastSequence: p.expectedLastSequence as number,
+            authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+          },
+        ];
+        if (p.attemptFamily === 'structured' || p.attemptFamily === 'generic') {
+          envelopes.push({
+            protocolVersion: 2,
+            at,
+            type: 'structured_assignment_dispatched',
+            dispatchRef: p.dispatchRef as BlobRefV2,
+            workItemId: p.workItemId as string,
+            attemptId: p.attemptId as string,
+            logicalAssignmentId: p.logicalAssignmentId as string,
+            reviewAssignmentId: p.reviewAssignmentId,
+            agentExecutionKind: p.attemptFamily === 'generic' ? 'generic_turn' : 'structured_session',
+            sessionKind: p.sessionKind,
+            inputArtifactDeliveryId: p.inputArtifactDeliveryId as string,
+            authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+          });
+          if (p.attemptFamily === 'structured') {
+            envelopes.push({
+              protocolVersion: 2,
+              at,
+              type: 'structured_agent_attempt_started_v2',
+              workItemId: p.workItemId as string,
+              logicalAssignmentId: p.logicalAssignmentId as string,
+              reviewAssignmentId: p.reviewAssignmentId,
+              attemptId: p.attemptId as string,
+              sessionKind: p.sessionKind as NonNullable<LeaseOrRetryPayload['sessionKind']>,
+              leaseEpoch: p.leaseEpoch as number,
+              authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+            });
+          } else {
+            envelopes.push({
+              protocolVersion: 2,
+              at,
+              type: 'structured_generic_agent_attempt_started',
+              attemptId: p.attemptId as string,
+              workItemId: p.workItemId as string,
+              agentId: p.agentId as string,
+              logicalAssignmentId: p.logicalAssignmentId as string,
+              leaseEpoch: p.leaseEpoch as number,
+              inputArtifactDeliveryId: p.inputArtifactDeliveryId as string,
+              authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+            });
+          }
+        } else if (p.attemptFamily === 'command') {
+          envelopes.push({
+            protocolVersion: 2,
+            at,
+            type: 'structured_system_command_started',
+            commandId: p.commandId as string,
+            workItemId: p.workItemId as string,
+            commandKind: p.commandKind as NonNullable<LeaseOrRetryPayload['commandKind']>,
+            leaseEpoch: p.leaseEpoch as number,
+            authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+          });
+        }
+        return envelopes;
+      },
+      expectedResultIdentity: (_payload, events) => sha256OfEvents(events),
+    });
+
+    // work_item_retryable_failed — attempt/command failure + workitem record.
+    this.register({
+      handlerKind: 'work_item_retryable_failed',
+      handlerVersion: 1,
+      payloadFamily: family,
+      expectedEventTypes: [
+        'structured_agent_attempt_retryable_failed_v2',
+        'structured_generic_agent_attempt_retryable_failed',
+        'structured_system_command_retryable_failed',
+        'structured_work_item_retryable_failed',
+      ],
+      rebuildable: true,
+      missingInputs: [],
+      parsePayload: parsePublicationOperationPayload,
+      childRefsOf: (p) => childRefsOfChecked(p, family, childRefs),
+      resolveRefs,
+      buildEvents: (payload, at) => {
+        const p = lease(payload);
+        if (p.eventBuilder !== 'work_item_retryable_failed') {
+          throw new NotRebuildableError('work_item_retryable_failed', ['eventBuilder']);
+        }
+        if (p.attemptFamily === null) {
+          throw new NotRebuildableError('work_item_retryable_failed', [
+            'attemptFamily must name the execution carrier (structured|generic|command)',
+          ]);
+        }
+        const missing: string[] = [];
+        if (p.failureCode === null) missing.push('failureCode');
+        if (p.failureDigest === null) missing.push('failureDigest');
+        if (p.retryOrdinal === null) missing.push('retryOrdinal');
+        if (p.retryNotBefore === null) missing.push('retryNotBefore');
+        if (p.maxAutomaticRetries === null) missing.push('maxAutomaticRetries');
+        if (missing.length > 0) throw new NotRebuildableError('work_item_retryable_failed', missing);
+        const envelopes: AuthoritativeReviewEventEnvelopeV2[] = [];
+        if (p.attemptFamily === 'structured') {
+          if (p.attemptId === null || p.logicalAssignmentId === null || p.sessionKind === null) {
+            throw new NotRebuildableError('work_item_retryable_failed', ['attemptId, logicalAssignmentId, sessionKind']);
+          }
+          envelopes.push({
+            protocolVersion: 2,
+            at,
+            type: 'structured_agent_attempt_retryable_failed_v2',
+            workItemId: p.workItemId as string,
+            logicalAssignmentId: p.logicalAssignmentId as string,
+            reviewAssignmentId: p.reviewAssignmentId,
+            attemptId: p.attemptId as string,
+            sessionKind: p.sessionKind as NonNullable<LeaseOrRetryPayload['sessionKind']>,
+            leaseEpoch: p.leaseEpoch as number,
+            failureCode: p.failureCode as string,
+            failureDigest: p.failureDigest as string,
+            retryOrdinal: p.retryOrdinal as number,
+            retryNotBefore: p.retryNotBefore as string,
+            validatorAggregateRef: p.validatorAggregateRef,
+            authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+          });
+        } else if (p.attemptFamily === 'generic') {
+          if (p.attemptId === null || p.agentId === null || p.logicalAssignmentId === null || p.inputArtifactDeliveryId === null) {
+            throw new NotRebuildableError('work_item_retryable_failed', ['attemptId, agentId, logicalAssignmentId, inputArtifactDeliveryId']);
+          }
+          envelopes.push({
+            protocolVersion: 2,
+            at,
+            type: 'structured_generic_agent_attempt_retryable_failed',
+            attemptId: p.attemptId as string,
+            workItemId: p.workItemId as string,
+            agentId: p.agentId as string,
+            logicalAssignmentId: p.logicalAssignmentId as string,
+            leaseEpoch: p.leaseEpoch as number,
+            inputArtifactDeliveryId: p.inputArtifactDeliveryId as string,
+            failureCode: p.failureCode as string,
+            failureDigest: p.failureDigest as string,
+            retryOrdinal: p.retryOrdinal as number,
+            retryNotBefore: p.retryNotBefore as string,
+            validatorAggregateRef: p.validatorAggregateRef,
+            authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+          });
+        } else if (p.attemptFamily === 'command') {
+          if (p.commandId === null || p.commandKind === null) {
+            throw new NotRebuildableError('work_item_retryable_failed', ['commandId, commandKind']);
+          }
+          envelopes.push({
+            protocolVersion: 2,
+            at,
+            type: 'structured_system_command_retryable_failed',
+            commandId: p.commandId as string,
+            workItemId: p.workItemId as string,
+            commandKind: p.commandKind,
+            leaseEpoch: p.leaseEpoch as number,
+            failureCode: p.failureCode as string,
+            failureDigest: p.failureDigest as string,
+            retryOrdinal: p.retryOrdinal as number,
+            retryNotBefore: p.retryNotBefore as string,
+            validatorAggregateRef: p.validatorAggregateRef,
+            authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+          });
+        }
+        envelopes.push({
+          protocolVersion: 2,
+          at,
+          type: 'structured_work_item_retryable_failed',
+          workItemId: p.workItemId as string,
+          leaseEpoch: p.leaseEpoch as number,
+          failureCode: p.failureCode as string,
+          failureDigest: p.failureDigest as string,
+          retryOrdinal: p.retryOrdinal as number,
+          retryNotBefore: p.retryNotBefore as string,
+          maxAutomaticRetries: p.maxAutomaticRetries as number,
+          validatorAggregateRef: p.validatorAggregateRef,
+          authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+        });
+        return envelopes;
+      },
+      expectedResultIdentity: (_payload, events) => sha256OfEvents(events),
+    });
+
+    // work_item_requeued — the timer-expiry CAS transition (no epoch advance).
+    this.register({
+      handlerKind: 'work_item_requeued',
+      handlerVersion: 1,
+      payloadFamily: family,
+      expectedEventTypes: ['structured_work_item_requeued'],
+      rebuildable: true,
+      missingInputs: [],
+      parsePayload: parsePublicationOperationPayload,
+      childRefsOf: (p) => childRefsOfChecked(p, family, childRefs),
+      resolveRefs,
+      buildEvents: (payload, at) => {
+        const p = lease(payload);
+        if (p.eventBuilder !== 'work_item_requeued') {
+          throw new NotRebuildableError('work_item_requeued', ['eventBuilder']);
+        }
+        if (p.expectedLastSequence === null) {
+          throw new NotRebuildableError('work_item_requeued', ['expectedLastSequence']);
+        }
+        return [
+          {
+            protocolVersion: 2,
+            at,
+            type: 'structured_work_item_requeued',
+            workItemId: p.workItemId as string,
+            leaseEpoch: p.leaseEpoch as number,
+            expectedLastSequence: p.expectedLastSequence as number,
+            authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+          },
+        ];
+      },
+      expectedResultIdentity: (_payload, events) => sha256OfEvents(events),
+    });
+
+    // work_item_lease_reclaimed — abandon first, then the reclaim (epoch rules).
+    this.register({
+      handlerKind: 'work_item_lease_reclaimed',
+      handlerVersion: 1,
+      payloadFamily: family,
+      expectedEventTypes: [
+        'structured_agent_attempt_abandoned_v2',
+        'structured_generic_agent_attempt_abandoned',
+        'structured_system_command_abandoned',
+        'structured_work_item_lease_reclaimed',
+      ],
+      rebuildable: true,
+      missingInputs: [],
+      parsePayload: parsePublicationOperationPayload,
+      childRefsOf: (p) => childRefsOfChecked(p, family, childRefs),
+      resolveRefs,
+      buildEvents: (payload, at) => {
+        const p = lease(payload);
+        if (p.eventBuilder !== 'work_item_lease_reclaimed') {
+          throw new NotRebuildableError('work_item_lease_reclaimed', ['eventBuilder']);
+        }
+        if (p.reason === null) {
+          throw new NotRebuildableError('work_item_lease_reclaimed', ['reason']);
+        }
+        if (p.attemptFamily === null) {
+          throw new NotRebuildableError('work_item_lease_reclaimed', [
+            'attemptFamily must name the execution carrier (structured|generic|command)',
+          ]);
+        }
+        const envelopes: AuthoritativeReviewEventEnvelopeV2[] = [];
+        if (p.attemptFamily === 'structured') {
+          if (p.attemptId === null || p.logicalAssignmentId === null || p.sessionKind === null) {
+            throw new NotRebuildableError('work_item_lease_reclaimed', ['attemptId, logicalAssignmentId, sessionKind']);
+          }
+          envelopes.push({
+            protocolVersion: 2,
+            at,
+            type: 'structured_agent_attempt_abandoned_v2',
+            workItemId: p.workItemId as string,
+            logicalAssignmentId: p.logicalAssignmentId as string,
+            reviewAssignmentId: p.reviewAssignmentId,
+            attemptId: p.attemptId as string,
+            sessionKind: p.sessionKind as NonNullable<LeaseOrRetryPayload['sessionKind']>,
+            leaseEpoch: p.leaseEpoch as number,
+            reason: p.reason as WorkItemReclaimReasonV2,
+            authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+          });
+        } else if (p.attemptFamily === 'generic') {
+          if (p.attemptId === null || p.agentId === null || p.logicalAssignmentId === null || p.inputArtifactDeliveryId === null) {
+            throw new NotRebuildableError('work_item_lease_reclaimed', ['attemptId, agentId, logicalAssignmentId, inputArtifactDeliveryId']);
+          }
+          envelopes.push({
+            protocolVersion: 2,
+            at,
+            type: 'structured_generic_agent_attempt_abandoned',
+            attemptId: p.attemptId as string,
+            workItemId: p.workItemId as string,
+            agentId: p.agentId as string,
+            logicalAssignmentId: p.logicalAssignmentId as string,
+            leaseEpoch: p.leaseEpoch as number,
+            inputArtifactDeliveryId: p.inputArtifactDeliveryId as string,
+            reason: p.reason as WorkItemReclaimReasonV2,
+            authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+          });
+        } else if (p.attemptFamily === 'command') {
+          if (p.commandId === null || p.commandKind === null) {
+            throw new NotRebuildableError('work_item_lease_reclaimed', ['commandId, commandKind']);
+          }
+          envelopes.push({
+            protocolVersion: 2,
+            at,
+            type: 'structured_system_command_abandoned',
+            commandId: p.commandId as string,
+            workItemId: p.workItemId as string,
+            commandKind: p.commandKind,
+            leaseEpoch: p.leaseEpoch as number,
+            reason: p.reason as WorkItemReclaimReasonV2,
+            authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+          });
+        }
+        envelopes.push({
+          protocolVersion: 2,
+          at,
+          type: 'structured_work_item_lease_reclaimed',
+          workItemId: p.workItemId as string,
+          leaseEpoch: p.leaseEpoch as number,
+          reason: p.reason as WorkItemReclaimReasonV2,
+          authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+        });
+        return envelopes;
+      },
+      expectedResultIdentity: (_payload, events) => sha256OfEvents(events),
+    });
+
+    // work_item_parked — budget exhaustion: attempt/command TERMINAL first,
+    // then the retry_budget_exhausted park (the only legal exhausted shape).
+    this.register({
+      handlerKind: 'work_item_parked',
+      handlerVersion: 1,
+      payloadFamily: family,
+      expectedEventTypes: [
+        'structured_agent_attempt_terminal_failed_v2',
+        'structured_generic_agent_attempt_terminal_failed',
+        'structured_system_command_terminal_failed',
+        'structured_work_item_parked',
+      ],
+      rebuildable: true,
+      missingInputs: [],
+      parsePayload: parsePublicationOperationPayload,
+      childRefsOf: (p) => childRefsOfChecked(p, family, childRefs),
+      resolveRefs,
+      buildEvents: (payload, at) => {
+        const p = lease(payload);
+        if (p.eventBuilder !== 'work_item_parked') {
+          throw new NotRebuildableError('work_item_parked', ['eventBuilder']);
+        }
+        if (p.attemptFamily === null) {
+          throw new NotRebuildableError('work_item_parked', [
+            'attemptFamily must name the execution carrier (structured|generic|command)',
+          ]);
+        }
+        const missing: string[] = [];
+        if (p.failureCode === null) missing.push('failureCode');
+        if (p.failureDigest === null) missing.push('failureDigest');
+        if (p.retryOrdinal === null) missing.push('retryOrdinal');
+        if (p.budgetPolicyDigest === null) missing.push('budgetPolicyDigest');
+        if (missing.length > 0) throw new NotRebuildableError('work_item_parked', missing);
+        const envelopes: AuthoritativeReviewEventEnvelopeV2[] = [];
+        if (p.attemptFamily === 'structured') {
+          if (p.attemptId === null || p.logicalAssignmentId === null || p.sessionKind === null) {
+            throw new NotRebuildableError('work_item_parked', ['attemptId, logicalAssignmentId, sessionKind']);
+          }
+          envelopes.push({
+            protocolVersion: 2,
+            at,
+            type: 'structured_agent_attempt_terminal_failed_v2',
+            workItemId: p.workItemId as string,
+            logicalAssignmentId: p.logicalAssignmentId as string,
+            reviewAssignmentId: p.reviewAssignmentId,
+            attemptId: p.attemptId as string,
+            sessionKind: p.sessionKind as NonNullable<LeaseOrRetryPayload['sessionKind']>,
+            leaseEpoch: p.leaseEpoch as number,
+            failureCode: p.failureCode as string,
+            failureDigest: p.failureDigest as string,
+            validatorAggregateRef: p.validatorAggregateRef,
+            authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+          });
+        } else if (p.attemptFamily === 'generic') {
+          if (p.attemptId === null || p.agentId === null || p.logicalAssignmentId === null || p.inputArtifactDeliveryId === null) {
+            throw new NotRebuildableError('work_item_parked', ['attemptId, agentId, logicalAssignmentId, inputArtifactDeliveryId']);
+          }
+          envelopes.push({
+            protocolVersion: 2,
+            at,
+            type: 'structured_generic_agent_attempt_terminal_failed',
+            attemptId: p.attemptId as string,
+            workItemId: p.workItemId as string,
+            agentId: p.agentId as string,
+            logicalAssignmentId: p.logicalAssignmentId as string,
+            leaseEpoch: p.leaseEpoch as number,
+            inputArtifactDeliveryId: p.inputArtifactDeliveryId as string,
+            failureCode: p.failureCode as string,
+            failureDigest: p.failureDigest as string,
+            validatorAggregateRef: p.validatorAggregateRef,
+            authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+          });
+        } else if (p.attemptFamily === 'command') {
+          if (p.commandId === null || p.commandKind === null) {
+            throw new NotRebuildableError('work_item_parked', ['commandId, commandKind']);
+          }
+          envelopes.push({
+            protocolVersion: 2,
+            at,
+            type: 'structured_system_command_terminal_failed',
+            commandId: p.commandId as string,
+            workItemId: p.workItemId as string,
+            commandKind: p.commandKind,
+            leaseEpoch: p.leaseEpoch as number,
+            failureCode: p.failureCode as string,
+            failureDigest: p.failureDigest as string,
+            validatorAggregateRef: p.validatorAggregateRef,
+            authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+          });
+        }
+        envelopes.push({
+          protocolVersion: 2,
+          at,
+          type: 'structured_work_item_parked',
+          workItemId: p.workItemId as string,
+          leaseEpoch: p.leaseEpoch as number,
+          parkDisposition: {
+            kind: 'retry_budget_exhausted',
+            retryOrdinal: p.retryOrdinal as number,
+            budgetPolicyDigest: p.budgetPolicyDigest as string,
+          },
+          authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+        });
+        return envelopes;
+      },
+      expectedResultIdentity: (_payload, events) => sha256OfEvents(events),
+    });
   }
 
   private seedQuestion(): void {
@@ -459,10 +1026,6 @@ export class PublicationIntentRegistry {
       expectedResultIdentity: (_payload, events) => sha256OfEvents(events),
     });
   }
-}
-
-function handlerKindForLease(builder: 'work_item_leased' | 'work_item_requeued' | 'work_item_lease_reclaimed'): string {
-  return builder;
 }
 
 function childRefsOfChecked(

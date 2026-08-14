@@ -1465,6 +1465,48 @@ export interface AssignmentDispatchV2 {
 /* §8 publication operation payload (registered blob kind union)       */
 /* ------------------------------------------------------------------ */
 
+/** §17.2/§10.2 reclaim reasons (also carried by attempt/command abandon events). */
+export type WorkItemReclaimReasonV2 =
+  | 'lease_expired'
+  | 'crash_recovery'
+  | 'user_stop'
+  | 'operator_interrupt';
+
+/** §17.3 suspension overlay reasons (projector derives stopped vs interrupted). */
+export type WorkItemSuspensionReasonV2 = 'user_stop' | 'operator_interrupt';
+
+/** Closed system command kinds (SystemCommandAttempt.commandKind, §17.2). */
+export type SystemCommandKindV2 =
+  | 'map_finalize'
+  | 'generation_finalize'
+  | 'repair_finalize'
+  | 'migration_validation_batch'
+  | 'review_settlement'
+  | 'seal';
+
+/** Which execution carrier a lease/retry mutation addresses. */
+export type AttemptExecutionKindV2 = 'structured' | 'generic' | 'command';
+
+/**
+ * Task 10 EXTENDED closed event-builder set of the lease_or_retry family
+ * (design §19.1 "lease/retry state-only mutation"; spec §7.1). The frozen
+ * Task 3 union carried only the three original builders whose envelopes were
+ * NOT byte-identically rebuildable (leaseOwner/leaseExpiresAt/
+ * expectedLastSequence/reason were absent). Task 10 adds the exact fields the
+ * workitem state-machine mutations commit: creation, lease (+dispatch/attempt
+ * start), retryable failure (+attempt/command failure), requeue, reclaim
+ * (+abandon) and budget park (+attempt/command terminal). schemaVersion stays
+ * 1: the capability is disabled, no production payload blobs exist, and every
+ * builder still fails closed on absent per-builder fields.
+ */
+export type WorkItemMutationEventBuilderV2 =
+  | 'work_item_created'
+  | 'work_item_leased'
+  | 'work_item_retryable_failed'
+  | 'work_item_requeued'
+  | 'work_item_lease_reclaimed'
+  | 'work_item_parked';
+
 /**
  * §8/§7.1 exact closed union of canonical publication operation payloads.
  * Every branch carries exact keys, authority/event-builder inputs and child
@@ -1497,8 +1539,43 @@ export type PublicationOperationPayloadV2 =
       taskId: string;
       workItemId: string;
       leaseEpoch: number;
-      eventBuilder: 'work_item_leased' | 'work_item_requeued' | 'work_item_lease_reclaimed';
+      eventBuilder: WorkItemMutationEventBuilderV2;
+      /** The authoritative base the mutation commits against (exact ref). */
       authorityBaseRef: BlobRefV2;
+      // --- work_item_created carriers (event fields, §17.2 discriminants) ---
+      kind: WorkItemKindV2 | null;
+      roleBinding: string | null;
+      agentExecutionKind: 'structured_session' | 'generic_turn' | null;
+      sessionKind: StructuredSessionKindV2 | null;
+      roundId: string | null;
+      logicalAssignmentId: string | null;
+      reviewAssignmentId: string | null;
+      grantSpecRef: BlobRefV2 | null;
+      inputArtifactDeliveryId: string | null;
+      payloadRef: BlobRefV2 | null;
+      initialLeaseEpoch: number | null;
+      maxAutomaticRetries: number | null;
+      // --- work_item_leased (runtime lease facts — the Task 3 gap) ---
+      leaseOwner: string | null;
+      leaseExpiresAt: string | null;
+      expectedLastSequence: number | null;
+      // --- lease / reclaim / failure execution identity ---
+      attemptFamily: AttemptExecutionKindV2 | null;
+      attemptId: string | null;
+      commandId: string | null;
+      agentId: string | null;
+      commandKind: SystemCommandKindV2 | null;
+      dispatchRef: BlobRefV2 | null;
+      grantInstanceRef: BlobRefV2 | null;
+      // --- work_item_lease_reclaimed (the other Task 3 gap) ---
+      reason: WorkItemReclaimReasonV2 | null;
+      // --- work_item_retryable_failed / work_item_parked ---
+      failureCode: string | null;
+      failureDigest: string | null;
+      retryOrdinal: number | null;
+      retryNotBefore: string | null;
+      validatorAggregateRef: BlobRefV2 | null;
+      budgetPolicyDigest: string | null;
     }
   | {
       family: 'lifecycle';
@@ -1507,6 +1584,12 @@ export type PublicationOperationPayloadV2 =
       kind: 'stop' | 'resume' | 'manual_retry' | 'run_migration_batch';
       suspensionId: string | null;
       workItemId: string | null;
+      /** Task 10 extension: stop reason (null keeps the Task 8 user_stop default). */
+      reason: WorkItemSuspensionReasonV2 | null;
+      /** Task 10 extension: manual_retry resume fields (new epoch etc.). */
+      leaseEpoch: number | null;
+      expectedLastSequence: number | null;
+      authorityBaseRef: BlobRefV2 | null;
     }
   | {
       family: 'question';

@@ -143,7 +143,8 @@ function intent(handlerKind: string, expectedResultIdentity?: string) {
   return { handlerKind, handlerVersion: 1, expectedResultIdentity };
 }
 
-function stopPayload(taskId: string, operationId: string, suspensionId: string | null): Record<string, unknown> {
+/** Task 10 lifecycle payload: the union gained explicit reason/lease fields. */
+function stopPayload(taskId: string, operationId: string, suspensionId: string | null, reason: string | null = null): Record<string, unknown> {
   return {
     family: 'lifecycle',
     operationId,
@@ -151,6 +152,10 @@ function stopPayload(taskId: string, operationId: string, suspensionId: string |
     kind: 'stop',
     suspensionId,
     workItemId: null,
+    reason,
+    leaseEpoch: null,
+    expectedLastSequence: null,
+    authorityBaseRef: null,
   };
 }
 
