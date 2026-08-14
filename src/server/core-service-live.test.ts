@@ -94,6 +94,10 @@ describe('CoreService live streaming (plan C)', () => {
     const environment = await createSchedulerEnvironment({ runtime });
     const taskId = await environment.createTask();
     expect(await workspaceActiveTurn(environment, taskId)).toBeNull();
+    // The projected summary carries the frozen-snapshot protocol derived
+    // through the shared helper (spec §4.1): the basic fixture is 'none'.
+    const workspace = await environment.service.getWorkspace(taskId);
+    expect(workspace.task.structuredProtocol).toBe('none');
   });
 
   it('exposes the in-flight turn as activeTurn and clears it on completion', async () => {

@@ -20,6 +20,7 @@ function makeTask(status: TaskStatus, overrides: Partial<TaskSummary> = {}): Tas
     latestVersion: null,
     updatedAt: '2026-01-02T00:00:00.000Z',
     diagnostic: null,
+    structuredProtocol: 'none',
     ...overrides,
   };
 }
@@ -73,6 +74,17 @@ describe('TaskControls', () => {
     expect(screen.queryByRole('button', { name: '停止' })).toBeNull();
     expect(screen.queryByRole('button', { name: '继续' })).toBeNull();
     expect(screen.queryByRole('button', { name: '重试' })).toBeNull();
+  });
+
+  it('renders the minimal neutral state for the v2 failed status (spec §10.3)', () => {
+    // Task 2: failed is terminal for ordinary commands and renders no action
+    // buttons; the recovery surface (reopen_failed / clone fallback) is Task 11.
+    renderControls(makeTask('failed'));
+    expect(screen.queryByRole('button', { name: '开始生产' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '停止' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '继续' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '重试' })).toBeNull();
+    expect(screen.queryByRole('textbox')).toBeNull();
   });
 
   it('shows the pending question and submits answers while waiting_human', async () => {

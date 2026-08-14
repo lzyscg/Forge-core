@@ -49,10 +49,16 @@ describe('createMockGateway', () => {
     expect(corrupt?.status).toBe('corrupt');
     expect(typeof corrupt?.diagnostic).toBe('string');
     expect((corrupt?.diagnostic ?? '').length).toBeGreaterThan(0);
+    // Corrupt mock records have no frozen identity: the protocol summary
+    // fails closed to 'none' and never guesses v2 (spec §4.1).
+    expect(corrupt?.structuredProtocol).toBe('none');
 
     const healthy = tasks.filter((task) => task.id !== 'task-corrupt');
     expect(healthy.length).toBeGreaterThanOrEqual(2);
     expect(healthy.every((task) => task.status !== 'corrupt')).toBe(true);
+    // Healthy fixture summaries derive the protocol through the shared
+    // helper: the mock simulates basic templates, so every summary is 'none'.
+    expect(healthy.every((task) => task.structuredProtocol === 'none')).toBe(true);
 
     await expect(gateway.getWorkspace('task-corrupt')).rejects.toMatchObject({
       code: 'TASK_CORRUPTED',

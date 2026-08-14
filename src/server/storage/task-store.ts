@@ -21,6 +21,10 @@ import { randomUUID } from 'node:crypto';
 import { copyFile, mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { InputField, TaskSummary } from '../../shared/contracts';
+import {
+  structuredProtocolOf,
+  type StructuredProtocol,
+} from '../../shared/authoritative-review-v2';
 import type { CorePaths } from './core-paths';
 import { CorePathError } from './core-paths';
 import { STORAGE_ERROR_CODES, StorageError, writeNewAtomic } from './atomic-file';
@@ -136,7 +140,7 @@ async function copyTree(from: string, to: string): Promise<void> {
   }
 }
 
-function toSummary(record: TaskRecord): TaskSummary {
+function toSummary(record: TaskRecord, structuredProtocol: StructuredProtocol): TaskSummary {
   return {
     id: record.id,
     name: record.name,
@@ -147,6 +151,9 @@ function toSummary(record: TaskRecord): TaskSummary {
     latestVersion: null,
     updatedAt: record.createdAt,
     diagnostic: null,
+    // The protocol comes from the task's frozen snapshot through the shared
+    // helper; the record-only path fails closed to 'none' and never guesses v2.
+    structuredProtocol,
   };
 }
 
@@ -217,7 +224,7 @@ export class TaskStore {
       createdAt,
     };
     await this.publishTaskDirectory(taskId, record, frozen);
-    return { ...toSummary(record), templateVersion: record.templateVersion };
+    return { ...toSummary(record, structuredProtocolOf(frozen)), templateVersion: record.templateVersion };
   }
 
   /**
@@ -397,7 +404,17 @@ export class TaskStore {
         continue;
       }
       try {
-        summaries.push(toSummary(await this.readTaskRecord(name)));
+        const record = await this.readTaskRecord(name);
+        // The frozen snapshot is the ONLY protocol authority (spec §4.1):
+        // healthy tasks derive through the shared helper; a snapshot that
+        // cannot be read fails closed to 'none' — never a v2 guess.
+        let protocol: StructuredProtocol = 'none';
+        try {
+          protocol = structuredProtocolOf(await this.readFrozenTemplate(name));
+        } catch {
+          // Unreadable/gated snapshot: keep the record summary, fail closed.
+        }
+        summaries.push(toSummary(record, protocol));
       } catch {
         summaries.push({
           id: name,
@@ -409,6 +426,8 @@ export class TaskStore {
           latestVersion: null,
           updatedAt: dirStat.mtime.toISOString(),
           diagnostic: '任务数据损坏，需要人工检查任务目录。',
+          // Corrupt record: no frozen identity is readable — fail closed.
+          structuredProtocol: 'none',
         });
       }
     }

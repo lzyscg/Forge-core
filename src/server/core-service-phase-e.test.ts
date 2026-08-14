@@ -52,6 +52,9 @@ describe('CoreService cloneTask (plan Task E3 Step 1)', () => {
     expect(cloned.status).toBe('ready');
     expect(cloned.templateId).toBe(source.templateId);
     expect(cloned).not.toHaveProperty('templateVersion');
+    // The clone's protocol derives from its freshly frozen snapshot through
+    // the shared helper (spec §4.1): basic template -> 'none'.
+    expect(cloned.structuredProtocol).toBe('none');
 
     const sourceWorkspace = await service.getWorkspace(source.id);
     const clonedWorkspace = await service.getWorkspace(cloned.id);

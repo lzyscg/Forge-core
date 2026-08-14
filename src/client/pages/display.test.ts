@@ -25,6 +25,7 @@ describe('taskStatusLabel', () => {
     ['stopped', '已停止'],
     ['corrupt', '任务文件损坏、只能查看诊断'],
     ['incompatible', '契约不兼容，需使用当前模板重建'],
+    ['failed', '已失败、无法继续运行'],
   ];
 
   it.each(cases)('maps %s to the public label', (status, label) => {
@@ -44,6 +45,7 @@ describe('taskStatusLabel', () => {
         'stopped',
         'corrupt',
         'incompatible',
+        'failed',
       ].sort(),
     );
   });
@@ -55,6 +57,7 @@ describe('taskStatusLabel', () => {
     expect(taskStatusTone('interrupted')).toBe('warning');
     expect(taskStatusTone('retryable_failure')).toBe('danger');
     expect(taskStatusTone('corrupt')).toBe('danger');
+    expect(taskStatusTone('failed')).toBe('danger');
     expect(taskStatusTone('ready')).toBe('neutral');
     expect(taskStatusTone('stopped')).toBe('neutral');
     expect(taskStatusTone('incompatible')).toBe('warning');

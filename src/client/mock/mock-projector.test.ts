@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { WorkspaceNode } from '../../shared/contracts';
 import { REVIEWER_AGENT_ID, WRITER_AGENT_ID, templateFixture } from './__fixtures__/zhihu-single-chapter';
 import type { MockTaskEvent, MockTaskRecord } from './mock-schema';
+import { expectMockBasicProtocol } from './mock-fixtures';
 import { projectMockWorkspace, projectTaskStatus, projectTaskSummary } from './mock-projector';
 
 const CREATED_AT = '2026-01-01T00:00:00.000Z';
@@ -55,6 +56,11 @@ describe('projectMockWorkspace', () => {
     expect(workspace.task.currentAgentName).toBeNull();
     expect(workspace.task.latestVersion).toBeNull();
     expect(workspace.task.diagnostic).toBeNull();
+    // The mock simulates basic templates: every fixture summary carries the
+    // frozen-snapshot protocol derived through the shared helper — never a
+    // guessed v2 (spec §4.1).
+    expectMockBasicProtocol(workspace.task);
+    expect(workspace.task.structuredProtocol).toBe('none');
     expect(workspace.nodes).toEqual([]);
     expect(workspace.executedRoutes).toEqual([]);
     expect(workspace.artifacts).toEqual([]);

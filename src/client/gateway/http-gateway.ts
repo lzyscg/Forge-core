@@ -35,6 +35,7 @@ import type {
   TurnTrace,
 } from '../../shared/contracts';
 import type { StructuredSlotTreeCursorV1 } from '../../shared/structured-slots';
+import type { DeleteTaskBodyV2 } from '../../shared/authoritative-review-v2';
 import type { PublicCoreError } from '../../shared/errors';
 import {
   errorBodySchema,
@@ -367,8 +368,10 @@ export function createHttpGateway(options: HttpGatewayOptions = {}): ForgeCoreGa
       return created;
     },
 
-    async deleteTask(taskId: string): Promise<void> {
-      await request(`/api/tasks/${encodeURIComponent(taskId)}`, 'DELETE');
+    async deleteTask(taskId: string, deleteRequest?: DeleteTaskBodyV2): Promise<void> {
+      // v1 callers send no body; the fenced v2 delete request (spec §10.5)
+      // is sent as exact JSON when the caller provides it.
+      await request(`/api/tasks/${encodeURIComponent(taskId)}`, 'DELETE', deleteRequest);
       // The task is gone server-side: drop it from the watchable set so a
       // stale watchTask call fails exactly like a never-seen id.
       knownTaskIds.delete(taskId);

@@ -164,6 +164,7 @@ export function workspaceWithReturnLoop(): TaskWorkspace {
       latestVersion: 2,
       updatedAt: '2026-01-02T00:00:08.000Z',
       diagnostic: null,
+      structuredProtocol: 'none',
     },
     frozenInput: { ...brief },
     templateVersion: template.version,

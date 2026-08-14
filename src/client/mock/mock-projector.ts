@@ -3,9 +3,11 @@ import type {
   TaskStatus,
   TaskSummary,
   TaskWorkspace,
+  TemplateDetail,
   WorkspaceNode,
   WorkspaceRoute,
 } from '../../shared/contracts';
+import { structuredProtocolOf } from '../../shared/authoritative-review-v2';
 import type { MockTaskEvent, MockTaskRecord } from './mock-schema';
 
 /**
@@ -183,6 +185,16 @@ const ACTIVE_AGENT_STATUSES: ReadonlySet<TaskStatus> = new Set([
   'retryable_failure',
 ]);
 
+/**
+ * The mock simulates basic templates only (mock-gateway.ts): its frozen
+ * `TemplateDetail` never declares a structured production mode. The protocol
+ * still derives through the shared frozen-snapshot helper and fails closed to
+ * 'none' exactly like the server — the mock never guesses a v2 protocol.
+ */
+function protocolOfMockTemplate(_template: TemplateDetail) {
+  return structuredProtocolOf({ productionMode: 'basic', structuredSlots: null });
+}
+
 function buildSummary(record: MockTaskRecord, state: ProjectionState): TaskSummary {
   const agent =
     ACTIVE_AGENT_STATUSES.has(state.status) && state.lastAgentId !== null
@@ -202,6 +214,7 @@ function buildSummary(record: MockTaskRecord, state: ProjectionState): TaskSumma
     latestVersion: latestVersion > 0 ? latestVersion : null,
     updatedAt: record.updatedAt,
     diagnostic: null,
+    structuredProtocol: protocolOfMockTemplate(record.frozenTemplate),
   };
 }
 

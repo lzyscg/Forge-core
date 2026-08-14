@@ -8,6 +8,11 @@
  * Platform-generic: no business vocabulary (iron rule 1).
  */
 import { Type, type TSchema } from 'typebox';
+import {
+  AUTHORITATIVE_BLOB_KINDS_V2,
+  QUESTION_VERSION_TOKEN_PATTERN,
+  UUID_V4_PATTERN,
+} from './authoritative-review-v2';
 
 /* ------------------------------ request bodies ------------------------------ */
 
@@ -134,11 +139,21 @@ export const taskSummarySchema = Type.Object({
     Type.Literal('stopped'),
     Type.Literal('corrupt'),
     Type.Literal('incompatible'),
+    // v2 permanent failure (spec §10.3): projected only by
+    // `structured_task_failed_v2`; v1 events never produce it.
+    Type.Literal('failed'),
   ]),
   currentAgentName: Type.Union([Type.String(), Type.Null()]),
   latestVersion: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()]),
   updatedAt: Type.String(),
   diagnostic: Type.Union([Type.String(), Type.Null()]),
+  // Frozen-snapshot protocol discriminator (spec §4.1/§10.5): required on
+  // every summary so the client never guesses from status/template/events.
+  structuredProtocol: Type.Union([
+    Type.Literal('none'),
+    Type.Literal('v1'),
+    Type.Literal('v2'),
+  ]),
 });
 
 export const taskSummaryListSchema = Type.Array(taskSummarySchema);
@@ -236,6 +251,494 @@ export const structuredSlotsSummarySchema = Type.Object(
   { additionalProperties: false },
 );
 
+/* ------------------- authoritative per-slot review v2 (spec 2026-08-14) ------------------- */
+
+/** Closed v2 blob-kind registry (spec §7.1) — explicit literal union. */
+export const authoritativeBlobKindV2Schema = Type.Union(
+  AUTHORITATIVE_BLOB_KINDS_V2.map((kind) => Type.Literal(kind)),
+);
+
+/** Lowercase SHA-256 digest (`digest` is never case-normalized, spec §7.1). */
+export const sha256HexSchema = Type.String({ pattern: '^[0-9a-f]{64}$' });
+
+/** UUID v4 operation id (spec §10.5/§10.3.1). */
+export const uuidV4Schema = Type.String({ pattern: UUID_V4_PATTERN });
+
+/** Opaque unpadded base64url question-version token, case-sensitive (§10.6). */
+export const questionVersionTokenSchema = Type.String({ pattern: QUESTION_VERSION_TOKEN_PATTERN });
+
+export const blobRefV2Schema = Type.Object(
+  {
+    kind: authoritativeBlobKindV2Schema,
+    digest: sha256HexSchema,
+    byteLength: Type.Integer({ minimum: 0 }),
+    mediaType: Type.Union([
+      Type.Literal('application/json'),
+      Type.Literal('text/markdown'),
+      Type.Literal('text/plain'),
+    ]),
+    schemaVersion: Type.Integer({ minimum: 1 }),
+  },
+  { additionalProperties: false },
+);
+
+/** Discriminated artifact provenance (spec §13.5.1). */
+export const artifactProvenanceV2Schema = Type.Union([
+  Type.Object(
+    {
+      producerKind: Type.Literal('agent'),
+      sourceNodeId: Type.String({ minLength: 1 }),
+      producerAgentId: Type.String({ minLength: 1 }),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      producerKind: Type.Literal('system'),
+      producerWorkItemId: Type.String({ minLength: 1 }),
+      sealRecordRef: blobRefV2Schema,
+      artifactRef: blobRefV2Schema,
+      custodyRef: blobRefV2Schema,
+    },
+    { additionalProperties: false },
+  ),
+]);
+
+/** Profile snapshot bootstrap identity (spec §4.3). */
+export const authoritativeReviewProfileSnapshotV1Schema = Type.Object(
+  {
+    schemaVersion: Type.Literal(1),
+    profileIdentity: Type.String({ minLength: 1 }),
+    profileVersion: Type.Integer({ minimum: 1 }),
+    qualificationState: Type.Union([
+      Type.Literal('test_only'),
+      Type.Literal('provisional'),
+      Type.Literal('final'),
+    ]),
+    profileDigest: sha256HexSchema,
+    abi: Type.Object(
+      {
+        validatorAbi: Type.Literal('forge-validator/v2'),
+        assemblerAbi: Type.Literal('forge-assembler/v2'),
+        profileAbi: Type.Literal('forge-authoritative-review/v1'),
+      },
+      { additionalProperties: false },
+    ),
+  },
+  { additionalProperties: false },
+);
+
+/** Reversible, non-event execution eligibility (spec §4.3). */
+export const authoritativeReviewExecutionEligibilityV1Schema = Type.Union([
+  Type.Object(
+    {
+      state: Type.Literal('eligible'),
+      frozenProfileDigest: sha256HexSchema,
+      currentProfileDigest: sha256HexSchema,
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      state: Type.Literal('blocked'),
+      reason: Type.Union([
+        Type.Literal('base_capability_disabled'),
+        Type.Literal('authoritative_capability_disabled'),
+        Type.Literal('profile_digest_mismatch'),
+        Type.Literal('required_abi_unavailable'),
+      ]),
+      frozenProfileDigest: sha256HexSchema,
+      currentProfileDigest: Type.Union([sha256HexSchema, Type.Null()]),
+    },
+    { additionalProperties: false },
+  ),
+]);
+
+/** Closed WorkItem execution kinds (spec §10.1). */
+export const workItemKindV2Schema = Type.Union([
+  Type.Literal('agent_assignment'),
+  Type.Literal('system_map_finalize'),
+  Type.Literal('system_generation_finalize'),
+  Type.Literal('system_repair_finalize'),
+  Type.Literal('system_migration_validation_batch'),
+  Type.Literal('system_review_settlement'),
+  Type.Literal('system_seal'),
+]);
+
+/** The pending v2 human question (spec §10.6). */
+export const pendingQuestionV2Schema = Type.Object(
+  {
+    questionId: Type.String({ minLength: 1 }),
+    questionDigest: sha256HexSchema,
+    questionVersion: questionVersionTokenSchema,
+    source: Type.Union([Type.Literal('agent_request'), Type.Literal('progress_guard')]),
+    text: Type.String(),
+  },
+  { additionalProperties: false },
+);
+
+/** Answer mutation v2 (spec §10.6): question identity + operation on EVERY branch. */
+const answerIdentityV2Fields = {
+  questionId: Type.String({ minLength: 1 }),
+  questionVersion: questionVersionTokenSchema,
+  operationId: Type.String({ minLength: 1 }),
+};
+export const answerBodyV2Schema = Type.Union([
+  Type.Object(
+    { ...answerIdentityV2Fields, answer: Type.String({ minLength: 1 }) },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { ...answerIdentityV2Fields, decision: Type.Literal('continue'), text: Type.String() },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { ...answerIdentityV2Fields, decision: Type.Literal('accept'), text: Type.String() },
+    { additionalProperties: false },
+  ),
+  Type.Object({ ...answerIdentityV2Fields, decision: Type.Literal('stop') }, { additionalProperties: false }),
+]);
+
+/** Fenced delete mutation (spec §10.5): UUID operation + 1..500 reason. */
+export const deleteTaskBodyV2Schema = Type.Object(
+  {
+    operationId: uuidV4Schema,
+    reason: Type.String({ minLength: 1, maxLength: 500 }),
+  },
+  { additionalProperties: false },
+);
+
+export const deleteTaskResultV2Schema = Type.Object(
+  {
+    operationId: uuidV4Schema,
+    state: Type.Union([Type.Literal('detached'), Type.Literal('purged')]),
+  },
+  { additionalProperties: false },
+);
+
+export const recoveryRecipeKeyV2Schema = Type.Union([
+  Type.Literal('retry_system_command'),
+  Type.Literal('restart_map_review_cycle'),
+  Type.Literal('restart_content_review_cycle'),
+  Type.Literal('rebuild_missing_work'),
+]);
+
+const reopenIdentityV2Fields = {
+  expectedLastSequence: Type.Integer({ minimum: 0 }),
+  operationId: uuidV4Schema,
+  reason: Type.String({ minLength: 1, maxLength: 1000 }),
+};
+
+/**
+ * Reopen mutation (spec §10.3.1). The wire schema is STRICTLY narrower than
+ * the flat spec interface: it enforces the exact recipe/track pairing of the
+ * §10.3.1 policy table (retry_system_command keeps track null; each restart
+ * cycle names its own track; rebuild_missing_work accepts the stored track
+ * or null). Cross-recipe bodies fail before reaching the service.
+ */
+export const reopenFailedRequestV2Schema = Type.Union([
+  Type.Object(
+    { ...reopenIdentityV2Fields, recipeKey: Type.Literal('retry_system_command'), track: Type.Null() },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { ...reopenIdentityV2Fields, recipeKey: Type.Literal('restart_map_review_cycle'), track: Type.Literal('map') },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { ...reopenIdentityV2Fields, recipeKey: Type.Literal('restart_content_review_cycle'), track: Type.Literal('content') },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      ...reopenIdentityV2Fields,
+      recipeKey: Type.Literal('rebuild_missing_work'),
+      track: Type.Union([Type.Literal('map'), Type.Literal('content'), Type.Null()]),
+    },
+    { additionalProperties: false },
+  ),
+]);
+
+/** Canonical recovery payload stored with structured_task_failed_v2 (§10.3.1). */
+export const failureRecoveryPayloadV2Schema = Type.Union([
+  Type.Object(
+    {
+      kind: Type.Literal('retry_system_command'),
+      failedWorkItemId: Type.String({ minLength: 1 }),
+      failedCommandId: Type.String({ minLength: 1 }),
+      failedLeaseEpoch: Type.Integer({ minimum: 0 }),
+      terminalEventId: Type.String({ minLength: 1 }),
+      terminalCommitId: Type.String({ minLength: 1 }),
+      authorityBaseRef: blobRefV2Schema,
+      systemKind: Type.Union([
+        Type.Literal('system_map_finalize'),
+        Type.Literal('system_generation_finalize'),
+        Type.Literal('system_repair_finalize'),
+        Type.Literal('system_migration_validation_batch'),
+        Type.Literal('system_review_settlement'),
+        Type.Literal('system_seal'),
+      ]),
+      systemPayloadRef: blobRefV2Schema,
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      kind: Type.Literal('restart_review_cycle'),
+      track: Type.Union([Type.Literal('map'), Type.Literal('content')]),
+      failedWorkItemId: Type.String({ minLength: 1 }),
+      failedAttemptOrCommandId: Type.String({ minLength: 1 }),
+      failedLeaseEpoch: Type.Integer({ minimum: 0 }),
+      terminalEventId: Type.String({ minLength: 1 }),
+      terminalCommitId: Type.String({ minLength: 1 }),
+      authorityBaseRef: blobRefV2Schema,
+      rejectedSubjectRef: blobRefV2Schema,
+      findingSetRef: blobRefV2Schema,
+      failedCycleOrdinal: Type.Integer({ minimum: 1 }),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      kind: Type.Literal('rebuild_missing_work'),
+      predecessorResultRef: blobRefV2Schema,
+      expectedSuccessorKind: workItemKindV2Schema,
+      expectedSuccessorPayloadRef: blobRefV2Schema,
+      authorityBaseRef: blobRefV2Schema,
+      grantSpecInputRef: Type.Union([blobRefV2Schema, Type.Null()]),
+    },
+    { additionalProperties: false },
+  ),
+]);
+
+/** One available round-budget override (spec §10.3.1). */
+export const roundBudgetOverrideV2Schema = Type.Object(
+  {
+    overrideId: Type.String({ minLength: 1 }),
+    failedEventId: Type.String({ minLength: 1 }),
+    track: Type.Union([Type.Literal('map'), Type.Literal('content')]),
+    repairLineageId: Type.String({ minLength: 1 }),
+    initialRepairPlanRef: blobRefV2Schema,
+    currentAuthorizedRepairPlanRef: blobRefV2Schema,
+    predecessorOverrideRef: Type.Union([blobRefV2Schema, Type.Null()]),
+    transferOrdinal: Type.Integer({ minimum: 0 }),
+    operationId: uuidV4Schema,
+    operatorId: Type.String({ minLength: 1 }),
+    reasonDigest: sha256HexSchema,
+    state: Type.Literal('available'),
+  },
+  { additionalProperties: false },
+);
+
+/** Bounded owner-facing recovery summary (spec §10.3.1) — never private refs. */
+export const failedTaskRecoverySummaryV2Schema = Type.Object(
+  {
+    failureCode: Type.String({ minLength: 1 }),
+    failedSequence: Type.Integer({ minimum: 0 }),
+    legalRecipes: Type.Array(
+      Type.Object(
+        {
+          recipeKey: recoveryRecipeKeyV2Schema,
+          track: Type.Union([Type.Literal('map'), Type.Literal('content'), Type.Null()]),
+        },
+        { additionalProperties: false },
+      ),
+    ),
+    reopenAllowed: Type.Boolean(),
+    cloneFallback: Type.Boolean(),
+  },
+  { additionalProperties: false },
+);
+
+/** Authenticated opaque snapshot cursor (spec §14.2). */
+export const snapshotCursorV2Schema = Type.Object(
+  {
+    version: Type.Literal(2),
+    keyId: Type.String({ minLength: 1 }),
+    token: Type.String({ minLength: 1 }),
+  },
+  { additionalProperties: false },
+);
+
+/** Factory for the stable cursor-paginated collection page shape (§14.2). */
+export function collectionPageV2Schema(items: TSchema): TSchema {
+  return Type.Object(
+    {
+      items: Type.Array(items),
+      nextCursor: Type.Union([snapshotCursorV2Schema, Type.Null()]),
+    },
+    { additionalProperties: false },
+  );
+}
+
+/** Public Map identity summary (design §10.1). */
+export const authoritativeMapSummaryV2Schema = Type.Object(
+  {
+    mapId: Type.String({ minLength: 1 }),
+    mapRevision: Type.Integer({ minimum: 1 }),
+    mapSemanticDigest: sha256HexSchema,
+    supersedesMapId: Type.Union([Type.String(), Type.Null()]),
+    mapSnapshotRef: Type.Union([blobRefV2Schema, Type.Null()]),
+    mapReviewBundleRef: Type.Union([blobRefV2Schema, Type.Null()]),
+    candidateRef: Type.Union([blobRefV2Schema, Type.Null()]),
+  },
+  { additionalProperties: false },
+);
+
+/**
+ * Relationship-layer summary: zero relations is a valid neutral state. The
+ * discriminated branches enforce the platform rule that a disabled policy
+ * can never coexist with relations (design §9) — a truthful projection can
+ * only ever produce `mode: 'disabled'` with zero relations.
+ */
+export const authoritativeRelationSummaryV2Schema = Type.Union([
+  Type.Object(
+    { mode: Type.Literal('disabled'), relationCount: Type.Literal(0) },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      mode: Type.Literal('optional'),
+      relationCount: Type.Integer({ minimum: 0 }),
+    },
+    { additionalProperties: false },
+  ),
+]);
+
+/** Derived slot-review state counts (design §11.6). */
+export const authoritativeReviewSummaryV2Schema = Type.Object(
+  {
+    version: Type.Literal(2),
+    mapCycleOrdinal: Type.Integer({ minimum: 0 }),
+    contentCycleOrdinal: Type.Integer({ minimum: 0 }),
+    pendingCount: Type.Integer({ minimum: 0 }),
+    passCount: Type.Integer({ minimum: 0 }),
+    rejectCount: Type.Integer({ minimum: 0 }),
+    staleCount: Type.Integer({ minimum: 0 }),
+    openBlockingFindingCount: Type.Integer({ minimum: 0 }),
+    relation: authoritativeRelationSummaryV2Schema,
+  },
+  { additionalProperties: false },
+);
+
+/** Public Finding summary (design §11.8). */
+export const authoritativeFindingSummaryV2Schema = Type.Object(
+  {
+    findingId: Type.String({ minLength: 1 }),
+    reviewContext: Type.Object(
+      {
+        kind: Type.Union([Type.Literal('map'), Type.Literal('content')]),
+        roundId: Type.String({ minLength: 1 }),
+      },
+      { additionalProperties: false },
+    ),
+    primaryLocation: Type.Object(
+      {
+        kind: Type.Union([
+          Type.Literal('slot'),
+          Type.Literal('relation'),
+          Type.Literal('map_node'),
+          Type.Literal('map'),
+        ]),
+        id: Type.String({ minLength: 1 }),
+      },
+      { additionalProperties: false },
+    ),
+    defectClass: Type.Union([Type.Literal('content'), Type.Literal('map'), Type.Literal('mixed')]),
+    severity: Type.Union([Type.Literal('blocking'), Type.Literal('advisory')]),
+    source: Type.Union([Type.Literal('reviewer'), Type.Literal('system_validator')]),
+    status: Type.Union([
+      Type.Literal('open'),
+      Type.Literal('repair_planned'),
+      Type.Literal('repair_dispatched'),
+      Type.Literal('addressed'),
+      Type.Literal('verified_closed'),
+    ]),
+  },
+  { additionalProperties: false },
+);
+
+/** One review round row of the paginated rounds views (design §11.3/§11.10). */
+export const authoritativeReviewRoundSummaryV2Schema = Type.Object(
+  {
+    reviewRoundId: Type.String({ minLength: 1 }),
+    kind: Type.Union([Type.Literal('map'), Type.Literal('content')]),
+    state: Type.Union([
+      Type.Literal('planned'),
+      Type.Literal('reviewing_batches'),
+      Type.Literal('whole_map_observation'),
+      Type.Literal('whole_tree_observation'),
+      Type.Literal('completed'),
+      Type.Literal('settled'),
+    ]),
+  },
+  { additionalProperties: false },
+);
+
+/** Findings collection page bound to the item schema above. */
+export const authoritativeFindingCollectionPageV2Schema = collectionPageV2Schema(
+  authoritativeFindingSummaryV2Schema,
+);
+
+/** Seal readiness projection (design §16.2) — never a model verdict. */
+export const authoritativeSealReadinessSummaryV2Schema = Type.Object(
+  {
+    readiness: Type.Union([Type.Literal('ready'), Type.Literal('not_ready')]),
+    unmetConditionCount: Type.Integer({ minimum: 0 }),
+    sealed: Type.Boolean(),
+    sealRecordRef: Type.Union([blobRefV2Schema, Type.Null()]),
+  },
+  { additionalProperties: false },
+);
+
+/** Immutable v2 SealRecord identity (design §16.3). */
+export const sealRecordV2Schema = Type.Object(
+  {
+    taskId: Type.String({ minLength: 1 }),
+    mapRef: blobRefV2Schema,
+    mapSemanticDigest: sha256HexSchema,
+    mapReviewBundleRef: blobRefV2Schema,
+    contentRevisionManifestRef: blobRefV2Schema,
+    contentRootDigest: sha256HexSchema,
+    reviewBundleRef: blobRefV2Schema,
+    sealValidationBundleRef: blobRefV2Schema,
+    templateSnapshotHash: sha256HexSchema,
+    assemblerDigest: sha256HexSchema,
+    artifactRef: blobRefV2Schema,
+    artifactDigest: sha256HexSchema,
+  },
+  { additionalProperties: false },
+);
+
+/** System artifact delivery (spec §13.5) — deliberately no artifactVersion. */
+export const systemArtifactDeliveryV2Schema = Type.Object(
+  {
+    deliveryId: Type.String({ minLength: 1 }),
+    producer: Type.Literal('system:structured_seal'),
+    sealRecordRef: blobRefV2Schema,
+    sealRecordDigest: sha256HexSchema,
+    artifactId: Type.String({ minLength: 1 }),
+    artifactRef: blobRefV2Schema,
+    artifactDigest: sha256HexSchema,
+    custodyRef: blobRefV2Schema,
+    custodyDigest: sha256HexSchema,
+    submitterWorkItemId: Type.String({ minLength: 1 }),
+    submitterAgentId: Type.String({ minLength: 1 }),
+    templateSnapshotHash: sha256HexSchema,
+  },
+  { additionalProperties: false },
+);
+
+/** Versioned v2 workspace summary (spec §14/§19.2). */
+export const authoritativeReviewWorkspaceV2Schema = Type.Object(
+  {
+    version: Type.Literal(2),
+    executionEligibility: authoritativeReviewExecutionEligibilityV1Schema,
+    pendingQuestion: Type.Union([pendingQuestionV2Schema, Type.Null()]),
+  },
+  { additionalProperties: false },
+);
+
 export const taskWorkspaceSchema = Type.Object({
   task: taskSummarySchema,
   frozenInput: Type.Record(Type.String(), Type.String()),
@@ -253,6 +756,10 @@ export const taskWorkspaceSchema = Type.Object({
   ]),
   activeTurn: Type.Optional(Type.Union([liveTurnSchema, Type.Null()])),
   structuredSlots: Type.Optional(structuredSlotsSummarySchema),
+  // Versioned v2 workspace summary (spec §14/§19.2): v2 tasks carry this
+  // instead of the v1 structuredSlots summary. Optional on the wire so v1
+  // and basic workspaces decode unchanged.
+  authoritativeReview: Type.Optional(authoritativeReviewWorkspaceV2Schema),
 });
 
 export const healthSchema = Type.Object({

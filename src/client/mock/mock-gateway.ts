@@ -1,5 +1,6 @@
 import type {
   CapabilityEvidence,
+  DeleteTaskBodyV2,
   HumanDecision,
   MockScenarioId,
   SkillContent,
@@ -285,6 +286,9 @@ export function createMockGateway(
       latestVersion: null,
       updatedAt,
       diagnostic: CORRUPT_TASK_DIAGNOSTIC,
+      // Corrupt mock records carry no frozen identity: fail closed to 'none'
+      // (spec §4.1) — the mock never guesses a v2 protocol.
+      structuredProtocol: 'none',
     };
   }
 
@@ -528,8 +532,12 @@ export function createMockGateway(
       );
     },
 
-    async deleteTask(taskId: string): Promise<void> {
+    async deleteTask(taskId: string, _request?: DeleteTaskBodyV2): Promise<void> {
       const location = 'MockGateway.deleteTask';
+      // The mock simulates basic templates only, so no fenced v2 delete path
+      // exists yet; the optional body is accepted and ignored (spec §10.5
+      // wiring lands with the v2 delete flow).
+      void _request;
       // Presence (not validity) gates deletion: corrupt entries delete too.
       const entry = store.getTaskEntry(taskId);
       if (!entry) {

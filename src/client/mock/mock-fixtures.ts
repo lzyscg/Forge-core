@@ -4,6 +4,7 @@
  * MockClock interfaces instead.
  */
 import type { MockScenarioId, TaskSummary, WorkspaceNode } from '../../shared/contracts';
+import { structuredProtocolOf } from '../../shared/authoritative-review-v2';
 import type { DevelopmentGateway } from '../gateway/development-gateway';
 import type { ForgeCoreGateway } from '../gateway/forge-core-gateway';
 import {
@@ -117,6 +118,21 @@ export const validCreateRequest = {
   name: templateFixture.sampleTaskName,
   input: { ...templateFixture.sampleInput },
 };
+
+/**
+ * The mock simulates basic templates only, so every fixture-derived summary
+ * must carry the frozen-snapshot protocol `none` through the shared helper
+ * (spec §4.1). Test helpers assert this so a future structured mock fixture
+ * cannot accidentally leak a guessed protocol.
+ */
+export function expectMockBasicProtocol(summary: TaskSummary): void {
+  const expected = structuredProtocolOf({ productionMode: 'basic', structuredSlots: null });
+  if (summary.structuredProtocol !== expected) {
+    throw new Error(
+      `mock fixture summary must fail closed to '${expected}', got '${summary.structuredProtocol}'`,
+    );
+  }
+}
 
 /* ------------------------- seeded storage builders ------------------------ */
 

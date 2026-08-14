@@ -86,6 +86,30 @@ function storageWithAllStatuses(): MemoryStorage {
 }
 
 /**
+ * A failed task row helper (v2 permanent failure, spec §10.3): the mock
+ * event model cannot project `failed` (no v2 events exist yet), so the row
+ * is built from the literal summary the server will send for a
+ * `structured_task_failed_v2` task. Task 2 renders the minimal neutral
+ * state — the danger chip and NO action buttons; the recovery surface
+ * (server-returned legal recipes, reopen_failed, clone fallback) lands with
+ * the v2 recovery flow (Task 11).
+ */
+function failedSummaryRow(): TaskSummary {
+  return {
+    id: 'task-failed',
+    name: '示例任务 已失败',
+    templateId: TEMPLATE_ID,
+    templateName: templateFixture.template.name,
+    status: 'failed',
+    currentAgentName: null,
+    latestVersion: null,
+    updatedAt: at(16),
+    diagnostic: null,
+    structuredProtocol: 'v2',
+  };
+}
+
+/**
  * Clone-button matrix: the terminal completed row comes from seededStorage;
  * here one stopped, one running and the seeded ready row prove the rerun
  * control exists exactly on terminal rows.
@@ -149,6 +173,23 @@ describe('TaskListPage', () => {
     // Current agent names are template-defined, never Agent 1/2/3.
     expect(screen.getAllByText('章节写作').length).toBeGreaterThanOrEqual(1);
     expect(screen.queryByText('Agent 1')).toBeNull();
+  });
+
+  it('renders a failed row with the danger chip and zero action buttons (spec §10.3)', async () => {
+    // Task 2 minimal neutral rendering: the failed status label chips the
+    // row, but start/stop/resume/retry/rerun never appear — reopen_failed
+    // and the clone fallback surface land with the v2 recovery flow (Task 11).
+    const gateway = stubGateway({ listTasks: async () => [failedSummaryRow()] });
+    renderPage('/tasks', gateway);
+    await screen.findByRole('heading', { level: 2, name: '示例任务 已失败' });
+
+    expect(screen.getByText('已失败、无法继续运行')).toBeVisible();
+    const row = rowOf('示例任务 已失败');
+    expect(within(row).getAllByRole('button')).toHaveLength(1);
+    expect(within(row).getByRole('button', { name: '删除' })).toBeVisible();
+    expect(within(row).queryByRole('button', { name: '重跑' })).toBeNull();
+    expect(within(row).queryByRole('button', { name: '重试' })).toBeNull();
+    expect(within(row).queryByRole('button', { name: '继续' })).toBeNull();
   });
 
   it('keeps corrupt rows openable with their diagnostic', async () => {
@@ -223,6 +264,7 @@ describe('TaskListPage', () => {
       latestVersion: null,
       updatedAt: at(5),
       diagnostic: null,
+      structuredProtocol: 'none',
     };
     const gateway = stubGateway({
       listTasks: async () => [interrupted],
@@ -365,6 +407,7 @@ describe('TaskListPage', () => {
       latestVersion: 1,
       updatedAt: at(5),
       diagnostic: null,
+      structuredProtocol: 'none',
     };
     const gateway = stubGateway({
       listTasks: async () => [completed],

@@ -13,6 +13,7 @@ import type {
   TurnTrace,
 } from '../../shared/contracts';
 import type { StructuredSlotTreeCursorV1 } from '../../shared/structured-slots';
+import type { DeleteTaskBodyV2 } from '../../shared/authoritative-review-v2';
 
 /**
  * 正式页面唯一的生产数据接口。页面不得直接访问 localStorage、
@@ -61,8 +62,13 @@ export interface ForgeCoreGateway {
    * is removed and the deletion cannot be undone. A task that is still
    * running is stopped first, so no execution survives the deletion.
    * Unknown ids reject with TASK_NOT_FOUND.
+   *
+   * v2 lifecycle (spec §10.5): when the corresponding task summary says v2,
+   * the caller MUST pass the fenced delete request (UUID operation id +
+   * reason); v1 callers continue sending no body. The enforcement wiring and
+   * the delete dialog's stable operation id land with the v2 delete flow.
    */
-  deleteTask(taskId: string): Promise<void>;
+  deleteTask(taskId: string, request?: DeleteTaskBodyV2): Promise<void>;
   /**
    * Public contract projection of the structured-slot contract (spec §14).
    * The owner projection never includes implementation paths, validators,

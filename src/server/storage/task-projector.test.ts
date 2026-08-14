@@ -55,6 +55,10 @@ describe('task-projector', () => {
     expect(workspace.task.id).toBe(created.id);
     expect(workspace.task.latestVersion).toBeNull();
     expect(workspace.task.currentAgentName).toBeNull();
+    // The frozen-snapshot protocol discriminator (spec §4.1) comes from the
+    // frozen template through the shared helper; the basic fixture yields
+    // 'none' and never a guessed protocol.
+    expect(workspace.task.structuredProtocol).toBe('none');
     expect(workspace.frozenInput).toEqual(record.frozenInput);
     expect(workspace.templateVersion).toBe(record.templateVersion);
     expect(workspace.agents.map((agent) => agent.id)).toEqual(['writer', 'reviewer']);

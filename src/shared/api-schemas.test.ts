@@ -9,12 +9,16 @@
 import { describe, expect, it } from 'vitest';
 import { Value } from 'typebox/value';
 import {
+  answerBodyV2Schema,
+  authoritativeBlobKindV2Schema,
+  authoritativeReviewWorkspaceV2Schema,
   structuredIssuePageSchema,
   structuredSealRecordSchema,
   structuredSlotOutlinePageSchema,
   structuredSlotPublicContractSchema,
   structuredSlotReadResponseSchema,
   structuredSlotsSummarySchema,
+  taskSummarySchema,
   taskWorkspaceSchema,
   traceEntrySchema,
   turnTraceSchema,
@@ -103,6 +107,7 @@ const BASE_TASK = {
   latestVersion: null,
   updatedAt: '2026-08-05T00:00:00.000Z',
   diagnostic: null,
+  structuredProtocol: 'none' as const,
 };
 
 function baseWorkspace(activeTurn?: unknown): Record<string, unknown> {
@@ -450,5 +455,114 @@ describe('structured slot read-only response schemas (spec §14)', () => {
     expect(Value.Check(structuredSealRecordSchema, seal)).toBe(true);
     expect(Value.Check(structuredSealRecordSchema, { ...seal, outputs: [{ ...seal.outputs[0], extra: 1 }] })).toBe(false);
     expect(Value.Check(structuredSealRecordSchema, { ...seal, stagingPath: '/tmp/x' })).toBe(false);
+  });
+});
+
+/* ------------------- v2 task summary: failed + structuredProtocol (spec §10.3/§10.5) ------------------- */
+
+describe('taskSummarySchema v2 fields (failed + structuredProtocol)', () => {
+  it('accepts the terminal failed status next to every v1 status', () => {
+    const failed = { ...BASE_TASK, status: 'failed' };
+    expect(Value.Check(taskSummarySchema, failed)).toBe(true);
+    for (const status of [
+      'draft',
+      'ready',
+      'running',
+      'waiting_human',
+      'retryable_failure',
+      'interrupted',
+      'completed',
+      'stopped',
+      'corrupt',
+      'incompatible',
+    ]) {
+      expect(Value.Check(taskSummarySchema, { ...BASE_TASK, status })).toBe(true);
+    }
+  });
+
+  it('requires structuredProtocol on every summary (the client never guesses)', () => {
+    expect(Value.Check(taskSummarySchema, { ...BASE_TASK, structuredProtocol: 'none' })).toBe(true);
+    expect(Value.Check(taskSummarySchema, { ...BASE_TASK, structuredProtocol: 'v1' })).toBe(true);
+    expect(Value.Check(taskSummarySchema, { ...BASE_TASK, structuredProtocol: 'v2' })).toBe(true);
+    const { structuredProtocol: _dropped, ...without } = BASE_TASK;
+    expect(Value.Check(taskSummarySchema, without)).toBe(false);
+    expect(Value.Check(taskSummarySchema, { ...BASE_TASK, structuredProtocol: 'v3' })).toBe(false);
+    expect(Value.Check(taskSummarySchema, { ...BASE_TASK, structuredProtocol: 2 })).toBe(false);
+  });
+});
+
+/* ------------------- v1/v2 workspace summary discrimination (spec §14/§15) ------------------- */
+
+describe('taskWorkspaceSchema v1/v2 structured summary discrimination', () => {
+  it('accepts a v1 structured workspace whose task carries structuredProtocol v1', () => {
+    const workspace = workspaceWithStructured();
+    workspace.task = { ...BASE_TASK, structuredProtocol: 'v1' };
+    expect(Value.Check(taskWorkspaceSchema, workspace)).toBe(true);
+  });
+
+  it('accepts a v2 workspace with the versioned authoritativeReview summary', () => {
+    const workspace = baseWorkspace();
+    workspace.task = { ...BASE_TASK, status: 'running', structuredProtocol: 'v2' };
+    (workspace as Record<string, unknown>).authoritativeReview = {
+      version: 2,
+      executionEligibility: {
+        state: 'eligible',
+        frozenProfileDigest: 'a'.repeat(64),
+        currentProfileDigest: 'a'.repeat(64),
+      },
+      pendingQuestion: {
+        questionId: 'question-1',
+        questionDigest: 'b'.repeat(64),
+        questionVersion: 'MYf28MmooIcTH9zYHiYmYEzbJCymSvrmmWPX1W0B7Pk',
+        source: 'agent_request',
+        text: '该章结尾是否需要补充来源？',
+      },
+    };
+    expect(Value.Check(taskWorkspaceSchema, workspace)).toBe(true);
+    expect(Value.Check(authoritativeReviewWorkspaceV2Schema, workspace.authoritativeReview)).toBe(true);
+  });
+
+  it('rejects a v2 workspace summary that is missing eligibility or carries v1 fields', () => {
+    const workspace = baseWorkspace();
+    workspace.task = { ...BASE_TASK, structuredProtocol: 'v2' };
+    (workspace as Record<string, unknown>).authoritativeReview = {
+      version: 2,
+      pendingQuestion: null,
+    };
+    expect(Value.Check(taskWorkspaceSchema, workspace)).toBe(false);
+
+    (workspace as Record<string, unknown>).authoritativeReview = {
+      version: 2,
+      executionEligibility: {
+        state: 'blocked',
+        reason: 'authoritative_capability_disabled',
+        frozenProfileDigest: 'c'.repeat(64),
+        currentProfileDigest: null,
+      },
+      pendingQuestion: { questionId: 'q', questionDigest: 'd'.repeat(64), questionVersion: '1', source: 'agent_request', text: 'x' },
+      structuredSlots: { version: 1 },
+    };
+    expect(Value.Check(taskWorkspaceSchema, workspace)).toBe(false);
+  });
+
+  it('rejects unknown kinds at the blob registry schema', () => {
+    expect(Value.Check(authoritativeBlobKindV2Schema, 'profile_snapshot')).toBe(true);
+    expect(Value.Check(authoritativeBlobKindV2Schema, 'made_up_kind')).toBe(false);
+  });
+
+  it('keeps the v1 answer body legal and requires question identity on the v2 body', () => {
+    expect(Value.Check(answerBodyV2Schema, { answer: 'text' })).toBe(false);
+    expect(Value.Check(answerBodyV2Schema, {
+      questionId: 'question-1',
+      questionVersion: 'MYf28MmooIcTH9zYHiYmYEzbJCymSvrmmWPX1W0B7Pk',
+      operationId: '3b2c8f4e-9a1d-4f6e-b2c4-1a2b3c4d5e6f',
+      answer: 'text',
+    })).toBe(true);
+    expect(Value.Check(answerBodyV2Schema, {
+      questionId: 'question-1',
+      questionVersion: 'MYf28MmooIcTH9zYHiYmYEzbJCymSvrmmWPX1W0B7Pk',
+      operationId: '3b2c8f4e-9a1d-4f6e-b2c4-1a2b3c4d5e6f',
+      decision: 'stop',
+    })).toBe(true);
   });
 });

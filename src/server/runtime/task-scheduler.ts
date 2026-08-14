@@ -787,6 +787,13 @@ export class TaskScheduler {
         throw contractIncompatible();
       }
       const status = workspace.task.status;
+      // v2 permanent failure (spec §10.3/§17.2/§21): shared TaskStatus
+      // `failed` is terminal for ordinary start/resume/retry/answer — only
+      // the authorized, reasoned, idempotent reopen_failed command (Task 11)
+      // may create replacement work. No v1 event ever projects it.
+      if (status === 'failed') {
+        throw invalidTransition('任务已失败，无法继续运行；请查看失败原因或重新创建任务。');
+      }
       if (kind === 'start') {
         if (status === 'running') {
           // Projected 'running' also covers never-started tasks that only

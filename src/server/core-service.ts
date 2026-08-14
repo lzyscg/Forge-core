@@ -882,6 +882,9 @@ export class CoreService {
       latestVersion: null,
       updatedAt,
       diagnostic: '任务数据损坏，需要人工检查任务目录。',
+      // No frozen snapshot identity is readable on a corrupt task: the
+      // protocol fails closed to 'none' and never guesses v2 (spec §4.1).
+      structuredProtocol: 'none',
     };
   }
 }

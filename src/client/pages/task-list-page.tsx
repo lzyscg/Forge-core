@@ -13,6 +13,12 @@ import { PublicErrorNotice } from './public-error-notice';
  * Terminal statuses whose frozen input can be rerun as a clone (plan Phase
  * E). `incompatible` legacy tasks are read-only and rebuild through cloning
  * alone (plan 2026-08-04 Task 3, spec §7.3).
+ *
+ * The v2 `failed` status (spec §10.3) is intentionally NOT listed: Task 2
+ * renders its row with the danger chip and zero action buttons (minimal
+ * neutral rendering). The recovery surface — server-returned legal recipes,
+ * reopen_failed, and the clone fallback — lands with the v2 recovery flow
+ * (Task 11), which may extend this list then.
  */
 const CLONE_STATUSES: readonly TaskStatus[] = ['completed', 'stopped', 'incompatible'];
 

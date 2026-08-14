@@ -34,6 +34,7 @@ import type {
   WorkspaceRoute,
 } from '../../shared/contracts';
 import type { StructuredIssueV1, StructuredSlotsSummaryV1 } from '../../shared/structured-slots';
+import { structuredProtocolOf } from '../../shared/authoritative-review-v2';
 import { makeStructuredIssue } from '../structured-slots/issues';
 import type { FrozenTemplate } from '../template/template-schema';
 import type { TaskRecord } from './task-store';
@@ -355,6 +356,10 @@ function buildSummary(
     latestVersion: latestVersion > 0 ? latestVersion : null,
     updatedAt: state.lastAt ?? task.record.createdAt,
     diagnostic: state.status === 'incompatible' ? state.incompatibleDiagnostic : null,
+    // Protocol identity of the frozen snapshot (spec §4.1): the projector
+    // owns the task's frozen template, so this is the authoritative production
+    // derivation — never status/template-id/event heuristics.
+    structuredProtocol: structuredProtocolOf(task.frozenTemplate),
   };
 }
 

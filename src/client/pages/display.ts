@@ -24,6 +24,9 @@ const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
   stopped: '已停止',
   corrupt: '任务文件损坏、只能查看诊断',
   incompatible: '契约不兼容，需使用当前模板重建',
+  // v2 permanent failure (spec §10.3): terminal for ordinary commands; the
+  // recovery surface renders from the server-provided summary (Task 11).
+  failed: '已失败、无法继续运行',
 };
 
 const TASK_STATUS_TONES: Record<TaskStatus, StatusChipTone> = {
@@ -37,6 +40,7 @@ const TASK_STATUS_TONES: Record<TaskStatus, StatusChipTone> = {
   stopped: 'neutral',
   corrupt: 'danger',
   incompatible: 'warning',
+  failed: 'danger',
 };
 
 export function taskStatusLabel(status: TaskStatus): string {

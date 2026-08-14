@@ -90,6 +90,10 @@ describe('typed JSON API', () => {
     expect(task.id.length).toBeGreaterThan(0);
     expect(task.templateId).toBe(ONE_TEMPLATE_ID);
     expect(task.status).toBe('ready');
+    // The wire summary carries the frozen-snapshot protocol (spec §4.1):
+    // this fixture is basic, so the production derivation is 'none'. The
+    // client must never need to guess it from status/template/events.
+    expect(task.structuredProtocol).toBe('none');
 
     const response = await client.get(`/api/tasks/${task.id}/workspace`);
     expect(response.status).toBe(200);
@@ -98,6 +102,9 @@ describe('typed JSON API', () => {
     expect(workspace.frozenInput).toEqual(validTaskRequest().input);
     expect(workspace.nodes).toEqual([]);
     expect(workspace.artifacts).toEqual([]);
+    expect(workspace.task.structuredProtocol).toBe('none');
+    expect(workspace.structuredSlots).toBeUndefined();
+    expect(workspace.authoritativeReview).toBeUndefined();
 
     // The workspace reports the same display version as the template detail.
     const detail = (await client.get(`/api/templates/${ONE_TEMPLATE_ID}`)).body as TemplateDetail;
@@ -392,6 +399,9 @@ describe('typed JSON API', () => {
     expect(list.status).toBe(200);
     const summaries = list.body as TaskSummary[];
     expect(summaries.find((summary) => summary.id === task.id)?.status).toBe('corrupt');
+    // A corrupt task has no readable frozen identity: the protocol summary
+    // fails closed to 'none' and never guesses v2 (spec §4.1/§10.5).
+    expect(summaries.find((summary) => summary.id === task.id)?.structuredProtocol).toBe('none');
     await client.close();
   });
 

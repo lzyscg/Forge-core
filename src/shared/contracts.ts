@@ -14,6 +14,66 @@ import type {
 /** Re-exported so gateway consumers import the seal fact from one place. */
 export type { SealRecord } from './structured-slots';
 
+/**
+ * Re-exports of the authoritative per-slot review v2 shared contracts (spec
+ * 2026-08-14 §5.1): the closed blob kinds and BlobRefV2, the profile
+ * bootstrap and execution eligibility, public Map/review/Finding/Seal DTOs,
+ * the pending question, the versioned answer/delete/reopen mutations and the
+ * v2 workspace summary. The module `authoritative-review-v2.ts` stays the
+ * single source; consumers keep importing the concrete names from there when
+ * they do not need the whole surface.
+ */
+export type {
+  AnswerTaskBodyV2,
+  ArtifactProvenanceV2,
+  AuthoritativeBlobKindV2,
+  AuthoritativeExecutionEligibilityReasonV1,
+  AuthoritativeFindingSummaryV2,
+  AuthoritativeMapSummaryV2,
+  AuthoritativeRelationSummaryV2,
+  AuthoritativeReviewExecutionEligibilityV1,
+  AuthoritativeReviewProfileSnapshotV1,
+  AuthoritativeReviewRoundSummaryV2,
+  AuthoritativeReviewSummaryV2,
+  AuthoritativeReviewWorkspaceV2,
+  AuthoritativeSealReadinessSummaryV2,
+  BlobRefV2,
+  CollectionPageV2,
+  DeleteTaskBodyV2,
+  DeleteTaskResultV2,
+  FailedTaskRecoverySummaryV2,
+  FailureRecoveryPayloadV2,
+  FindingDefectClassV2,
+  FindingPrimaryLocationKindV2,
+  FindingSeverityV2,
+  FindingSourceV2,
+  FindingStatusV2,
+  PendingQuestionV2,
+  PendingQuestionSourceV2,
+  RecoveryRecipeKeyV2,
+  RelationshipPolicyModeV2,
+  ReopenFailedRequestV2,
+  ReviewRoundKindV2,
+  ReviewRoundStateV2,
+  RoundBudgetOverrideV2,
+  SealRecordV2,
+  SnapshotCursorV2,
+  StructuredProtocol,
+  StructuredProtocolSource,
+  SystemArtifactDeliveryV2,
+  WorkItemKindV2,
+} from './authoritative-review-v2';
+export {
+  AUTHORITATIVE_BLOB_KINDS_V2,
+  QUESTION_VERSION_TOKEN_PATTERN,
+  QUESTION_VERSION_TOKEN_REGEX,
+  UUID_V4_PATTERN,
+  UUID_V4_REGEX,
+  isQuestionVersionToken,
+  isUuidV4,
+  structuredProtocolOf,
+} from './authoritative-review-v2';
+
 export type TaskStatus =
   | 'draft'
   | 'ready'
@@ -30,7 +90,14 @@ export type TaskStatus =
    * can only be viewed, exported or cloned onto the current template — never
    * started, resumed or retried.
    */
-  | 'incompatible';
+  | 'incompatible'
+  /**
+   * Formal v2 permanent failure (spec §10.3/§17.2): projected ONLY by the
+   * `structured_task_failed_v2` event family, never by v1 events. Terminal
+   * for ordinary start/resume/retry/answer; only the fenced, reasoned,
+   * idempotent `reopen_failed` command may create replacement work (Task 11).
+   */
+  | 'failed';
 
 export type NodeKind = 'input' | 'result' | 'human_request' | 'human_answer' | 'skill';
 export type RouteKind = 'message' | 'artifact';
@@ -104,6 +171,14 @@ export interface TaskSummary {
   latestVersion: number | null;
   updatedAt: string;
   diagnostic: string | null;
+  /**
+   * Structured-slot protocol of the task's FROZEN template snapshot (spec
+   * §4.1/§10.5): 'none' | 'v1' | 'v2'. Required on every summary so the
+   * client never guesses from status, template ID or events. Production
+   * projections derive it from the frozen snapshot via the shared helper;
+   * historical/corrupt fallbacks fail closed to 'none' (never guess v2).
+   */
+  structuredProtocol: 'none' | 'v1' | 'v2';
 }
 
 export interface WorkspaceNode {
@@ -287,9 +362,16 @@ export interface TaskWorkspace {
   /**
    * Optional structured-slots summary (spec §14 / design I01). Absent for
    * basic tasks; never embeds content, the full tree, Grants or private
-   * Drafts. Populated by the structured-slot engine.
+   * Drafts. Populated by the structured-slot engine. v2 tasks carry the
+   * versioned `authoritativeReview` summary instead (spec §14/§19.2).
    */
   structuredSlots?: StructuredSlotsSummaryV1;
+  /**
+   * Versioned authoritative per-slot review summary (spec §14/§19.2): v2
+   * tasks carry this instead of the v1 `structuredSlots` summary. Optional
+   * on the wire so v1 and basic workspaces decode unchanged.
+   */
+  authoritativeReview?: import('./authoritative-review-v2').AuthoritativeReviewWorkspaceV2;
 }
 
 export type CapabilityStage =

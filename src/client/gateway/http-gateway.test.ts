@@ -75,6 +75,7 @@ function stubSummary(id: string, overrides: Partial<TaskSummary> = {}): TaskSumm
     latestVersion: null,
     updatedAt: '2026-08-03T00:00:00.000Z',
     diagnostic: null,
+    structuredProtocol: 'none',
     ...overrides,
   };
 }
@@ -491,12 +492,37 @@ describe('createHttpGateway', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toBe('http://forge.test/api/tasks/task%201');
     expect(calls[0].init.method).toBe('DELETE');
+    expect(calls[0].init.body).toBeUndefined();
 
     // A deleted task leaves knownTaskIds: watchTask refuses it like any
     // never-seen id.
     expect(() => gateway.watchTask('task 1', () => {})).toThrowError(
       expect.objectContaining({ code: 'TASK_NOT_FOUND' }),
     );
+  });
+
+  it('sends the fenced v2 delete request as exact JSON when provided (spec §10.5)', async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init: RequestInit) => {
+        calls.push({ url, init });
+        return jsonResponse(200, { ok: true });
+      }),
+    );
+    const gateway = createHttpGateway({ apiBase: 'http://forge.test' });
+
+    await gateway.deleteTask('task-1', {
+      operationId: '3b2c8f4e-9a1d-4f6e-b2c4-1a2b3c4d5e6f',
+      reason: '任务已归档。',
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe('http://forge.test/api/tasks/task-1');
+    expect(calls[0].init.method).toBe('DELETE');
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({
+      operationId: '3b2c8f4e-9a1d-4f6e-b2c4-1a2b3c4d5e6f',
+      reason: '任务已归档。',
+    });
   });
 
   it('maps delete misses to the public TASK_NOT_FOUND envelope', async () => {

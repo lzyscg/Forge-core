@@ -190,6 +190,10 @@ describe('TaskStore', () => {
       latestVersion: null,
       diagnostic: null,
     });
+    // The protocol is derived from the FROZEN snapshot via the shared helper:
+    // this template is basic, so the summary fails closed to 'none' — never
+    // a guess from template id or catalog status (spec §4.1).
+    expect(task.structuredProtocol).toBe('none');
     expect(task.updatedAt).toBe(JSON.parse(readFileSync(paths.taskFile(task.id), 'utf8')).createdAt);
   });
 
@@ -268,9 +272,13 @@ describe('TaskStore', () => {
       latestVersion: null,
     });
     expect(typeof broken?.diagnostic).toBe('string');
+    // Corrupt records carry no readable frozen identity: the protocol fails
+    // closed to 'none' and never guesses v2 (spec §4.1).
+    expect(broken?.structuredProtocol).toBe('none');
     const healthySummary = listed.find((item) => item.id === healthy.id);
     expect(healthySummary?.status).toBe('ready');
     expect(healthySummary?.diagnostic).toBeNull();
+    expect(healthySummary?.structuredProtocol).toBe('none');
   });
 
   it('rejects readFrozenTemplate for unknown and corrupt tasks', async () => {
@@ -398,6 +406,10 @@ describe('TaskStore structured mode (Task 5, spec §5 / O05)', () => {
     expect(frozen.productionMode).toBe('structured_slots');
     expect(frozen.structuredSlots).not.toBeNull();
     expect(frozen.versionHash).toBe(task.templateVersion);
+    // The protocol derives from the frozen snapshot's contract version: the
+    // v1 fixture yields 'v1' through the shared helper (spec §4.1).
+    expect(task.structuredProtocol).toBe('v1');
+    expect((await taskStore.listTasks())[0].structuredProtocol).toBe('v1');
     // The task snapshot carries the slots contract subtree.
     expect(relativeTree(paths.taskSnapshotRoot(task.id))).toContain('slots/contract.yaml');
   });

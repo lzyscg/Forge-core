@@ -44,6 +44,13 @@ const CONTROLS_BY_STATUS: Partial<Record<TaskStatus, LifecycleControl[]>> = {
     { action: 'retryTask', label: '重试' },
     { action: 'stopTask', label: '停止' },
   ],
+  /**
+   * v2 permanent failure (spec §10.3): terminal for every ordinary lifecycle
+   * command. Task 2 renders the minimal neutral state (no action buttons);
+   * the recovery surface (server-returned legal recipes, reopen_failed, clone
+   * fallback) lands with the v2 recovery flow (Task 11).
+   */
+  failed: [],
 };
 
 /**

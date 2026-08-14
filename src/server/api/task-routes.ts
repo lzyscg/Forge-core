@@ -16,7 +16,12 @@
  */
 import { Value } from 'typebox/value';
 import type { TaskSummary, TaskWorkspace } from '../../shared/contracts';
-import { answerBodySchema, createTaskBodySchema } from '../../shared/api-schemas';
+import {
+  answerBodySchema,
+  answerBodyV2Schema,
+  createTaskBodySchema,
+} from '../../shared/api-schemas';
+import { structuredProtocolOf } from '../../shared/authoritative-review-v2';
 import type { CoreService } from '../core-service';
 import type { HumanAnswerRequest } from '../runtime/task-scheduler';
 import {
@@ -92,12 +97,22 @@ async function handleCreateTask({ service, req, res }: ApiRouteContext): Promise
 
 async function handleAnswer({ service, req, params, res }: ApiRouteContext): Promise<void> {
   const body = await readJsonObject(req);
-  if (!Value.Check(answerBodySchema, body)) {
+  // The answer wire schema is versioned by the FROZEN task protocol (spec
+  // §10.6): v2 tasks require questionId/questionVersion/operationId on every
+  // branch; v1 (and basic) tasks keep the legacy body. The dispatch reads the
+  // task's frozen snapshot — never the request body or current catalog.
+  const frozen = await service.tasks.readFrozenTemplate(params.taskId);
+  const isV2 = structuredProtocolOf(frozen) === 'v2';
+  if (!Value.Check(isV2 ? answerBodyV2Schema : answerBodySchema, body)) {
     throw new ApiError(
       'INVALID_INPUT',
-      '人工回答请求必须是 { answer: string } 或 { decision: continue|accept|stop, text?: string }。',
+      isV2
+        ? 'v2 回答请求必须携带 questionId、questionVersion、operationId 与 answer 或 decision。'
+        : '人工回答请求必须是 { answer: string } 或 { decision: continue|accept|stop, text?: string }。',
       null,
-      '按 { answer: string } 或 { decision, text? } 形状重新提交。',
+      isV2
+        ? '按 { questionId, questionVersion, operationId, answer|decision } 形状重新提交。'
+        : '按 { answer: string } 或 { decision, text? } 形状重新提交。',
     );
   }
   // Accepted asynchronously: validation errors still reject publicly, the
