@@ -289,16 +289,22 @@ v2 contract validator 强制 generator 与 reviewer 对活动任务的已提交 
 
 v2 pipeline 把“角色许可图”和“运行调度图”拆开。模板角色声明仍用于证明哪些 Agent 可以承担 structure_chunk/generation_batch/review/map_repair/content_repair/submitter，但这些声明不是运行时 completion Route；模板不能靠某个 Agent 的输出选择 review、repair 或 Seal 分支。加载器必须验证：每类可能由系统产生的 Agent WorkItem 都有且只有一个合法角色绑定，reviewer 满足上述独立身份约束，submitter 只接受系统已发布的 artifact WorkItem，系统内部 WorkItem 不要求伪造模板 Agent。
 
+平台容量/安全 profile 也必须成为任务的不可变权威，而不是只记录一个可漂移的名称。启用清单解析完整 canonical `AuthoritativeReviewProfileSnapshotV1`（所有 limit、lease/retry/recovery/cursor/GC/event/validator/assembler policy 与实现身份）及其 digest；创建 v2 任务时把原始 bytes 归档进冻结快照/Blob，并让安装 task index、template hash、AuthorityBase、plan/dispatch/grant/validator/Seal 全链引用该 profileSnapshotRef。当前 capability 只决定能否新建/执行；历史读取、genesis replay、删除和 corruption 诊断必须使用任务冻结 profile，即使当前 profile 已换版或 capability disabled。缺冻结 bytes fail closed，不允许按当前 profile 猜测。
+
+profile 的语义身份与 Blob 地址也是两个 digest：`profileDigest` 对不含该字段的 canonical profile body 求 SHA-256；`profileSnapshotRef.digest` 对含 `profileDigest` 的完整 canonical object bytes 求 SHA-256。task index/FrozenTemplate 分别绑定并交叉验证这两个值，绝不要求二者相等。`profile_snapshot` 是封闭 Blob kind，prepared/active index 和删除 tombstone 在 purged 前都是其正式 GC root，避免尚未 start 的任务丢失冻结 profile。
+
+当前部署暂时 disabled、缺少冻结 ABI，或只授权同 identity 的另一个 profile digest 时，不得把事件投影改成终态 `incompatible`。系统另外派生可逆、非事件权威的 `executionEligibility=blocked`，保留任务的底层事件状态、WorkItem disposition 和 durable wakeup identity，只阻止 create/start/lease/reclaim/会产生运行事件的 mutation；只读、genesis、删除和诊断继续使用冻结 profile。恢复精确 profile digest/ABI 后，启动扫描重新登记原本可运行的任务；stopped、waiting_human、retry-budget-exhausted 等底态仍按原规则处置。`incompatible` 只表示冻结 schema/协议永久不受本二进制支持，仍是终态。
+
 v2 使用新的封闭 capability 集合，不向 v1 的十项枚举追加字段：
 
 | Session kind | 必需 capability | 允许的终结结果 |
 | --- | --- | --- |
 | `structure_chunk` | `read_structure_contract`、`read_map_build_frontier`、`append_map_candidate_chunk`、`finish_map_build` | chunk committed、finish proposed 或 incomplete |
-| `review_map_batch` | `read_map_candidate`、`submit_map_node_review`、`submit_map_relation_review`、`complete_review_assignment` | assignment complete 或 incomplete |
-| `review_map_whole` | `read_map_candidate`、`submit_map_whole_finding`、`complete_review_assignment` | Map observation complete 或 incomplete |
+| `review_map_batch` | `read_map_candidate`、`submit_map_node_review`、`submit_map_relation_review`、`submit_finding_verification`、`complete_review_assignment` | assignment complete 或 incomplete |
+| `review_map_whole` | `read_map_candidate`、`submit_map_whole_finding`、`submit_finding_verification`、`complete_review_assignment` | Map observation complete 或 incomplete |
 | `generation_batch` | `read_active_map`、`read_slot_content`、`write_slot_content`、`submit_content_draft` | generation batch commit 或 attempt incomplete |
-| `review_content_batch` | `read_active_map`、`read_slot_content`、`submit_slot_review`、`submit_relation_review`、`complete_review_assignment` | assignment complete 或 incomplete |
-| `review_content_whole` | 上述 review 读取能力、`submit_whole_tree_finding`、`complete_review_assignment` | content observation complete 或 incomplete |
+| `review_content_batch` | `read_active_map`、`read_slot_content`、`submit_slot_review`、`submit_relation_review`、`submit_finding_verification`、`complete_review_assignment` | assignment complete 或 incomplete |
+| `review_content_whole` | 上述 review 读取能力、`submit_whole_tree_finding`、`submit_finding_verification`、`complete_review_assignment` | content observation complete 或 incomplete |
 | `map_repair` | Map/内容/Finding 读取、`write_map_patch`、`submit_map_patch`、`request_scope_expansion` | Map commit、scope request 或 incomplete |
 | `content_repair` | Map/内容/Finding 读取、`write_slot_content`、`submit_content_draft`、`request_scope_expansion` | content commit、scope request 或 incomplete |
 
@@ -1097,6 +1103,10 @@ reviewerAttemptId
 
 这避免了“返修已提交”被误当成“问题已解决”，也避免系统仅凭一个无关槽位的 pass 自动关闭 Finding。
 
+`submit_finding_verification` 是 Map/content reviewer assignment 的封闭 capability，不是 Finding-close capability。输入只接受 `{ findingId, repairStage, verdict: resolved | still_present, evidence[], clientOperationId }`；task/round/assignment/attempt/AuthorityBase 由 tool closure 提供。服务端要求 Finding 来源为 reviewer、当前 stage=`addressed`、stage 在当前 assignment 的 `verificationFindingStages` 中且 candidate/map/content/evidence baseline 与当前轮一致。每个验证目标恰好一次；同 operation 同载荷幂等，不同载荷 conflict。工具先写 attempt-bound review draft journal，只有 `complete_review_assignment` 同时校验普通 verdict 目标与 verification 目标全部覆盖后，才在同一个 `AssignmentLedgerBlob` 中冻结 ReviewFacts 与 FindingVerificationRecords 并原子发布，因此不存在悬空 verification 或先关闭后补 verdict 的窗口。`resolved` 仍只是一条语义事实；Finding stage 的 verified/closed 状态只能由 settlement 系统投影。
+
+普通批次不能单独调用自由 `submit_finding`。节点/关系/槽位 Finding 必须作为对应 verdict 的 `findingDrafts` 原子提交；若问题主目标在 assignment 外，只能把 bounded `crossScopeFindingDrafts` 附着到一个当前 assigned source-target verdict。每项必须指向同一冻结 baseline 中确实存在的 primary target，并保存 source target、上下文/evidence digest 与 operation-local key。`complete_review_assignment` 将它与 ledger 原子冻结，并创建不可丢失的系统 routing obligation：未审核 primary target 注入其既定 assignment/确定性 successor，已审核 primary target 注入 whole observation 强制判别清单；blocking obligation 在当前基线获得目标 verdict 前阻止 settlement。只有 whole observation session 可通过 `submit_map_whole_finding` / `submit_whole_tree_finding` 创建无 batch source-target 的 anchored Finding。这样 review assignment 的每个 Finding 都有一个可验证的目标事实、跨范围来源或整体观察来源。
+
 Map stage 验证绑定 `candidateId`，content stage 验证绑定活动 `mapId`；未适用的身份必须为 null。当前有效性只比较该 Finding stage 绑定的 Map context、证据槽位 digest 与 reviewPolicyDigest。无关 Map 区域变化不会让验证记录全量 stale。
 
 system_validator 来源的 Finding 不交给审核 Agent 作语义验证：系统在新基线上重跑同一个冻结 validator，当前 stage 通过则生成 validator verification fact 并把该 stage 投影为 verified，仍失败则回到 open；只有所有 required stage 均 verified 才投影 `verified_closed`。这样确定性规则由系统闭环，语义问题由审核 Agent 闭环。
@@ -1225,7 +1235,7 @@ GrantInstance
   instanceDigest
 ```
 
-创建 Agent 写 WorkItem 的原子批次同时创建不可变 WriteGrantSpec；WorkItem 保存 `grantSpecRef: BlobRefV2`，不保存尚不存在的 attempt-bound instance。GrantSpec.authorityBaseRef 必须与 WorkItem.authorityBaseRef 完全相同，且其直列的 map/manifest/plan/staging refs 必须等于 AuthorityBaseSetV2 中对应子 ref；二者任一不一致即 schema error。每次 Agent WorkItem lease envelope 在生成 attemptId 后，按同一 scope 原子签发 GrantInstance，并把 `grantInstanceRef: BlobRefV2` 放入 AssignmentDispatch。GrantInstance 是服务端签发、不可伪造的 capability token；工具入参可携带 ref.digest 作为 capability token，但服务端必须从 WorkItem/dispatch 的 ref 闭包解析并逐字段校验 spec、workItem、leaseEpoch、attempt、agent、snapshot 和活动基线 BlobRefs。lease reclaim/attempt 终结会废弃旧 instance，新 lease 依据同一 WriteGrantSpec 重签新 instance；scope 不因重签改变。
+创建 Agent 写 WorkItem 的原子批次同时创建不可变 WriteGrantSpec；WorkItem 保存 `grantSpecRef: BlobRefV2`，不保存尚不存在的 attempt-bound instance。GrantSpec.authorityBaseRef 必须与 WorkItem.authorityBaseRef 完全相同，且其直列的 map/manifest/plan/staging refs 必须等于 AuthorityBaseSetV2 中对应子 ref；二者任一不一致即 schema error。每次 Agent WorkItem lease envelope 在生成 attemptId 后，按同一 scope 原子签发 GrantInstance，并把 `grantInstanceRef: BlobRefV2` 放入 AssignmentDispatch。GrantInstance 是服务端签发、不可伪造的内部 capability token；Agent 工具入参不得携带该 ref/digest。tool closure 从当前 WorkItem/dispatch 解析它并逐字段校验 spec、workItem、leaseEpoch、attempt、agent、snapshot 和活动基线 BlobRefs。lease reclaim/attempt 终结会废弃旧 instance，新 lease 依据同一 WriteGrantSpec 重签新 instance；scope 不因重签改变。
 
 四类 spec 的创建边界固定如下：
 
@@ -1468,7 +1478,7 @@ mixed 的初始内容写集合不是“所有受影响槽位”：它由该 Find
 - 初次生成只能在 MapReviewBundle 当前有效且 MapSnapshot 已激活后启动，并只能写系统当次 GenerationGrant 指定的内容槽位。
 - 返修只能写 `writeSlotIds`。
 - 一次提交只要包含任何未授权槽位，整个提交原子拒绝，不部分接受。
-- 提交必须带当前 `grantInstanceRef`、其 `grantSpecRef`、`authorityBaseRef` 和读取时的 map/content refs；服务端从权威 refs 解析对象，任一过期即拒绝。
+- Agent 提交只带业务载荷、读取时获得的 expected semantic/root digests 和 `clientOperationId`；当前 `grantInstanceRef`、`grantSpecRef`、`authorityBaseRef` 与权威 map/content refs 都由 tool closure 注入并从服务端对象解析，任一过期即拒绝。Agent 不得回传或选择这些 capability refs。
 
 ### 14.3 扩权请求
 
@@ -1478,7 +1488,7 @@ mixed 的初始内容写集合不是“所有受影响槽位”：它由该 Find
 - 关联关系和连续性证据；
 - 不扩权会产生的矛盾。
 
-工具调用使用 `grantInstanceDigest + requestedScope + evidence + clientOperationId`，本身不修改当前 WriteGrantSpec/GrantInstance，也不允许在已有 staging batch commit 之后追加请求。系统根据位置/关系图、Finding、模板影响策略和 profile 上限确定性批准或拒绝，并在一个 CAS envelope 结束当前 attempt、abandon 当前 draft journal、完成/ supersede 当前 WorkItem 且废弃旧 GrantInstance。
+工具调用只使用 `requestedScope + evidence + clientOperationId`；当前 GrantInstance/WriteGrantSpec 从 closure 解析。本调用不修改它们，也不允许在已有 staging batch commit 之后追加请求。系统根据位置/关系图、Finding、模板影响策略和 profile 上限确定性批准或拒绝，并在一个 CAS envelope 结束当前 attempt、abandon 当前 draft journal、完成/ supersede 当前 WorkItem 且废弃旧 GrantInstance。
 
 - **批准**：predecessor RepairPlan 原子失活，创建 `origin.kind=successor/scope_expansion` 的唯一 plan revision，继承已提交 staging/manifest/key lineage，重新切片尚未完成 batches；同批创建 successor 的首个全新 WorkItem 和全新 WriteGrantSpec。新 spec 绑定新 `planRevisionId/workItemId/expectedStagingRootRef/planKeyLedgerRef`。
 - **拒绝**：写 `structured_repair_scope_expansion_rejected_v2`，保持 predecessor plan/staging active，但仍创建 replacement WorkItem 与全新、同 scope 的 WriteGrantSpec；旧 spec 因绑定旧 WorkItem 永不复用。拒绝理由作为下一 AssignmentDispatch 的公开输入。若同一请求重放，返回相同 replacement；不同载荷 conflict。
@@ -1619,7 +1629,6 @@ SystemArtifactDelivery
   sealRecordRef: BlobRefV2
   sealRecordDigest  # 必须等于 ref.digest，仅展示
   artifactId
-  artifactVersion
   artifactRef: BlobRefV2
   artifactDigest  # 必须等于 ref.digest，仅展示
   custodyRef: BlobRefV2
@@ -1639,7 +1648,7 @@ ArtifactProvenanceV2 =
       custodyRef: BlobRefV2 }
 ```
 
-系统 Seal 原子批次以稳定 `publishOperationId = sealWorkItemId + artifactRef.digest` 同时写正式 `artifact_published_v2`、`structured_system_artifact_delivery_created`、SystemArtifactDelivery 和带 `inputArtifactDeliveryId` 的 submitter WorkItem；重复提交必须返回同一 artifactVersion/delivery，载荷不同则 conflict。storage/API schema 依据 producerKind 校验各自字段，System 来源明确禁止 `sourceNodeId`，且所有跨对象 custody 都必须为 BlobRefV2；Agent v1/v2 来源仍要求它。Submitter 的 AssignmentDispatch/agent_input 通过 deliveryRef 装配 `currentInputArtifact`，不依赖 v1 `inputVersion + agent_result.sourceNodeId`。final commit validator 对 v2 system artifact 使用封闭规则：delivery 存在且当前、关联 system Seal WorkItem completed、SealRecord/artifact/custody/template refs 全匹配、目标 submitter 与当前 WorkItem 一致；任一失败返回不可达。它不调用 v1 committed Agent Route walk，也不允许 humanAuthorized 绕过。UI 对 Agent provenance 保留“定位节点”，对 System provenance 展示 SealRecord/模板快照/producer WorkItem 链且不渲染不存在的节点链接；旧 v1 artifact input、`sourceNodeId` 和 `assertReachable` 规则保持原义。
+`SystemArtifactDelivery` 不保存 `artifactVersion`，避免内容寻址对象依赖必须在 store lock 内分配的序号。系统 Seal 原子批次以稳定 `publishOperationId = sealWorkItemId + artifactRef.digest` 同时写正式 `artifact_published_v2 { artifactVersion, deliveryRef, ... }`、`structured_system_artifact_delivery_created` 和带 `inputArtifactDeliveryId` 的 submitter WorkItem；delivery blob 在锁前完成并 pin，artifactVersion 在锁内从 v1/v2 统一历史分配。projection/API 由 publish event 派生版本并交叉校验其 deliveryRef，重复提交返回同一 artifactVersion/delivery，载荷不同则 conflict。storage/API schema 依据 producerKind 校验各自字段，System 来源明确禁止 `sourceNodeId`，且所有跨对象 custody 都必须为 BlobRefV2；Agent v1/v2 来源仍要求它。Submitter 的 AssignmentDispatch/agent_input 通过 deliveryRef 装配 `currentInputArtifact`，不依赖 v1 `inputVersion + agent_result.sourceNodeId`。final commit validator 对 v2 system artifact 使用封闭规则：delivery 存在且当前、关联 system Seal WorkItem completed、SealRecord/artifact/custody/template refs 全匹配、目标 submitter 与当前 WorkItem 一致；任一失败返回不可达。它不调用 v1 committed Agent Route walk，也不允许 humanAuthorized 绕过。UI 对 Agent provenance 保留“定位节点”，对 System provenance 展示 SealRecord/模板快照/producer WorkItem 链且不渲染不存在的节点链接；旧 v1 artifact input、`sourceNodeId` 和 `assertReachable` 规则保持原义。
 
 ## 17. 状态机与事件模型
 
@@ -1913,22 +1922,26 @@ WorkItem 状态因此扩展 `parked`；合法转换包含 `ready|leased -> parke
 
 ### 18.1 编排 Agent
 
+以下签名只列业务参数；所有 mutating 调用还必须携带 18.4 的 `clientOperationId`，而 attempt/AuthorityBase/Grant/lease identity 全由 server closure 提供。实现的 exact schema 以这一规则补全，不能把未列出的 authority 字段暴露给 Agent。
+
 - `get_map_assignment()`
 - `read_active_map()`
 - `read_slot_tree()`
 - `read_findings()`
-- `open_map_chunk(grantInstanceDigest)`
+- `open_map_chunk()`
 - `append_map_candidate_chunk(nodes, relations, expectedFrontierDigest)`
 - `complete_map_chunk(expectedChunkOrdinal)`
 - `finish_map_build(expectedChunkCount, expectedFrontierDigest, expectedRootCount)`
 - `read_map_repair_staging(repairPlanId, revision, selector)`
 - `propose_map_repair_batch(patch, expectedStagingMapRootDigest, planKeyLedgerDigest)`
-- `request_map_repair_scope_expansion(grantInstanceDigest, requestedMapScope, evidence, clientOperationId)`
+- `request_map_repair_scope_expansion(requestedMapScope, evidence, clientOperationId)`
 - `submit_map_repair_batch(expectedStagingMapRootDigest)`
 
 初始编排只提交当前 Grant 允许的 chunk；`complete_map_chunk` 返回“分块已接收/被拒绝”，不创建活动候选。只有 `finish_map_build` 的声明通过连续 ordinal/frontier/root/profile 校验后，系统才创建 `system_map_finalize`。返修工具强制校验当前 RepairPlan revision、expected staging root、plan key ledger、batch scope 和 lease；每批只返回新的私有 staging root/ledger，不接受 candidateId，也不允许 Agent 指定批准或活动版本。最后一批只创建 finalizer；即使 staging 完全满足 schema，也必须等待 finalizer 和 MapReviewRound。
 
 ### 18.2 生成 Agent
+
+以下 mutating 签名同样必须携带 18.4 的 `clientOperationId`；省略仅为避免重复展示。
 
 - `get_generation_assignment()`
 - `read_active_map()`
@@ -1936,14 +1949,16 @@ WorkItem 状态因此扩展 `parked`；合法转换包含 `ready|leased -> parke
 - `read_relations(selector)`
 - `read_findings()`
 - `read_content_repair_staging(repairPlanId, revision, selector)`
-- `open_content_draft(grantInstanceDigest)`
+- `open_content_draft()`
 - `write_slot_content(slotId, content)`
-- `request_content_repair_scope_expansion(grantInstanceDigest, requestedSlotIds, evidence, clientOperationId)`
+- `request_content_repair_scope_expansion(requestedSlotIds, evidence, clientOperationId)`
 - `submit_content_draft(expectedContentOrStagingRootDigest)`
 
 初次生成和返修都使用“WriteGrantSpec + 每 lease GrantInstance”；initial generation 绑定当前 GenerationPlan/content root，repair batch 绑定 RepairPlan revision/private staging root/Findings。服务端在每次写工具调用和最终提交时双重检查 GrantInstance；repair batch 提交只推进私有 staging root，最后一批只创建 system_repair_finalize，不能直接发布完整内容根或 ReviewRound。
 
 ### 18.3 审核 Agent
+
+以下 mutating 签名同样必须携带 18.4 的 `clientOperationId`；省略仅为避免重复展示。
 
 - `get_review_assignment()`
 - `read_map_candidate()`
@@ -1965,7 +1980,7 @@ WorkItem 状态因此扩展 `parked`；合法转换包含 `ready|leased -> parke
 
 ### 18.4 幂等与并发
 
-所有写工具要求 `attemptId + clientOperationId + authorityBaseRef`：
+所有写工具只从 server closure 绑定 `attemptId + authorityBaseRef`，这两个字段不得出现在 Agent 输入；Agent 输入必须携带 `clientOperationId`。每个工具的 exact schema 都显式声明该字段，或由受信 runner 提供并持久化等价的稳定 Pi tool-call operation identity，不能以易变数组序号/时间戳代替：
 
 - 相同操作、相同载荷重放返回原结果。
 - 相同操作 ID、不同载荷返回 conflict。
@@ -2017,12 +2032,12 @@ structured-slots/
 
 所有目录共享封闭的 `BlobRefV2 = { kind, digest, byteLength, mediaType, schemaVersion }`，事件和其他 blob 只能保存这个 ref，不接受 Agent 提供的任意路径。写事务采用“先耐久、后引用”，并以安装级持久 publication pin/GC generation 屏障消除 put 与 append 之间的删除竞态：
 
-1. 在同一存储根的 `publication-pins/<pinId>.json` durable 创建 `PublicationPin = { pinId, taskId, operationId, expectedTailCommitId, blobRefs[], gcGeneration, createdAtServer, ownerEpoch }`，文件与目录均 fsync；相同 operationId/refs 幂等，不同载荷冲突。
+1. 在同一存储根的 `publication-pins/<pinId>.json` durable 创建 `PublicationPin = { pinId, taskId, operationId, expectedTailCommitId, blobRefs[], gcGeneration, createdAtServer, ownerEpoch, intent }`，其中 `intent = { handlerKind, handlerVersion, canonicalOperationPayloadRef, expectedResultIdentity }` 足以让 allowlisted server handler 确定性重建同一事件 envelope；不持久化可执行 callback 或 Agent 私有文本。文件与目录均 fsync；相同 operationId/refs/intent 幂等，不同载荷冲突。
 2. 服务端把 canonical bytes 写入同文件系统临时文件，校验 digest/size、fsync 并原子 rename 到内容地址，再 fsync 父目录；同 digest 已存在时必须逐字节/长度一致，否则存储进入 corrupt。GC 必须排除所有 durable pins 引用的 ref，以及 `objectGeneration > markStartGeneration` 的对象。
 3. append CAS 前在 pin 持有的跨进程 store lock/generation read barrier 下重新验证所有 blob 和 expected task tail；验证成功才提交正式 refs。事件 envelope 保存 `publicationPinId` 供审计，但权威可见性仍来自事件本身。
 4. commit durability 确认后才 durable 标记 pin committed 并删除 pin；响应丢失以 operationId/commitId 重放。崩溃发生在 put 后、事件前留下 pinned orphan，绝不会被 GC 抢删；事件提交后 blob 已保证可读。
 
-GC 每轮先在同一个跨进程 generation lock 下记录 `markStartGeneration` 和活动 pin 快照，mark/sweep 期间持续重新读取 pin；删除前再次在 lock 下确认 ref 未被 event roots、任一 active pin或新 generation 对象保护。启动恢复扫描 pins：若 operationId 已有合法 commit，则验证 refs 后清 pin；若 expected tail 仍匹配且 command 可安全重放，则续提交流程；否则在冻结 prepare TTL 与 owner lease 过期后标记 abandoned，至少再过一个完整 GC generation 才可回收。锁文件包含 owner PID/start token/lease epoch，进程死亡只能通过原子 epoch takeover；不得仅凭墙钟删除活 pin。
+GC 每轮先在同一个跨进程 generation lock 下记录 `markStartGeneration` 和活动 pin 快照，mark/sweep 期间持续重新读取 pin；删除前再次在 lock 下确认 ref 未被 event roots、任一 active pin或新 generation 对象保护。启动恢复扫描 pins：若 operationId 已有合法 commit，则验证 refs 后清 pin；若 expected tail 仍匹配，且 allowlisted `handlerKind/version + canonicalOperationPayloadRef` 能字节一致重建并重新证明 authority/idempotency，则续提交流程；intent 缺失/未知、重建不同或已不合法时绝不猜事件，而是在冻结 prepare TTL 与 owner lease 过期后标记 abandoned，至少再过一个完整 GC generation 才可回收，并由所属 WorkItem/lifecycle recovery 产生新的合法操作。锁文件包含 owner PID/start token/lease epoch，进程死亡只能通过原子 epoch takeover；不得仅凭墙钟删除活 pin。
 
 MapBuild active manifest/key ledger、Generation/RepairPlan manifest、repair staging root/key ledger、各类 ValidationReceipt/ValidationWarningRoot/ValidationWarningCustodyRoot/ValidatorAggregate/ValidatorFailure/MapReviewSettlementCore/SealValidationBundle、candidate contribution manifest、Assignment/Adoption ledger 都遵守这一协议。私有对象不会因为“文件存在”而可见：只有当前 event-derived plan/build revision 的 manifest 闭包能授权读取，且 staging/Grant/receipt API 继续执行任务、WorkItem、revision 与 lease 校验。finalizer 只能遍历事件绑定的唯一 active manifest，不能扫描目录猜“最新文件”。
 
