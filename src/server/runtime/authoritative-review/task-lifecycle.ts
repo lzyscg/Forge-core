@@ -781,6 +781,15 @@ export class TaskLifecycleServiceV2 {
       failureDigest: string;
       failureRecoveryPayloadRef: BlobRefV2 | null;
       taskFailure: boolean;
+      /**
+       * Task 12 I-1: the attempt/command identity the CALLER holds. When
+       * provided, the method rejects with `INVALID_TRANSITION` (ZERO writes)
+       * unless it equals the active lease's bound attempt/command — a
+       * stale-epoch late terminal can never terminal-fail the CURRENT
+       * re-leased attempt (§10.2).
+       */
+      attemptId?: string | null;
+      commandId?: string | null;
     },
   ): Promise<void> {
     await this.assertNotDeleted(taskId);
@@ -799,6 +808,21 @@ export class TaskLifecycleServiceV2 {
       throw new TaskLifecycleError('INVALID_TRANSITION', `WorkItem ${input.workItemId} 未处于租赁状态。`);
     }
     const lease = state.activeLease;
+    // I-1: the caller's identity must match the active lease's bound carrier.
+    const callerAttemptId = input.attemptId ?? null;
+    const callerCommandId = input.commandId ?? null;
+    if (callerAttemptId !== null && lease?.attemptId !== callerAttemptId) {
+      throw new TaskLifecycleError(
+        'INVALID_TRANSITION',
+        `调用方 attempt '${callerAttemptId}' 与当前租赁 attempt '${String(lease?.attemptId ?? null)}' 不一致。`,
+      );
+    }
+    if (callerCommandId !== null && lease?.commandId !== callerCommandId) {
+      throw new TaskLifecycleError(
+        'INVALID_TRANSITION',
+        `调用方 command '${callerCommandId}' 与当前租赁 command '${String(lease?.commandId ?? null)}' 不一致。`,
+      );
+    }
     const attempt =
       lease === null || lease === undefined
         ? undefined
@@ -858,6 +882,7 @@ export class TaskLifecycleServiceV2 {
       budgetPolicyDigest: null,
       failureRecoveryPayloadRef: input.failureRecoveryPayloadRef,
       taskFailure: input.taskFailure,
+      resultRefs: [],
     };
     const tail = await this.tail(taskId);
     const preparedRefs: BlobRefV2[] = [base];

@@ -1488,6 +1488,30 @@ export type SystemCommandKindV2 =
 export type AttemptExecutionKindV2 = 'structured' | 'generic' | 'command';
 
 /**
+ * Task 12 §9.2 completion gate: true when the workitem's §17.5 completion
+ * envelope folds a domain result/successor, so a bare `work_item_completed`
+ * (no domain result carrier) is ILLEGAL. Enumerated per design §17.5:
+ * - every structured agent session (sessionKind non-null) folds its chunk/
+ *   ledger/content/staging result + successor in the same batch;
+ * - every system command (map_finalize, generation_finalize, repair_finalize,
+ *   migration_validation_batch, review_settlement, seal) folds its candidate/
+ *   manifest/round/Seal/delivery result + successor in the same batch;
+ * - the generic Submitter (null sessionKind) is NOT gated at the bare level:
+ *   its result IS the delivery-bound submission (the completion event carries
+ *   the exact `inputArtifactDeliveryId` the projector validates), wired through
+ *   the ActionCommitter v2 seam in Task 20.
+ */
+export function completionKindRequiresResult(
+  kind: WorkItemKindV2,
+  sessionKind: StructuredSessionKindV2 | null,
+): boolean {
+  if (kind === 'agent_assignment') {
+    return sessionKind !== null;
+  }
+  return true;
+}
+
+/**
  * Task 10 EXTENDED closed event-builder set of the lease_or_retry family
  * (design §19.1 "lease/retry state-only mutation"; spec §7.1). The frozen
  * Task 3 union carried only the three original builders whose envelopes were
@@ -1522,7 +1546,17 @@ export type WorkItemMutationEventBuilderV2 =
    * `structured_task_failed_v2` in the SAME batch (§10.3). Registered NOW so
    * the reopen/startup/rejection tests have a legal failing path.
    */
-  | 'work_item_terminal_failed';
+  | 'work_item_terminal_failed'
+  /**
+   * Task 12 (constraint A round 3): the SUCCESS completion envelope the
+   * attempt-coordinator commits — [attempt/command completed,
+   * work_item_completed] in ONE batch (§9.2 "Agent completion plus ... attempt
+   * terminal, WorkItem completion" all-or-none). The terminal carrier set
+   * (attemptFamily/attemptId/commandId/logicalAssignmentId/sessionKind/
+   * agentId/inputArtifactDeliveryId) already lives in the union, so the branch
+   * is byte-rebuildable from the pin alone.
+   */
+  | 'work_item_completed';
 
 /**
  * §8/§7.1 exact closed union of canonical publication operation payloads.
@@ -1597,6 +1631,18 @@ export type PublicationOperationPayloadV2 =
       retryNotBefore: string | null;
       validatorAggregateRef: BlobRefV2 | null;
       budgetPolicyDigest: string | null;
+      /**
+       * Task 12 (constraint A round 3): the SUCCESS-completion result carrier
+       * of the `work_item_completed` builder. For workitem kinds whose §17.5
+       * envelope folds a domain result/successor (every structured agent
+       * session and every system command), this MUST be non-empty — the
+       * all-or-none gate closes the "completed WorkItem without its result"
+       * half-state (§9.2). The refs are pinned/verified in the SAME batch;
+       * later domain-completion builders emit the events that reference them.
+       * Empty for un-gated kinds (the generic submitter, whose result is the
+       * delivery-bound submission).
+       */
+      resultRefs: BlobRefV2[];
     }
   | {
       /**

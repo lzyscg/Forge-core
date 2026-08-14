@@ -50,6 +50,7 @@ import { projectStructuredSlotState } from '../storage/structured-slot-state';
 import type { BasicTurnContractV1, BasicTurnContractV2, FrozenAgentConfig, FrozenTemplate, StructuredTurnContractV3 } from '../template/template-schema';
 import type { FrozenStructuredSlotContractV1 } from '../template/structured-slot-contract';
 import { isAuthoritativeStructuredTurnContractV4, isStructuredTurnContractV3, TEMPLATE_ERROR_CODES, TemplateError } from '../template/template-schema';
+import { structuredProtocolOf } from '../../shared/authoritative-review-v2';
 import type { StructuredRuntimeEnvironmentV1 } from '../structured-slots/runtime-capability';
 import type { AuthoritativeReviewRuntimeEnvironmentV1 } from '../structured-slots/authoritative-review-capability';
 import { isStructuredRuntimeEnabled } from '../structured-slots/runtime-capability';
@@ -175,6 +176,14 @@ export interface TaskRunnerOptions {
    * gates recheck it; never a second default.
    */
   authoritativeReviewEnvironment?: AuthoritativeReviewRuntimeEnvironmentV1;
+  /**
+   * Task 12 v2 runner entry seam (additive): the authoritative attempt
+   * coordinator (the lease -> execute -> complete loop over the v2 scheduler's
+   * leased dispatch). When wired, `runV2Next` delegates the whole authoritative
+   * turn to it; an unwired v2 task fails closed with a typed runtime failure.
+   * CoreService wires this together with the Task 12 scheduling tick.
+   */
+  v2Attempts?: Pick<import('./authoritative-review/attempt-coordinator').V2AttemptCoordinator, 'runNext'>;
 }
 
 /** Per-call retry context the scheduler supplies (plan Task 5 Step 3). */
@@ -733,6 +742,8 @@ export class TaskRunner {
 
   private readonly authoritativeReviewEnvironment: AuthoritativeReviewRuntimeEnvironmentV1 | undefined;
 
+  private readonly v2Attempts: Pick<import('./authoritative-review/attempt-coordinator').V2AttemptCoordinator, 'runNext'> | undefined;
+
   /**
    * Per-task pagination cursor signers (wiring note 9): ONE signer per task so
    * a model-held cursor keeps verifying across requests and turns within the
@@ -766,6 +777,7 @@ export class TaskRunner {
     this.paths = options.paths;
     this.runtimeEnvironment = options.runtimeEnvironment;
     this.authoritativeReviewEnvironment = options.authoritativeReviewEnvironment;
+    this.v2Attempts = options.v2Attempts;
   }
 
   /**
@@ -1067,6 +1079,101 @@ ${checklist}`;
     return collectPendingAgents(events, (agentId) =>
       frozen.routes.filter((route) => route.from === agentId && route.kind === 'artifact').length,
     );
+  }
+
+  /**
+   * Task 12 v2 runner entry (spec §4.4): the authoritative review branch of
+   * the scheduler's execution loop. Bound to the FROZEN protocol — a v1/none
+   * task is rejected before any dispatch; consumes the leased AssignmentDispatch
+   * through the v2 attempt coordinator, which injects the v2 tool provider,
+   * persists only public trace and submits the completion to the v2 committer
+   * (the facade-backed terminal batch). `runStructuredNext` and the basic path
+   * stay byte-for-byte; this entry is additive and fails closed when the
+   * coordinator is not wired.
+   */
+  async runV2Next(taskId: string, signal?: AbortSignal): Promise<RunNextResult> {
+    const frozen = await this.frozenFor(taskId);
+    if (structuredProtocolOf(frozen) !== 'v2') {
+      throw RuntimeFailure.permanent(
+        'STRUCTURED_TURN_NOT_RUNNABLE',
+        'runV2Next 需要 v2 结构化协议。',
+      );
+    }
+    if (this.v2Attempts === undefined) {
+      throw RuntimeFailure.permanent(
+        'AUTHORITATIVE_RUNTIME_NOT_WIRED',
+        '权威评审执行器尚未接入。',
+      );
+    }
+    const outcome = await this.v2Attempts.runNext(taskId, 'task_owner', signal);
+    switch (outcome.kind) {
+      case 'idle':
+        return {
+          processedNodeId: null,
+          committed: false,
+          taskCompleted: false,
+          waitingHuman: false,
+          attemptFailed: false,
+          retryable: false,
+          attemptCount: 0,
+          pendingAgentIds: [],
+        };
+      case 'completed':
+        return {
+          processedNodeId: outcome.workItemId,
+          committed: true,
+          taskCompleted: false,
+          waitingHuman: false,
+          attemptFailed: false,
+          retryable: false,
+          attemptCount: outcome.leaseEpoch,
+          pendingAgentIds: [],
+        };
+      case 'retryable_failed':
+        return {
+          processedNodeId: outcome.workItemId,
+          committed: false,
+          taskCompleted: false,
+          waitingHuman: false,
+          attemptFailed: true,
+          retryable: true,
+          attemptCount: outcome.retryOrdinal,
+          pendingAgentIds: [],
+        };
+      case 'terminal_failed':
+        return {
+          processedNodeId: outcome.workItemId,
+          committed: false,
+          taskCompleted: false,
+          waitingHuman: false,
+          attemptFailed: true,
+          retryable: false,
+          attemptCount: 0,
+          pendingAgentIds: [],
+        };
+      case 'parked':
+        return {
+          processedNodeId: outcome.workItemId,
+          committed: false,
+          taskCompleted: false,
+          waitingHuman: false,
+          attemptFailed: true,
+          retryable: false,
+          attemptCount: outcome.retryOrdinal,
+          pendingAgentIds: [],
+        };
+      case 'aborted':
+        return {
+          processedNodeId: outcome.workItemId,
+          committed: false,
+          taskCompleted: false,
+          waitingHuman: false,
+          attemptFailed: false,
+          retryable: false,
+          attemptCount: 0,
+          pendingAgentIds: [],
+        };
+    }
   }
 
   /**

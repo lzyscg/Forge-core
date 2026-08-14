@@ -612,20 +612,24 @@ describe('leaseNext — claims, ordering, batch shape', () => {
     await env.coordinator.clearSuspension(taskId, opId('resume-1'));
     // budget park -> status retryable_failure blocks claims
     await env.coordinator.leaseNext(taskId, env.worker.next(), opId('lease-c2'));
+    const attemptIdFor1 = (await env.readProjection(taskId)).activeLease?.attemptId ?? undefined;
     await env.coordinator.recordRetryableFailure({
       taskId,
       operationId: opId('fail-1'),
       workItemId,
+      attemptId: attemptIdFor1,
       failureCode: 'HANDLER_FAILED',
       failureDigest: 'f'.repeat(64),
       retryNotBefore: env.iso(-1000),
     });
     await env.coordinator.requeueDue(taskId, workItemId, opId('requeue-1'));
     await env.coordinator.leaseNext(taskId, env.worker.next(), opId('lease-c3'));
+    const attemptIdFor2 = (await env.readProjection(taskId)).activeLease?.attemptId ?? undefined;
     await env.coordinator.recordRetryableFailure({
       taskId,
       operationId: opId('fail-2'),
       workItemId,
+      attemptId: attemptIdFor2,
       failureCode: 'HANDLER_FAILED',
       failureDigest: 'f'.repeat(64),
       retryNotBefore: env.iso(-1000),
@@ -962,11 +966,13 @@ describe('reclaimExpired — expiry, epochs, late results', () => {
     env.now.value = env.iso(31 * 60 * 1000);
     await env.coordinator.reclaimExpired(taskId, workItemId, opId('reclaim-1'), 'lease_expired');
     // The old-epoch failure arrives late: the coordinator rejects it.
+    const attemptIdFor3 = (await env.readProjection(taskId)).activeLease?.attemptId ?? undefined;
     await expect(
       env.coordinator.recordRetryableFailure({
         taskId,
         operationId: opId('late-fail'),
         workItemId,
+        attemptId: attemptIdFor3,
         failureCode: 'HANDLER_FAILED',
         failureDigest: 'f'.repeat(64),
         retryNotBefore: env.iso(-1000),
@@ -1019,10 +1025,12 @@ describe('recordRetryableFailure / requeueDue / manualRetry — ordinals, budget
     const taskId = tid('retryable');
     const { workItemId } = await createAgentWorkItem(env, taskId, { maxAutomaticRetries: 2 });
     await env.coordinator.leaseNext(taskId, env.worker.next(), opId('lease-1'));
+    const attemptIdFor4 = (await env.readProjection(taskId)).activeLease?.attemptId ?? undefined;
     const result = await env.coordinator.recordRetryableFailure({
       taskId,
       operationId: opId('fail-1'),
       workItemId,
+      attemptId: attemptIdFor4,
       failureCode: 'HANDLER_FAILED',
       failureDigest: 'f'.repeat(64),
       retryNotBefore: env.iso(5000),
@@ -1068,10 +1076,12 @@ describe('recordRetryableFailure / requeueDue / manualRetry — ordinals, budget
       aggregateDigest: canonicalJsonSha256(aggregateWithoutDigest),
     };
     const aggregate = await env.facade.prepareBlob(taskId, 'validator_aggregate', aggregateObject);
+    const attemptIdFor5 = (await env.readProjection(taskId)).activeLease?.attemptId ?? undefined;
     await env.coordinator.recordRetryableFailure({
       taskId,
       operationId: opId('fail-validator'),
       workItemId,
+      attemptId: attemptIdFor5,
       failureCode: 'VALIDATOR_INFRASTRUCTURE',
       failureDigest: 'a'.repeat(64),
       validatorAggregateRef: aggregate,
@@ -1093,10 +1103,12 @@ describe('recordRetryableFailure / requeueDue / manualRetry — ordinals, budget
     const taskId = tid('requeue');
     const { workItemId } = await createAgentWorkItem(env, taskId);
     await env.coordinator.leaseNext(taskId, env.worker.next(), opId('lease-1'));
+    const attemptIdFor6 = (await env.readProjection(taskId)).activeLease?.attemptId ?? undefined;
     await env.coordinator.recordRetryableFailure({
       taskId,
       operationId: opId('fail-1'),
       workItemId,
+      attemptId: attemptIdFor6,
       failureCode: 'HANDLER_FAILED',
       failureDigest: 'f'.repeat(64),
       retryNotBefore: env.iso(5000),
@@ -1124,20 +1136,24 @@ describe('recordRetryableFailure / requeueDue / manualRetry — ordinals, budget
     const taskId = tid('budget');
     const { workItemId } = await createAgentWorkItem(env, taskId, { maxAutomaticRetries: 1 });
     await env.coordinator.leaseNext(taskId, env.worker.next(), opId('lease-1'));
+    const attemptIdFor7 = (await env.readProjection(taskId)).activeLease?.attemptId ?? undefined;
     await env.coordinator.recordRetryableFailure({
       taskId,
       operationId: opId('fail-1'),
       workItemId,
+      attemptId: attemptIdFor7,
       failureCode: 'HANDLER_FAILED',
       failureDigest: 'f'.repeat(64),
       retryNotBefore: env.iso(-1000),
     });
     await env.coordinator.requeueDue(taskId, workItemId, opId('requeue-1'));
     await env.coordinator.leaseNext(taskId, env.worker.next(), opId('lease-2'));
+    const attemptIdFor8 = (await env.readProjection(taskId)).activeLease?.attemptId ?? undefined;
     const second = await env.coordinator.recordRetryableFailure({
       taskId,
       operationId: opId('fail-2'),
       workItemId,
+      attemptId: attemptIdFor8,
       failureCode: 'HANDLER_FAILED',
       failureDigest: 'f'.repeat(64),
       retryNotBefore: env.iso(-1000),
@@ -1222,11 +1238,13 @@ describe('recordRetryableFailure / requeueDue / manualRetry — ordinals, budget
       env.coordinator.manualRetry(taskId, workItemId, opId('manual-human')),
     ).rejects.toMatchObject({ code: 'WORK_ITEM_NOT_BUDGET_PARKED' });
     // double failure discipline: recordRetryableFailure on a non-leased workitem
+    const attemptIdFor9 = (await env.readProjection(taskId)).activeLease?.attemptId ?? undefined;
     await expect(
       env.coordinator.recordRetryableFailure({
         taskId,
         operationId: opId('fail-human'),
         workItemId,
+        attemptId: attemptIdFor9,
         failureCode: 'X',
         failureDigest: 'f'.repeat(64),
       }),
@@ -1266,6 +1284,7 @@ describe('recordRetryableFailure / requeueDue / manualRetry — ordinals, budget
       taskId,
       operationId: opId('fail-cmd'),
       workItemId: 'wi-cmd',
+      commandId: leased?.commandId ?? undefined,
       failureCode: 'HANDLER_FAILED',
       failureDigest: 'a'.repeat(64),
       retryNotBefore: env.iso(1000),
@@ -1279,6 +1298,146 @@ describe('recordRetryableFailure / requeueDue / manualRetry — ordinals, budget
     expect(commandFailed?.event.commandId).toBe(leased?.commandId);
   });
 }, 30_000);
+
+describe('completeWorkItem — Task 12 success terminal (M-6 direct unit tests)', () => {
+  async function resultRef(env: WorkItemCoordinatorEnvironment, taskId: string): Promise<BlobRefV2> {
+    return env.facade.prepareBlob(taskId, 'content_value', payloadObject('domain result'));
+  }
+
+  it('completes a leased structured attempt with [attempt_completed_v2, work_item_completed] in ONE ordered batch', async () => {
+    const env = await makeEnv();
+    const taskId = tid('complete');
+    const { workItemId } = await createAgentWorkItem(env, taskId);
+    const leased = await env.coordinator.leaseNext(taskId, env.worker.next(), opId('lease-1'));
+    const ref = await resultRef(env, taskId);
+    const completed = await env.coordinator.completeWorkItem({
+      taskId,
+      operationId: opId('complete-1'),
+      workItemId,
+      attemptId: leased?.attemptId ?? undefined,
+      resultRefs: [ref],
+    });
+    expect(completed.replayed).toBe(false);
+    expect(completed.attemptFamily).toBe('structured');
+    // Envelope order: the attempt terminal precedes the workitem completion.
+    const types = completed.events.map((entry) => entry.event.type);
+    const iAttempt = types.indexOf('structured_agent_attempt_completed_v2');
+    const iWorkItem = types.indexOf('structured_work_item_completed');
+    expect(iAttempt).toBeGreaterThanOrEqual(0);
+    expect(iWorkItem).toBe(iAttempt + 1);
+    const projection = await env.readProjection(taskId);
+    expect(projection.workItems[workItemId].state).toBe('completed');
+    expect(projection.activeLease).toBeNull();
+    expect(projection.attempts[String(leased?.attemptId)].state).toBe('completed');
+  });
+
+  it('completes a leased SYSTEM COMMAND workitem with [command_completed, work_item_completed]', async () => {
+    const env = await makeEnv();
+    const taskId = tid('cmd-complete');
+    await env.coordinator.createWorkItem({
+      taskId,
+      operationId: opId('create-cmd'),
+      workItemId: 'wi-cmd',
+      kind: 'system_map_finalize',
+      roleBinding: null,
+      agentExecutionKind: null,
+      sessionKind: null,
+      roundId: null,
+      logicalAssignmentId: null,
+      reviewAssignmentId: null,
+      inputArtifactDeliveryId: null,
+      payload: { kind: 'content_value', value: payloadObject('cmd') },
+      authorityBase: buildAuthorityBaseSet(baseInput(env, taskId, {
+        kind: 'system_map_finalize',
+        agentExecutionKind: null,
+        sessionKind: null,
+      }, { planSpecRef: synthRef('map_build_spec', 10) })),
+      maxAutomaticRetries: 2,
+    });
+    const leased = await env.coordinator.leaseNext(taskId, env.worker.next(), opId('lease-cmd'));
+    expect(leased?.commandId).toMatch(/^cmd-/);
+    const ref = await resultRef(env, taskId);
+    const completed = await env.coordinator.completeWorkItem({
+      taskId,
+      operationId: opId('complete-cmd'),
+      workItemId: 'wi-cmd',
+      commandId: leased?.commandId ?? undefined,
+      resultRefs: [ref],
+    });
+    expect(completed.attemptFamily).toBe('command');
+    const types = completed.events.map((entry) => entry.event.type);
+    expect(types).toContain('structured_system_command_completed');
+    expect(types).toContain('structured_work_item_completed');
+    const projection = await env.readProjection(taskId);
+    expect(projection.workItems['wi-cmd'].state).toBe('completed');
+  });
+
+  it('replays the ORIGINAL completion on response loss (same operation id, same result)', async () => {
+    const env = await makeEnv();
+    const taskId = tid('complete-replay');
+    const { workItemId } = await createAgentWorkItem(env, taskId);
+    const leased = await env.coordinator.leaseNext(taskId, env.worker.next(), opId('lease-1'));
+    const ref = await resultRef(env, taskId);
+    const operationId = opId('complete-replay-op');
+    const input = {
+      taskId,
+      operationId,
+      workItemId,
+      attemptId: leased?.attemptId ?? undefined,
+      resultRefs: [ref],
+    };
+    const first = await env.coordinator.completeWorkItem(input);
+    const second = await env.coordinator.completeWorkItem(input);
+    expect(second.replayed).toBe(true);
+    expect(second.events.map((entry) => entry.event.id)).toEqual(first.events.map((entry) => entry.event.id));
+    expect((await env.eventStore.read(taskId)).filter((e) => e.event.type === 'structured_work_item_completed')).toHaveLength(1);
+  });
+
+  it('rejects a bare completion of a gated kind with ZERO writes (§9.2 I-2)', async () => {
+    const env = await makeEnv();
+    const taskId = tid('bare');
+    const { workItemId } = await createAgentWorkItem(env, taskId);
+    const leased = await env.coordinator.leaseNext(taskId, env.worker.next(), opId('lease-1'));
+    const before = (await env.eventStore.read(taskId)).length;
+    await expect(
+      env.coordinator.completeWorkItem({
+        taskId,
+        operationId: opId('bare-complete'),
+        workItemId,
+        attemptId: leased?.attemptId ?? undefined,
+        resultRefs: [],
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect((await env.eventStore.read(taskId)).length).toBe(before);
+    const projection = await env.readProjection(taskId);
+    expect(projection.workItems[workItemId].state).toBe('leased');
+  });
+
+  it('I-1: rejects a stale completion naming a PREVIOUS attempt after reclaim+re-lease (ZERO writes)', async () => {
+    const env = await makeEnv();
+    const taskId = tid('stale');
+    const { workItemId } = await createAgentWorkItem(env, taskId);
+    const leaseA = await env.coordinator.leaseNext(taskId, env.worker.next(), opId('lease-a'));
+    env.now.value = env.iso(31 * 60 * 1000);
+    await env.coordinator.reclaimExpired(taskId, workItemId, opId('reclaim-1'), 'lease_expired');
+    const leaseB = await env.coordinator.leaseNext(taskId, env.worker.next(), opId('lease-b'));
+    expect(leaseB?.attemptId).not.toBe(leaseA?.attemptId);
+    const before = (await env.eventStore.read(taskId)).length;
+    const ref = await resultRef(env, taskId);
+    await expect(
+      env.coordinator.completeWorkItem({
+        taskId,
+        operationId: opId('stale-complete'),
+        workItemId,
+        attemptId: leaseA?.attemptId ?? undefined,
+        resultRefs: [ref],
+      }),
+    ).rejects.toMatchObject({ code: 'ATTEMPT_MISMATCH' });
+    expect((await env.eventStore.read(taskId)).length).toBe(before);
+    const projection = await env.readProjection(taskId);
+    expect(projection.activeLease?.attemptId).toBe(leaseB?.attemptId);
+  });
+});
 
 describe('suspension overlay — applySuspension / clearSuspension', () => {
   it('applies and clears an overlay without touching the underlying WorkItem state', async () => {
@@ -1319,20 +1478,24 @@ describe('suspension overlay — applySuspension / clearSuspension', () => {
     const taskId = tid('suspend-budget');
     const { workItemId } = await createAgentWorkItem(env, taskId, { maxAutomaticRetries: 1 });
     await env.coordinator.leaseNext(taskId, env.worker.next(), opId('lease-1'));
+    const attemptIdFor11 = (await env.readProjection(taskId)).activeLease?.attemptId ?? undefined;
     await env.coordinator.recordRetryableFailure({
       taskId,
       operationId: opId('fail-1'),
       workItemId,
+      attemptId: attemptIdFor11,
       failureCode: 'HANDLER_FAILED',
       failureDigest: 'f'.repeat(64),
       retryNotBefore: env.iso(-1000),
     });
     await env.coordinator.requeueDue(taskId, workItemId, opId('requeue-1'));
     await env.coordinator.leaseNext(taskId, env.worker.next(), opId('lease-2'));
+    const attemptIdFor12 = (await env.readProjection(taskId)).activeLease?.attemptId ?? undefined;
     await env.coordinator.recordRetryableFailure({
       taskId,
       operationId: opId('fail-2'),
       workItemId,
+      attemptId: attemptIdFor12,
       failureCode: 'HANDLER_FAILED',
       failureDigest: 'f'.repeat(64),
       retryNotBefore: env.iso(-1000),
@@ -1357,10 +1520,12 @@ describe('suspension overlay — applySuspension / clearSuspension', () => {
     const taskId = tid('suspend-retryable');
     const { workItemId } = await createAgentWorkItem(env, taskId);
     await env.coordinator.leaseNext(taskId, env.worker.next(), opId('lease-1'));
+    const attemptIdFor13 = (await env.readProjection(taskId)).activeLease?.attemptId ?? undefined;
     await env.coordinator.recordRetryableFailure({
       taskId,
       operationId: opId('fail-1'),
       workItemId,
+      attemptId: attemptIdFor13,
       failureCode: 'HANDLER_FAILED',
       failureDigest: 'f'.repeat(64),
       retryNotBefore: env.iso(5000),
@@ -1463,17 +1628,21 @@ describe('response-loss idempotency across methods', () => {
     const { workItemId } = await createAgentWorkItem(env, taskId);
     await env.coordinator.leaseNext(taskId, env.worker.next(), opId('lease-1'));
     const failOp = opId('fail-idem');
+    const attemptIdFor14 = (await env.readProjection(taskId)).activeLease?.attemptId ?? undefined;
     const first = await env.coordinator.recordRetryableFailure({
       taskId,
       operationId: failOp,
       workItemId,
+      attemptId: attemptIdFor14,
       failureCode: 'HANDLER_FAILED',
       failureDigest: 'f'.repeat(64),
     });
+    const attemptIdFor15 = (await env.readProjection(taskId)).activeLease?.attemptId ?? undefined;
     const second = await env.coordinator.recordRetryableFailure({
       taskId,
       operationId: failOp,
       workItemId,
+      attemptId: attemptIdFor15,
       failureCode: 'HANDLER_FAILED',
       failureDigest: 'f'.repeat(64),
     });
@@ -1580,6 +1749,7 @@ describe('constraint A evidence — half-state lease pins are rejected at admiss
       budgetPolicyDigest: null,
       failureRecoveryPayloadRef: null,
       taskFailure: null,
+      resultRefs: [],
     };
     await expect(
       env.facade.publishWithPin({
@@ -1693,20 +1863,24 @@ describe('deterministic identities and full-history replay equivalence', () => {
       lease3: opId('d-lease-3'),
     };
     await env.coordinator.leaseNext(taskId, env.worker.next(), operationIds.lease1);
+    const attemptIdFor16 = (await env.readProjection(taskId)).activeLease?.attemptId ?? undefined;
     await env.coordinator.recordRetryableFailure({
       taskId,
       operationId: operationIds.fail1,
       workItemId,
+      attemptId: attemptIdFor16,
       failureCode: 'HANDLER_FAILED',
       failureDigest: 'f'.repeat(64),
       retryNotBefore: env.iso(-1000),
     });
     await env.coordinator.requeueDue(taskId, workItemId, operationIds.requeue);
     await env.coordinator.leaseNext(taskId, env.worker.next(), operationIds.lease2);
+    const attemptIdFor17 = (await env.readProjection(taskId)).activeLease?.attemptId ?? undefined;
     await env.coordinator.recordRetryableFailure({
       taskId,
       operationId: operationIds.fail2,
       workItemId,
+      attemptId: attemptIdFor17,
       failureCode: 'HANDLER_FAILED',
       failureDigest: 'f'.repeat(64),
       retryNotBefore: env.iso(-1000),

@@ -1600,3 +1600,61 @@ describe('ActionCommitter basic-path non-regression (Task 15 Step 1)', () => {
     expect(names.some((name) => name.endsWith('.batch.json'))).toBe(false);
   });
 });
+
+describe('Task 12 authoritative v2 generic-turn branch', () => {
+  it('reuses basic-turn validation and delegates a submit_final_artifact to the v2 completion callback (writes NO v1 events)', async () => {
+    let onSubmitCalls = 0;
+    const context = buildCommitContext(env, 'reviewer', {
+      turnId: 'turn-v2-1',
+      v2: {
+        workItemId: 'wi-submit-1',
+        attemptId: 'att-1',
+        onSubmit: async () => {
+          onSubmitCalls += 1;
+        },
+      },
+    });
+    const before = await events.read(taskId);
+    const result = await committer.validateAndCommit(context, [SUBMIT_CURRENT]);
+    expect(onSubmitCalls).toBe(1);
+    expect(result.taskCompleted).toBe(true);
+    expect(result.committedEvents).toEqual([]);
+    // No v1 event was written (no agent_result / final_submission_accepted).
+    const after = await events.read(taskId);
+    expect(after.length).toBe(before.length);
+  });
+
+  it('rejects a non-submit dispatch for a v2 generic turn before any completion', async () => {
+    const context = buildCommitContext(env, 'reviewer', {
+      turnId: 'turn-v2-2',
+      v2: {
+        workItemId: 'wi-submit-2',
+        attemptId: 'att-2',
+        onSubmit: async () => {
+          throw new Error('must not be called');
+        },
+      },
+    });
+    await expect(
+      committer.validateAndCommit(context, [
+        { type: 'send_message', targetAgentId: 'writer', summary: 'not a submit' },
+      ]),
+    ).rejects.toMatchObject({ code: 'AGENT_DISPATCH_CARDINALITY_INVALID' });
+  });
+
+  it('rejects a v2 submit by a non-submitter agent before any completion', async () => {
+    const context = buildCommitContext(env, 'writer', {
+      turnId: 'turn-v2-3',
+      v2: {
+        workItemId: 'wi-submit-3',
+        attemptId: 'att-3',
+        onSubmit: async () => {
+          throw new Error('must not be called');
+        },
+      },
+    });
+    await expect(committer.validateAndCommit(context, [SUBMIT_CURRENT])).rejects.toMatchObject({
+      code: 'FINAL_SUBMITTER_NOT_ALLOWED',
+    });
+  });
+});

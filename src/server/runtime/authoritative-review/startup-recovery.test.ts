@@ -199,8 +199,8 @@ describe('runStartupRecoveryV2 matrix', () => {
     await env.registerTask(taskId);
     await env.lifecycle.startV2(taskId, { operationId: OP(11), userInputText: 'input' });
     const wiId = lifecycleWorkItemId(taskId, OP(11), 'initial_structure_chunk');
-    await env.coordinator.leaseNext(taskId, 'worker-a', OP(12));
-    await env.coordinator.recordRetryableFailure({ taskId, operationId: OP(13), workItemId: wiId, failureCode: 'HANDLER_FAILED', failureDigest: 'd'.repeat(64), retryNotBefore: env.iso(5 * 60 * 1000) });
+    const leaseAttempt1 = await env.coordinator.leaseNext(taskId, 'worker-a', OP(12));
+    await env.coordinator.recordRetryableFailure({ taskId, operationId: OP(13), workItemId: wiId, attemptId: leaseAttempt1?.attemptId ?? undefined, failureCode: 'HANDLER_FAILED', failureDigest: 'd'.repeat(64), retryNotBefore: env.iso(5 * 60 * 1000) });
     // Before due.
     let result = await runStartupRecoveryV2(recoveryDeps(env));
     expect(result.requeued).not.toContain(taskId);
@@ -225,8 +225,8 @@ describe('runStartupRecoveryV2 matrix', () => {
     await env.registerTask(taskId);
     await env.lifecycle.startV2(taskId, { operationId: OP(21), userInputText: 'input' });
     const wiId = lifecycleWorkItemId(taskId, OP(21), 'initial_structure_chunk');
-    await env.coordinator.leaseNext(taskId, 'worker-a', OP(22));
-    await env.coordinator.recordRetryableFailure({ taskId, operationId: OP(23), workItemId: wiId, failureCode: 'HANDLER_FAILED', failureDigest: 'd'.repeat(64), retryNotBefore: env.iso(10 * 60 * 1000) });
+    const leaseAttempt2 = await env.coordinator.leaseNext(taskId, 'worker-a', OP(22));
+    await env.coordinator.recordRetryableFailure({ taskId, operationId: OP(23), workItemId: wiId, attemptId: leaseAttempt2?.attemptId ?? undefined, failureCode: 'HANDLER_FAILED', failureDigest: 'd'.repeat(64), retryNotBefore: env.iso(10 * 60 * 1000) });
     // The underlying retryable failure is what the overlay must keep dormant.
     await env.lifecycle.stopV2(taskId, { operationId: OP(25), reason: 'user_stop' });
     // Restart scan: the overlay task keeps its underlying timer DORMANT.

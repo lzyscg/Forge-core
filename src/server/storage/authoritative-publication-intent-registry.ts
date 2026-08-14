@@ -31,6 +31,7 @@
 import { createHash } from 'node:crypto';
 import { canonicalJson } from '../structured-slots/canonical-json';
 import { parsePublicationOperationPayload } from '../authoritative-review/object-schema-parsers-3';
+import { completionKindRequiresResult } from '../authoritative-review/authority-types';
 import type {
   PublicationOperationPayloadV2,
   WorkItemReclaimReasonV2,
@@ -552,6 +553,7 @@ export class PublicationIntentRegistry {
       if (parsed.dispatchRef !== null) refs.push(parsed.dispatchRef);
       if (parsed.grantInstanceRef !== null) refs.push(parsed.grantInstanceRef);
       if (parsed.validatorAggregateRef !== null) refs.push(parsed.validatorAggregateRef);
+      for (const resultRef of parsed.resultRefs) refs.push(resultRef);
       return refs;
     };
     const resolveRefs = (): readonly PublicationIntentResolvedRef[] => [];
@@ -1264,6 +1266,117 @@ export class PublicationIntentRegistry {
             authorityBaseRef: p.authorityBaseRef as BlobRefV2,
           });
         }
+        return envelopes;
+      },
+      expectedResultIdentity: (_payload, events) => sha256OfEvents(events),
+    });
+
+    // Task 12 (constraint A round 3): the SUCCESS completion envelope — the
+    // attempt/command `completed` terminal + `structured_work_item_completed`
+    // in ONE batch (spec §9.2 "Agent completion plus ... attempt terminal,
+    // WorkItem completion" all-or-none; the projector demands the attempt be
+    // completed before the workitem completion event). Domain facts ride the
+    // SAME batch only through domain-completion handlers registered by later
+    // tasks (the `human_answer` pattern); this generic handler is the base
+    // terminal pair the attempt-coordinator commits, with the §9.2 all-or-none
+    // GATE: workitem kinds whose §17.5 envelope folds a domain result/successor
+    // (every structured agent session + every system command) MUST carry a
+    // non-empty `resultRefs` carrier — a bare completion of those kinds is
+    // fail-closed here (and at the coordinator), so "a completed WorkItem
+    // without its result" is unreachable (§9.2). Only the generic submitter
+    // (null sessionKind) completes bare, because its result IS the
+    // delivery-bound submission carried by the attempt identity.
+    this.register({
+      handlerKind: 'work_item_completed',
+      handlerVersion: 1,
+      payloadFamily: family,
+      expectedEventTypes: [
+        'structured_agent_attempt_completed_v2',
+        'structured_generic_agent_attempt_completed',
+        'structured_system_command_completed',
+        'structured_work_item_completed',
+      ],
+      rebuildable: true,
+      missingInputs: [],
+      parsePayload: parsePublicationOperationPayload,
+      childRefsOf: (p) => childRefsOfChecked(p, family, childRefs),
+      resolveRefs,
+      buildEvents: (payload, at) => {
+        const p = lease(payload);
+        if (p.eventBuilder !== 'work_item_completed') {
+          throw new NotRebuildableError('work_item_completed', ['eventBuilder']);
+        }
+        if (p.attemptFamily === null) {
+          throw new NotRebuildableError('work_item_completed', [
+            'attemptFamily must name the execution carrier (structured|generic|command)',
+          ]);
+        }
+        // §9.2 completion gate: gated kinds MUST fold a domain result carrier.
+        if (p.kind !== null && completionKindRequiresResult(p.kind, p.sessionKind) && (p.resultRefs?.length ?? 0) === 0) {
+          throw new NotRebuildableError('work_item_completed', [
+            `kind '${p.kind}' requires a domain result carrier (resultRefs) in the same batch (§9.2)`,
+          ]);
+        }
+        const missing: string[] = [];
+        if (p.workItemId === '') missing.push('workItemId');
+        if (p.leaseEpoch === null) missing.push('leaseEpoch');
+        const envelopes: AuthoritativeReviewEventEnvelopeV2[] = [];
+        if (p.attemptFamily === 'structured') {
+          if (p.attemptId === null || p.logicalAssignmentId === null || p.sessionKind === null) {
+            throw new NotRebuildableError('work_item_completed', ['attemptId, logicalAssignmentId, sessionKind']);
+          }
+          envelopes.push({
+            protocolVersion: 2,
+            at,
+            type: 'structured_agent_attempt_completed_v2',
+            workItemId: p.workItemId as string,
+            logicalAssignmentId: p.logicalAssignmentId as string,
+            reviewAssignmentId: p.reviewAssignmentId,
+            attemptId: p.attemptId as string,
+            sessionKind: p.sessionKind as NonNullable<LeaseOrRetryPayload['sessionKind']>,
+            leaseEpoch: p.leaseEpoch as number,
+            authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+          });
+        } else if (p.attemptFamily === 'generic') {
+          if (p.attemptId === null || p.agentId === null || p.logicalAssignmentId === null || p.inputArtifactDeliveryId === null) {
+            throw new NotRebuildableError('work_item_completed', ['attemptId, agentId, logicalAssignmentId, inputArtifactDeliveryId']);
+          }
+          envelopes.push({
+            protocolVersion: 2,
+            at,
+            type: 'structured_generic_agent_attempt_completed',
+            attemptId: p.attemptId as string,
+            workItemId: p.workItemId as string,
+            agentId: p.agentId as string,
+            logicalAssignmentId: p.logicalAssignmentId as string,
+            leaseEpoch: p.leaseEpoch as number,
+            inputArtifactDeliveryId: p.inputArtifactDeliveryId as string,
+            authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+          });
+        } else if (p.attemptFamily === 'command') {
+          if (p.commandId === null || p.commandKind === null) {
+            throw new NotRebuildableError('work_item_completed', ['commandId, commandKind']);
+          }
+          envelopes.push({
+            protocolVersion: 2,
+            at,
+            type: 'structured_system_command_completed',
+            commandId: p.commandId as string,
+            workItemId: p.workItemId as string,
+            commandKind: p.commandKind as NonNullable<LeaseOrRetryPayload['commandKind']>,
+            leaseEpoch: p.leaseEpoch as number,
+            authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+          });
+        }
+        if (missing.length > 0) throw new NotRebuildableError('work_item_completed', missing);
+        envelopes.push({
+          protocolVersion: 2,
+          at,
+          type: 'structured_work_item_completed',
+          workItemId: p.workItemId as string,
+          leaseEpoch: p.leaseEpoch as number,
+          authorityBaseRef: p.authorityBaseRef as BlobRefV2,
+        });
         return envelopes;
       },
       expectedResultIdentity: (_payload, events) => sha256OfEvents(events),

@@ -164,6 +164,7 @@ describe('publication_operation_payload, recovery payload, round override (ยง8/ย
       budgetPolicyDigest: null,
       failureRecoveryPayloadRef: null,
       taskFailure: null,
+      resultRefs: [],
     };
     expect(() => parseBlob('publication_operation_payload', lease)).not.toThrow();
 

@@ -1923,3 +1923,15 @@ describe('TaskRunner structured resource-limit closure (Task 17, spec §7.6/N04)
     expect(events.some((e) => e.type === 'route_executed')).toBe(false);
   });
 });
+
+describe('TaskRunner v2 runner entry (Task 12)', () => {
+  it('rejects a non-v2 task with STRUCTURED_TURN_NOT_RUNNABLE before any dispatch', async () => {
+    const h = await runnerHarness({});
+    await expect(h.runner.runV2Next(h.taskId, h.controller.signal)).rejects.toMatchObject({
+      code: 'STRUCTURED_TURN_NOT_RUNNABLE',
+    });
+    // No execution events were written for the v1 task.
+    const events = (await h.service.events.read(h.taskId)).map((entry) => entry.event);
+    expect(events.filter((e) => e.type.startsWith('structured_')).length).toBe(0);
+  });
+});

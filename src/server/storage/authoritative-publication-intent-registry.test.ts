@@ -363,7 +363,7 @@ describe('publication_operation_payload child-ref extraction', () => {
         [H_REF('map_build_spec', H2)],
       ],
       [
-        { family: 'lease_or_retry', operationId: 'op-1', taskId: 't', workItemId: 'w', leaseEpoch: 1, eventBuilder: 'work_item_leased', authorityBaseRef: authority, kind: null, roleBinding: null, agentExecutionKind: null, sessionKind: null, roundId: null, logicalAssignmentId: null, reviewAssignmentId: null, grantSpecRef: null, inputArtifactDeliveryId: null, payloadRef: null, initialLeaseEpoch: null, maxAutomaticRetries: null, leaseOwner: null, leaseExpiresAt: null, expectedLastSequence: null, attemptFamily: null, attemptId: null, commandId: null, agentId: null, commandKind: null, dispatchRef: null, grantInstanceRef: null, reason: null, failureCode: null, failureDigest: null, retryOrdinal: null, retryNotBefore: null, validatorAggregateRef: null, budgetPolicyDigest: null, failureRecoveryPayloadRef: null, taskFailure: null },
+        { family: 'lease_or_retry', operationId: 'op-1', taskId: 't', workItemId: 'w', leaseEpoch: 1, eventBuilder: 'work_item_leased', authorityBaseRef: authority, kind: null, roleBinding: null, agentExecutionKind: null, sessionKind: null, roundId: null, logicalAssignmentId: null, reviewAssignmentId: null, grantSpecRef: null, inputArtifactDeliveryId: null, payloadRef: null, initialLeaseEpoch: null, maxAutomaticRetries: null, leaseOwner: null, leaseExpiresAt: null, expectedLastSequence: null, attemptFamily: null, attemptId: null, commandId: null, agentId: null, commandKind: null, dispatchRef: null, grantInstanceRef: null, reason: null, failureCode: null, failureDigest: null, retryOrdinal: null, retryNotBefore: null, validatorAggregateRef: null, budgetPolicyDigest: null, failureRecoveryPayloadRef: null, taskFailure: null, resultRefs: [] },
         [authority],
       ],
       [
@@ -435,6 +435,8 @@ describe('PublicationIntentRegistry isolation', () => {
       ['restart_content_review_cycle', 1],
       ['rebuild_missing_work', 1],
       ['task_terminal_failed', 1],
+      // Task 12 (constraint A round 3): the SUCCESS completion envelope.
+      ['work_item_completed', 1],
     ];
     for (const [handlerKind, handlerVersion] of rebuildable) {
       const registration = resolvePublicationIntent(handlerKind, handlerVersion);
@@ -489,6 +491,7 @@ describe('PublicationIntentRegistry isolation', () => {
       budgetPolicyDigest: H2,
       failureRecoveryPayloadRef: null,
       taskFailure: null,
+      resultRefs: [],
     });
     for (const builder of ['work_item_leased', 'work_item_retryable_failed', 'work_item_lease_reclaimed', 'work_item_parked'] as const) {
       const registration = resolvePublicationIntent(builder, 1);

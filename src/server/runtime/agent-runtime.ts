@@ -35,6 +35,31 @@ export interface AgentTurnInput {
    * silently skip the later structured wiring.
    */
   slotSession: SessionHandle | null;
+  /**
+   * Task 12 v2 attempt session handle (authoritative review v2). Additive —
+   * basic and v3 structured turns leave it null and behave byte-for-byte.
+   * Carries the composite attempt signal (deadline ∪ scheduler stop) so the
+   * Pi runtime aborts the session on timeout/stop; the closed v2 tool set is
+   * resolved by the Pi adapter's `v2Tools` seam (never recreated by Pi
+   * auto-compaction or corrective prompts).
+   */
+  v2Session?: V2SessionHandle | null;
+  /**
+   * Task 12: the attempt's ISOLATED conversation namespace
+   * `<executionKind>/<roleBinding>/<workItemId>/<attemptId>` (spec §10.2).
+   * Additive — basic and v3 structured turns leave it null and keep the
+   * `taskId:agentId` session key byte-for-byte.
+   */
+  v2Namespace?: string | null;
+}
+
+/**
+ * Task 12 internal opaque handle for one authoritative v2 attempt. Minimal by
+ * design: the composite abort signal; the closed v2 tool set lives behind the
+ * Pi adapter's `v2Tools` seam (kept free of SDK imports here).
+ */
+export interface V2SessionHandle {
+  signal: AbortSignal;
 }
 
 /**

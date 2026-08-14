@@ -30,7 +30,7 @@ import { createHash } from 'node:crypto';
 import { canonicalJson, canonicalJsonSha256 } from '../../structured-slots/canonical-json';
 import type { AuthoritativeAppendFacadeV2, PublishWithPinInput, PublishedV2Result } from '../../storage/authoritative-append-facade';
 import type { AuthoritativeReviewCheckpointStore } from '../../storage/authoritative-review-checkpoint-store';
-import type { AuthoritativeReviewProjectionV2, BlobObjectResolver, ProjectionFoldDataV2, WorkItemProjectionV2 } from '../../storage/authoritative-review-state';
+import type { AuthoritativeReviewProjectionV2, AttemptProjectionV2, BlobObjectResolver, ProjectionFoldDataV2, WorkItemProjectionV2 } from '../../storage/authoritative-review-state';
 import { ProjectionCorruptionError } from '../../storage/authoritative-review-state';
 import { STORAGE_ERROR_CODES, StorageError } from '../../storage/atomic-file';
 import { SchemaError } from '../../authoritative-review/authority-types';
@@ -43,6 +43,7 @@ import type {
   WorkItemParkDispositionV2,
   WriteGrantSpecV2,
 } from '../../authoritative-review/authority-types';
+import { completionKindRequiresResult } from '../../authoritative-review/authority-types';
 import type { BlobRefV2, WorkItemKindV2 } from '../../../shared/authoritative-review-v2';
 import {
   StaleAuthorityBaseError,
@@ -92,6 +93,7 @@ export type CoordinatorErrorCodeV2 =
   | 'TASK_TERMINAL' // failed/completed tasks reject new execution commands
   | 'STALE_TAIL' // the expected tail moved — reproject and retry
   | 'STALE_AUTHORITY_BASE' // a carrier references a different base/profile
+  | 'ATTEMPT_MISMATCH' // a late completion/failure names an attempt/command that is NOT the active lease's
   | 'INVALID_INPUT';
 
 export class CoordinatorError extends Error {
@@ -233,6 +235,15 @@ export interface RecordRetryableFailureInputV2 {
   validatorAggregateRef?: BlobRefV2 | null;
   /** Server-computed retryNotBefore override (default clock()). */
   retryNotBefore?: string;
+  /**
+   * The attempt identity the CALLER holds (Task 12 I-1). Exactly one of
+   * `attemptId` | `commandId` must be non-null; the method rejects with
+   * `ATTEMPT_MISMATCH` (ZERO writes) when it does not equal the active lease's
+   * bound attempt/command — a stale-epoch late failure can never fail the
+   * CURRENT re-leased attempt (§10.2).
+   */
+  attemptId?: string | null;
+  commandId?: string | null;
 }
 
 export type RetryRecordedResultV2 =
@@ -256,6 +267,41 @@ export interface RequeueResultV2 {
 export interface ManualRetryResultV2 {
   workItemId: string;
   nextEpoch: number;
+}
+
+/** Task 12 success-completion input (lease_or_retry `work_item_completed`). */
+export interface CompleteWorkItemInputV2 {
+  taskId: string;
+  operationId: string;
+  workItemId: string;
+  /**
+   * The attempt identity the CALLER holds (from the operation-id-encoded
+   * attempt). Exactly one of `attemptId` | `commandId` must be non-null. The
+   * method rejects with `ATTEMPT_MISMATCH` (ZERO writes) when it does not
+   * equal the active lease's bound attempt/command — a stale-epoch late result
+   * can never complete the CURRENT re-leased attempt (§10.2/§17.2).
+   */
+  attemptId?: string | null;
+  commandId?: string | null;
+  /**
+   * The §9.2 domain result carrier pinned/verified in the SAME batch. For
+   * gated kinds (every structured agent session + every system command,
+   * `completionKindRequiresResult`) this MUST be non-empty; a bare completion
+   * of a gated kind is rejected with `INVALID_INPUT` and ZERO writes. Later
+   * domain-completion builders emit the events that reference these refs.
+   */
+  resultRefs?: readonly BlobRefV2[];
+}
+
+/** The committed completion result (attempt/command terminal + workitem done). */
+export interface CompletedWorkV2 {
+  workItemId: string;
+  leaseEpoch: number;
+  attemptFamily: AttemptExecutionKindV2;
+  attemptId: string | null;
+  commandId: string | null;
+  events: readonly CoordinatorCommittedEventV2[];
+  replayed: boolean;
 }
 
 export interface SuspensionResultV2 {
@@ -348,6 +394,15 @@ export class WorkItemCoordinatorV2 {
       }
       throw error;
     }
+  }
+
+  /**
+   * Public projection reader (Task 12 attempt-coordinator): the SAME Task 9
+   * projection, corruption propagated. Never a second implementation.
+   */
+  async readProjectionState(taskId: string): Promise<AuthoritativeReviewProjectionV2> {
+    const { state } = await this.readProjection(taskId);
+    return state;
   }
 
   /**
@@ -450,6 +505,58 @@ export class WorkItemCoordinatorV2 {
     }
     this.requireRunning(state);
     return wi;
+  }
+
+  /**
+   * Task 12 I-1: the caller's attempt identity MUST equal the active lease's
+   * bound attempt/command. A stale-epoch late result (the caller holds attempt
+   * A, the lease now binds attempt B) is rejected with `ATTEMPT_MISMATCH` and
+   * ZERO writes — it can never complete/fail the CURRENT re-leased attempt
+   * (§10.2 "Late completion from an older epoch ... rejected without partial
+   * writes", design §17.2). Returns the resolved attempt (undefined for a
+   * command carrier).
+   */
+  private demandActiveAttemptMatch(
+    state: AuthoritativeReviewProjectionV2,
+    workItemId: string,
+    callerAttemptId: string | null | undefined,
+    callerCommandId: string | null | undefined,
+  ): AttemptProjectionV2 | undefined {
+    const active = state.activeLease;
+    if (active === null) {
+      throw new CoordinatorError('WORK_ITEM_NOT_LEASED', `workitem '${workItemId}' holds no active lease`);
+    }
+    const boundAttemptId = active.attemptId ?? null;
+    const boundCommandId = active.commandId ?? null;
+    const attemptId = callerAttemptId ?? null;
+    const commandId = callerCommandId ?? null;
+    if ((attemptId === null) === (commandId === null)) {
+      throw new CoordinatorError('INVALID_INPUT', 'exactly one of attemptId|commandId must name the executing attempt/command');
+    }
+    if (attemptId !== null) {
+      if (attemptId !== boundAttemptId) {
+        throw new CoordinatorError(
+          'ATTEMPT_MISMATCH',
+          `caller attempt '${attemptId}' does not match the active lease attempt '${String(boundAttemptId)}'`,
+        );
+      }
+      const attempt = state.attempts[attemptId];
+      if (attempt === undefined || attempt.state !== 'started') {
+        throw new CoordinatorError('INVALID_INPUT', `attempt '${attemptId}' is not a started active attempt`);
+      }
+      return attempt;
+    }
+    if (commandId !== boundCommandId) {
+      throw new CoordinatorError(
+        'ATTEMPT_MISMATCH',
+        `caller command '${commandId}' does not match the active lease command '${String(boundCommandId)}'`,
+      );
+    }
+    const command = state.attempts[commandId as string];
+    if (command === undefined || command.state !== 'started') {
+      throw new CoordinatorError('INVALID_INPUT', `command '${commandId}' is not a started active command`);
+    }
+    return undefined; // command carrier — the attempt map entry is keyed by commandId
   }
 
   private leaseBaseOf(state: AuthoritativeReviewProjectionV2, wi: WorkItemProjectionV2): BlobRefV2 {
@@ -585,6 +692,7 @@ export class WorkItemCoordinatorV2 {
       budgetPolicyDigest: null,
       failureRecoveryPayloadRef: null,
       taskFailure: null,
+      resultRefs: [],
     };
     const tail = await this.expectedTail(input.taskId, state);
     const published = await this.commitOne({
@@ -808,6 +916,7 @@ export class WorkItemCoordinatorV2 {
       budgetPolicyDigest: null,
       failureRecoveryPayloadRef: null,
       taskFailure: null,
+      resultRefs: [],
     };
     const tail = await this.expectedTail(taskId, state);
     const published = await this.commitOne({
@@ -956,6 +1065,7 @@ export class WorkItemCoordinatorV2 {
       budgetPolicyDigest: null,
       failureRecoveryPayloadRef: null,
       taskFailure: null,
+      resultRefs: [],
     };
     const tail = await this.expectedTail(taskId, state);
     const published = await this.commitOne({
@@ -988,6 +1098,8 @@ export class WorkItemCoordinatorV2 {
   /* ---------------- recordRetryableFailure ---------------- */
 
   async recordRetryableFailure(input: RecordRetryableFailureInputV2): Promise<RetryRecordedResultV2> {
+    const callerAttemptId = input.attemptId ?? null;
+    const callerCommandId = input.commandId ?? null;
     const { state } = await this.readProjection(input.taskId);
     const committed = await this.committedOperation(input.taskId, input.operationId);
     if (committed !== null) {
@@ -1001,17 +1113,11 @@ export class WorkItemCoordinatorV2 {
       return result.result;
     }
     const { wi, base } = this.demandLeased(state, input.workItemId);
-    const active = state.activeLease;
-    const boundAttemptId = active?.attemptId ?? null;
-    const boundCommandId = active?.commandId ?? null;
-    const attempt = boundAttemptId === null ? undefined : state.attempts[boundAttemptId];
-    const attemptFamily: AttemptExecutionKindV2 = attempt?.family ?? (boundCommandId !== null ? 'command' : 'structured');
-    if (attempt !== undefined && attempt.state !== 'started') {
-      throw new CoordinatorError('INVALID_INPUT', `attempt '${boundAttemptId}' is ${attempt.state}, not started`);
-    }
-    if (attempt === undefined && boundCommandId === null) {
-      throw new CoordinatorError('INVALID_INPUT', `workitem '${input.workItemId}' has no started attempt/command to fail`);
-    }
+    // I-1: the caller's attempt identity must equal the active lease's bound
+    // attempt/command — a stale-epoch late failure can never fail the CURRENT
+    // re-leased attempt (zero writes on mismatch).
+    const attempt = this.demandActiveAttemptMatch(state, input.workItemId, callerAttemptId, callerCommandId);
+    const attemptFamily: AttemptExecutionKindV2 = callerCommandId !== null ? 'command' : (attempt?.family ?? 'structured');
     const retryOrdinal = wi.retryOrdinal + 1;
     const retryNotBefore = input.retryNotBefore ?? this.clock();
     const validatorAggregateRef = input.validatorAggregateRef ?? null;
@@ -1043,10 +1149,12 @@ export class WorkItemCoordinatorV2 {
       leaseExpiresAt: null,
       expectedLastSequence: null,
       attemptFamily,
-      attemptId: boundAttemptId,
-      commandId: boundCommandId,
+      attemptId: callerAttemptId,
+      commandId: callerCommandId,
       agentId: attempt?.agentId ?? null,
-      commandKind: attempt?.commandKind ?? (boundCommandId === null ? null : SYSTEM_COMMAND_KIND_BY_WORK_ITEM[wi.kind] ?? null),
+      commandKind: callerCommandId !== null
+        ? ((state.attempts[callerCommandId]?.commandKind as SystemCommandKindV2 | null) ?? null)
+        : (attempt?.commandKind as SystemCommandKindV2 | null),
       dispatchRef: null,
       grantInstanceRef: null,
       reason: null,
@@ -1058,6 +1166,7 @@ export class WorkItemCoordinatorV2 {
       budgetPolicyDigest: parked ? dispositionDigest(input.workItemId, retryOrdinal, input.failureCode) : null,
       failureRecoveryPayloadRef: null,
       taskFailure: null,
+      resultRefs: [],
     } as Extract<PublicationOperationPayloadV2, { family: 'lease_or_retry' }>;
     const tail = await this.expectedTail(input.taskId, state);
     const published = await this.commitOne({
@@ -1124,6 +1233,145 @@ export class WorkItemCoordinatorV2 {
     return null;
   }
 
+  /* ---------------- completeWorkItem (Task 12 success terminal) ---------------- */
+
+  /**
+   * Task 12: the SUCCESS completion envelope (spec §9.2, design §17.2) — the
+   * attempt/command `completed` terminal + `structured_work_item_completed`
+   * in ONE batch through the registered `work_item_completed` builder. The
+   * projector demands the attempt be completed BEFORE the workitem completion
+   * event, so the envelope order is fixed. Response-loss replay returns the
+   * original commit; a late call from a stale epoch/base is rejected by the
+   * demandLeased + base-match path with NO partial write. Domain facts ride
+   * the same batch only through domain-completion handlers registered by later
+   * tasks (the `human_answer` pattern); this method commits the base terminal
+   * pair the Task 12 attempt-coordinator uses.
+   */
+  async completeWorkItem(input: CompleteWorkItemInputV2): Promise<CompletedWorkV2> {
+    const callerAttemptId = input.attemptId ?? null;
+    const callerCommandId = input.commandId ?? null;
+    const resultRefs = input.resultRefs ?? [];
+    const { state } = await this.readProjection(input.taskId);
+    const committed = await this.committedOperation(input.taskId, input.operationId);
+    if (committed !== null) {
+      const result = this.deriveCompletedResult(input, committed, true);
+      if (result.workItemId !== input.workItemId) {
+        throw new CoordinatorError('OPERATION_CONFLICT', `operation '${input.operationId}' committed a different completion`);
+      }
+      // The operation id is attempt-bound; a caller that names a DIFFERENT
+      // attempt under the same operation id is a conflict, never a replay.
+      if (callerAttemptId !== null && result.attemptId !== callerAttemptId) {
+        throw new CoordinatorError('ATTEMPT_MISMATCH', `operation '${input.operationId}' completed attempt '${String(result.attemptId)}', not '${callerAttemptId}'`);
+      }
+      if (callerCommandId !== null && result.commandId !== callerCommandId) {
+        throw new CoordinatorError('ATTEMPT_MISMATCH', `operation '${input.operationId}' completed command '${String(result.commandId)}', not '${callerCommandId}'`);
+      }
+      return result;
+    }
+    const { wi, base } = this.demandLeased(state, input.workItemId);
+    // I-1: the caller's attempt identity must equal the active lease's bound
+    // attempt/command — a stale-epoch late result can never complete the
+    // CURRENT re-leased attempt (zero writes on mismatch).
+    const attempt = this.demandActiveAttemptMatch(state, input.workItemId, callerAttemptId, callerCommandId);
+    const attemptFamily: AttemptExecutionKindV2 = callerCommandId !== null ? 'command' : (attempt?.family ?? 'structured');
+    // I-2 (§9.2): gated kinds MUST fold a domain result carrier in the same
+    // batch — a bare completion of a gated kind is rejected with ZERO writes.
+    if (completionKindRequiresResult(wi.kind as WorkItemKindV2, wi.sessionKind as never) && resultRefs.length === 0) {
+      throw new CoordinatorError(
+        'INVALID_INPUT',
+        `workitem '${input.workItemId}' kind '${wi.kind}' requires a domain result carrier in the same batch (§9.2)`,
+      );
+    }
+    const payload: Extract<PublicationOperationPayloadV2, { family: 'lease_or_retry' }> = {
+      family: 'lease_or_retry',
+      operationId: input.operationId,
+      taskId: input.taskId,
+      workItemId: input.workItemId,
+      leaseEpoch: wi.leaseEpoch,
+      eventBuilder: 'work_item_completed',
+      authorityBaseRef: base,
+      kind: wi.kind as WorkItemKindV2,
+      roleBinding: wi.roleBinding,
+      agentExecutionKind: wi.agentExecutionKind,
+      sessionKind: wi.sessionKind as never,
+      roundId: wi.roundId,
+      logicalAssignmentId: attempt?.logicalAssignmentId ?? wi.logicalAssignmentId,
+      reviewAssignmentId: attempt?.reviewAssignmentId ?? wi.reviewAssignmentId,
+      grantSpecRef: wi.grantSpecRef,
+      inputArtifactDeliveryId: attempt?.inputArtifactDeliveryId ?? wi.inputArtifactDeliveryId,
+      payloadRef: wi.payloadRef,
+      initialLeaseEpoch: 0,
+      maxAutomaticRetries: wi.maxAutomaticRetries,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      expectedLastSequence: null,
+      attemptFamily,
+      attemptId: callerAttemptId,
+      commandId: callerCommandId,
+      agentId: attempt?.agentId ?? wi.leaseOwner,
+      commandKind: callerCommandId !== null
+        ? ((state.attempts[callerCommandId]?.commandKind as SystemCommandKindV2 | null) ?? null)
+        : (attempt?.commandKind as SystemCommandKindV2 | null),
+      dispatchRef: null,
+      grantInstanceRef: null,
+      reason: null,
+      failureCode: null,
+      failureDigest: null,
+      retryOrdinal: null,
+      retryNotBefore: null,
+      validatorAggregateRef: null,
+      budgetPolicyDigest: null,
+      failureRecoveryPayloadRef: null,
+      taskFailure: null,
+      resultRefs: [...resultRefs],
+    };
+    const tail = await this.expectedTail(input.taskId, state);
+    const published = await this.commitOne({
+      taskId: input.taskId,
+      operationId: input.operationId,
+      payload,
+      intent: { handlerKind: 'work_item_completed', handlerVersion: 1 },
+      preparedRefs: [base, ...resultRefs],
+      expectedTailSequence: tail.lastSequence,
+      expectedTailCommitId: tail.lastCommitId,
+    });
+    const result = this.deriveCompletedResult(input, published.events, false);
+    if (result.workItemId !== input.workItemId) {
+      this.mapCommitError(new StorageError(STORAGE_ERROR_CODES.EVENT_INVALID, 'completion produced no completion event', null, 'retry'));
+    }
+    return result;
+  }
+
+  private deriveCompletedResult(
+    input: CompleteWorkItemInputV2,
+    committed: readonly CoordinatorCommittedEventV2[],
+    replayed: boolean,
+  ): CompletedWorkV2 {
+    const completed = committed.find((entry) => entry.event.type === 'structured_work_item_completed');
+    if (completed === undefined) {
+      throw new CoordinatorError('OPERATION_CONFLICT', `operation '${input.operationId}' committed no workitem completion`);
+    }
+    const event = completed.event as Record<string, unknown>;
+    const terminal = committed.find(
+      (entry) =>
+        entry.event.type === 'structured_agent_attempt_completed_v2' ||
+        entry.event.type === 'structured_generic_agent_attempt_completed' ||
+        entry.event.type === 'structured_system_command_completed',
+    );
+    const terminalEvent = terminal === undefined ? undefined : (terminal.event as Record<string, unknown>);
+    const isCommand = terminal?.event.type === 'structured_system_command_completed';
+    const isGeneric = terminalEvent !== undefined && terminalEvent.agentId !== undefined;
+    return {
+      workItemId: String(event.workItemId),
+      leaseEpoch: event.leaseEpoch as number,
+      attemptFamily: (isCommand ? 'command' : isGeneric ? 'generic' : 'structured') as AttemptExecutionKindV2,
+      attemptId: terminal !== undefined && !isCommand ? (terminalEvent?.attemptId as string) : null,
+      commandId: isCommand ? (terminalEvent?.commandId as string) : null,
+      events: committed,
+      replayed,
+    };
+  }
+
   /* ---------------- requeueDue ---------------- */
 
   async requeueDue(taskId: string, workItemId: string, operationId: string): Promise<RequeueResultV2> {
@@ -1183,6 +1431,7 @@ export class WorkItemCoordinatorV2 {
       budgetPolicyDigest: null,
       failureRecoveryPayloadRef: null,
       taskFailure: null,
+      resultRefs: [],
     };
     const tail = await this.expectedTail(taskId, state);
     const published = await this.commitOne({

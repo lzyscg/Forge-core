@@ -177,6 +177,27 @@ export interface CommitContext {
    * Basic v2 contexts never carry it.
    */
   structured?: StructuredCommitContext;
+  /**
+   * Task 12 authoritative v2 generic-turn wiring (additive): when present,
+   * `validateAndCommit` REUSES the basic-turn execution validation (phase/
+   * cardinality/final-submitter authorization — spec §6.4) but delegates the
+   * terminal to the `onSubmit` callback, which the attempt-coordinator wires to
+   * the v2 committer (the facade-backed generic completion). The v2 path never
+   * writes a v1 event (no agent_result/final_submission_accepted) — the v2
+   * attempt terminal + work_item_completed are the authority. Delivery-bound
+   * authority is preserved upstream: the coordinator blocks a submitter lease
+   * without a current SystemArtifactDelivery, and the v2 completion event
+   * carries the exact `inputArtifactDeliveryId` the projector validates.
+   * Basic v1 contexts never carry it (byte-for-byte).
+   */
+  v2?: {
+    workItemId: string;
+    attemptId: string;
+    onSubmit(
+      context: CommitContext,
+      dispatch: Extract<ForgeAction, { type: 'submit_final_artifact' }>,
+    ): Promise<void>;
+  };
 }
 
 /** Metadata of one event the commit produced or replayed. */
@@ -349,11 +370,71 @@ export class ActionCommitter {
     context: CommitContext,
     actions: ReadonlyArray<unknown>,
   ): Promise<CommitResult> {
+    if (context.v2 !== undefined) {
+      return this.commitV2(context, actions);
+    }
     if (context.structured !== undefined) {
       return this.commitStructured(context, actions);
     }
     const validated = await this.validateActionSet(context, actions);
     return this.commitValidated(context, validated);
+  }
+
+  /**
+   * Task 12 authoritative v2 generic-turn branch (spec §6.4, design §17.2):
+   * REUSES the basic-turn execution VALIDATION (phase/cardinality and the
+   * final-submitter authorization) but writes NO v1 event — the v2 completion
+   * (attempt terminal + work_item_completed) is delegated to `context.v2
+   * .onSubmit`, which the attempt-coordinator wires to the facade-backed v2
+   * committer. `submit_final_artifact` is the ONLY legal dispatch (the
+   * submitter delivers the exact current artifact); anything else fails closed
+   * before any v2 commit.
+   */
+  private async commitV2(
+    context: CommitContext,
+    actions: ReadonlyArray<unknown>,
+  ): Promise<CommitResult> {
+    if (!SAFE_TURN_ID.test(context.turnId)) {
+      throw new CommitFailure(
+        COMMIT_ERROR_CODES.COMMIT_CONTEXT_INVALID,
+        '提交上下文的 Turn 标识不可用。',
+      );
+    }
+    if (actions.length > MAX_ACTIONS_PER_TURN) {
+      throw new CommitFailure(
+        COMMIT_ERROR_CODES.TOO_MANY_ACTIONS,
+        `一次执行最多提交 ${MAX_ACTIONS_PER_TURN} 个生产动作。`,
+      );
+    }
+    const parsed = actions.map((raw) => parseCommittableAction(raw));
+    const sequence = this.validatePhaseSequence(parsed);
+    const { dispatch } = sequence;
+    if (dispatch.type !== 'submit_final_artifact') {
+      throw new CommitFailure(
+        COMMIT_ERROR_CODES.AGENT_DISPATCH_CARDINALITY_INVALID,
+        'v2 提交回合只允许 submit_final_artifact。',
+      );
+    }
+    if (!context.finalOutput.submitters.includes(context.currentAgent.id)) {
+      throw new CommitFailure(
+        COMMIT_ERROR_CODES.FINAL_SUBMITTER_NOT_ALLOWED,
+        '该 Agent 不是模板声明的最终产物提交者。',
+      );
+    }
+    await context.v2!.onSubmit(context, dispatch);
+    return {
+      committedEvents: [],
+      publishedVersions: [],
+      taskCompleted: true,
+      waitingHuman: false,
+      nextAgentIds: [],
+      phase: {
+        state: 'dispatched',
+        dispatchAction: 'submit_final_artifact',
+        target: null,
+        message: '已提交系统交付物。',
+      },
+    };
   }
 
   /**

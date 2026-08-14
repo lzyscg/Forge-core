@@ -607,6 +607,8 @@ export interface PiHarnessOptions {
   script?: readonly PiScriptedTurn[];
   /** Structured-slot runtime seam (Task 14); wired into the harness runtime. */
   structuredSlot?: PiStructuredSlotRuntime;
+  /** Task 12 authoritative v2 tool seam; wired into the harness runtime. */
+  v2Tools?: import('./pi-agent-runtime').PiV2ToolRuntime;
 }
 
 /** Everything tests need to observe about the injected Pi session factory. */
@@ -653,6 +655,7 @@ export function createPiHarness(options: PiHarnessOptions = {}): PiHarness {
       return { model: stubModel };
     },
     structuredSlot: options.structuredSlot,
+    v2Tools: options.v2Tools,
     createSession: async (sessionOptions) => {
       const customTools = (sessionOptions.customTools ?? []) as unknown as PiToolDefinitionLike[];
       const session = new ScriptedPiSession(script, customTools, stubModel);

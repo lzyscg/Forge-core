@@ -351,13 +351,13 @@ describe('TaskLifecycleServiceV2 stop/resume/retry', () => {
     const leased = await env.coordinator.leaseNext(taskId, 'worker-a', OP(52));
     const base = leased!.authorityBaseRef;
     // Fail twice: maxAutomaticRetries=2 → third failure parks (ordinal 3 > 2).
-    await env.coordinator.recordRetryableFailure({ taskId, operationId: OP(53), workItemId: wiId, failureCode: 'HANDLER_FAILED', failureDigest: 'd'.repeat(64), retryNotBefore: env.iso() });
+    await env.coordinator.recordRetryableFailure({ taskId, operationId: OP(53), workItemId: wiId, attemptId: leased?.attemptId ?? undefined, failureCode: 'HANDLER_FAILED', failureDigest: 'd'.repeat(64), retryNotBefore: env.iso() });
     await env.coordinator.requeueDue(taskId, wiId, OP(54));
-    await env.coordinator.leaseNext(taskId, 'worker-a', OP(55));
-    await env.coordinator.recordRetryableFailure({ taskId, operationId: OP(56), workItemId: wiId, failureCode: 'HANDLER_FAILED', failureDigest: 'd'.repeat(64), retryNotBefore: env.iso() });
+    const leaseAttempt1 = await env.coordinator.leaseNext(taskId, 'worker-a', OP(55));
+    await env.coordinator.recordRetryableFailure({ taskId, operationId: OP(56), workItemId: wiId, attemptId: leaseAttempt1?.attemptId ?? undefined, failureCode: 'HANDLER_FAILED', failureDigest: 'd'.repeat(64), retryNotBefore: env.iso() });
     await env.coordinator.requeueDue(taskId, wiId, OP(57));
-    await env.coordinator.leaseNext(taskId, 'worker-a', OP(58));
-    const parked = await env.coordinator.recordRetryableFailure({ taskId, operationId: OP(59), workItemId: wiId, failureCode: 'HANDLER_FAILED', failureDigest: 'd'.repeat(64), retryNotBefore: env.iso() });
+    const leaseAttempt2 = await env.coordinator.leaseNext(taskId, 'worker-a', OP(58));
+    const parked = await env.coordinator.recordRetryableFailure({ taskId, operationId: OP(59), workItemId: wiId, attemptId: leaseAttempt2?.attemptId ?? undefined, failureCode: 'HANDLER_FAILED', failureDigest: 'd'.repeat(64), retryNotBefore: env.iso() });
     expect(parked.mode).toBe('parked');
     // terminal-fail pieces were part of the park: the attempt is terminal.
     const state = await env.readProjection(taskId);

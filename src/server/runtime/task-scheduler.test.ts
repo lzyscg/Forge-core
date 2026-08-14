@@ -2283,10 +2283,13 @@ describe('v2 scheduling loop (Task 11, spec §10.4)', { timeout: 30_000 }, () =>
     // Record a retryable failure on the CLAIMED workitem with a future
     // retryNotBefore (the pass's claim is the only legal lease).
     const coordinator = (engine as unknown as { deps: { coordinator: WorkItemCoordinatorV2 } }).deps.coordinator;
+    const activeProjection = (await service.v2CheckpointStore.readState(task.id, (ref) => service.v2BlobStore.readJson(task.id, ref, ref.kind))).projection;
+    const activeAttemptId = activeProjection.activeLease?.attemptId ?? undefined;
     const recorded = await coordinator.recordRetryableFailure({
       taskId: task.id,
       operationId: 'ls-fail-seed',
       workItemId: claimed.leased[0]?.workItemId as string,
+      attemptId: activeAttemptId,
       failureCode: 'HANDLER_FAILED',
       failureDigest: 'f'.repeat(64),
       retryNotBefore: '2026-08-14T10:30:00.000Z',
@@ -2433,10 +2436,13 @@ describe('v1 boot recovery v2 gate (review A-F1) + blocked startup (review A-F2)
     expect(leasedPass.leased).toHaveLength(1);
     const workItemId = leasedPass.leased[0]?.workItemId as string;
     const coordinator = (engine as unknown as { deps: { coordinator: WorkItemCoordinatorV2 } }).deps.coordinator;
+    const activeProjection = (await harnessA.service.v2CheckpointStore.readState(task.id, (ref) => harnessA.service.v2BlobStore.readJson(task.id, ref, ref.kind))).projection;
+    const activeAttemptId = activeProjection.activeLease?.attemptId ?? undefined;
     const recorded = await coordinator.recordRetryableFailure({
       taskId: task.id,
       operationId: 'ls-fail-due',
       workItemId,
+      attemptId: activeAttemptId,
       failureCode: 'HANDLER_FAILED',
       failureDigest: 'f'.repeat(64),
       retryNotBefore: '2026-08-14T09:00:00.000Z', // ALREADY DUE

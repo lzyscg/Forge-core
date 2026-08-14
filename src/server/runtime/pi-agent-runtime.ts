@@ -199,6 +199,23 @@ export interface PiAgentRuntimeOptions {
    * session services; tests inject fakes.
    */
   structuredSlot?: PiStructuredSlotRuntime;
+  /**
+   * Task 12 authoritative v2 tool seam: resolves the closed v2 tool set for an
+   * authoritative review v2 attempt (`AgentTurnInput.v2Session` set). Returns
+   * null for basic / v3 structured turns. Task 13's tool-factory wires it;
+   * tests inject fakes. Additive — the v1 tool surface is byte-for-byte.
+   */
+  v2Tools?: PiV2ToolRuntime;
+}
+
+/**
+ * The per-turn authoritative v2 tool runtime seam (Task 12). The closed tool
+ * set is bound to the attempt context (server closure supplies task/grant/
+ * path/authority identities); Pi auto-compaction and corrective prompts never
+ * recreate it.
+ */
+export interface PiV2ToolRuntime {
+  createContext(input: AgentTurnInput): Promise<{ toolDefinitions: ToolDefinition[] } | null>;
 }
 
 /**
@@ -590,6 +607,8 @@ export class PiAgentRuntime implements AgentRuntime {
 
   readonly #structuredSlot: PiStructuredSlotRuntime | undefined;
 
+  readonly #v2Tools: PiV2ToolRuntime | undefined;
+
   readonly #live = new Map<string, LiveSession>();
 
   #disposed = false;
@@ -676,6 +695,7 @@ export class PiAgentRuntime implements AgentRuntime {
     this.#resolveModelBinding = options.resolveModelBinding ?? createDefaultModelBindingResolver();
     this.#log = options.log ?? (() => undefined);
     this.#structuredSlot = options.structuredSlot;
+    this.#v2Tools = options.v2Tools;
   }
 
   async run(
@@ -692,7 +712,13 @@ export class PiAgentRuntime implements AgentRuntime {
     if (signal.aborted) {
       throw new RuntimeAbortedError(`turn ${input.turnId} aborted before it started`);
     }
-    const sessionKey = `${input.taskId}:${input.agent.id}`;
+    // Task 12: a v2 attempt runs under its ISOLATED conversation namespace
+    // (§10.2) so two WorkItems for the same Agent ID never share a session key;
+    // basic/v3 turns keep the `taskId:agentId` key byte-for-byte.
+    const sessionKey =
+      input.v2Namespace !== null && input.v2Namespace !== undefined
+        ? `${input.taskId}:${input.v2Namespace}`
+        : `${input.taskId}:${input.agent.id}`;
     if (this.#live.has(sessionKey)) {
       throw RuntimeFailure.permanent(
         PI_RUNTIME_ERROR_CODES.AGENT_TURN_ALREADY_RUNNING,
@@ -705,10 +731,16 @@ export class PiAgentRuntime implements AgentRuntime {
     const live: LiveSession = { session: null, platformAborted: false };
     this.#live.set(sessionKey, live);
 
-    // Task 14: a structured v3 turn runs under the composite Attempt signal
-    // carried by AgentTurnInput.slotSession (deadline/resource closure ∪
-    // scheduler stop); basic turns keep the scheduler signal (byte-for-byte).
-    const runAbortSignal = input.slotSession !== null ? input.slotSession.signal : signal;
+    // Task 14/12: a structured v3 turn runs under the composite Attempt signal
+    // carried by AgentTurnInput.slotSession; a Task 12 v2 attempt under its
+    // own v2Session signal (deadline ∪ scheduler stop); basic turns keep the
+    // scheduler signal (byte-for-byte).
+    const runAbortSignal =
+      input.slotSession !== null
+        ? input.slotSession.signal
+        : input.v2Session !== null && input.v2Session !== undefined
+          ? input.v2Session.signal
+          : signal;
 
     // Registered before any await as well: an abort firing during session
     // setup is caught up below via the signal.aborted check.
@@ -737,14 +769,18 @@ export class PiAgentRuntime implements AgentRuntime {
     };
     let unsubscribe: (() => void) | null = null;
     let structuredUnsubscribe: (() => void) | null = null;
-    // Task 14: the structured slot runtime context (tool set, meter, dispatch
-    // guard, corrective prompt) is resolved once per turn and is NOT recreated
-    // by Pi auto-compaction or corrective prompts. Resolved inside the try so a
-    // provider failure still runs the failure/finally cleanup below.
+    // Task 14/12: the structured v3 (or Task 12 v2) tool context is resolved
+    // once per turn and is NOT recreated by Pi auto-compaction or corrective
+    // prompts. Resolved inside the try so a provider failure still runs the
+    // failure/finally cleanup below.
     let structuredCtx: StructuredSlotRuntimeContext | null = null;
+    let v2Ctx: { toolDefinitions: ToolDefinition[] } | null = null;
     try {
       if (input.slotSession !== null && this.#structuredSlot !== undefined) {
         structuredCtx = await this.#structuredSlot.createContext(input);
+      }
+      if (input.v2Session !== null && input.v2Session !== undefined && this.#v2Tools !== undefined) {
+        v2Ctx = await this.#v2Tools.createContext(input);
       }
       const binding = await this.#resolveModelBinding(input.agent.model);
 
@@ -822,6 +858,9 @@ export class PiAgentRuntime implements AgentRuntime {
           // Task 14: the closed per-kind Slot Tool set (structure/fill/seal)
           // for a structured v3 turn; an empty spread for basic turns.
           ...(structuredCtx?.toolDefinitions ?? []),
+          // Task 12: the closed v2 tool set of an authoritative attempt
+          // (Task 13's tool-factory); an empty spread for basic/v3 turns.
+          ...(v2Ctx?.toolDefinitions ?? []),
         ],
       });
       live.session = session;

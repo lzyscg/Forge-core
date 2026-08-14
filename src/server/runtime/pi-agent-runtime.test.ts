@@ -1711,3 +1711,80 @@ describe('Task 14 Step 7 — structured runtime integration', () => {
     expect(createCount).toBe(1);
   });
 });
+
+describe('authoritative v2 seam (Task 12)', () => {
+  it('injects the closed v2 tool set through the v2Tools seam exactly once per turn', async () => {
+    let createCount = 0;
+    const harness = createPiHarness({
+      coreCwd: tempCwd(),
+      script: [{ text: 'v2 output' }, { text: 'v2 output' }, { text: 'v2 output' }],
+      v2Tools: {
+        createContext: async () => {
+          createCount += 1;
+          return {
+            toolDefinitions: [
+              {
+                name: 'read_active_map',
+                label: 'read_active_map',
+                description: 'read the active Map',
+                executionMode: 'sequential' as const,
+                parameters: Type.Object({ parentId: Type.Optional(Type.String()) }),
+                execute: async () => ({ content: [{ type: 'text', text: '{}' }], details: { ok: true } }),
+              },
+            ],
+          };
+        },
+      },
+    });
+    const result = await harness.runtime.run(
+      sampleTurnInput({
+        v2Session: { signal: new AbortController().signal },
+        v2Namespace: 'structured/orchestrator/wi-1/att-1',
+      }),
+      freshSignal(),
+    );
+    expect(createCount).toBe(1);
+    const names = harness.sessionOptions.customTools.map((tool) => tool.name);
+    expect(names).toContain('read_active_map');
+    expect(result.publicText).toBe('v2 output');
+  });
+
+  it('runs a v2 turn under the isolated namespace (session key never the bare agent id)', async () => {
+    const harness = createPiHarness({ coreCwd: tempCwd(), script: [{ text: 'ok' }, { text: 'ok' }, { text: 'ok' }] });
+    const result = await harness.runtime.run(
+      sampleTurnInput({
+        v2Session: { signal: new AbortController().signal },
+        v2Namespace: 'generic/submitter/wi-2/att-2',
+      }),
+      freshSignal(),
+    );
+    expect(result.publicText).toBe('ok');
+    // The namespace is sanitized into the Pi session id; two WorkItems of the
+    // same agent never share a session identity (spec §10.2).
+    expect(harness.sessionCount).toBe(1);
+  });
+
+  it('aborts the session when the v2 composite signal stops', async () => {
+    const controller = new AbortController();
+    const harness = createPiHarness({
+      coreCwd: tempCwd(),
+      script: [
+        {
+          text: 'never',
+          deferred: createDeferred(),
+        },
+      ],
+    });
+    const runPromise = harness.runtime.run(
+      sampleTurnInput({
+        v2Session: { signal: controller.signal },
+        v2Namespace: 'structured/orchestrator/wi-3/att-3',
+      }),
+      freshSignal(),
+    );
+    await Promise.resolve();
+    controller.abort();
+    await expect(runPromise).rejects.toBeInstanceOf(RuntimeAbortedError);
+    expect(harness.session.abortCount).toBeGreaterThan(0);
+  });
+});

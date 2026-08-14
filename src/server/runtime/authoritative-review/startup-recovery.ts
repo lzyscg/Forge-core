@@ -331,6 +331,7 @@ async function failRunningWithoutWork(
     budgetPolicyDigest: null,
     failureRecoveryPayloadRef,
     taskFailure: true,
+    resultRefs: [],
   } as Extract<PublicationOperationPayloadImport, { family: 'lease_or_retry' }>;
   const tail = await deps.tail(taskId);
   await deps.facade.publishWithPin({

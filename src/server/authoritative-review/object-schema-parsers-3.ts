@@ -241,6 +241,9 @@ const EVENT_BUILDERS = [
   'work_item_created', 'work_item_leased', 'work_item_retryable_failed',
   'work_item_requeued', 'work_item_lease_reclaimed', 'work_item_parked',
   'task_terminal_failed', 'work_item_terminal_failed',
+  // Task 12: the SUCCESS completion envelope ([attempt/command completed,
+  // work_item_completed] in one batch).
+  'work_item_completed',
 ] as const;
 const LIFECYCLE_KINDS = ['stop', 'resume', 'manual_retry', 'run_migration_batch', 'start'] as const;
 const RECLAIM_REASONS = ['lease_expired', 'crash_recovery', 'user_stop', 'operator_interrupt'] as const;
@@ -276,6 +279,7 @@ export function parsePublicationOperationPayload(value: unknown): PublicationOpe
       'expectedLastSequence', 'attemptFamily', 'attemptId', 'commandId', 'agentId', 'commandKind',
       'dispatchRef', 'grantInstanceRef', 'reason', 'failureCode', 'failureDigest', 'retryOrdinal',
       'retryNotBefore', 'validatorAggregateRef', 'budgetPolicyDigest', 'failureRecoveryPayloadRef', 'taskFailure',
+      'resultRefs',
     ], 'publication_operation_payload');
     if (!(EVENT_BUILDERS as readonly string[]).includes(str(o.eventBuilder, 'eventBuilder'))) throw new SchemaError('eventBuilder unknown');
     const attemptFamily = o.attemptFamily === null ? null : str(o.attemptFamily, 'attemptFamily');
@@ -327,6 +331,7 @@ export function parsePublicationOperationPayload(value: unknown): PublicationOpe
       budgetPolicyDigest: o.budgetPolicyDigest === null ? null : hx(o.budgetPolicyDigest, 'budgetPolicyDigest'),
       failureRecoveryPayloadRef: rfn(o.failureRecoveryPayloadRef, 'failureRecoveryPayloadRef'),
       taskFailure: o.taskFailure === null ? null : (o.taskFailure === true || o.taskFailure === false ? o.taskFailure : (() => { throw new SchemaError('taskFailure must be boolean|null'); })()),
+      resultRefs: rfa(o.resultRefs, 'resultRefs'),
     } as PublicationOperationPayloadV2;
   }
   if (family === 'lifecycle') {
