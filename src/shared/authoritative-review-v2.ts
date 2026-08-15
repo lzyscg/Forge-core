@@ -95,6 +95,7 @@ export const AUTHORITATIVE_BLOB_KINDS_V2 = [
   'map_candidate_validation_core',
   'map_review_bundle',
   'map_review_coverage_core',
+  'map_review_round',
   'map_review_settlement_core',
   'map_snapshot',
   'migration_activation_decision',

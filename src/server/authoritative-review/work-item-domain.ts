@@ -46,7 +46,7 @@ const MATRIX: Readonly<Record<string, AuthorityBaseRuleV2>> = {
   system_generation_finalize: { required: ['mapRef', 'contentRevisionManifestRef', 'planSpecRef'], optional: ['stagingManifestRef', 'findingSetRef'], oneOf: [] },
   system_repair_finalize: { required: ['planSpecRef', 'stagingManifestRef'], optional: ['findingSetRef'], oneOf: [['mapRef', 'mapCandidateRef']] },
   system_migration_validation_batch: { required: ['mapCandidateRef', 'planSpecRef'], optional: ['reviewRoundRef', 'findingSetRef'], oneOf: [] },
-  system_review_settlement: { required: ['contentRevisionManifestRef', 'reviewCoverageCoreRef', 'reviewRoundRef'], optional: ['findingSetRef'], oneOf: [['mapRef', 'mapCandidateRef']] },
+  system_review_settlement: { required: ['reviewCoverageCoreRef', 'reviewRoundRef'], optional: ['contentRevisionManifestRef', 'findingSetRef'], oneOf: [['mapRef', 'mapCandidateRef']] },
   system_seal: { required: ['mapRef', 'mapReviewBundleRef', 'contentRevisionManifestRef', 'reviewBundleRef'], optional: ['reviewCoverageCoreRef', 'findingSetRef'], oneOf: [] },
 };
 

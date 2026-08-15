@@ -1745,6 +1745,68 @@ export interface MapBuildPublishCarriersV2 {
 }
 
 /**
+ * Task 16 one `structured_map_observation_recorded` carrier (design §12.6):
+ * the deterministic layered whole-Map observation event. The observationRef is
+ * the whole-observation ledger summary; childObservationRefs close the child
+ * digest closure.
+ */
+export interface MapReviewObservationCarrierV2 {
+  observationId: string;
+  level: number;
+  parentObservationId: string | null;
+  observationRef: BlobRefV2;
+  coveredTargetCount: number;
+  childObservationRefs: readonly BlobRefV2[];
+}
+
+/**
+ * Task 16 map-review publication carriers (deterministic rebuild; each carrier
+ * is null when a publish branch does not use it). Covers the three Task 16
+ * domain-publish branches: `review_assignment_commit` (the §12.4 freeze of one
+ * completed assignment — batch AND whole observation), `map_review_round_completed`
+ * (the coverage-core closure), and `map_review_settlement` (the §13.1
+ * activation envelope: round settled + Map activated + baseline-unset manifest
+ * + successor generation WorkItem + command/WorkItem terminals).
+ */
+export interface MapReviewPublishCarriersV2 {
+  // --- review_assignment_commit (batch/whole freeze) ---
+  assignmentId: string | null;
+  mapReviewRoundId: string | null;
+  workItemId: string | null;
+  attemptId: string | null;
+  reviewAssignmentId: string | null;
+  source: 'batch' | 'whole_map_observation' | null;
+  ledgerRef: BlobRefV2 | null;
+  coverageTargetCount: number | null;
+  findingCount: number | null;
+  /** whole-session observation events (level closure; batch sessions leave null). */
+  observations: readonly MapReviewObservationCarrierV2[] | null;
+  // --- map_review_round_completed ---
+  coverageCoreRef: BlobRefV2 | null;
+  // --- map_review_settlement (activation envelope) ---
+  settlementCoreRef: BlobRefV2 | null;
+  outcome: 'map_repair' | 'activate' | null;
+  mapId: string | null;
+  mapRevision: number | null;
+  supersedesMapId: string | null;
+  mapSnapshotRef: BlobRefV2 | null;
+  mapReviewBundleRef: BlobRefV2 | null;
+  mapSemanticDigest: string | null;
+  contentRevisionManifestRef: BlobRefV2 | null;
+  activationValidatorAggregateRef: BlobRefV2 | null;
+  migrationSettlementCoreRef: BlobRefV2 | null;
+  migrationActivationDecisionRef: BlobRefV2 | null;
+  // --- content_revision_committed (baseline_unset) ---
+  taskContentRevision: number | null;
+  manifestPhase: 'baseline_unset' | 'provisional' | 'finalized' | null;
+  producerPlanSpecRef: BlobRefV2 | null;
+  priorManifestRef: BlobRefV2 | null;
+  // --- §9.2 successor WorkItem + command-terminal pair ---
+  successor: SuccessorWorkItemCarrierV2 | null;
+  terminal: SystemCommandTerminalCarrierV2 | null;
+}
+
+/**
  * §8/§7.1 exact closed union of canonical publication operation payloads.
  * Every branch carries exact keys, authority/event-builder inputs and child
  * refs; pins never persist executable callbacks or raw Agent text.
@@ -1761,6 +1823,7 @@ export type PublicationOperationPayloadV2 =
         | 'content_plan_finalize'
         | 'review_assignment_commit'
         | 'map_review_settlement'
+        | 'map_review_round_completed'
         | 'content_review_settlement'
         | 'map_activation'
         | 'generation_finalize'
@@ -1774,6 +1837,8 @@ export type PublicationOperationPayloadV2 =
       expectedResultIdentity: string;
       /** Task 15 map-build carriers (null for every non-map-build publish kind). */
       mapBuild: MapBuildPublishCarriersV2 | null;
+      /** Task 16 map-review carriers (null for every non-map-review publish kind). */
+      mapReview: MapReviewPublishCarriersV2 | null;
     }
   | {
       family: 'lease_or_retry';

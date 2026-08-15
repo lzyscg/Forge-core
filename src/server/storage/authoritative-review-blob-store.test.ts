@@ -62,6 +62,7 @@ function publishPayload(overrides: Record<string, unknown> = {}): Record<string,
     blobRefs: [],
     expectedResultIdentity: 'result-1',
     mapBuild: null,
+    mapReview: null,
     ...overrides,
   };
 }

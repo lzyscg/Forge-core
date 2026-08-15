@@ -217,6 +217,26 @@ export function publicationPayloadChildRefs(payload: PublicationOperationPayload
           if (mb.successorBuildStart.sourceValidationReceiptRef !== null) refs.push(mb.successorBuildStart.sourceValidationReceiptRef);
         }
       }
+      const mr = parsed.mapReview;
+      if (mr !== null) {
+        if (mr.ledgerRef !== null) refs.push(mr.ledgerRef);
+        if (mr.observations !== null) for (const o of mr.observations) refs.push(o.observationRef, ...o.childObservationRefs);
+        if (mr.coverageCoreRef !== null) refs.push(mr.coverageCoreRef);
+        if (mr.settlementCoreRef !== null) refs.push(mr.settlementCoreRef);
+        if (mr.mapSnapshotRef !== null) refs.push(mr.mapSnapshotRef);
+        if (mr.mapReviewBundleRef !== null) refs.push(mr.mapReviewBundleRef);
+        if (mr.contentRevisionManifestRef !== null) refs.push(mr.contentRevisionManifestRef);
+        if (mr.activationValidatorAggregateRef !== null) refs.push(mr.activationValidatorAggregateRef);
+        if (mr.migrationSettlementCoreRef !== null) refs.push(mr.migrationSettlementCoreRef);
+        if (mr.migrationActivationDecisionRef !== null) refs.push(mr.migrationActivationDecisionRef);
+        if (mr.producerPlanSpecRef !== null) refs.push(mr.producerPlanSpecRef);
+        if (mr.priorManifestRef !== null) refs.push(mr.priorManifestRef);
+        if (mr.terminal !== null) refs.push(mr.terminal.authorityBaseRef);
+        if (mr.successor !== null) {
+          refs.push(mr.successor.authorityBaseRef, mr.successor.payloadRef);
+          if (mr.successor.grantSpecRef !== null) refs.push(mr.successor.grantSpecRef);
+        }
+      }
       return refs;
     }
     case 'lease_or_retry':

@@ -22,6 +22,8 @@ import {
   type AssignmentLedgerBlobV2,
   type AuthorityBaseSetV2,
   type MapBuildPublishCarriersV2,
+  type MapReviewObservationCarrierV2,
+  type MapReviewPublishCarriersV2,
   type MapReviewRoundPlanCarrierV2,
   type ProjectionCheckpointV2,
   type PublicationOperationPayloadV2,
@@ -243,7 +245,7 @@ export function parseProjectionCheckpoint(value: unknown): ProjectionCheckpointV
 /* ---- publication_operation_payload (§7.1/§8) -------------------- */
 const PUBLISH_KINDS = [
   'map_build_commit', 'map_candidate_commit', 'content_revision_commit', 'content_plan_finalize',
-  'review_assignment_commit', 'map_review_settlement', 'content_review_settlement', 'map_activation',
+  'review_assignment_commit', 'map_review_settlement', 'map_review_round_completed', 'content_review_settlement', 'map_activation',
   'generation_finalize', 'repair_finalize', 'migration_settlement', 'seal_publish',
   // Task 15 map-build service: finish proposal + the two finalizer envelopes.
   'map_build_finish', 'map_finalize_commit', 'map_finalize_rejected',
@@ -271,7 +273,7 @@ export function parsePublicationOperationPayload(value: unknown): PublicationOpe
   const o = rec(value, 'publication_operation_payload');
   const family = str(o.family, 'publication_operation_payload.family');
   if (family === 'domain_publish') {
-    ex(o, ['family', 'operationId', 'taskId', 'publishKind', 'blobRefs', 'expectedResultIdentity', 'mapBuild'], 'publication_operation_payload');
+    ex(o, ['family', 'operationId', 'taskId', 'publishKind', 'blobRefs', 'expectedResultIdentity', 'mapBuild', 'mapReview'], 'publication_operation_payload');
     if (!(PUBLISH_KINDS as readonly string[]).includes(str(o.publishKind, 'publishKind'))) throw new SchemaError('publishKind unknown');
     return {
       family,
@@ -281,6 +283,7 @@ export function parsePublicationOperationPayload(value: unknown): PublicationOpe
       blobRefs: rfa(o.blobRefs, 'blobRefs'),
       expectedResultIdentity: str(o.expectedResultIdentity, 'expectedResultIdentity'),
       mapBuild: parseMapBuildPublishCarriers(o.mapBuild),
+      mapReview: parseMapReviewPublishCarriers(o.mapReview),
     } as PublicationOperationPayloadV2;
   }
   if (family === 'lease_or_retry') {
@@ -587,6 +590,84 @@ function parseSuccessorBuildStartCarrier(value: unknown): MapBuildPublishCarrier
     supersedesMapBuildId: o.supersedesMapBuildId === null ? null : str(o.supersedesMapBuildId, 'successorBuildStart.supersedesMapBuildId'),
     mapBuildSpecRef: rfKind(o.mapBuildSpecRef, 'map_build_spec', 'successorBuildStart.mapBuildSpecRef'),
     sourceValidationReceiptRef: rfn(o.sourceValidationReceiptRef, 'successorBuildStart.sourceValidationReceiptRef'),
+  };
+}
+
+/**
+ * Task 16 map-review carriers: `review_assignment_commit`, `map_review_round_completed`
+ * and `map_review_settlement` (the activation envelope). Every carrier is null
+ * when the publish branch does not use it (the exact-key parser rejects
+ * anything else).
+ */
+function parseMapReviewPublishCarriers(value: unknown): MapReviewPublishCarriersV2 | null {
+  if (value === null || value === undefined) return null;
+  const o = rec(value, 'mapReview');
+  ex(o, [
+    'assignmentId', 'mapReviewRoundId', 'workItemId', 'attemptId', 'reviewAssignmentId',
+    'source', 'ledgerRef', 'coverageTargetCount', 'findingCount', 'observations',
+    'coverageCoreRef', 'settlementCoreRef', 'outcome',
+    'mapId', 'mapRevision', 'supersedesMapId', 'mapSnapshotRef', 'mapReviewBundleRef',
+    'mapSemanticDigest', 'contentRevisionManifestRef', 'activationValidatorAggregateRef',
+    'migrationSettlementCoreRef', 'migrationActivationDecisionRef',
+    'taskContentRevision', 'manifestPhase', 'producerPlanSpecRef', 'priorManifestRef',
+    'successor', 'terminal',
+  ], 'mapReview');
+  const source = o.source === null ? null : str(o.source, 'mapReview.source');
+  if (source !== null && source !== 'batch' && source !== 'whole_map_observation') {
+    throw new SchemaError('mapReview.source must be batch|whole_map_observation|null');
+  }
+  const outcome = o.outcome === null ? null : str(o.outcome, 'mapReview.outcome');
+  if (outcome !== null && outcome !== 'map_repair' && outcome !== 'activate') {
+    throw new SchemaError('mapReview.outcome must be map_repair|activate|null');
+  }
+  const manifestPhase = o.manifestPhase === null ? null : str(o.manifestPhase, 'mapReview.manifestPhase');
+  if (manifestPhase !== null && manifestPhase !== 'baseline_unset' && manifestPhase !== 'provisional' && manifestPhase !== 'finalized') {
+    throw new SchemaError('mapReview.manifestPhase must be baseline_unset|provisional|finalized|null');
+  }
+  const observations = o.observations === null ? null : (o.observations as unknown[]).map((v, i) => parseMapReviewObservationCarrier(v, `mapReview.observations[${i}]`));
+  return {
+    assignmentId: o.assignmentId === null ? null : str(o.assignmentId, 'mapReview.assignmentId'),
+    mapReviewRoundId: o.mapReviewRoundId === null ? null : str(o.mapReviewRoundId, 'mapReview.mapReviewRoundId'),
+    workItemId: o.workItemId === null ? null : str(o.workItemId, 'mapReview.workItemId'),
+    attemptId: o.attemptId === null ? null : str(o.attemptId, 'mapReview.attemptId'),
+    reviewAssignmentId: o.reviewAssignmentId === null ? null : str(o.reviewAssignmentId, 'mapReview.reviewAssignmentId'),
+    source,
+    ledgerRef: rfn(o.ledgerRef, 'mapReview.ledgerRef'),
+    coverageTargetCount: o.coverageTargetCount === null ? null : onn(o.coverageTargetCount, 'mapReview.coverageTargetCount'),
+    findingCount: o.findingCount === null ? null : onn(o.findingCount, 'mapReview.findingCount'),
+    observations,
+    coverageCoreRef: rfn(o.coverageCoreRef, 'mapReview.coverageCoreRef'),
+    settlementCoreRef: rfn(o.settlementCoreRef, 'mapReview.settlementCoreRef'),
+    outcome,
+    mapId: o.mapId === null ? null : str(o.mapId, 'mapReview.mapId'),
+    mapRevision: o.mapRevision === null ? null : onn(o.mapRevision, 'mapReview.mapRevision'),
+    supersedesMapId: o.supersedesMapId === null ? null : str(o.supersedesMapId, 'mapReview.supersedesMapId'),
+    mapSnapshotRef: rfn(o.mapSnapshotRef, 'mapReview.mapSnapshotRef'),
+    mapReviewBundleRef: rfn(o.mapReviewBundleRef, 'mapReview.mapReviewBundleRef'),
+    mapSemanticDigest: o.mapSemanticDigest === null ? null : hx(o.mapSemanticDigest, 'mapReview.mapSemanticDigest'),
+    contentRevisionManifestRef: rfn(o.contentRevisionManifestRef, 'mapReview.contentRevisionManifestRef'),
+    activationValidatorAggregateRef: rfn(o.activationValidatorAggregateRef, 'mapReview.activationValidatorAggregateRef'),
+    migrationSettlementCoreRef: rfn(o.migrationSettlementCoreRef, 'mapReview.migrationSettlementCoreRef'),
+    migrationActivationDecisionRef: rfn(o.migrationActivationDecisionRef, 'mapReview.migrationActivationDecisionRef'),
+    taskContentRevision: o.taskContentRevision === null ? null : onn(o.taskContentRevision, 'mapReview.taskContentRevision'),
+    manifestPhase,
+    producerPlanSpecRef: rfn(o.producerPlanSpecRef, 'mapReview.producerPlanSpecRef'),
+    priorManifestRef: rfn(o.priorManifestRef, 'mapReview.priorManifestRef'),
+    successor: parseSuccessorWorkItemCarrier(o.successor),
+    terminal: parseSystemCommandTerminalCarrier(o.terminal),
+  };
+}
+
+function parseMapReviewObservationCarrier(value: unknown, where: string): MapReviewObservationCarrierV2 {
+  const o = rec(value, where);
+  ex(o, ['observationId', 'level', 'parentObservationId', 'observationRef', 'coveredTargetCount', 'childObservationRefs'], where);
+  return {
+    observationId: str(o.observationId, `${where}.observationId`),
+    level: onn(o.level, `${where}.level`),
+    parentObservationId: o.parentObservationId === null ? null : str(o.parentObservationId, `${where}.parentObservationId`),
+    observationRef: rf(o.observationRef, `${where}.observationRef`),
+    coveredTargetCount: onn(o.coveredTargetCount, `${where}.coveredTargetCount`),
+    childObservationRefs: rfa(o.childObservationRefs, `${where}.childObservationRefs`),
   };
 }
 

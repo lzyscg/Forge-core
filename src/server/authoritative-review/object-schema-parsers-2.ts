@@ -21,6 +21,7 @@ import {
   type MapCandidateValidationCoreV2,
   type MapReviewBundleV2,
   type MapReviewCoverageCoreV2,
+  type MapReviewRoundV2,
   type MapReviewSettlementCoreV2,
   type MapSnapshotV2,
   type MigrationActivationDecisionV2,
@@ -358,6 +359,53 @@ export function parseMapSnapshot(value: unknown): MapSnapshotV2 {
 }
 
 /* map review / settlement / bundle (design §11.3) ----------------- */
+/**
+ * Task 16 `map_review_round` blob — the frozen MapReviewRound identity the
+ * review WorkItems and the settlement bind via `reviewRoundRef` (design
+ * §11.3; spec §10.1). Rounds are also event identities; this canonical object
+ * is the resolvable reviewRoundRef payload the tool-factory reads.
+ */
+export function parseMapReviewRound(value: unknown): MapReviewRoundV2 {
+  const o = rec(value, 'map_review_round');
+  ex(o, [
+    'mapReviewRoundId',
+    'candidateId',
+    'candidateDigest',
+    'contentRevisionManifestRef',
+    'contentRootDigest',
+    'reviewPolicyDigest',
+    'coverageNodeIds',
+    'coverageRelationIds',
+    'assignmentIds',
+    'inheritedRecordRefs',
+    'wholeMapObservationRefs',
+    'verificationFindingStages',
+    'state',
+    'settlementRef',
+  ], 'map_review_round');
+  const state = str(o.state, 'state');
+  if (!['planned', 'reviewing_batches', 'whole_map_observation', 'completed', 'settled'].includes(state)) {
+    throw new SchemaError('map_review_round.state unknown');
+  }
+  const out: MapReviewRoundV2 = {
+    mapReviewRoundId: str(o.mapReviewRoundId, 'mapReviewRoundId'),
+    candidateId: str(o.candidateId, 'candidateId'),
+    candidateDigest: hx(o.candidateDigest, 'candidateDigest'),
+    contentRevisionManifestRef: rfn(o.contentRevisionManifestRef, 'contentRevisionManifestRef'),
+    contentRootDigest: o.contentRootDigest === null ? null : hx(o.contentRootDigest, 'contentRootDigest'),
+    reviewPolicyDigest: hx(o.reviewPolicyDigest, 'reviewPolicyDigest'),
+    coverageNodeIds: sa(o.coverageNodeIds, 'coverageNodeIds'),
+    coverageRelationIds: sa(o.coverageRelationIds, 'coverageRelationIds'),
+    assignmentIds: sa(o.assignmentIds, 'assignmentIds'),
+    inheritedRecordRefs: rfa(o.inheritedRecordRefs, 'inheritedRecordRefs'),
+    wholeMapObservationRefs: rfa(o.wholeMapObservationRefs, 'wholeMapObservationRefs'),
+    verificationFindingStages: sa(o.verificationFindingStages, 'verificationFindingStages'),
+    state: state as MapReviewRoundV2['state'],
+    settlementRef: rfn(o.settlementRef, 'settlementRef'),
+  };
+  return out;
+}
+
 export function parseMapReviewCoverageCore(value: unknown): MapReviewCoverageCoreV2 {
   const o = rec(value, 'map_review_coverage_core');
   ex(o, ['mapReviewRoundId', 'candidateRef', 'contentRevisionManifestRef', 'contentRootDigest', 'reviewPolicyDigest', 'coverageLedgerRootRefs', 'wholeMapObservationRootRefs', 'findingStageRootRef', 'coreDigest'], 'map_review_coverage_core');

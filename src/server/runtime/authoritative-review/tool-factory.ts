@@ -872,10 +872,16 @@ export function buildReviewAssignmentFreeze(input: {
 
   if (errors.length > 0) return { ok: false, errors };
 
-  const factRefs = facts.map((fact) => refOfBlob('review_fact', fact));
-  const verificationRecordRefs = verifications.map((rec) => refOfBlob('finding_verification_record', rec));
-  const findingDraftRefs = registry.refsList;
-  const ledgerBody = {
+  // The frozen ledger parser requires the ref arrays in canonical order (sorted
+  // by ref digest) and the coverage target ids sorted by string — the freeze
+  // MUST produce parser-valid ledger bytes (the seam publishes them). The
+  // ledgerDigest is the canonical hash of the body WITHOUT that field (hs).
+  const sortRefs = (refs: readonly BlobRefV2[]): BlobRefV2[] =>
+    [...refs].sort((a, b) => (a.digest < b.digest ? -1 : a.digest > b.digest ? 1 : 0));
+  const factRefs = sortRefs(facts.map((fact) => refOfBlob('review_fact', fact)));
+  const verificationRecordRefs = sortRefs(verifications.map((rec) => refOfBlob('finding_verification_record', rec)));
+  const findingDraftRefs = sortRefs(registry.refsList);
+  const without = {
     assignmentId: input.assignmentId,
     workItemId: input.workItemId,
     reviewAssignmentId: input.reviewAssignmentId,
@@ -884,10 +890,9 @@ export function buildReviewAssignmentFreeze(input: {
     factRefs,
     findingDraftRefs,
     verificationRecordRefs,
-    coverageTargetIds: input.requireOrdinaryCoverage ? [...verdictByTarget.keys()].sort() : wholeObservationRefs.map((r) => r.digest),
-    ledgerDigest: '',
+    coverageTargetIds: input.requireOrdinaryCoverage ? [...verdictByTarget.keys()].sort() : sortRefs(wholeObservationRefs).map((r) => r.digest),
   };
-  const ledger: AssignmentLedgerBlobV2 = { ...ledgerBody, ledgerDigest: canonicalJsonSha256(ledgerBody) };
+  const ledger: AssignmentLedgerBlobV2 = { ...without, ledgerDigest: canonicalJsonSha256(without) };
   const freeze: FrozenReviewAssignmentV2 = {
     ledger,
     facts,

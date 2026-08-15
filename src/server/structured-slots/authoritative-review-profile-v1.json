@@ -3,7 +3,7 @@
   "profileIdentity": "forge-authoritative-review/v1",
   "profileVersion": 2,
   "qualificationState": "provisional",
-  "profileDigest": "f717be9d876bbf764adeda1c41896d7536acdab0e450aa60751ab4d67b1721f7",
+  "profileDigest": "49f3b4c18748d1105d0fa1406f320a359e57007dca4679db0a779b0f8291e549",
   "abi": {
     "validatorAbi": "forge-validator/v2",
     "assemblerAbi": "forge-assembler/v2",
@@ -39,6 +39,7 @@
       "map_candidate_validation_core": 4194304,
       "map_review_bundle": 4194304,
       "map_review_coverage_core": 4194304,
+      "map_review_round": 4194304,
       "map_review_settlement_core": 4194304,
       "map_snapshot": 4194304,
       "migration_activation_decision": 4194304,
