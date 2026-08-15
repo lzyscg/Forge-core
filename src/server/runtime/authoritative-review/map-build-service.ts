@@ -1089,6 +1089,7 @@ export class MapBuildService {
         blobRefs: [durableChunkRef, keyLedgerRef, manifestRef],
         expectedResultIdentity: canonicalJsonSha256({ operationId, publishKind: 'map_build_commit' }),
         mapReview: null,
+        contentPlan: null,
         mapBuild: mapBuildCarrier({ mapBuildId: spec.mapBuildId, chunkId: chunk.chunkId, chunkOrdinal: chunk.chunkOrdinal, parentFrontierDigest: chunk.parentFrontierDigest }),
       },
       intent: { handlerKind: 'map_build_commit', handlerVersion: 1 },
@@ -1183,6 +1184,7 @@ export class MapBuildService {
         blobRefs: [grant.spec.mapBuildSpecRef, authorityBaseRef],
         expectedResultIdentity: canonicalJsonSha256({ operationId, publishKind: 'map_build_finish' }),
         mapReview: null,
+        contentPlan: null,
         mapBuild: mapBuildCarrier({
           mapBuildId: spec.mapBuildId,
           expectedChunkCount: params.expectedChunkCount,
@@ -1463,6 +1465,7 @@ export class MapBuildService {
         blobRefs: [manifestRef, contributionManifestRef, candidateRef, keyLedgerRef],
         expectedResultIdentity: canonicalJsonSha256({ operationId, publishKind: 'map_finalize_commit' }),
         mapReview: null,
+        contentPlan: null,
         mapBuild: mapBuildCarrier({
           mapBuildId: spec.mapBuildId,
           manifestRef,
@@ -1588,6 +1591,7 @@ export class MapBuildService {
         blobRefs: [receiptRef, successorSpecRef, successorLedgerRef, authorityBaseRef, grantSpecRef],
         expectedResultIdentity: canonicalJsonSha256({ operationId, publishKind: 'map_finalize_rejected' }),
         mapReview: null,
+        contentPlan: null,
         mapBuild: mapBuildCarrier({
           mapBuildId: spec.mapBuildId,
           validationReceiptRef: receiptRef,

@@ -575,6 +575,36 @@ describe('response-loss replay and conflict (per write family)', () => {
     expect(resultRefs[0].kind).toBe('review_assignment_ledger');
     expect(resultRefs[0].digest).toBe(env.published[0].ledgerRef.digest);
   });
+
+  it('F3: collectResultRefs folds the LAST committed submit_content_draft manifestRef (a blocked-then-re-written batch still completes, not bare)', async () => {
+    const env = await makeEnv({ sessionKind: 'generation_batch' });
+    const binding = {
+      workItemId: env.ctx.workItemId,
+      leaseEpoch: env.ctx.leaseEpoch,
+      attemptId: env.ctx.attemptId,
+      authorityBaseRef: env.ctx.authorityBaseRef,
+      grantSpecRef: env.grantSpecRef,
+    };
+    const manifestRef = refOfBlob('content_revision_manifest', { manifestDigest: 'prov-1' });
+    // The journal records EVERY submit_content_draft result — first a BLOCKED
+    // batch (no manifestRef), then the re-written COMMITTED batch.
+    await env.store.appendReviewDraft(binding, {
+      clientOperationId: 'op-1',
+      op: 'submit_content_draft',
+      body: {},
+      result: { committed: false, failureCode: 'GENERATION_BATCH_BLOCKED' },
+    });
+    await env.store.appendReviewDraft(binding, {
+      clientOperationId: 'op-2',
+      op: 'submit_content_draft',
+      body: {},
+      result: { committed: true, manifestRef },
+    });
+    const resultRefs = await env.factory.collectResultRefs(env.ctx);
+    expect(resultRefs).toHaveLength(1);
+    expect(resultRefs[0].kind).toBe('content_revision_manifest');
+    expect(resultRefs[0].digest).toBe(manifestRef.digest);
+  });
 });
 
 describe('verification flow (spec §11.3, design §11.9)', () => {

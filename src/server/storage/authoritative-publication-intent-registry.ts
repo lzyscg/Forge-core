@@ -237,6 +237,34 @@ export function publicationPayloadChildRefs(payload: PublicationOperationPayload
           if (mr.successor.grantSpecRef !== null) refs.push(mr.successor.grantSpecRef);
         }
       }
+      const cp = parsed.contentPlan;
+      if (cp !== null) {
+        if (cp.generationPlanSpecRef !== null) refs.push(cp.generationPlanSpecRef);
+        if (cp.sourceValidationReceiptRef !== null) refs.push(cp.sourceValidationReceiptRef);
+        if (cp.contentRevisionCommitCoreRef !== null) refs.push(cp.contentRevisionCommitCoreRef);
+        if (cp.validatorAggregateRef !== null) refs.push(cp.validatorAggregateRef);
+        if (cp.contentRevisionManifestRef !== null) refs.push(cp.contentRevisionManifestRef);
+        if (cp.producerPlanSpecRef !== null) refs.push(cp.producerPlanSpecRef);
+        if (cp.priorManifestRef !== null) refs.push(cp.priorManifestRef);
+        if (cp.successor !== null) {
+          refs.push(cp.successor.authorityBaseRef, cp.successor.payloadRef);
+          if (cp.successor.grantSpecRef !== null) refs.push(cp.successor.grantSpecRef);
+        }
+        if (cp.finalizerWarningRootRef !== null) refs.push(cp.finalizerWarningRootRef);
+        if (cp.reviewRound !== null) {
+          refs.push(cp.reviewRound.mapRef, cp.reviewRound.contentRevisionManifestRef, cp.reviewRound.adoptionRootRef);
+          if (cp.reviewRound.consumedOverrideRef !== null) refs.push(cp.reviewRound.consumedOverrideRef);
+        }
+        if (cp.reviewWorkItems !== null) {
+          for (const s of cp.reviewWorkItems) {
+            refs.push(s.authorityBaseRef, s.payloadRef);
+            if (s.grantSpecRef !== null) refs.push(s.grantSpecRef);
+          }
+        }
+        if (cp.validationReceiptRef !== null) refs.push(cp.validationReceiptRef);
+        if (cp.successorPlanRef !== null) refs.push(cp.successorPlanRef);
+        if (cp.terminal !== null) refs.push(cp.terminal.authorityBaseRef);
+      }
       return refs;
     }
     case 'lease_or_retry':

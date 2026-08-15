@@ -1807,6 +1807,77 @@ export interface MapReviewPublishCarriersV2 {
 }
 
 /**
+ * Task 17 one `structured_review_round_planned` carrier (design §12.2, spec
+ * §13.2 step 4): the content-review round the generation finalizer plans on
+ * clear. `contentCycleOrdinal` starts at 1 (spec §13.3.1); the round binds the
+ * exact finalized manifest + active Map + an empty adoption root (Task 18
+ * computes the presence-aware coverage core and review WorkItems from it).
+ */
+export interface ContentReviewRoundPlanCarrierV2 {
+  reviewRoundId: string;
+  contentCycleOrdinal: number;
+  mapRef: BlobRefV2;
+  mapSemanticDigest: string;
+  contentRevisionManifestRef: BlobRefV2;
+  reviewPolicyDigest: string;
+  adoptionRootRef: BlobRefV2;
+  coverageSlotCount: number;
+  coverageRelationCount: number;
+  assignmentCount: number;
+  verificationFindingCount: number;
+  consumedOverrideRef: BlobRefV2 | null;
+}
+
+/**
+ * Task 17 content-plan publication carriers (deterministic rebuild; each
+ * carrier is null when a publish branch does not use it). Covers the three
+ * Task 17 domain-publish branches:
+ * - `content_revision_commit` (one generation batch): the plan-started event
+ *   (FIRST batch only) + `structured_generation_batch_committed` + the
+ *   `structured_content_revision_committed` provisional-manifest event + the
+ *   successor WorkItem (next batch or the `system_generation_finalize`
+ *   WorkItem). No terminal pair — the agent session completes separately.
+ * - `content_plan_finalize` (finalizer clear): the `structured_content_revision_committed`
+ *   finalized event + `structured_generation_plan_completed` + the
+ *   `structured_review_round_planned` content-review planning + the content
+ *   review WorkItems + the §9.2 command-terminal pair.
+ * - `generation_finalize` (finalizer blocking): the `structured_generation_plan_rejected`
+ *   + the successor `structured_generation_plan_started` (revision 2) + the
+ *   successor generation-batch WorkItem + the §9.2 command-terminal pair.
+ */
+export interface ContentPlanPublishCarriersV2 {
+  // --- content_revision_commit (batch) ---
+  generationPlanId: string | null;
+  generationPlanRevision: number | null;
+  supersedesGenerationPlanId: string | null;
+  generationPlanSpecRef: BlobRefV2 | null;
+  sourceValidationReceiptRef: BlobRefV2 | null;
+  planStarted: boolean | null;
+  batchOrdinal: number | null;
+  contentRevisionCommitCoreRef: BlobRefV2 | null;
+  validatorAggregateRef: BlobRefV2 | null;
+  contentRevisionManifestRef: BlobRefV2 | null;
+  taskContentRevision: number | null;
+  manifestPhase: 'provisional' | 'finalized' | null;
+  producerPlanSpecRef: BlobRefV2 | null;
+  priorManifestRef: BlobRefV2 | null;
+  /** §9.2 successor WorkItem (next batch or the finalizer). */
+  successor: SuccessorWorkItemCarrierV2 | null;
+  // --- content_plan_finalize (finalizer clear) ---
+  finalizerWarningRootRef: BlobRefV2 | null;
+  reviewRound: ContentReviewRoundPlanCarrierV2 | null;
+  reviewWorkItems: readonly SuccessorWorkItemCarrierV2[] | null;
+  // --- generation_finalize (finalizer blocking) ---
+  validationReceiptRef: BlobRefV2 | null;
+  /** The successor plan's revision (superseded plan revision + 1; the rebuild
+   * derives the successor plan id + plan-started revision from it). */
+  successorPlanRevision: number | null;
+  successorPlanRef: BlobRefV2 | null;
+  // --- §9.2 command-terminal pair (finalizer envelopes only) ---
+  terminal: SystemCommandTerminalCarrierV2 | null;
+}
+
+/**
  * §8/§7.1 exact closed union of canonical publication operation payloads.
  * Every branch carries exact keys, authority/event-builder inputs and child
  * refs; pins never persist executable callbacks or raw Agent text.
@@ -1839,6 +1910,8 @@ export type PublicationOperationPayloadV2 =
       mapBuild: MapBuildPublishCarriersV2 | null;
       /** Task 16 map-review carriers (null for every non-map-review publish kind). */
       mapReview: MapReviewPublishCarriersV2 | null;
+      /** Task 17 content-plan carriers (null for every non-content-plan publish kind). */
+      contentPlan: ContentPlanPublishCarriersV2 | null;
     }
   | {
       family: 'lease_or_retry';

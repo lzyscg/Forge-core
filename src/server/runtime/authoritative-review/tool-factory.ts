@@ -1064,6 +1064,28 @@ export class V2ToolFactory {
         return [];
       }
     }
+    if (ctx.sessionKind === 'generation_batch' || ctx.sessionKind === 'content_repair') {
+      // Task 17: a completed generation batch folds its committed provisional
+      // manifest ref (the submit_content_draft result) so the §9.2 completion
+      // gate is never bare. Content-repair batches reuse the same carrier.
+      try {
+        const journal = await this.reviewJournal(ctx);
+        const view = await this.deps.privateStore.readAllReviewDraft(journal);
+        // The journal records EVERY submit_content_draft result, including a
+        // blocked batch ({ committed: false }). The LAST entry carrying a
+        // manifestRef is the committed batch — a blocked-then-re-written
+        // session must still fold its committed provisional manifest.
+        for (let i = view.committed.length - 1; i >= 0; i--) {
+          const entry = view.committed[i];
+          if (entry.op !== 'submit_content_draft') continue;
+          const result = entry.result as { manifestRef?: BlobRefV2 } | null;
+          if (result?.manifestRef !== undefined && result?.manifestRef !== null) return [result.manifestRef];
+        }
+        return [];
+      } catch {
+        return [];
+      }
+    }
     return [];
   }
 

@@ -21,6 +21,8 @@ import {
   SchemaError,
   type AssignmentLedgerBlobV2,
   type AuthorityBaseSetV2,
+  type ContentPlanPublishCarriersV2,
+  type ContentReviewRoundPlanCarrierV2,
   type MapBuildPublishCarriersV2,
   type MapReviewObservationCarrierV2,
   type MapReviewPublishCarriersV2,
@@ -273,7 +275,7 @@ export function parsePublicationOperationPayload(value: unknown): PublicationOpe
   const o = rec(value, 'publication_operation_payload');
   const family = str(o.family, 'publication_operation_payload.family');
   if (family === 'domain_publish') {
-    ex(o, ['family', 'operationId', 'taskId', 'publishKind', 'blobRefs', 'expectedResultIdentity', 'mapBuild', 'mapReview'], 'publication_operation_payload');
+    ex(o, ['family', 'operationId', 'taskId', 'publishKind', 'blobRefs', 'expectedResultIdentity', 'mapBuild', 'mapReview', 'contentPlan'], 'publication_operation_payload');
     if (!(PUBLISH_KINDS as readonly string[]).includes(str(o.publishKind, 'publishKind'))) throw new SchemaError('publishKind unknown');
     return {
       family,
@@ -284,6 +286,7 @@ export function parsePublicationOperationPayload(value: unknown): PublicationOpe
       expectedResultIdentity: str(o.expectedResultIdentity, 'expectedResultIdentity'),
       mapBuild: parseMapBuildPublishCarriers(o.mapBuild),
       mapReview: parseMapReviewPublishCarriers(o.mapReview),
+      contentPlan: parseContentPlanPublishCarriers(o.contentPlan),
     } as PublicationOperationPayloadV2;
   }
   if (family === 'lease_or_retry') {
@@ -656,6 +659,86 @@ function parseMapReviewPublishCarriers(value: unknown): MapReviewPublishCarriers
     successor: parseSuccessorWorkItemCarrier(o.successor),
     terminal: parseSystemCommandTerminalCarrier(o.terminal),
   };
+}
+
+/**
+ * Task 17 content-plan carriers (deterministic rebuild; exact-key parser).
+ */
+function parseContentPlanPublishCarriers(value: unknown): ContentPlanPublishCarriersV2 | null {
+  if (value === null || value === undefined) return null;
+  const o = rec(value, 'contentPlan');
+  ex(o, [
+    'generationPlanId', 'generationPlanRevision', 'supersedesGenerationPlanId',
+    'generationPlanSpecRef', 'sourceValidationReceiptRef', 'planStarted',
+    'batchOrdinal', 'contentRevisionCommitCoreRef', 'validatorAggregateRef',
+    'contentRevisionManifestRef', 'taskContentRevision', 'manifestPhase',
+    'producerPlanSpecRef', 'priorManifestRef', 'successor',
+    'finalizerWarningRootRef', 'reviewRound', 'reviewWorkItems',
+    'validationReceiptRef', 'successorPlanRevision', 'successorPlanRef',
+    'terminal',
+  ], 'contentPlan');
+  const manifestPhase = o.manifestPhase === null ? null : str(o.manifestPhase, 'contentPlan.manifestPhase');
+  if (manifestPhase !== null && manifestPhase !== 'provisional' && manifestPhase !== 'finalized') {
+    throw new SchemaError('contentPlan.manifestPhase must be provisional|finalized|null');
+  }
+  const planStartedRaw = o.planStarted;
+  if (planStartedRaw !== null && typeof planStartedRaw !== 'boolean') {
+    throw new SchemaError('contentPlan.planStarted must be a boolean or null');
+  }
+  const planStarted = planStartedRaw as boolean | null;
+  const reviewWorkItems = o.reviewWorkItems === null
+    ? null
+    : (o.reviewWorkItems as unknown[]).map((v, i) => parseSuccessorWorkItemCarrier(v)).filter((s): s is SuccessorWorkItemCarrierV2 => s !== null);
+  return {
+    generationPlanId: o.generationPlanId === null ? null : str(o.generationPlanId, 'contentPlan.generationPlanId'),
+    generationPlanRevision: o.generationPlanRevision === null ? null : onn(o.generationPlanRevision, 'contentPlan.generationPlanRevision'),
+    supersedesGenerationPlanId: o.supersedesGenerationPlanId === null ? null : str(o.supersedesGenerationPlanId, 'contentPlan.supersedesGenerationPlanId'),
+    generationPlanSpecRef: rfn(o.generationPlanSpecRef, 'contentPlan.generationPlanSpecRef'),
+    sourceValidationReceiptRef: rfn(o.sourceValidationReceiptRef, 'contentPlan.sourceValidationReceiptRef'),
+    planStarted,
+    batchOrdinal: o.batchOrdinal === null ? null : onn(o.batchOrdinal, 'contentPlan.batchOrdinal'),
+    contentRevisionCommitCoreRef: rfn(o.contentRevisionCommitCoreRef, 'contentPlan.contentRevisionCommitCoreRef'),
+    validatorAggregateRef: rfn(o.validatorAggregateRef, 'contentPlan.validatorAggregateRef'),
+    contentRevisionManifestRef: rfn(o.contentRevisionManifestRef, 'contentPlan.contentRevisionManifestRef'),
+    taskContentRevision: o.taskContentRevision === null ? null : onn(o.taskContentRevision, 'contentPlan.taskContentRevision'),
+    manifestPhase,
+    producerPlanSpecRef: rfn(o.producerPlanSpecRef, 'contentPlan.producerPlanSpecRef'),
+    priorManifestRef: rfn(o.priorManifestRef, 'contentPlan.priorManifestRef'),
+    successor: parseSuccessorWorkItemCarrier(o.successor),
+    finalizerWarningRootRef: rfn(o.finalizerWarningRootRef, 'contentPlan.finalizerWarningRootRef'),
+    reviewRound: parseContentReviewRoundPlanCarrier(o.reviewRound),
+    reviewWorkItems,
+    validationReceiptRef: rfn(o.validationReceiptRef, 'contentPlan.validationReceiptRef'),
+    successorPlanRevision: o.successorPlanRevision === null ? null : onn(o.successorPlanRevision, 'contentPlan.successorPlanRevision'),
+    successorPlanRef: rfn(o.successorPlanRef, 'contentPlan.successorPlanRef'),
+    terminal: parseSystemCommandTerminalCarrier(o.terminal),
+  };
+}
+
+function parseContentReviewRoundPlanCarrier(value: unknown): ContentReviewRoundPlanCarrierV2 | null {
+  if (value === null) return null;
+  const o = rec(value, 'reviewRound');
+  ex(o, [
+    'reviewRoundId', 'contentCycleOrdinal', 'mapRef', 'mapSemanticDigest',
+    'contentRevisionManifestRef', 'reviewPolicyDigest', 'adoptionRootRef',
+    'coverageSlotCount', 'coverageRelationCount', 'assignmentCount',
+    'verificationFindingCount', 'consumedOverrideRef',
+  ], 'reviewRound');
+  const out: ContentReviewRoundPlanCarrierV2 = {
+    reviewRoundId: str(o.reviewRoundId, 'reviewRound.reviewRoundId'),
+    contentCycleOrdinal: onn(o.contentCycleOrdinal, 'reviewRound.contentCycleOrdinal'),
+    mapRef: rfKind(o.mapRef, 'map_snapshot', 'reviewRound.mapRef'),
+    mapSemanticDigest: hx(o.mapSemanticDigest, 'reviewRound.mapSemanticDigest'),
+    contentRevisionManifestRef: rfKind(o.contentRevisionManifestRef, 'content_revision_manifest', 'reviewRound.contentRevisionManifestRef'),
+    reviewPolicyDigest: hx(o.reviewPolicyDigest, 'reviewRound.reviewPolicyDigest'),
+    adoptionRootRef: rfKind(o.adoptionRootRef, 'review_adoption_root', 'reviewRound.adoptionRootRef'),
+    coverageSlotCount: onn(o.coverageSlotCount, 'reviewRound.coverageSlotCount'),
+    coverageRelationCount: onn(o.coverageRelationCount, 'reviewRound.coverageRelationCount'),
+    assignmentCount: onn(o.assignmentCount, 'reviewRound.assignmentCount'),
+    verificationFindingCount: onn(o.verificationFindingCount, 'reviewRound.verificationFindingCount'),
+    consumedOverrideRef: rfn(o.consumedOverrideRef, 'reviewRound.consumedOverrideRef'),
+  };
+  return out;
 }
 
 function parseMapReviewObservationCarrier(value: unknown, where: string): MapReviewObservationCarrierV2 {

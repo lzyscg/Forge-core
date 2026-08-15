@@ -1287,6 +1287,7 @@ export class MapReviewService {
           blobRefs: resultRefs,
           expectedResultIdentity: canonicalJsonSha256({ operationId, publishKind: 'map_review_settlement' }),
           mapBuild: null,
+          contentPlan: null,
           mapReview: mapReviewCarrier({
             mapReviewRoundId: round.mapReviewRoundId,
             settlementCoreRef,
@@ -1420,6 +1421,7 @@ export class MapReviewService {
         blobRefs: input.blobRefs,
         expectedResultIdentity: canonicalJsonSha256({ operationId: input.operationId, publishKind: input.publishKind }),
         mapBuild: null,
+        contentPlan: null,
         mapReview: input.carriers,
       },
       intent: { handlerKind: input.publishKind, handlerVersion: 1 },

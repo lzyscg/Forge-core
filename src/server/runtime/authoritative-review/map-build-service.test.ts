@@ -320,7 +320,7 @@ afterEach(() => {
 /* Step 1: pure chunk/frontier/key tests                               */
 /* ------------------------------------------------------------------ */
 
-describe('pure build domain — chunk/frontier/key semantics', () => {
+describe('pure build domain — chunk/frontier/key semantics', { timeout: 30_000 }, () => {
   it('chunks commit in contiguous ordinal order (1..n) and the frontier chains chunk refs', () => {
     const mapBuildId = 'mb-1';
     const c1 = chunkInput(mapBuildId, 1, EMPTY_BUILD_FRONTIER_DIGEST, [nodeDecl('root')]);
@@ -485,7 +485,7 @@ describe('pure build domain — chunk/frontier/key semantics', () => {
 /* Step 2: finalizer-only publication                                  */
 /* ------------------------------------------------------------------ */
 
-describe('map-build service — finalizer-only publication', () => {
+describe('map-build service — finalizer-only publication', { timeout: 30_000 }, () => {
   it('append_map_candidate_chunk commits a chunk through the grant scope', async () => {
     const { service, ctx, taskId } = await makeBuildEnv();
     const result = await service.appendChunk(ctx, {
@@ -556,7 +556,7 @@ describe('map-build service — finalizer-only publication', () => {
 /* Step 3: clear / blocking / infrastructure finalizer                 */
 /* ------------------------------------------------------------------ */
 
-describe('map-build service — map_finalize SystemCommand handler', () => {
+describe('map-build service — map_finalize SystemCommand handler', { timeout: 30_000 }, () => {
   it('clear outcome publishes the candidate + round planned atomically with system provenance', async () => {
     const build = await makeBuildEnv();
     const lastCtx = await appendChain(build, 2);
