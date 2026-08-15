@@ -281,3 +281,33 @@ The remaining warnings in the full run are pre-existing React Router/`act(...)` 
 - `npm run build`: passed (732 modules).
 
 The only full-suite diagnostics were the pre-existing React Router and `act(...)` warnings; there were no test failures.
+
+---
+
+## Fix round 4 (schemaVersion-1 staging compatibility, 2026-08-16)
+
+**Status:** COMPLETE. The sole P1 in `task-19-rereview3-findings-codex.md` is closed inside Task 19. schemaVersion remains 1; no v1 surface, capability fixture, blob kind, SystemCommand kind, or Task 20 behavior changed. Publication remains facade-only with zero runtime EventStore imports.
+
+### 1. Historical and cumulative roots share the schemaVersion-1 read contract
+
+- `parseRepairStagingRoot` accepts exactly two closed forms: the historical root without `contentManifestRef`, and the cumulative root with it. Each form verifies `stagingDigest` against the exact fields that were persisted; unknown keys remain rejected.
+- A historical root is normalized to `contentManifestRef: null` only after its historical digest passes. The normalized object is a read view: its current-form content address differs, and neither BlobStore reads nor GC rewrite the historical canonical bytes.
+- `currentStagingState` takes an uncommitted plan's base root from the persisted batch-1 authority base instead of recomputing it with the current builder. Historical Map and Content grants therefore retain their exact CAS identity after an upgrade.
+
+### 2. Legacy Map and Content recovery is authoritative
+
+- A historical Map base/root resolves normally, can commit a current-form successor root whose `priorStagingRootRef` names the historical bytes, and can complete through the normal finalizer.
+- A historical Content base with no committed batch safely falls back to the authoritative repair-base manifest once, then writes a current cumulative root with an event-rooted `contentManifestRef`.
+- A historical Content head after any committed batch never falls back to the repair base. Before the next batch validator runs, the service atomically abandons/reclaims/supersedes the active old WorkItem and creates one `successorReason: recovery` plan revision from the unchanged authoritative base. A legacy finalizer head similarly completes its system command with one recovery successor. This preserves committed validator execution history without pretending the missing cumulative closure can be reconstructed.
+- The `repair_plan_creation` rebuild handler carries the recovery WorkItem transition in the same deterministic envelope. The old committed staging event continues to root the historical bytes and remains GC-resolvable after the successor is created.
+
+### Verification
+
+- RED evidence: parser/BlobStore/GC tests failed on missing `contentManifestRef`; all three runtime compatibility paths initially failed because the recomputed base ref did not match the persisted historical Grant; the multi-batch path then incorrectly returned `committed`; the finalizer returned `STAGING_UNRESOLVED`.
+- Focused compatibility run: **4 files / 8 passed** (historical/current parser forms, byte-preserving BlobStore resolution, event-rooted old/new GC walk, Map recovery, Content base migration, in-flight batch recovery, finalizer recovery).
+- Complete repair-service serial run: **1 file / 33 passed**.
+- Full affected serial run: **10 files / 899 passed** (`repair-service`, repair property, content review, tool factory, event schema, projector, GC, BlobStore, validator engine, object registry).
+- Capability/dependency-boundary qualification: **2 files / 5 focused passed** (checked-in production capability stays disabled; runtime/domain trees remain free of EventStore imports/construction).
+- `npm run check`: passed.
+- `npm run build`: passed (732 modules).
+- `git diff --check`: passed.

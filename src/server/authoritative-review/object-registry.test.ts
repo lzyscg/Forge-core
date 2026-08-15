@@ -383,6 +383,55 @@ describe('content batch validation wrapper', () => {
   });
 });
 
+describe('repair_staging_root schemaVersion-1 compatibility', () => {
+  const H = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+
+  function forms(): { legacy: Record<string, unknown>; current: Record<string, unknown>; ledgerRef: BlobRefV2 } {
+    const ledgerRef = refOfBlob('repair_key_ledger', { ledgerDigest: 'historical-ledger' });
+    const common = {
+      repairPlanId: 'rp-historical',
+      planRevisionId: H,
+      batchOrdinal: 1,
+      mapRootDigest: H,
+      contentRootDigest: null,
+      priorStagingRootRef: null,
+      keyLedgerRef: ledgerRef,
+    };
+    const legacy = { ...common, stagingDigest: canonicalJsonSha256(common) };
+    const currentBody = { ...common, contentManifestRef: null };
+    const current = { ...currentBody, stagingDigest: canonicalJsonSha256(currentBody) };
+    return { legacy, current, ledgerRef };
+  }
+
+  it('accepts the exact historical and cumulative forms under the same schema version', () => {
+    const { legacy, current, ledgerRef } = forms();
+    const legacyRef = refOfBlob('repair_staging_root', legacy);
+    const currentRef = refOfBlob('repair_staging_root', current);
+
+    const parsedLegacy = parseBlob('repair_staging_root', legacy, legacyRef);
+    const parsedCurrent = parseBlob('repair_staging_root', current, currentRef);
+
+    expect(parsedLegacy.ref).toEqual(legacyRef);
+    expect(parsedCurrent.ref).toEqual(currentRef);
+    expect(parsedLegacy.ref.schemaVersion).toBe(1);
+    expect(parsedCurrent.ref.schemaVersion).toBe(1);
+    expect(parsedLegacy.object).toEqual({ ...legacy, contentManifestRef: null });
+    expect(parsedCurrent.object).toEqual(current);
+    expect(childRefsForBlob('repair_staging_root', parsedLegacy.object)).toEqual([ledgerRef]);
+    expect(legacyRef.digest).not.toBe(currentRef.digest);
+  });
+
+  it('checks each exact form against the bytes that form actually persisted', () => {
+    const { legacy, current } = forms();
+    expect(() => parseBlob('repair_staging_root', { ...legacy, contentManifestRef: null })).toThrow('stagingDigest');
+    const currentWithoutManifest = { ...current };
+    delete currentWithoutManifest.contentManifestRef;
+    expect(() => parseBlob('repair_staging_root', currentWithoutManifest)).toThrow('stagingDigest');
+    expect(() => parseBlob('repair_staging_root', { ...legacy, surprise: true })).toThrow('SCHEMA_INVALID');
+    expect(() => parseBlob('repair_staging_root', { ...current, surprise: true })).toThrow('SCHEMA_INVALID');
+  });
+});
+
 describe('repair_plan_spec identity (Finding 1)', () => {
   const H = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 

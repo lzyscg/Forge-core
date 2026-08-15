@@ -1282,16 +1282,44 @@ export function parseRepairPlanSpec(value: unknown): RepairPlanSpecV2 {
 
 export function parseRepairStagingRoot(value: unknown): RepairStagingRootV2 {
   const o = rec(value, 'repair_staging_root');
-  ex(o, ['repairPlanId', 'planRevisionId', 'batchOrdinal', 'mapRootDigest', 'contentRootDigest', 'contentManifestRef', 'priorStagingRootRef', 'keyLedgerRef', 'stagingDigest'], 'repair_staging_root');
-  const out: RepairStagingRootV2 = {
+  const hasContentManifestRef = Object.prototype.hasOwnProperty.call(o, 'contentManifestRef');
+  ex(
+    o,
+    hasContentManifestRef
+      ? ['repairPlanId', 'planRevisionId', 'batchOrdinal', 'mapRootDigest', 'contentRootDigest', 'contentManifestRef', 'priorStagingRootRef', 'keyLedgerRef', 'stagingDigest']
+      : ['repairPlanId', 'planRevisionId', 'batchOrdinal', 'mapRootDigest', 'contentRootDigest', 'priorStagingRootRef', 'keyLedgerRef', 'stagingDigest'],
+    'repair_staging_root',
+  );
+  const common = {
     repairPlanId: str(o.repairPlanId, 'repairPlanId'),
     planRevisionId: hx(o.planRevisionId, 'planRevisionId'),
     batchOrdinal: onn(o.batchOrdinal, 'batchOrdinal'),
     mapRootDigest: o.mapRootDigest === null ? null : hx(o.mapRootDigest, 'mapRootDigest'),
     contentRootDigest: o.contentRootDigest === null ? null : hx(o.contentRootDigest, 'contentRootDigest'),
-    contentManifestRef: o.contentManifestRef === null ? null : rfKind(o.contentManifestRef, 'content_revision_manifest', 'contentManifestRef'),
     priorStagingRootRef: rfn(o.priorStagingRootRef, 'priorStagingRootRef'),
     keyLedgerRef: rfKind(o.keyLedgerRef, 'repair_key_ledger', 'keyLedgerRef'),
+  };
+
+  if (!hasContentManifestRef) {
+    // schemaVersion=1 roots written before cumulative content custody did not
+    // carry contentManifestRef. Validate their historical byte shape first,
+    // then expose a nullable read view. Never hash or persist that normalized
+    // view at the historical content address.
+    const historical = {
+      ...common,
+      stagingDigest: '',
+    };
+    hs(historical, o.stagingDigest, 'stagingDigest', 'repair_staging_root');
+    return {
+      ...historical,
+      contentManifestRef: null,
+      stagingDigest: hx(o.stagingDigest, 'stagingDigest'),
+    };
+  }
+
+  const out: RepairStagingRootV2 = {
+    ...common,
+    contentManifestRef: o.contentManifestRef === null ? null : rfKind(o.contentManifestRef, 'content_revision_manifest', 'contentManifestRef'),
     stagingDigest: '',
   };
   hs(out, o.stagingDigest, 'stagingDigest', 'repair_staging_root');

@@ -208,6 +208,13 @@ export function repairBatchCommitOperationId(taskId: string, workItemId: string,
   return `rb-${canonicalJsonSha256({ taskId, workItemId, batchOrdinal }).slice(0, 32)}`;
 }
 
+/** Same-schema recovery identity for a content plan whose committed staging
+ * head predates cumulative manifest custody. The old root ref is part of the
+ * key, so retries rebuild exactly one recovery successor. */
+export function repairLegacyStagingRecoveryOperationId(taskId: string, repairPlanId: string, planRevisionId: string, stagingRootRef: BlobRefV2): string {
+  return `rl-${canonicalJsonSha256({ taskId, repairPlanId, planRevisionId, stagingRootRef, label: 'legacy-content-staging-recovery' }).slice(0, 32)}`;
+}
+
 /** Finalizer publication operation id (= the coordinator's continuation op so
  * the §9.2 completion envelope REPLAYS, not double-commits). */
 export function repairFinalizeOperationId(taskId: string, workItemId: string, commandId: string): string {
@@ -831,6 +838,7 @@ export interface RepairServiceDependencies {
 /** The committed result of one repair batch. */
 export type RepairBatchOutcome =
   | { kind: 'committed'; stagingRootRef: BlobRefV2; stagingRoot: RepairStagingRootV2; nextWorkItemId: string }
+  | { kind: 'restarted'; failureCode: 'LEGACY_CONTENT_STAGING_RESTARTED'; resultRefs: readonly BlobRefV2[]; successorPlanSpecRef: BlobRefV2 }
   | { kind: 'blocked'; failureCode: string }
   | { kind: 'infrastructure_failure'; failureCode: string };
 
@@ -1110,7 +1118,10 @@ export class RepairService {
     sourceReceiptRef: BlobRefV2 | null;
     repairBase: RepairPlanSpecV2['repairBase'];
     importedStagingManifestRef: BlobRefV2;
-    terminal: SystemCommandTerminalCarrierV2;
+    terminal: SystemCommandTerminalCarrierV2 | null;
+    /** Agent-triggered recovery has no system command terminal. It atomically
+     * abandons/reclaims/supersedes the active old-revision WorkItem instead. */
+    supersededWorkItem?: NonNullable<RepairPublishCarriersV2['supersededWorkItem']> | null;
     /** the blocking finalizer's aggregate (the rejected event's carrier). */
     validatorAggregateRef?: BlobRefV2 | null;
     validationReceiptRef?: BlobRefV2 | null;
@@ -1194,6 +1205,7 @@ export class RepairService {
         grantSpecId: `gs-${firstWorkItemId}`,
         grantKind: track === 'map' ? 'map_repair_batch' : 'content_repair_batch',
         overrideTransfer,
+        supersededWorkItem: input.supersededWorkItem ?? null,
         successor: successor.carrier,
         terminal: input.terminal,
       }),
@@ -1381,6 +1393,13 @@ export class RepairService {
 
     const currentRoot = (await this.deps.resolver(taskId, current.stagingRootRef)) as RepairStagingRootV2 | null;
     if (currentRoot === null || typeof currentRoot !== 'object') throw new RepairError('STAGING_UNRESOLVED', 'current staging root unresolvable');
+    if (currentRoot.contentManifestRef === null && current.lastBatchOrdinal > 0) {
+      // Historical schemaVersion=1 content roots did not retain the complete
+      // cumulative manifest. Falling back to repairBase after a committed
+      // ordinal silently discards prior repaired slots. End this attempt and
+      // restart under a recovery successor before invoking any validator.
+      return this.restartLegacyContentRepair(input, plan, planRef, current.stagingRootRef);
+    }
     const priorManifestRef = currentRoot.contentManifestRef ?? (plan.repairBase.kind === 'content' ? plan.repairBase.contentRevisionManifestRef : null);
     if (priorManifestRef === null) throw new RepairError('MANIFEST_UNRESOLVED', 'content staging root has no cumulative manifest');
     const priorManifest = (await this.deps.resolver(taskId, priorManifestRef)) as ContentRevisionManifestV2 | null;
@@ -1399,6 +1418,50 @@ export class RepairService {
     });
     const stagingRootRef = await this.deps.facade.prepareBlob(taskId, 'repair_staging_root', stagingRoot);
     return this.publishBatchCommit(taskId, plan, planRef, input, stagingRootRef, newLedgerRef);
+  }
+
+  /** A committed historical Content root has no event-rooted cumulative
+   * manifest to continue from. Recovery therefore supersedes the old revision
+   * and its active agent cycle atomically, then restarts ordinal 1 against the
+   * unchanged authoritative content base using the current root format. */
+  private async restartLegacyContentRepair(
+    input: { taskId: string; workItemId: string; attemptId: string },
+    plan: RepairPlanSpecV2,
+    planRef: BlobRefV2,
+    historicalStagingRootRef: BlobRefV2,
+  ): Promise<Extract<RepairBatchOutcome, { kind: 'restarted' }>> {
+    const state = await this.deps.readProjection(input.taskId);
+    const supersededWorkItem = this.supersededWorkItemOf(state, plan, input.taskId);
+    if (supersededWorkItem === null || supersededWorkItem.workItemId !== input.workItemId) {
+      throw new RepairError('WORK_ITEM_NOT_FOUND', 'legacy content recovery cannot identify the active repair attempt');
+    }
+    const operationId = repairLegacyStagingRecoveryOperationId(
+      input.taskId,
+      plan.repairPlanId,
+      plan.planRevisionId,
+      historicalStagingRootRef,
+    );
+    const successor = await this.createSuccessorRepairPlan({
+      taskId: input.taskId,
+      track: 'content',
+      repairPlanId: plan.repairPlanId,
+      supersededPlanSpecRef: planRef,
+      supersededPlanRevisionId: plan.planRevisionId,
+      successorReason: 'recovery',
+      successorOperationKey: operationId,
+      findings: await this.projectPlanFindings(input.taskId, plan),
+      sourceReceiptRef: plan.sourceReceiptRef,
+      repairBase: plan.repairBase,
+      importedStagingManifestRef: plan.importedStagingManifestRef,
+      terminal: null,
+      supersededWorkItem,
+    });
+    return {
+      kind: 'restarted',
+      failureCode: 'LEGACY_CONTENT_STAGING_RESTARTED',
+      resultRefs: successor.resultRefs,
+      successorPlanSpecRef: successor.successorPlanSpecRef,
+    };
   }
 
   /** The batch-commit envelope (both tracks): batch_committed +
@@ -1515,6 +1578,39 @@ export class RepairService {
       const current = await this.currentStagingState(taskId, plan, track);
       if (!sameRef(base.stagingManifestRef, current.stagingRootRef)) {
         throw new RepairError('GRANT_STALE', 'finalize staging base does not match the current staging root');
+      }
+      if (track === 'content' && current.lastBatchOrdinal > 0) {
+        const currentRoot = (await this.deps.resolver(taskId, current.stagingRootRef)) as RepairStagingRootV2 | null;
+        if (currentRoot === null || typeof currentRoot !== 'object') {
+          throw new RepairError('STAGING_UNRESOLVED', 'current content staging root is unresolvable');
+        }
+        if (currentRoot.contentManifestRef === null) {
+          // The final batch was committed by the historical schemaVersion=1
+          // writer, so its content closure cannot be reconstructed without
+          // rerunning committed validators. Complete this system command with
+          // one authoritative recovery successor instead.
+          const recovery = await this.createSuccessorRepairPlan({
+            taskId,
+            track: 'content',
+            repairPlanId: plan.repairPlanId,
+            supersededPlanSpecRef: base.planSpecRef,
+            supersededPlanRevisionId: plan.planRevisionId,
+            successorReason: 'recovery',
+            successorOperationKey: repairFinalizeOperationId(taskId, input.workItemId, input.commandId),
+            findings: await this.projectPlanFindings(taskId, plan),
+            sourceReceiptRef: plan.sourceReceiptRef,
+            repairBase: plan.repairBase,
+            importedStagingManifestRef: plan.importedStagingManifestRef,
+            terminal: {
+              workItemId: input.workItemId,
+              commandId: input.commandId,
+              commandKind: input.commandKind,
+              leaseEpoch: input.leaseEpoch,
+              authorityBaseRef: input.authorityBaseRef,
+            },
+          });
+          return { kind: 'completed', resultRefs: recovery.resultRefs };
+        }
       }
       const findingSetRef = await this.prepareFindingSet(taskId, plan);
 
@@ -2684,6 +2780,34 @@ export class RepairService {
     const last = batches[batches.length - 1];
     if (last === undefined) {
       const keyLedgerRef = plan.keyLineageRef;
+      // The batch-1 authority base is the durable source of truth for the
+      // base staging ref. schemaVersion=1 roots written before cumulative
+      // content custody have different canonical bytes from roots emitted by
+      // the current builder; recomputing here would manufacture a new ref and
+      // falsely reject the historical grant's exact CAS binding.
+      const state = await this.deps.readProjection(taskId);
+      const firstWorkItemId = repairBatchWorkItemId(taskId, plan.repairPlanId, 1, plan.planRevisionId);
+      const firstWorkItem = state.workItems[firstWorkItemId];
+      if (firstWorkItem !== undefined) {
+        const authorityBase = (await this.deps.resolver(taskId, firstWorkItem.authorityBaseRef)) as {
+          stagingManifestRef?: BlobRefV2 | null;
+        } | null;
+        const persistedRootRef = authorityBase?.stagingManifestRef ?? null;
+        if (persistedRootRef !== null) {
+          const persistedRoot = (await this.deps.resolver(taskId, persistedRootRef)) as RepairStagingRootV2 | null;
+          if (
+            persistedRoot === null ||
+            typeof persistedRoot !== 'object' ||
+            persistedRoot.repairPlanId !== plan.repairPlanId ||
+            persistedRoot.planRevisionId !== plan.planRevisionId ||
+            persistedRoot.batchOrdinal !== 0 ||
+            !sameRef(persistedRoot.keyLedgerRef, keyLedgerRef)
+          ) {
+            throw new RepairError('STAGING_DIVERGED', 'persisted base staging root does not match the active repair plan');
+          }
+          return { stagingRootRef: persistedRootRef, keyLedgerRef, lastBatchOrdinal: 0 };
+        }
+      }
       const baseRoot = buildRepairStagingRoot({
         repairPlanId: plan.repairPlanId,
         planRevisionId: plan.planRevisionId,
@@ -4164,6 +4288,9 @@ function registerRepairPlanCreation(registry: PublicationIntentRegistry): void {
       'structured_map_repair_plan_started',
       'structured_content_repair_plan_started',
       'structured_repair_plan_revision_started',
+      'structured_agent_attempt_abandoned_v2',
+      'structured_work_item_lease_reclaimed',
+      'structured_work_item_superseded',
       'structured_work_item_created',
       'structured_repair_grant_issued',
       'structured_round_budget_override_transferred_v2',
@@ -4193,6 +4320,43 @@ function registerRepairPlanCreation(registry: PublicationIntentRegistry): void {
       } else {
         envelopes.push(revisionStartedEvent(rp, at));
       }
+      if (rp.supersededWorkItem !== null) {
+        const sw = rp.supersededWorkItem;
+        if (sw.attemptAbandonment !== null) {
+          const ab = sw.attemptAbandonment;
+          envelopes.push({
+            protocolVersion: 2,
+            at,
+            type: 'structured_agent_attempt_abandoned_v2',
+            workItemId: sw.workItemId,
+            logicalAssignmentId: ab.logicalAssignmentId,
+            reviewAssignmentId: ab.reviewAssignmentId,
+            attemptId: ab.attemptId,
+            sessionKind: ab.sessionKind,
+            leaseEpoch: ab.leaseEpoch,
+            reason: 'operator_interrupt',
+            authorityBaseRef: ab.authorityBaseRef,
+          });
+          envelopes.push({
+            protocolVersion: 2,
+            at,
+            type: 'structured_work_item_lease_reclaimed',
+            workItemId: sw.workItemId,
+            leaseEpoch: ab.leaseEpoch,
+            reason: 'operator_interrupt',
+            authorityBaseRef: ab.authorityBaseRef,
+          });
+        }
+        envelopes.push({
+          protocolVersion: 2,
+          at,
+          type: 'structured_work_item_superseded',
+          workItemId: sw.workItemId,
+          leaseEpoch: sw.leaseEpoch,
+          reason: sw.reason,
+          authorityBaseRef: sw.authorityBaseRef,
+        });
+      }
       const s = rp.successor;
       need(s, 'successor');
       envelopes.push(workItemCreatedEvent(s, at));
@@ -4211,8 +4375,11 @@ function registerRepairPlanCreation(registry: PublicationIntentRegistry): void {
         });
       }
       const t = rp.terminal;
-      need(t, 'terminal');
-      envelopes.push(...terminalEvents(t, at));
+      if (t !== null) {
+        envelopes.push(...terminalEvents(t, at));
+      } else if (rp.supersededWorkItem === null) {
+        throw new NotRebuildableError('repair_plan_creation', ['terminal|supersededWorkItem']);
+      }
       return envelopes;
     },
     expectedResultIdentity: (_payload, events) => sha256Of(events),

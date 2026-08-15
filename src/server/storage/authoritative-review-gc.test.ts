@@ -25,7 +25,7 @@ import {
   PublicationIntentRegistry,
   type PublicationIntentRegistrationV2,
 } from './authoritative-publication-intent-registry';
-import { canonicalJsonSha256 } from '../structured-slots/canonical-json';
+import { canonicalJsonBytes, canonicalJsonSha256 } from '../structured-slots/canonical-json';
 import { fullProfileForTests } from '../authoritative-review/object-registry';
 import type { AuthoritativeReviewProfile } from '../authoritative-review/authority-types';
 import type { BlobRefV2 } from '../../shared/authoritative-review-v2';
@@ -242,6 +242,51 @@ describe('AuthoritativeReviewGc', () => {
         'structured_map_chunk_committed',
       ]);
     }
+  });
+
+  it('walks a current root through an event-rooted historical repair root without rewriting either schemaVersion-1 form', async () => {
+    const env = await makeEnv();
+    const taskId = randomUUID();
+    const ledgerBody = { repairPlanId: 'rp-historical', planRevisionId: H1, entries: [] };
+    const ledger = await env.facade.prepareBlob(taskId, 'repair_key_ledger', {
+      ...ledgerBody,
+      ledgerDigest: canonicalJsonSha256(ledgerBody),
+    });
+    const legacyBody = {
+      repairPlanId: 'rp-historical',
+      planRevisionId: H1,
+      batchOrdinal: 1,
+      mapRootDigest: H2,
+      contentRootDigest: null,
+      priorStagingRootRef: null,
+      keyLedgerRef: ledger,
+    };
+    const legacyValue = { ...legacyBody, stagingDigest: canonicalJsonSha256(legacyBody) };
+    const legacy = await env.facade.prepareBlob(taskId, 'repair_staging_root', legacyValue);
+    const currentBody = {
+      ...legacyBody,
+      batchOrdinal: 2,
+      mapRootDigest: H3,
+      contentManifestRef: null,
+      priorStagingRootRef: legacy,
+    };
+    const currentValue = { ...currentBody, stagingDigest: canonicalJsonSha256(currentBody) };
+    const current = await env.facade.prepareBlob(taskId, 'repair_staging_root', currentValue);
+    const legacyBytes = await readFile(blobPath(env.paths, taskId, legacy));
+    const currentBytes = await readFile(blobPath(env.paths, taskId, current));
+    const orphan = await env.facade.prepareBlob(taskId, 'content_value', contentValue('orphan-compat'));
+    await publishChunk(env, taskId, 'gc-repair-root-compat', current);
+
+    await expect(env.gc.run()).resolves.toBeDefined();
+
+    expect(await exists(blobPath(env.paths, taskId, current))).toBe(true);
+    expect(await exists(blobPath(env.paths, taskId, legacy))).toBe(true);
+    expect(await exists(blobPath(env.paths, taskId, ledger))).toBe(true);
+    expect(await exists(blobPath(env.paths, taskId, orphan))).toBe(false);
+    expect(await readFile(blobPath(env.paths, taskId, legacy))).toEqual(legacyBytes);
+    expect(await readFile(blobPath(env.paths, taskId, current))).toEqual(currentBytes);
+    expect(legacyBytes).toEqual(canonicalJsonBytes(legacyValue));
+    expect(currentBytes).toEqual(canonicalJsonBytes(currentValue));
   });
 
   it('sweeps unreferenced orphan blobs while keeping referenced ones', async () => {

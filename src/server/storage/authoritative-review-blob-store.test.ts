@@ -124,6 +124,35 @@ describe('AuthoritativeReviewBlobStore put/read (§7.1/§8)', () => {
     expect(readBack.factId).toBe('f-1');
   });
 
+  it('resolves a historical schemaVersion-1 repair root without rewriting its canonical bytes', async () => {
+    const { store, paths } = await createStore();
+    const ledgerRef = refOfBlob('repair_key_ledger', { ledgerDigest: 'historical-ledger' });
+    const historicalBody = {
+      repairPlanId: 'rp-historical',
+      planRevisionId: H1,
+      batchOrdinal: 1,
+      mapRootDigest: H2,
+      contentRootDigest: null,
+      priorStagingRootRef: null,
+      keyLedgerRef: ledgerRef,
+    };
+    const historical = { ...historicalBody, stagingDigest: canonicalJsonSha256(historicalBody) };
+    const ref = await store.putJson(TASK_ID, 'repair_staging_root', historical);
+    const file = paths.taskStructuredV2BlobFile(TASK_ID, ref.kind, ref.digest);
+    const before = await readFile(file);
+
+    const resolved = await store.readJson<Record<string, unknown>>(TASK_ID, ref, 'repair_staging_root');
+    const after = await readFile(file);
+
+    expect(ref.schemaVersion).toBe(1);
+    expect(resolved).toEqual({ ...historical, contentManifestRef: null });
+    expect(before).toEqual(canonicalJsonBytes(historical));
+    expect(after).toEqual(before);
+    // Normalization is a read view only. Its current-form bytes have another
+    // content address and are never written over the historical address.
+    expect(refOfBlob('repair_staging_root', resolved).digest).not.toBe(ref.digest);
+  });
+
   it('same digest but DIFFERENT existing bytes at the address is corruption, never last-writer-wins', async () => {
     const { store, paths } = await createStore();
     const value = reviewFact();
