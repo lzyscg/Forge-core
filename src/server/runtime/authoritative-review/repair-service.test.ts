@@ -8,6 +8,8 @@
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
+import { rm } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import type { BlobRefV2 } from '../../../shared/authoritative-review-v2';
 import { PublicationIntentRegistry } from '../../storage/authoritative-publication-intent-registry';
 import { fullProfileForTests, parseBlob, refOfBlob } from '../../authoritative-review/object-registry';
@@ -267,7 +269,7 @@ interface RepairEnv {
 
 let envs: RepairEnv[] = [];
 
-async function makeRepairEnv(opts: { maxRounds?: number; contentBatchTargetSlots?: number; blocking?: boolean; blockingOnRevision2?: boolean; stagedBlocking?: boolean; blockOnContentBatchCore?: boolean; legacyStagingRoots?: boolean; extraHandlers?: (registry: PublicationIntentRegistry) => void } = {}): Promise<RepairEnv> {
+async function makeRepairEnv(opts: { maxRounds?: number; contentBatchTargetSlots?: number; blocking?: boolean; blockingOnRevision2?: boolean; stagedBlocking?: boolean; blockOnContentBatchCore?: boolean; legacyStagingRoots?: boolean; failRepairBatchPublishOnce?: boolean; loseRepairBatchResponseOnce?: boolean; extraHandlers?: (registry: PublicationIntentRegistry) => void } = {}): Promise<RepairEnv> {
   const registry = new PublicationIntentRegistry();
   registerMapBuildPublicationHandlers(registry);
   registerMapReviewPublicationHandlers(registry);
@@ -305,6 +307,8 @@ async function makeRepairEnv(opts: { maxRounds?: number; contentBatchTargetSlots
     testValidatorEntry('content_commit', 'batch_commit', contentBatchSource, '.batch_commit'),
   ]);
   let writeLegacyStagingRoots = opts.legacyStagingRoots === true;
+  let failRepairBatchPublish = opts.failRepairBatchPublishOnce === true;
+  let loseRepairBatchResponse = opts.loseRepairBatchResponseOnce === true;
   const repairFacade: RepairServiceDependencies['facade'] = {
     prepareBlob: async (id, kind, value) => {
       if (writeLegacyStagingRoots && kind === 'repair_staging_root') {
@@ -318,7 +322,24 @@ async function makeRepairEnv(opts: { maxRounds?: number; contentBatchTargetSlots
       }
       return env.facade.prepareBlob(id, kind, value);
     },
-    publishWithPin: (input) => env.facade.publishWithPin(input),
+    publishWithPin: async (input) => {
+      if (
+        failRepairBatchPublish &&
+        (input.payload as { publishKind?: unknown }).publishKind === 'repair_batch_commit'
+      ) {
+        failRepairBatchPublish = false;
+        throw new Error('injected crash after content checkpoint preparation');
+      }
+      const published = await env.facade.publishWithPin(input);
+      if (
+        loseRepairBatchResponse &&
+        (input.payload as { publishKind?: unknown }).publishKind === 'repair_batch_commit'
+      ) {
+        loseRepairBatchResponse = false;
+        throw new Error('injected response loss after repair batch commit');
+      }
+      return published;
+    },
   };
   const service = new RepairService({
     facade: repairFacade,
@@ -1835,7 +1856,7 @@ describe('content repair staging + continuity', { timeout: 120_000 }, () => {
       operationId: attemptContinuationOperationId(b.taskId, workItemId, ctx.attemptId, 'complete'),
       workItemId,
       attemptId: ctx.attemptId,
-      resultRefs: [outcome.stagingRootRef],
+      resultRefs: outcome.resultRefs,
     });
     expect(b.contentBatchValidatorCalls()).toBe(1);
     const root1 = (await b.resolver(b.taskId, outcome.stagingRootRef)) as { contentManifestRef?: BlobRefV2 | null };
@@ -1870,7 +1891,7 @@ describe('content repair staging + continuity', { timeout: 120_000 }, () => {
     const outcome2 = await b.service.commitRepairBatch({ taskId: b.taskId, workItemId: workItem2, attemptId: ctx2.attemptId, batchOrdinal: 2, ctx: ctx2, slotContents: { [targetSlot2]: { text: 'repaired-batch-2', mediaType: 'text/markdown' } } });
     expect(outcome2.kind).toBe('committed');
     if (outcome2.kind !== 'committed') throw new Error('second content repair batch did not commit');
-    await b.env.coordinator.completeWorkItem({ taskId: b.taskId, operationId: attemptContinuationOperationId(b.taskId, workItem2, ctx2.attemptId, 'complete'), workItemId: workItem2, attemptId: ctx2.attemptId, resultRefs: [outcome2.stagingRootRef] });
+    await b.env.coordinator.completeWorkItem({ taskId: b.taskId, operationId: attemptContinuationOperationId(b.taskId, workItem2, ctx2.attemptId, 'complete'), workItemId: workItem2, attemptId: ctx2.attemptId, resultRefs: outcome2.resultRefs });
     expect(b.contentBatchValidatorCalls()).toBe(2);
     const finalized = await runFinalizer(b, repairFinalizeWorkItemId(b.taskId, plan.repairPlanId, plan.planRevisionId));
     expect(finalized.kind).toBe('completed');
@@ -1908,6 +1929,55 @@ describe('content repair staging + continuity', { timeout: 120_000 }, () => {
     await expect(b.service.commitRepairBatch({ taskId: b.taskId, workItemId, attemptId: ctx.attemptId, batchOrdinal: 1, ctx, slotContents: { [slotId]: { text: 'blocked-by-core', mediaType: 'text/markdown' } } })).rejects.toMatchObject({ code: 'CONTENT_REPAIR_BATCH_BLOCKED' });
     expect(b.contentBatchValidatorCalls()).toBe(1);
     expect((await b.readEvents(b.taskId)).filter((event) => event.type === 'structured_content_repair_batch_committed')).toHaveLength(0);
+  });
+
+  it('replays a persisted content batch checkpoint across pre-publish crash and post-commit response loss without rerunning its validator', async () => {
+    const b = await makeRepairEnv({
+      contentBatchTargetSlots: 1,
+      failRepairBatchPublishOnce: true,
+      loseRepairBatchResponseOnce: true,
+    });
+    const stack = await driveToContentStack(b, ['s-1']);
+    const slotId = stack.nodeIds[0] as string;
+    await seedFindings(b, [{ findingId: 'c-crash-replay', primaryLocation: { kind: 'slot', id: slotId }, defectClass: 'content', severity: 'blocking' }], 'content');
+    const plan = await createCompatibilityRepairPlan(b, ['c-crash-replay']);
+    const workItemId = repairBatchWorkItemId(b.taskId, plan.repairPlanId, 1, plan.planRevisionId);
+    const leased = await leaseTargeted(b, workItemId, 'worker-content-crash');
+    const ctx = ctxOf(b, leased);
+    const command = {
+      taskId: b.taskId,
+      workItemId,
+      attemptId: ctx.attemptId,
+      batchOrdinal: 1,
+      ctx,
+      slotContents: { [slotId]: { text: 'persisted-before-publish', mediaType: 'text/markdown' as const } },
+    };
+
+    await expect(b.service.commitRepairBatch(command)).rejects.toThrow('injected crash');
+    expect(b.contentBatchValidatorCalls()).toBe(1);
+    expect((await b.readEvents(b.taskId)).filter((event) => event.type === 'structured_content_repair_batch_committed')).toHaveLength(0);
+
+    await expect(b.service.commitRepairBatch(command)).rejects.toThrow('injected response loss');
+    expect(b.contentBatchValidatorCalls()).toBe(1);
+    expect((await b.readEvents(b.taskId)).filter((event) => event.type === 'structured_content_repair_batch_committed')).toHaveLength(1);
+
+    const replay = await b.service.commitRepairBatch(command);
+    expect(replay.kind).toBe('committed');
+    if (replay.kind !== 'committed') throw new Error('persisted content checkpoint did not replay');
+    expect(b.contentBatchValidatorCalls()).toBe(1);
+    expect((await b.readEvents(b.taskId)).filter((event) => event.type === 'structured_content_repair_batch_committed')).toHaveLength(1);
+    await b.env.coordinator.completeWorkItem({
+      taskId: b.taskId,
+      operationId: attemptContinuationOperationId(b.taskId, workItemId, ctx.attemptId, 'complete'),
+      workItemId,
+      attemptId: ctx.attemptId,
+      resultRefs: replay.resultRefs,
+    });
+    const { AuthoritativeReviewGc } = await import('../../storage/authoritative-review-gc');
+    const gc = new AuthoritativeReviewGc(b.env.paths, b.env.blobStore, b.env.eventStore, b.env.publicationStore, {});
+    await expect(gc.run()).resolves.toBeDefined();
+    await expect(runFinalizer(b, repairFinalizeWorkItemId(b.taskId, plan.repairPlanId, plan.planRevisionId))).resolves.toMatchObject({ kind: 'completed' });
+    expect(b.contentBatchValidatorCalls()).toBe(1);
   });
 
   it('same-root/different-manifest staleness rejects a content repair commit', async () => {
@@ -2002,6 +2072,11 @@ describe('repair_staging_root schemaVersion-1 runtime compatibility', { timeout:
     const committedRoot = await b.resolver(b.taskId, committedEvent?.stagingRootRef as BlobRefV2) as { priorStagingRootRef: BlobRefV2; contentManifestRef: null };
     expect(committedRoot.priorStagingRootRef.digest).toBe(grant.expectedStagingRootRef.digest);
     expect(refOfBlob('repair_staging_root', committedRoot).digest).toBe(committedEvent?.stagingRootRef.digest);
+    const { AuthoritativeReviewGc } = await import('../../storage/authoritative-review-gc');
+    const gc = new AuthoritativeReviewGc(b.env.paths, b.env.blobStore, b.env.eventStore, b.env.publicationStore, {});
+    await expect(gc.run()).resolves.toBeDefined();
+    await expect(b.resolver(b.taskId, grant.expectedStagingRootRef)).resolves.toMatchObject({ batchOrdinal: 0 });
+    await expect(b.resolver(b.taskId, committedEvent?.stagingRootRef as BlobRefV2)).resolves.toMatchObject({ batchOrdinal: 1 });
     await expect(runFinalizer(b, repairFinalizeWorkItemId(b.taskId, plan.repairPlanId, plan.planRevisionId))).resolves.toMatchObject({ kind: 'completed' });
   });
 
@@ -2036,11 +2111,14 @@ describe('repair_staging_root schemaVersion-1 runtime compatibility', { timeout:
     await expect(b.resolver(b.taskId, outcome.stagingRoot.contentManifestRef as BlobRefV2)).resolves.toMatchObject({ manifestPhase: 'provisional' });
   });
 
-  it('supersedes and restarts an in-flight old Content revision before executing the next batch validator', async () => {
+  it('continues an in-flight old Content revision from its committed prefix before executing the next batch validator', async () => {
     const b = await makeRepairEnv({ legacyStagingRoots: true, contentBatchTargetSlots: 1 });
-    const stack = await driveToContentStack(b, ['s-1', 's-2']);
+    const stack = await driveToContentStack(b, ['s-1', 's-2', 's-3']);
     const slot1 = stack.nodeIds[0] as string;
     const slot2 = stack.nodeIds[1] as string;
+    const untouchedSlot = stack.nodeIds[2] as string;
+    const baseManifest = await b.resolver(b.taskId, stack.manifestRef) as ContentRevisionManifestV2;
+    const baseRefs = new Map(baseManifest.entries.map((entry) => [entry.slotId, entry.versionRef]));
     await seedFindings(b, [
       { findingId: 'c-compat-recovery', primaryLocation: { kind: 'slot', id: slot1 }, defectClass: 'content', severity: 'blocking', suggestedRepairSlotIds: [slot2] },
     ], 'content');
@@ -2068,11 +2146,18 @@ describe('repair_staging_root schemaVersion-1 runtime compatibility', { timeout:
       operationId: attemptContinuationOperationId(b.taskId, workItem1, ctx1.attemptId, 'complete'),
       workItemId: workItem1,
       attemptId: ctx1.attemptId,
-      resultRefs: [outcome1.stagingRootRef],
+      resultRefs: outcome1.resultRefs,
     });
     expect(outcome1.stagingRoot.contentManifestRef).toBeNull();
     expect(refOfBlob('repair_staging_root', outcome1.stagingRoot).digest).not.toBe(outcome1.stagingRootRef.digest);
     expect(b.contentBatchValidatorCalls()).toBe(1);
+
+    // Completion roots the checkpoint's cumulative manifest/validator
+    // closure even though the historical staging root itself has no child
+    // edge. A crash + GC before the next agent starts must remain resumable.
+    const { AuthoritativeReviewGc } = await import('../../storage/authoritative-review-gc');
+    const gc = new AuthoritativeReviewGc(b.env.paths, b.env.blobStore, b.env.eventStore, b.env.publicationStore, {});
+    await expect(gc.run()).resolves.toBeDefined();
 
     b.useCurrentStagingRoots();
     const workItem2 = repairBatchWorkItemId(b.taskId, plan.repairPlanId, 2, plan.planRevisionId);
@@ -2089,6 +2174,23 @@ describe('repair_staging_root schemaVersion-1 runtime compatibility', { timeout:
     expect(recovery.kind).toBe('restarted');
     expect(b.contentBatchValidatorCalls()).toBe(1);
 
+    // Response-loss replay of the interrupted old attempt must resolve to the
+    // SAME recovery successor after the old plan/attempt became stale. It may
+    // not construct a second revision or rerun a committed validator.
+    const replayedRecovery = await b.service.commitRepairBatch({
+      taskId: b.taskId,
+      workItemId: workItem2,
+      attemptId: ctx2.attemptId,
+      batchOrdinal: 2,
+      ctx: ctx2,
+      slotContents: { [scope2.slotIds[0] as string]: { text: 'retry-bytes-are-ignored-after-recovery-commit', mediaType: 'text/markdown' } },
+    });
+    expect(replayedRecovery).toMatchObject({
+      kind: 'restarted',
+      successorPlanSpecRef: recovery.kind === 'restarted' ? recovery.successorPlanSpecRef : undefined,
+    });
+    expect(b.contentBatchValidatorCalls()).toBe(1);
+
     const state = await b.env.readProjection(b.taskId);
     const lineage = state.repairPlans[plan.repairPlanId];
     expect(lineage.revisions[plan.planRevisionId].state).toBe('superseded');
@@ -2099,22 +2201,148 @@ describe('repair_staging_root schemaVersion-1 runtime compatibility', { timeout:
     expect(state.workItems[workItem2].state).toBe('superseded');
     expect(state.attempts[ctx2.attemptId].state).toBe('abandoned');
     const successorPlan = await b.resolver(b.taskId, successorHead.specRef) as RepairPlanSpecV2;
+    expect(successorPlan.orderedBatchScopes).toEqual([{ ...scope2, batchOrdinal: 1 }]);
+    expect(successorPlan.importedStagingManifestRef.digest).not.toBe(stack.manifestRef.digest);
+    const recoveredPrefix = await b.resolver(b.taskId, successorPlan.importedStagingManifestRef) as ContentRevisionManifestV2;
+    const recoveredPrefixRefs = new Map(recoveredPrefix.entries.map((entry) => [entry.slotId, entry.versionRef]));
+    const recoveredSlot1Ref = recoveredPrefixRefs.get(scope1.slotIds[0] as string) as BlobRefV2;
+    expect(recoveredSlot1Ref.digest).not.toBe(baseRefs.get(scope1.slotIds[0] as string)?.digest);
+    expect(recoveredPrefixRefs.get(untouchedSlot)).toEqual(baseRefs.get(untouchedSlot));
+    const recoveredSlot1Version = await b.resolver(b.taskId, recoveredSlot1Ref) as {
+      provenance: { contentCommitValidatorAggregateRef: BlobRefV2; contentCommitWarningRootRef: BlobRefV2 };
+    };
     const successorWorkItem1 = repairBatchWorkItemId(b.taskId, successorPlan.repairPlanId, 1, successorPlan.planRevisionId);
     const successorGrant = await grantOf(b, successorWorkItem1) as RepairBatchGrantSpecV2 & { kind: 'content_repair_batch' };
     const successorBase = await b.resolver(b.taskId, successorGrant.expectedStagingRootRef) as { contentManifestRef: BlobRefV2 | null };
-    expect(successorBase.contentManifestRef?.digest).toBe(stack.manifestRef.digest);
+    expect(successorBase.contentManifestRef).toEqual(successorPlan.importedStagingManifestRef);
     await expect(b.resolver(b.taskId, outcome1.stagingRootRef)).resolves.toMatchObject({ contentManifestRef: null });
 
-    const { AuthoritativeReviewGc } = await import('../../storage/authoritative-review-gc');
-    const gc = new AuthoritativeReviewGc(b.env.paths, b.env.blobStore, b.env.eventStore, b.env.publicationStore, {});
     await expect(gc.run()).resolves.toBeDefined();
     await expect(b.resolver(b.taskId, outcome1.stagingRootRef)).resolves.toMatchObject({ contentManifestRef: null });
+    await expect(b.resolver(b.taskId, recoveredSlot1Ref)).resolves.toEqual(recoveredSlot1Version);
+
+    // The successor's local ordinal 1 is the predecessor's first UNFINISHED
+    // scope (old ordinal 2). The committed prefix therefore never re-enters
+    // stagedContentVersions / the content batch validator.
+    const successorLease = await leaseTargeted(b, successorWorkItem1, 'worker-recovery-continuation');
+    const successorCtx = ctxOf(b, successorLease);
+    const continuedSlot = scope2.slotIds[0] as string;
+    const continued = await b.service.commitRepairBatch({
+      taskId: b.taskId,
+      workItemId: successorWorkItem1,
+      attemptId: successorCtx.attemptId,
+      batchOrdinal: 1,
+      ctx: successorCtx,
+      slotContents: { [continuedSlot]: { text: 'successor-only-unfinished-batch', mediaType: 'text/markdown' } },
+    });
+    expect(continued.kind).toBe('committed');
+    if (continued.kind !== 'committed') throw new Error('recovery continuation did not commit');
+    expect(b.contentBatchValidatorCalls()).toBe(2);
+    await b.env.coordinator.completeWorkItem({
+      taskId: b.taskId,
+      operationId: attemptContinuationOperationId(b.taskId, successorWorkItem1, successorCtx.attemptId, 'complete'),
+      workItemId: successorWorkItem1,
+      attemptId: successorCtx.attemptId,
+      resultRefs: continued.resultRefs,
+    });
+    await expect(runFinalizer(b, repairFinalizeWorkItemId(b.taskId, successorPlan.repairPlanId, successorPlan.planRevisionId))).resolves.toMatchObject({ kind: 'completed' });
+    expect(b.contentBatchValidatorCalls()).toBe(2);
+
+    const planned = (await b.readEvents(b.taskId)).filter(
+      (event): event is Extract<AuthoritativeReviewEventV2, { type: 'structured_review_round_planned' }> => event.type === 'structured_review_round_planned',
+    ).pop();
+    if (planned === undefined) throw new Error('recovered content finalizer did not plan review');
+    const finalManifest = await b.resolver(b.taskId, planned.contentRevisionManifestRef) as ContentRevisionManifestV2;
+    const finalRefs = new Map(finalManifest.entries.map((entry) => [entry.slotId, entry.versionRef]));
+    expect(finalRefs.get(scope1.slotIds[0] as string)).toEqual(recoveredSlot1Ref);
+    expect(finalRefs.get(continuedSlot)?.digest).not.toBe(baseRefs.get(continuedSlot)?.digest);
+    expect(finalRefs.get(untouchedSlot)).toEqual(baseRefs.get(untouchedSlot));
+    const finalRecoveredVersion = await b.resolver(b.taskId, finalRefs.get(scope1.slotIds[0] as string) as BlobRefV2) as {
+      provenance: { contentCommitValidatorAggregateRef: BlobRefV2; contentCommitWarningRootRef: BlobRefV2 };
+    };
+    expect(finalRecoveredVersion.provenance).toMatchObject(recoveredSlot1Version.provenance);
+    const recoveryEvents = (await b.readEvents(b.taskId)).filter(
+      (event) => event.type === 'structured_repair_plan_revision_started' && event.successorReason === 'recovery',
+    );
+    expect(recoveryEvents).toHaveLength(1);
+  });
+
+  it('fails closed without a persisted legacy Content checkpoint instead of replaying a committed validator', async () => {
+    const b = await makeRepairEnv({ legacyStagingRoots: true, contentBatchTargetSlots: 1 });
+    const stack = await driveToContentStack(b, ['s-1', 's-2']);
+    const slot1 = stack.nodeIds[0] as string;
+    const slot2 = stack.nodeIds[1] as string;
+    await seedFindings(b, [
+      {
+        findingId: 'c-compat-non-resumable',
+        primaryLocation: { kind: 'slot', id: slot1 },
+        defectClass: 'content',
+        severity: 'blocking',
+        suggestedRepairSlotIds: [slot2],
+      },
+    ], 'content');
+    const plan = await createCompatibilityRepairPlan(b, ['c-compat-non-resumable']);
+    const scope1 = plan.orderedBatchScopes[0];
+    const scope2 = plan.orderedBatchScopes[1];
+    if (scope1?.kind !== 'content' || scope2?.kind !== 'content') throw new Error('expected two content scopes');
+
+    const workItem1 = repairBatchWorkItemId(b.taskId, plan.repairPlanId, 1, plan.planRevisionId);
+    const leased1 = await leaseTargeted(b, workItem1, 'worker-legacy-no-checkpoint-1');
+    const ctx1 = ctxOf(b, leased1);
+    const committed = await b.service.commitRepairBatch({
+      taskId: b.taskId,
+      workItemId: workItem1,
+      attemptId: ctx1.attemptId,
+      batchOrdinal: 1,
+      ctx: ctx1,
+      slotContents: { [scope1.slotIds[0] as string]: { text: 'legacy-prefix-with-lost-checkpoint', mediaType: 'text/markdown' } },
+    });
+    if (committed.kind !== 'committed') throw new Error('legacy prefix did not commit');
+    await b.env.coordinator.completeWorkItem({
+      taskId: b.taskId,
+      operationId: attemptContinuationOperationId(b.taskId, workItem1, ctx1.attemptId, 'complete'),
+      workItemId: workItem1,
+      attemptId: ctx1.attemptId,
+      resultRefs: committed.resultRefs,
+    });
+    expect(b.contentBatchValidatorCalls()).toBe(1);
+
+    // Model a genuinely older writer: it committed the historical root but
+    // never persisted the round-5 continuation checkpoint. Even though the
+    // prepared closure may still be on disk, recovery cannot assert its
+    // authority and must not manufacture a base-reset successor.
+    const checkpointJournal = b.env.paths.taskV2RepairStagingJournalFile(
+      b.taskId,
+      plan.planRevisionId,
+      1,
+    );
+    await rm(dirname(checkpointJournal), { recursive: true, force: true });
+    b.useCurrentStagingRoots();
+
+    const workItem2 = repairBatchWorkItemId(b.taskId, plan.repairPlanId, 2, plan.planRevisionId);
+    const leased2 = await leaseTargeted(b, workItem2, 'worker-legacy-no-checkpoint-2');
+    const ctx2 = ctxOf(b, leased2);
+    await expect(b.service.commitRepairBatch({
+      taskId: b.taskId,
+      workItemId: workItem2,
+      attemptId: ctx2.attemptId,
+      batchOrdinal: 2,
+      ctx: ctx2,
+      slotContents: { [scope2.slotIds[0] as string]: { text: 'must-not-run', mediaType: 'text/markdown' } },
+    })).rejects.toMatchObject({ code: 'LEGACY_CONTENT_RECOVERY_NON_RESUMABLE' });
+    expect(b.contentBatchValidatorCalls()).toBe(1);
+    expect((await b.readEvents(b.taskId)).filter(
+      (event) => event.type === 'structured_repair_plan_revision_started' && event.successorReason === 'recovery',
+    )).toHaveLength(0);
   });
 
   it('turns an old Content finalizer head into one recovery successor instead of retrying an unresolvable staging closure', async () => {
     const b = await makeRepairEnv({ legacyStagingRoots: true, contentBatchTargetSlots: 1 });
-    const stack = await driveToContentStack(b, ['s-1']);
+    const stack = await driveToContentStack(b, ['s-1', 's-2']);
     const slotId = stack.nodeIds[0] as string;
+    const untouchedSlot = stack.nodeIds[1] as string;
+    const baseManifest = await b.resolver(b.taskId, stack.manifestRef) as ContentRevisionManifestV2;
+    const baseRefs = new Map(baseManifest.entries.map((entry) => [entry.slotId, entry.versionRef]));
     await seedFindings(b, [{ findingId: 'c-compat-finalize', primaryLocation: { kind: 'slot', id: slotId }, defectClass: 'content', severity: 'blocking' }], 'content');
     const plan = await createCompatibilityRepairPlan(b, ['c-compat-finalize']);
     const workItemId = repairBatchWorkItemId(b.taskId, plan.repairPlanId, 1, plan.planRevisionId);
@@ -2134,20 +2362,59 @@ describe('repair_staging_root schemaVersion-1 runtime compatibility', { timeout:
       operationId: attemptContinuationOperationId(b.taskId, workItemId, ctx.attemptId, 'complete'),
       workItemId,
       attemptId: ctx.attemptId,
-      resultRefs: [committed.stagingRootRef],
+      resultRefs: committed.resultRefs,
     });
     expect(committed.stagingRoot.contentManifestRef).toBeNull();
     expect(b.contentBatchValidatorCalls()).toBe(1);
+    const { AuthoritativeReviewGc } = await import('../../storage/authoritative-review-gc');
+    const gc = new AuthoritativeReviewGc(b.env.paths, b.env.blobStore, b.env.eventStore, b.env.publicationStore, {});
+    await expect(gc.run()).resolves.toBeDefined();
 
     b.useCurrentStagingRoots();
     const finalizeWorkItemId = repairFinalizeWorkItemId(b.taskId, plan.repairPlanId, plan.planRevisionId);
-    await expect(runFinalizer(b, finalizeWorkItemId)).resolves.toMatchObject({ kind: 'completed' });
+    const finalizeLease = await leaseTargeted(b, finalizeWorkItemId, 'worker-legacy-finalize-recovery');
+    const finalizeCtx = ctxOf(b, finalizeLease);
+    const finalizeInput = {
+      taskId: b.taskId,
+      commandId: finalizeLease.commandId ?? finalizeCtx.attemptId,
+      workItemId: finalizeWorkItemId,
+      commandKind: 'repair_finalize' as const,
+      leaseEpoch: finalizeLease.leaseEpoch,
+      authorityBaseRef: finalizeLease.authorityBaseRef,
+      payloadRef: await payloadRefOf(b, finalizeWorkItemId),
+    };
+    await expect(b.service.executeRepairFinalize(finalizeInput)).resolves.toMatchObject({ kind: 'completed' });
+    await expect(b.service.executeRepairFinalize(finalizeInput)).resolves.toMatchObject({ kind: 'completed' });
     expect(b.contentBatchValidatorCalls()).toBe(1);
     const state = await b.env.readProjection(b.taskId);
     const lineage = state.repairPlans[plan.repairPlanId];
     expect(lineage.revisions[plan.planRevisionId].state).toBe('superseded');
-    expect(lineage.revisions[lineage.currentPlanRevisionId as string].successorReason).toBe('recovery');
+    const recoveryHead = lineage.revisions[lineage.currentPlanRevisionId as string];
+    expect(recoveryHead.successorReason).toBe('recovery');
     expect(state.workItems[finalizeWorkItemId].state).toBe('completed');
+    const recoveryPlan = await b.resolver(b.taskId, recoveryHead.specRef) as RepairPlanSpecV2;
+    expect(recoveryPlan.importedStagingManifestRef.digest).not.toBe(stack.manifestRef.digest);
+    const recoveredPrefix = await b.resolver(b.taskId, recoveryPlan.importedStagingManifestRef) as ContentRevisionManifestV2;
+    const recoveredRefs = new Map(recoveredPrefix.entries.map((entry) => [entry.slotId, entry.versionRef]));
+    const recoveredSlotRef = recoveredRefs.get(slotId) as BlobRefV2;
+    expect(recoveredSlotRef.digest).not.toBe(baseRefs.get(slotId)?.digest);
+    expect(recoveredRefs.get(untouchedSlot)).toEqual(baseRefs.get(untouchedSlot));
+    const directFinalizeWorkItemId = repairFinalizeWorkItemId(b.taskId, recoveryPlan.repairPlanId, recoveryPlan.planRevisionId);
+    expect(state.workItems[directFinalizeWorkItemId]?.state).toBe('ready');
+    expect(state.workItems[repairBatchWorkItemId(b.taskId, recoveryPlan.repairPlanId, 1, recoveryPlan.planRevisionId)]).toBeUndefined();
+
+    await expect(gc.run()).resolves.toBeDefined();
+    await expect(b.resolver(b.taskId, recoveredSlotRef)).resolves.toBeDefined();
+    await expect(runFinalizer(b, directFinalizeWorkItemId)).resolves.toMatchObject({ kind: 'completed' });
+    expect(b.contentBatchValidatorCalls()).toBe(1);
+    const planned = (await b.readEvents(b.taskId)).filter(
+      (event): event is Extract<AuthoritativeReviewEventV2, { type: 'structured_review_round_planned' }> => event.type === 'structured_review_round_planned',
+    ).pop();
+    if (planned === undefined) throw new Error('direct recovery finalizer did not plan review');
+    const finalManifest = await b.resolver(b.taskId, planned.contentRevisionManifestRef) as ContentRevisionManifestV2;
+    const finalRefs = new Map(finalManifest.entries.map((entry) => [entry.slotId, entry.versionRef]));
+    expect(finalRefs.get(slotId)).toEqual(recoveredSlotRef);
+    expect(finalRefs.get(untouchedSlot)).toEqual(baseRefs.get(untouchedSlot));
     const recoveryEvents = (await b.readEvents(b.taskId)).filter(
       (event) => event.type === 'structured_repair_plan_revision_started' && event.successorReason === 'recovery',
     );
@@ -2359,7 +2626,7 @@ async function driveMapRepairToFinalizer(b: RepairEnv, options: { mixed?: boolea
     operationId: attemptContinuationOperationId(b.taskId, workItemId, ctx.attemptId, 'complete'),
     workItemId,
     attemptId: ctx.attemptId,
-    resultRefs: [outcome.stagingRootRef],
+    resultRefs: outcome.resultRefs,
   });
   return { plan, finalizeWorkItemId: repairFinalizeWorkItemId(b.taskId, plan.repairPlanId, plan.planRevisionId) };
 }
@@ -3049,7 +3316,7 @@ async function commitMapRepairBatchOne(b: RepairEnv, plan: RepairPlanSpecV2, wor
     operationId: attemptContinuationOperationId(b.taskId, workItemId, ctx.attemptId, 'complete'),
     workItemId,
     attemptId: ctx.attemptId,
-    resultRefs: [outcome.stagingRootRef],
+    resultRefs: outcome.resultRefs,
   });
 }
 
@@ -3219,7 +3486,7 @@ async function finalizeExistingContentPlan(
     operationId: attemptContinuationOperationId(b.taskId, workItemId, ctx.attemptId, 'complete'),
     workItemId,
     attemptId: ctx.attemptId,
-    resultRefs: [committed.stagingRootRef],
+    resultRefs: committed.resultRefs,
   });
   const finalized = await runFinalizer(b, repairFinalizeWorkItemId(b.taskId, plan.repairPlanId, plan.planRevisionId));
   if (finalized.kind !== 'completed') throw new Error(`content finalize failed: ${JSON.stringify(finalized)}`);
@@ -3736,7 +4003,7 @@ describe('I-3 (review): the content re-review round carries the plan verificatio
       operationId: attemptContinuationOperationId(b.taskId, workItemId, ctx.attemptId, 'complete'),
       workItemId,
       attemptId: ctx.attemptId,
-      resultRefs: [outcome.stagingRootRef],
+      resultRefs: outcome.resultRefs,
     });
     const finalizeWorkItemId = repairFinalizeWorkItemId(b.taskId, plan.repairPlanId, plan.planRevisionId);
     const finalizeOutcome = await runFinalizer(b, finalizeWorkItemId);

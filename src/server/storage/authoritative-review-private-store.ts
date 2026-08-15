@@ -353,6 +353,27 @@ export class AuthoritativeReviewPrivateStore {
     return { status: 'committed', entry: full };
   }
 
+  /** The FULL committed repair-staging journal for one exact attempt-bound
+   * plan/revision/ordinal. Unlike `openRepairStaging`, this read-only path
+   * never manufactures a missing binding header: recovery may trust only a
+   * checkpoint that was durably written by the original batch attempt. */
+  async readAllRepairStaging(binding: RepairStagingBindingV2): Promise<RepairStagingViewV2> {
+    assertBindingShape(binding, 'binding');
+    if (typeof binding.planRevisionId !== 'string' || binding.planRevisionId.length === 0) {
+      throw invalidInput('binding.planRevisionId 必须是非空字符串。');
+    }
+    if (typeof binding.batchOrdinal !== 'number' || !Number.isInteger(binding.batchOrdinal) || binding.batchOrdinal < 0) {
+      throw invalidInput('binding.batchOrdinal 必须是非负整数。');
+    }
+    const file = this.repairFile(binding.planRevisionId, binding.batchOrdinal);
+    const headerFile = this.repairHeaderFile(binding.planRevisionId, binding.batchOrdinal);
+    const header = await this.readHeader(headerFile);
+    if (header === null) return { binding, committed: [], seq: 0 };
+    this.assertHeaderMatches(header, 'repair', binding);
+    const committed = await this.readEntries(file);
+    return { binding, committed, seq: committed.length > 0 ? committed[committed.length - 1].seq : 0 };
+  }
+
   /* ------------------------------------------------------------ internal */
 
   private async assertHeaderOrCreate(

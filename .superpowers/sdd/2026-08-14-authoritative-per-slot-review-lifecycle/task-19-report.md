@@ -311,3 +311,39 @@ The only full-suite diagnostics were the pre-existing React Router and `act(...)
 - `npm run check`: passed.
 - `npm run build`: passed (732 modules).
 - `git diff --check`: passed.
+
+---
+
+## Fix round 5 (persisted Content recovery continuation, 2026-08-16)
+
+**Status:** COMPLETE. The sole P1 in `task-19-rereview4-findings-codex.md` is closed inside Task 19. A recovery successor now imports the exact committed Content prefix and begins at the first unfinished predecessor scope; it never regenerates a committed scope or reruns that scope's validator. schemaVersion remains 1, historical root bytes remain readable without rewriting, v1 behavior and the checked-in disabled capability are unchanged, publication remains facade-only, and production runtime/domain trees retain zero `EventStore` imports/construction.
+
+### 1. Attempt-bound persisted Content checkpoints
+
+- After a Content batch validator clears and its manifest/provenance graph is prepared, the service durably appends one exact checkpoint to the existing attempt-bound repair staging journal before publication. The checkpoint binds the WorkItem/attempt, plan/ref/revision, batch ordinal and scope, prior staging root and manifest, cumulative manifest/root digest, commit/validation cores, validator input/aggregate, receipt refs, warning root/custody, and a canonical self-digest.
+- A pre-publication crash reopens the same binding, verifies the command-body digest, re-resolves and cross-checks the complete checkpoint closure, and publishes it without invoking the validator again. A post-commit response loss replays the already-committed batch envelope before stale-head/order checks.
+- Recovery joins the paired committed batch events with the projected WorkItem/attempt, exact Grant and AuthorityBase, staging-root CAS chain, private checkpoint chain, cumulative manifest chain, repaired-version provenance, commit-core replacements, validator target refs/aggregate/receipts, and warning custody. Missing or divergent evidence fails closed as `LEGACY_CONTENT_RECOVERY_NON_RESUMABLE`; a real pre-checkpoint historical writer is never represented as resumable.
+
+### 2. Successors continue the prefix instead of resetting it
+
+- Mid-plan recovery slices off the verified predecessor ordinals, reindexes only the unfinished scopes to local successor ordinals `1..N`, imports the cumulative prefix manifest, and creates the first unfinished repair WorkItem. Previously repaired version refs and provenance remain byte-identical; untouched slot refs remain exact.
+- When every predecessor scope already committed, recovery creates a direct `system_repair_finalize` successor with no repair-batch WorkItem or Grant. The finalizer consumes the imported cumulative manifest and does not call a batch validator.
+- The historical root still preserves its schemaVersion-1 bytes. Because that root has no manifest child edge, the next WorkItem/finalizer AuthorityBase carries the exact cumulative manifest as event-rooted migration custody; successful WorkItem completion also folds the journaled full result refs. GC therefore preserves the manifest, values, versions, validator aggregate/receipts, and warning custody before recovery and after successor creation.
+
+### 3. Replay, Map compatibility, and tool-result custody
+
+- Same-operation batch replay returns the original committed staging result; same-operation legacy recovery and system-finalizer replay return the single already-created successor instead of `PLAN_STALE` or an infrastructure failure.
+- Map uses the same replay-safe batch result path but retains its historical/current root behavior and finalizer flow. Content repair tool results now carry the checkpoint closure refs, and the WorkItem completion collector persists them instead of reducing the result to only the staging root.
+
+### Verification
+
+- RED evidence before implementation: the checkpoint-crash retry invoked the batch validator twice; the old mid-plan recovery replay failed `PLAN_STALE`; the old finalizer replay degraded to infrastructure failure.
+- Recovery/crash/fail-closed focus: **1 file / 4 passed** (pre-publish crash, post-commit response loss, mid-plan prefix continuation, missing-checkpoint fail-closed, and all-complete direct-finalizer recovery are covered by the four selected tests).
+- Complete repair-service serial run: **1 file / 35 passed**.
+- Full affected serial run before the final exact-binding hardening: **11 files / 909 passed** (`repair-service` 34 at that point, repair property, Content review, tool factory, event schema, projector, GC, BlobStore, validator engine, object registry, private store). The final exact-binding changes were then covered by the fresh complete 35-test repair-service run.
+- Capability/v1/dependency qualification: **5 focused passed** across the authoritative capability, base runtime capability, and append-facade suites (checked-in capability disabled, explicit disabled runtime, v1 EventStore behavior unchanged, and zero production runtime/domain `EventStore` imports/construction).
+- `npm run check -- --pretty false`: passed.
+- `npm run build`: passed (732 modules).
+- `git diff --check`: passed.
+
+This fix round is committed with the exact message `fix: resume task19 content repairs without replay`.

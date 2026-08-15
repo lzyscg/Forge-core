@@ -111,6 +111,7 @@ import type {
   SuccessorWorkItemCarrierV2,
   SystemCommandTerminalCarrierV2,
   ValidationWarningCustodyRootV2,
+  ValidatorInputEnvelopeV2,
   WriteGrantSpecV2,
 } from '../../authoritative-review/authority-types';
 import { refOfBlob } from '../../authoritative-review/object-registry';
@@ -153,7 +154,7 @@ import {
 import type { ProjectedFindingLifecycleV2 } from './finding-service';
 import { buildFindingStageRoot, repairRouteOf, REQUIRED_STAGES_BY_DEFECT } from './finding-service';
 import type { V2AttemptContext } from './attempt-coordinator';
-import type { AuthoritativeReviewPrivateStore } from '../../storage/authoritative-review-private-store';
+import type { AuthoritativeReviewPrivateStore, RepairStagingBindingV2 } from '../../storage/authoritative-review-private-store';
 
 /* ------------------------------------------------------------------ */
 /* Deterministic ids (§11.11 / Task 16/17 conventions)                 */
@@ -837,7 +838,7 @@ export interface RepairServiceDependencies {
 
 /** The committed result of one repair batch. */
 export type RepairBatchOutcome =
-  | { kind: 'committed'; stagingRootRef: BlobRefV2; stagingRoot: RepairStagingRootV2; nextWorkItemId: string }
+  | { kind: 'committed'; stagingRootRef: BlobRefV2; stagingRoot: RepairStagingRootV2; nextWorkItemId: string; resultRefs: readonly BlobRefV2[] }
   | { kind: 'restarted'; failureCode: 'LEGACY_CONTENT_STAGING_RESTARTED'; resultRefs: readonly BlobRefV2[]; successorPlanSpecRef: BlobRefV2 }
   | { kind: 'blocked'; failureCode: string }
   | { kind: 'infrastructure_failure'; failureCode: string };
@@ -854,6 +855,94 @@ export type RepairFinalizeOutcome =
 export interface ContentReReviewMapContextV2 {
   mapRef: BlobRefV2;
   mapSemanticDigest: string;
+}
+
+/** Durable, attempt-bound continuation record written after a Content batch
+ * validator clears and before its publication begins. This is intentionally a
+ * private staging-ledger record (not a new public blob schema): historical
+ * schemaVersion-1 roots cannot grow a field, while recovery still needs an
+ * exact manifest + validator-custody closure that can be checked against the
+ * committed batch events and immutable authority/grant binding. */
+interface ContentRepairBatchCheckpointV1 {
+  version: 1;
+  repairPlanId: string;
+  planRevisionId: string;
+  batchOrdinal: number;
+  workItemId: string;
+  attemptId: string;
+  repairPlanSpecRef: BlobRefV2;
+  priorStagingRootRef: BlobRefV2;
+  stagingRootRef: BlobRefV2;
+  priorManifestRef: BlobRefV2;
+  contentManifestRef: BlobRefV2;
+  contentRootDigest: string;
+  commitCoreRef: BlobRefV2;
+  validationCoreRef: BlobRefV2;
+  validatorInputEnvelopeRef: BlobRefV2;
+  validatorAggregateRef: BlobRefV2;
+  validationReceiptRefs: readonly BlobRefV2[];
+  warningRootRef: BlobRefV2;
+  warningCustodyRef: BlobRefV2;
+  scopeSlotIds: readonly string[];
+  checkpointDigest: string;
+}
+
+interface ContentRepairCheckpointBodyV1 {
+  version: 1;
+  repairPlanSpecRef: BlobRefV2;
+  priorStagingRootRef: BlobRefV2;
+  priorManifestRef: BlobRefV2;
+  batchOrdinal: number;
+  scopeSlotIds: readonly string[];
+  slotContentsDigest: string;
+}
+
+interface RecoveredContentPrefixV1 {
+  completedBatchOrdinals: readonly number[];
+  manifestRef: BlobRefV2;
+  manifest: ContentRevisionManifestV2;
+}
+
+function reordinalRepairScopes(scopes: readonly RepairBatchScopeV2[], completedBatchCount: number): RepairBatchScopeV2[] {
+  return scopes.slice(completedBatchCount).map((scope, index) => ({ ...scope, batchOrdinal: index + 1 }));
+}
+
+function uniqueBlobRefs(refs: readonly BlobRefV2[]): BlobRefV2[] {
+  const seen = new Set<string>();
+  const out: BlobRefV2[] = [];
+  for (const ref of refs) {
+    const key = `${ref.kind}:${ref.digest}:${ref.byteLength}:${ref.mediaType}:${ref.schemaVersion}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(ref);
+  }
+  return out;
+}
+
+function embeddedBlobRefs(value: unknown): BlobRefV2[] {
+  const refs: BlobRefV2[] = [];
+  const visit = (candidate: unknown): void => {
+    if (Array.isArray(candidate)) {
+      candidate.forEach(visit);
+      return;
+    }
+    if (candidate === null || typeof candidate !== 'object') return;
+    const object = candidate as Record<string, unknown>;
+    if (
+      typeof object.kind === 'string' &&
+      typeof object.digest === 'string' &&
+      typeof object.byteLength === 'number' &&
+      typeof object.mediaType === 'string' &&
+      typeof object.schemaVersion === 'number' &&
+      Object.keys(object).length === 5
+    ) {
+      refs.push(object as unknown as BlobRefV2);
+      return;
+    }
+    Object.values(object).forEach(visit);
+  };
+  visit(value);
+  return uniqueBlobRefs(refs);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1125,6 +1214,16 @@ export class RepairService {
     /** the blocking finalizer's aggregate (the rejected event's carrier). */
     validatorAggregateRef?: BlobRefV2 | null;
     validationReceiptRef?: BlobRefV2 | null;
+    /** Recovery-only continuation. The successor imports the verified
+     * cumulative prefix and either exposes only unfinished scopes (reindexed
+     * within the new revision) or starts directly at the finalizer when the
+     * predecessor already committed every scope. */
+    contentContinuation?: {
+      orderedBatchScopes: readonly RepairBatchScopeV2[];
+      contentManifestRef: BlobRefV2;
+      contentRootDigest: string;
+      startWithFinalizer: boolean;
+    };
   }): Promise<{ kind: 'completed'; resultRefs: readonly BlobRefV2[]; successorPlanSpecRef: BlobRefV2; successorPlan: RepairPlanSpecV2 }> {
     const { taskId, track } = input;
     const superseded = (await this.deps.resolver(taskId, input.supersededPlanSpecRef)) as RepairPlanSpecV2 | null;
@@ -1133,7 +1232,10 @@ export class RepairService {
     }
     const revision = superseded.revision + 1;
     const targets = await this.resolveRepairTargets(taskId, track, input.findings);
-    const scopes = buildRepairBatchScopes({
+    if (input.contentContinuation !== undefined && (track !== 'content' || input.successorReason !== 'recovery')) {
+      throw new RepairError('INVALID_INPUT', 'content continuation is legal only for a Content recovery successor');
+    }
+    const scopes = input.contentContinuation?.orderedBatchScopes ?? buildRepairBatchScopes({
       track,
       repairPlanId: input.repairPlanId,
       nodeIds: targets.nodeIds,
@@ -1158,16 +1260,30 @@ export class RepairService {
       importedStagingManifestRef: input.importedStagingManifestRef,
     });
     const successorPlanRef = await this.deps.facade.prepareBlob(taskId, 'repair_plan_spec', successorPlan);
-    const baseStagingRoot = this.baseStagingRootOf(successorPlan, keyLedgerRef, taskId, track, targets);
+    const baseStagingRoot = input.contentContinuation === undefined
+      ? this.baseStagingRootOf(successorPlan, keyLedgerRef, taskId, track, targets)
+      : buildRepairStagingRoot({
+          repairPlanId: successorPlan.repairPlanId,
+          planRevisionId: successorPlan.planRevisionId,
+          batchOrdinal: 0,
+          mapRootDigest: null,
+          contentRootDigest: input.contentContinuation.contentRootDigest,
+          contentManifestRef: input.contentContinuation.contentManifestRef,
+          priorStagingRootRef: null,
+          keyLedgerRef,
+        });
     const baseStagingRootRef = await this.deps.facade.prepareBlob(taskId, 'repair_staging_root', baseStagingRoot);
-    const firstWorkItemId = repairBatchWorkItemId(taskId, input.repairPlanId, 1, successorPlan.planRevisionId);
+    const startWithFinalizer = input.contentContinuation?.startWithFinalizer === true;
+    const firstWorkItemId = startWithFinalizer
+      ? repairFinalizeWorkItemId(taskId, input.repairPlanId, successorPlan.planRevisionId)
+      : repairBatchWorkItemId(taskId, input.repairPlanId, 1, successorPlan.planRevisionId);
     const successor = await this.prepareRepairBatchSuccessor({
       taskId,
       plan: successorPlan,
       planRef: successorPlanRef,
       batchOrdinal: 0,
       nextWorkItemId: firstWorkItemId,
-      isLast: false,
+      isLast: startWithFinalizer,
       currentStagingRootRef: baseStagingRootRef,
       keyLedgerRef,
     });
@@ -1201,9 +1317,9 @@ export class RepairService {
         validatorAggregateRef: input.validatorAggregateRef ?? null,
         validationReceiptRef: input.validationReceiptRef ?? input.sourceReceiptRef,
         workItemId: firstWorkItemId,
-        batchOrdinal: 1,
-        grantSpecId: `gs-${firstWorkItemId}`,
-        grantKind: track === 'map' ? 'map_repair_batch' : 'content_repair_batch',
+        batchOrdinal: startWithFinalizer ? null : 1,
+        grantSpecId: startWithFinalizer ? null : `gs-${firstWorkItemId}`,
+        grantKind: startWithFinalizer ? null : track === 'map' ? 'map_repair_batch' : 'content_repair_batch',
         overrideTransfer,
         supersededWorkItem: input.supersededWorkItem ?? null,
         successor: successor.carrier,
@@ -1250,6 +1366,12 @@ export class RepairService {
     const plan = (await this.deps.resolver(input.taskId, repairSpec.repairPlanSpecRef)) as RepairPlanSpecV2 | null;
     if (plan === null || typeof plan !== 'object') throw new RepairError('PLAN_UNRESOLVED', 'repair plan spec unresolvable');
     const track = plan.orderedBatchScopes[0]?.kind === 'map' ? 'map' : 'content';
+    const batchReplay = await this.replayedRepairBatchCommit(input, plan);
+    if (batchReplay !== null) return batchReplay;
+    if (track === 'content') {
+      const recoveryReplay = await this.replayedLegacyContentRecovery(input, plan, repairSpec.repairPlanSpecRef);
+      if (recoveryReplay !== null) return recoveryReplay;
+    }
     const current = await this.currentStagingState(input.taskId, plan, track);
     // The plan must be the CURRENT active head (a superseded revision's grant
     // can never commit — the scope-expansion supersede rule).
@@ -1299,8 +1421,109 @@ export class RepairService {
       const outcome = await this.commitMapRepairBatch(input, plan, repairSpec as Extract<WriteGrantSpecV2, { kind: 'map_repair_batch' }>, current);
       return outcome;
     }
-    const outcome = await this.commitContentRepairBatch(input, plan, repairSpec as Extract<WriteGrantSpecV2, { kind: 'content_repair_batch' }>, current);
+    const outcome = await this.commitContentRepairBatch(
+      input,
+      plan,
+      repairSpec as Extract<WriteGrantSpecV2, { kind: 'content_repair_batch' }>,
+      grant.specRef,
+      current,
+    );
     return outcome;
+  }
+
+  private async replayedRepairBatchCommit(
+    input: { taskId: string; workItemId: string; attemptId: string; batchOrdinal: number },
+    plan: RepairPlanSpecV2,
+  ): Promise<Extract<RepairBatchOutcome, { kind: 'committed' }> | null> {
+    const committed = await this.deps.committedOperation(
+      input.taskId,
+      repairBatchCommitOperationId(input.taskId, input.workItemId, input.batchOrdinal),
+    );
+    if (committed === null) return null;
+    const repairCommit = committed.find(
+      (event): event is Extract<AuthoritativeReviewEventV2, { type: 'structured_repair_committed' }> =>
+        event.type === 'structured_repair_committed',
+    );
+    const nextWorkItem = committed.find(
+      (event): event is Extract<AuthoritativeReviewEventV2, { type: 'structured_work_item_created' }> =>
+        event.type === 'structured_work_item_created',
+    );
+    if (
+      repairCommit === undefined || nextWorkItem === undefined ||
+      repairCommit.repairPlanId !== plan.repairPlanId ||
+      repairCommit.planRevisionId !== plan.planRevisionId ||
+      repairCommit.batchOrdinal !== input.batchOrdinal ||
+      repairCommit.workItemId !== input.workItemId ||
+      repairCommit.attemptId !== input.attemptId
+    ) {
+      throw new RepairError('OPERATION_CONFLICT', 'repair batch operation committed a different event envelope');
+    }
+    const stagingRoot = await this.deps.resolver(input.taskId, repairCommit.stagingRootRef) as RepairStagingRootV2 | null;
+    if (stagingRoot === null || typeof stagingRoot !== 'object') {
+      throw new RepairError('STAGING_UNRESOLVED', 'replayed repair batch staging root is unresolvable');
+    }
+    return {
+      kind: 'committed',
+      stagingRootRef: repairCommit.stagingRootRef,
+      stagingRoot,
+      nextWorkItemId: nextWorkItem.workItemId,
+      resultRefs: uniqueBlobRefs([repairCommit.stagingRootRef, ...embeddedBlobRefs(committed)]),
+    };
+  }
+
+  private async replayedLegacyContentRecovery(
+    input: { taskId: string; batchOrdinal: number },
+    plan: RepairPlanSpecV2,
+    planRef: BlobRefV2,
+  ): Promise<Extract<RepairBatchOutcome, { kind: 'restarted' }> | null> {
+    if (input.batchOrdinal < 2) return null;
+    const events = await this.deps.readEvents(input.taskId);
+    const predecessor = events
+      .filter(
+        (event): event is Extract<AuthoritativeReviewEventV2, { type: 'structured_content_repair_batch_committed' }> =>
+          event.type === 'structured_content_repair_batch_committed' &&
+          event.repairPlanId === plan.repairPlanId &&
+          event.planRevisionId === plan.planRevisionId &&
+          event.batchOrdinal === input.batchOrdinal - 1,
+      )
+      .pop();
+    if (predecessor === undefined) return null;
+    const predecessorRoot = await this.deps.resolver(input.taskId, predecessor.stagingRootRef) as RepairStagingRootV2 | null;
+    if (predecessorRoot === null || typeof predecessorRoot !== 'object' || predecessorRoot.contentManifestRef !== null) return null;
+    const operationId = repairLegacyStagingRecoveryOperationId(
+      input.taskId,
+      plan.repairPlanId,
+      plan.planRevisionId,
+      predecessor.stagingRootRef,
+    );
+    const committed = await this.deps.committedOperation(input.taskId, operationId);
+    if (committed === null) return null;
+    const revision = committed.find(
+      (event): event is Extract<AuthoritativeReviewEventV2, { type: 'structured_repair_plan_revision_started' }> =>
+        event.type === 'structured_repair_plan_revision_started' &&
+        event.repairPlanId === plan.repairPlanId &&
+        event.supersedesPlanRevisionId === plan.planRevisionId &&
+        event.successorReason === 'recovery',
+    );
+    if (revision === undefined) {
+      throw new RepairError('OPERATION_CONFLICT', 'legacy Content recovery operation committed a different event envelope');
+    }
+    const successorPlan = await this.deps.resolver(input.taskId, revision.repairPlanSpecRef) as RepairPlanSpecV2 | null;
+    if (
+      successorPlan === null || typeof successorPlan !== 'object' ||
+      successorPlan.origin.kind !== 'successor' ||
+      successorPlan.origin.successorReason !== 'recovery' ||
+      successorPlan.origin.successorOperationKey !== operationId ||
+      !sameRef(successorPlan.origin.supersedesPlanSpecRef, planRef)
+    ) {
+      throw new RepairError('OPERATION_CONFLICT', 'legacy Content recovery successor identity diverged on replay');
+    }
+    return {
+      kind: 'restarted',
+      failureCode: 'LEGACY_CONTENT_STAGING_RESTARTED',
+      resultRefs: embeddedBlobRefs(committed),
+      successorPlanSpecRef: revision.repairPlanSpecRef,
+    };
   }
 
   private async commitMapRepairBatch(
@@ -1375,6 +1598,7 @@ export class RepairService {
     input: { taskId: string; workItemId: string; attemptId: string; batchOrdinal: number; ctx: V2AttemptContext; slotContents?: Readonly<Record<string, { text: string; mediaType: 'text/markdown' | 'text/plain' }>> },
     plan: RepairPlanSpecV2,
     grant: RepairBatchGrantSpecV2 & { kind: 'content_repair_batch' },
+    grantSpecRef: BlobRefV2,
     current: { stagingRootRef: BlobRefV2; keyLedgerRef: BlobRefV2; lastBatchOrdinal: number },
   ): Promise<RepairBatchOutcome> {
     const { taskId } = input;
@@ -1404,6 +1628,45 @@ export class RepairService {
     if (priorManifestRef === null) throw new RepairError('MANIFEST_UNRESOLVED', 'content staging root has no cumulative manifest');
     const priorManifest = (await this.deps.resolver(taskId, priorManifestRef)) as ContentRevisionManifestV2 | null;
     if (priorManifest === null || typeof priorManifest !== 'object') throw new RepairError('MANIFEST_UNRESOLVED', 'prior cumulative content manifest unresolvable');
+    const checkpointBinding: RepairStagingBindingV2 = {
+      workItemId: input.workItemId,
+      leaseEpoch: input.ctx.leaseEpoch,
+      attemptId: input.attemptId,
+      authorityBaseRef: input.ctx.authorityBaseRef,
+      grantSpecRef,
+      planRevisionId: plan.planRevisionId,
+      batchOrdinal: input.batchOrdinal,
+    };
+    const checkpointBody = this.contentCheckpointBody({
+      planRef,
+      priorStagingRootRef: current.stagingRootRef,
+      priorManifestRef,
+      batchOrdinal: input.batchOrdinal,
+      scopeSlotIds: scope.slotIds,
+      slotContents,
+    });
+    const checkpointReplay = await this.readContentRepairCheckpoint(taskId, checkpointBinding, checkpointBody);
+    if (checkpointReplay !== null) {
+      await this.validateContentRepairCheckpoint({
+        taskId,
+        plan,
+        planRef,
+        checkpoint: checkpointReplay,
+        expectedPriorManifest: priorManifest,
+        expectedPriorManifestRef: priorManifestRef,
+        expectedPriorStagingRootRef: current.stagingRootRef,
+        expectedScope: scope,
+      });
+      return this.publishBatchCommit(
+        taskId,
+        plan,
+        planRef,
+        input,
+        checkpointReplay.stagingRootRef,
+        current.keyLedgerRef,
+        this.contentCheckpointResultRefs(checkpointReplay),
+      );
+    }
     const staged = await this.stagedContentVersions(taskId, plan, planRef, priorManifestRef, priorManifest, input.batchOrdinal, slotContents, input.workItemId, input.attemptId);
     const newLedgerRef = current.keyLedgerRef;
     const stagingRoot = buildRepairStagingRoot({
@@ -1417,13 +1680,520 @@ export class RepairService {
       keyLedgerRef: newLedgerRef,
     });
     const stagingRootRef = await this.deps.facade.prepareBlob(taskId, 'repair_staging_root', stagingRoot);
-    return this.publishBatchCommit(taskId, plan, planRef, input, stagingRootRef, newLedgerRef);
+    const checkpoint = this.buildContentRepairCheckpoint({
+      plan,
+      planRef,
+      workItemId: input.workItemId,
+      attemptId: input.attemptId,
+      batchOrdinal: input.batchOrdinal,
+      priorStagingRootRef: current.stagingRootRef,
+      stagingRootRef,
+      priorManifestRef,
+      contentManifestRef: staged.manifestRef,
+      contentRootDigest: staged.manifest.contentRootDigest,
+      scopeSlotIds: scope.slotIds,
+      validationRefs: staged.validationRefs,
+    });
+    await this.deps.privateStore.appendRepairStaging(checkpointBinding, {
+      clientOperationId: repairBatchCommitOperationId(taskId, input.workItemId, input.batchOrdinal),
+      op: 'content_repair_batch_checkpoint',
+      body: checkpointBody as unknown as Record<string, unknown>,
+      result: checkpoint,
+    });
+    return this.publishBatchCommit(
+      taskId,
+      plan,
+      planRef,
+      input,
+      stagingRootRef,
+      newLedgerRef,
+      this.contentCheckpointResultRefs(checkpoint),
+    );
   }
 
-  /** A committed historical Content root has no event-rooted cumulative
-   * manifest to continue from. Recovery therefore supersedes the old revision
-   * and its active agent cycle atomically, then restarts ordinal 1 against the
-   * unchanged authoritative content base using the current root format. */
+  private contentCheckpointBody(input: {
+    planRef: BlobRefV2;
+    priorStagingRootRef: BlobRefV2;
+    priorManifestRef: BlobRefV2;
+    batchOrdinal: number;
+    scopeSlotIds: readonly string[];
+    slotContents: Readonly<Record<string, { text: string; mediaType: 'text/markdown' | 'text/plain' }>>;
+  }): ContentRepairCheckpointBodyV1 {
+    return {
+      version: 1,
+      repairPlanSpecRef: input.planRef,
+      priorStagingRootRef: input.priorStagingRootRef,
+      priorManifestRef: input.priorManifestRef,
+      batchOrdinal: input.batchOrdinal,
+      scopeSlotIds: [...input.scopeSlotIds].sort(),
+      slotContentsDigest: canonicalJsonSha256(input.slotContents),
+    };
+  }
+
+  private buildContentRepairCheckpoint(input: {
+    plan: RepairPlanSpecV2;
+    planRef: BlobRefV2;
+    workItemId: string;
+    attemptId: string;
+    batchOrdinal: number;
+    priorStagingRootRef: BlobRefV2;
+    stagingRootRef: BlobRefV2;
+    priorManifestRef: BlobRefV2;
+    contentManifestRef: BlobRefV2;
+    contentRootDigest: string;
+    scopeSlotIds: readonly string[];
+    validationRefs: {
+      commitCoreRef: BlobRefV2;
+      validationCoreRef: BlobRefV2;
+      validatorInputEnvelopeRef: BlobRefV2;
+      validatorAggregateRef: BlobRefV2;
+      validationReceiptRefs: readonly BlobRefV2[];
+      warningRootRef: BlobRefV2;
+      warningCustodyRef: BlobRefV2;
+    };
+  }): ContentRepairBatchCheckpointV1 {
+    const body: Omit<ContentRepairBatchCheckpointV1, 'checkpointDigest'> = {
+      version: 1,
+      repairPlanId: input.plan.repairPlanId,
+      planRevisionId: input.plan.planRevisionId,
+      batchOrdinal: input.batchOrdinal,
+      workItemId: input.workItemId,
+      attemptId: input.attemptId,
+      repairPlanSpecRef: input.planRef,
+      priorStagingRootRef: input.priorStagingRootRef,
+      stagingRootRef: input.stagingRootRef,
+      priorManifestRef: input.priorManifestRef,
+      contentManifestRef: input.contentManifestRef,
+      contentRootDigest: input.contentRootDigest,
+      commitCoreRef: input.validationRefs.commitCoreRef,
+      validationCoreRef: input.validationRefs.validationCoreRef,
+      validatorInputEnvelopeRef: input.validationRefs.validatorInputEnvelopeRef,
+      validatorAggregateRef: input.validationRefs.validatorAggregateRef,
+      validationReceiptRefs: uniqueBlobRefs(input.validationRefs.validationReceiptRefs),
+      warningRootRef: input.validationRefs.warningRootRef,
+      warningCustodyRef: input.validationRefs.warningCustodyRef,
+      scopeSlotIds: [...input.scopeSlotIds].sort(),
+    };
+    return { ...body, checkpointDigest: canonicalJsonSha256(body) };
+  }
+
+  private parseContentRepairCheckpoint(value: unknown): ContentRepairBatchCheckpointV1 {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new RepairError('LEGACY_CONTENT_RECOVERY_NON_RESUMABLE', 'content repair checkpoint is not an object');
+    }
+    const object = value as Record<string, unknown>;
+    const expectedKeys = [
+      'version', 'repairPlanId', 'planRevisionId', 'batchOrdinal', 'workItemId', 'attemptId',
+      'repairPlanSpecRef', 'priorStagingRootRef', 'stagingRootRef', 'priorManifestRef',
+      'contentManifestRef', 'contentRootDigest', 'commitCoreRef', 'validationCoreRef',
+      'validatorInputEnvelopeRef', 'validatorAggregateRef', 'validationReceiptRefs',
+      'warningRootRef', 'warningCustodyRef', 'scopeSlotIds', 'checkpointDigest',
+    ].sort();
+    if (Object.keys(object).sort().join('\n') !== expectedKeys.join('\n')) {
+      throw new RepairError('LEGACY_CONTENT_RECOVERY_NON_RESUMABLE', 'content repair checkpoint has an unknown or missing field');
+    }
+    const checkpoint = value as ContentRepairBatchCheckpointV1;
+    if (
+      checkpoint.version !== 1 ||
+      typeof checkpoint.repairPlanId !== 'string' || checkpoint.repairPlanId.length === 0 ||
+      typeof checkpoint.planRevisionId !== 'string' || checkpoint.planRevisionId.length === 0 ||
+      !Number.isInteger(checkpoint.batchOrdinal) || checkpoint.batchOrdinal < 1 ||
+      typeof checkpoint.workItemId !== 'string' || checkpoint.workItemId.length === 0 ||
+      typeof checkpoint.attemptId !== 'string' || checkpoint.attemptId.length === 0 ||
+      typeof checkpoint.contentRootDigest !== 'string' || !/^[0-9a-f]{64}$/.test(checkpoint.contentRootDigest) ||
+      typeof checkpoint.checkpointDigest !== 'string' || !/^[0-9a-f]{64}$/.test(checkpoint.checkpointDigest) ||
+      !Array.isArray(checkpoint.scopeSlotIds) || checkpoint.scopeSlotIds.some((slotId) => typeof slotId !== 'string') ||
+      !Array.isArray(checkpoint.validationReceiptRefs)
+    ) {
+      throw new RepairError('LEGACY_CONTENT_RECOVERY_NON_RESUMABLE', 'content repair checkpoint scalar fields are invalid');
+    }
+    const refFields: readonly (keyof ContentRepairBatchCheckpointV1)[] = [
+      'repairPlanSpecRef', 'priorStagingRootRef', 'stagingRootRef', 'priorManifestRef',
+      'contentManifestRef', 'commitCoreRef', 'validationCoreRef', 'validatorInputEnvelopeRef',
+      'validatorAggregateRef', 'warningRootRef', 'warningCustodyRef',
+    ];
+    const refValues = [
+      ...refFields.map((field) => checkpoint[field]),
+      ...checkpoint.validationReceiptRefs,
+    ];
+    for (const ref of refValues) {
+      if (
+        ref === null || typeof ref !== 'object' || Array.isArray(ref) ||
+        Object.keys(ref as unknown as Record<string, unknown>).length !== 5 ||
+        typeof (ref as BlobRefV2).kind !== 'string' ||
+        typeof (ref as BlobRefV2).digest !== 'string' || !/^[0-9a-f]{64}$/.test((ref as BlobRefV2).digest) ||
+        typeof (ref as BlobRefV2).byteLength !== 'number' || !Number.isInteger((ref as BlobRefV2).byteLength) ||
+        typeof (ref as BlobRefV2).mediaType !== 'string' ||
+        typeof (ref as BlobRefV2).schemaVersion !== 'number' || !Number.isInteger((ref as BlobRefV2).schemaVersion)
+      ) {
+        throw new RepairError('LEGACY_CONTENT_RECOVERY_NON_RESUMABLE', 'content repair checkpoint contains an invalid BlobRef');
+      }
+    }
+    const digestBody = { ...checkpoint } as Record<string, unknown>;
+    delete digestBody.checkpointDigest;
+    if (canonicalJsonSha256(digestBody) !== checkpoint.checkpointDigest) {
+      throw new RepairError('LEGACY_CONTENT_RECOVERY_NON_RESUMABLE', 'content repair checkpoint digest does not match its canonical bytes');
+    }
+    return checkpoint;
+  }
+
+  private async readContentRepairCheckpoint(
+    taskId: string,
+    binding: RepairStagingBindingV2,
+    expectedBody: ContentRepairCheckpointBodyV1,
+  ): Promise<ContentRepairBatchCheckpointV1 | null> {
+    const view = await this.deps.privateStore.readAllRepairStaging(binding);
+    // Historical code did not use this ledger at all. A current writer emits
+    // exactly one checkpoint entry in the ordinal-scoped journal.
+    const entries = view.committed.filter((entry) => entry.op === 'content_repair_batch_checkpoint');
+    if (entries.length === 0) return null;
+    if (entries.length !== 1) {
+      throw new RepairError('LEGACY_CONTENT_RECOVERY_NON_RESUMABLE', 'content repair staging ledger has competing checkpoints');
+    }
+    const entry = entries[0];
+    if (entry.clientOperationId !== repairBatchCommitOperationId(taskId, binding.workItemId, binding.batchOrdinal)) {
+      throw new RepairError('LEGACY_CONTENT_RECOVERY_NON_RESUMABLE', 'content repair checkpoint operation identity diverged');
+    }
+    if (entry.bodyDigest !== canonicalJsonSha256(expectedBody)) {
+      throw new RepairError('OPERATION_CONFLICT', 'content repair checkpoint committed different batch input bytes');
+    }
+    return this.parseContentRepairCheckpoint(entry.result);
+  }
+
+  private contentCheckpointResultRefs(checkpoint: ContentRepairBatchCheckpointV1): BlobRefV2[] {
+    return uniqueBlobRefs([
+      checkpoint.stagingRootRef,
+      checkpoint.contentManifestRef,
+      checkpoint.commitCoreRef,
+      checkpoint.validationCoreRef,
+      checkpoint.validatorInputEnvelopeRef,
+      checkpoint.validatorAggregateRef,
+      ...checkpoint.validationReceiptRefs,
+      checkpoint.warningRootRef,
+      checkpoint.warningCustodyRef,
+    ]);
+  }
+
+  private async validateContentRepairCheckpoint(input: {
+    taskId: string;
+    plan: RepairPlanSpecV2;
+    planRef: BlobRefV2;
+    checkpoint: ContentRepairBatchCheckpointV1;
+    expectedPriorManifest: ContentRevisionManifestV2;
+    expectedPriorManifestRef: BlobRefV2;
+    expectedPriorStagingRootRef: BlobRefV2;
+    expectedScope: RepairBatchScopeV2 & { kind: 'content' };
+  }): Promise<void> {
+    const { checkpoint } = input;
+    const fail = (detail: string): never => {
+      throw new RepairError('LEGACY_CONTENT_RECOVERY_NON_RESUMABLE', detail);
+    };
+    if (
+      checkpoint.repairPlanId !== input.plan.repairPlanId ||
+      checkpoint.planRevisionId !== input.plan.planRevisionId ||
+      checkpoint.batchOrdinal !== input.expectedScope.batchOrdinal ||
+      !sameRef(checkpoint.repairPlanSpecRef, input.planRef) ||
+      !sameRef(checkpoint.priorManifestRef, input.expectedPriorManifestRef) ||
+      !sameRef(checkpoint.priorStagingRootRef, input.expectedPriorStagingRootRef) ||
+      canonicalJsonSha256(checkpoint.scopeSlotIds) !== canonicalJsonSha256([...input.expectedScope.slotIds].sort())
+    ) {
+      fail(`content repair checkpoint batch ${checkpoint.batchOrdinal} does not match its plan/scope/predecessor authority`);
+    }
+    const root = await this.deps.resolver(input.taskId, checkpoint.stagingRootRef) as RepairStagingRootV2 | null;
+    if (
+      root === null || typeof root !== 'object' ||
+      root.repairPlanId !== checkpoint.repairPlanId ||
+      root.planRevisionId !== checkpoint.planRevisionId ||
+      root.batchOrdinal !== checkpoint.batchOrdinal ||
+      root.contentRootDigest !== checkpoint.contentRootDigest ||
+      root.priorStagingRootRef === null || !sameRef(root.priorStagingRootRef, checkpoint.priorStagingRootRef) ||
+      (root.contentManifestRef !== null && !sameRef(root.contentManifestRef, checkpoint.contentManifestRef))
+    ) {
+      fail(`content repair checkpoint batch ${checkpoint.batchOrdinal} staging root diverged`);
+    }
+    const manifest = await this.deps.resolver(input.taskId, checkpoint.contentManifestRef) as ContentRevisionManifestV2 | null;
+    if (manifest === null || typeof manifest !== 'object') {
+      fail(`content repair checkpoint batch ${checkpoint.batchOrdinal} cumulative manifest is unresolvable`);
+    }
+    const resolvedManifest = manifest as ContentRevisionManifestV2;
+    if (
+      resolvedManifest.manifestPhase !== 'provisional' ||
+      resolvedManifest.contentRootDigest !== checkpoint.contentRootDigest ||
+      !sameRef(resolvedManifest.producerPlanSpecRef as BlobRefV2, input.planRef)
+    ) {
+      fail(`content repair checkpoint batch ${checkpoint.batchOrdinal} cumulative manifest diverged`);
+    }
+    const priorEntries = new Map(input.expectedPriorManifest.entries.map((entry) => [entry.slotId, entry.versionRef]));
+    const manifestEntries = new Map(resolvedManifest.entries.map((entry) => [entry.slotId, entry.versionRef]));
+    if (manifestEntries.size !== priorEntries.size) {
+      fail(`content repair checkpoint batch ${checkpoint.batchOrdinal} changed manifest cardinality`);
+    }
+    const scopeSlots = new Set(checkpoint.scopeSlotIds);
+    for (const [slotId, priorRef] of priorEntries) {
+      const nextRef = manifestEntries.get(slotId);
+      if (nextRef === undefined) {
+        fail(`content repair checkpoint batch ${checkpoint.batchOrdinal} dropped slot '${slotId}'`);
+      }
+      if (!scopeSlots.has(slotId) && !sameRef(nextRef as BlobRefV2, priorRef)) {
+        fail(`content repair checkpoint batch ${checkpoint.batchOrdinal} changed out-of-scope slot '${slotId}'`);
+      }
+    }
+    const selectedTargetRefs: BlobRefV2[] = [];
+    for (const slotId of input.expectedScope.slotIds) {
+      const versionRef = manifestEntries.get(slotId);
+      if (versionRef === undefined) {
+        fail(`content repair checkpoint batch ${checkpoint.batchOrdinal} omitted repaired slot '${slotId}'`);
+      }
+      const version = await this.deps.resolver(input.taskId, versionRef as BlobRefV2) as SlotContentVersionV2 | null;
+      if (
+        version === null || typeof version !== 'object' ||
+        version.slotId !== slotId ||
+        version.state !== 'set' ||
+        version.provenance.kind !== 'generated' ||
+        version.provenance.producer.kind !== 'content_repair_batch' ||
+        version.provenance.producer.planRevisionId !== checkpoint.planRevisionId ||
+        version.provenance.producer.batchOrdinal !== checkpoint.batchOrdinal ||
+        version.provenance.producer.attemptId !== checkpoint.attemptId ||
+        !sameRef(version.provenance.contentRevisionCommitCoreRef, checkpoint.commitCoreRef) ||
+        !sameRef(version.provenance.contentCommitValidatorAggregateRef, checkpoint.validatorAggregateRef) ||
+        !sameRef(version.provenance.contentCommitWarningRootRef, checkpoint.warningCustodyRef)
+      ) {
+        fail(`content repair checkpoint batch ${checkpoint.batchOrdinal} repaired version provenance diverged for '${slotId}'`);
+      }
+      selectedTargetRefs.push((version as Extract<SlotContentVersionV2, { state: 'set' }>).blobRef);
+    }
+    const commitCore = await this.deps.resolver(input.taskId, checkpoint.commitCoreRef) as ContentRevisionCommitCoreV2 | null;
+    const expectedReplacements = [...input.expectedScope.slotIds]
+      .sort()
+      .map((slotId) => ({ slotId, expectedCurrentVersionRef: priorEntries.get(slotId) ?? null }));
+    if (
+      commitCore === null || typeof commitCore !== 'object' ||
+      commitCore.batchOrdinal !== checkpoint.batchOrdinal ||
+      !sameRef(commitCore.priorManifestRef, checkpoint.priorManifestRef) ||
+      !sameRef(commitCore.producerPlanSpecRef as BlobRefV2, input.planRef) ||
+      !sameRef(commitCore.expectedMapRef, resolvedManifest.mapRef) ||
+      canonicalJsonSha256(commitCore.authorizedReplacementEntriesWithoutValidation) !== canonicalJsonSha256(expectedReplacements)
+    ) {
+      fail(`content repair checkpoint batch ${checkpoint.batchOrdinal} commit core diverged`);
+    }
+    const validationCore = await this.deps.resolver(input.taskId, checkpoint.validationCoreRef) as ContentValidationCoreV2 | null;
+    if (
+      validationCore === null || typeof validationCore !== 'object' ||
+      validationCore.phase !== 'batch_commit' ||
+      !sameRef(validationCore.contentRevisionCommitCoreRef, checkpoint.commitCoreRef)
+    ) {
+      fail(`content repair checkpoint batch ${checkpoint.batchOrdinal} validation core diverged`);
+    }
+    const envelope = await this.deps.resolver(input.taskId, checkpoint.validatorInputEnvelopeRef) as ValidatorInputEnvelopeV2 | null;
+    if (
+      envelope === null || envelope.trigger !== 'content_commit' || envelope.executionPhase !== 'batch_commit' ||
+      envelope.taskId !== input.taskId || envelope.templateSnapshotHash !== this.deps.snapshotHash ||
+      !sameRef(envelope.contentValidationCoreRef, checkpoint.validationCoreRef) ||
+      canonicalJsonSha256(envelope.selectedTargetRefs) !== canonicalJsonSha256(selectedTargetRefs)
+    ) {
+      fail(`content repair checkpoint batch ${checkpoint.batchOrdinal} validator envelope diverged`);
+    }
+    const aggregate = await this.deps.resolver(input.taskId, checkpoint.validatorAggregateRef) as {
+      trigger?: unknown;
+      executionPhase?: unknown;
+      outcome?: unknown;
+      inputRef?: BlobRefV2;
+      blockingInvalidReceiptRefs?: readonly BlobRefV2[];
+      advisoryReceiptRefs?: readonly BlobRefV2[];
+      warningRootRef?: BlobRefV2;
+    } | null;
+    const aggregateReceipts = uniqueBlobRefs([
+      ...(aggregate?.blockingInvalidReceiptRefs ?? []),
+      ...(aggregate?.advisoryReceiptRefs ?? []),
+    ]);
+    if (
+      aggregate === null || aggregate.trigger !== 'content_commit' || aggregate.executionPhase !== 'batch_commit' ||
+      aggregate.outcome !== 'clear' || aggregate.inputRef === undefined || !sameRef(aggregate.inputRef, checkpoint.validatorInputEnvelopeRef) ||
+      aggregate.warningRootRef === undefined || !sameRef(aggregate.warningRootRef, checkpoint.warningRootRef) ||
+      canonicalJsonSha256(aggregateReceipts) !== canonicalJsonSha256(checkpoint.validationReceiptRefs)
+    ) {
+      fail(`content repair checkpoint batch ${checkpoint.batchOrdinal} validator aggregate/receipt refs diverged`);
+    }
+    const warningRoot = await this.deps.resolver(input.taskId, checkpoint.warningRootRef) as { inputRef?: BlobRefV2 } | null;
+    if (warningRoot === null || warningRoot.inputRef === undefined || !sameRef(warningRoot.inputRef, checkpoint.validatorInputEnvelopeRef)) {
+      fail(`content repair checkpoint batch ${checkpoint.batchOrdinal} warning root diverged`);
+    }
+    const custody = await this.deps.resolver(input.taskId, checkpoint.warningCustodyRef) as ValidationWarningCustodyRootV2 | null;
+    const custodyEntry = custody?.entries.find((entry) =>
+      entry.executionScope.planRevisionId === checkpoint.planRevisionId && entry.executionScope.batchOrdinal === checkpoint.batchOrdinal,
+    );
+    if (
+      custody === null || custodyEntry === undefined ||
+      !sameRef(custodyEntry.inputRef, checkpoint.validatorInputEnvelopeRef) ||
+      !sameRef(custodyEntry.validatorAggregateRef, checkpoint.validatorAggregateRef) ||
+      !sameRef(custodyEntry.warningRootRef, checkpoint.warningRootRef)
+    ) {
+      fail(`content repair checkpoint batch ${checkpoint.batchOrdinal} warning custody diverged`);
+    }
+  }
+
+  private async recoverLegacyContentPrefix(
+    taskId: string,
+    plan: RepairPlanSpecV2,
+    planRef: BlobRefV2,
+    expectedLastStagingRootRef: BlobRefV2,
+  ): Promise<RecoveredContentPrefixV1> {
+    if (plan.repairBase.kind !== 'content') {
+      throw new RepairError('LEGACY_CONTENT_RECOVERY_NON_RESUMABLE', 'legacy Content recovery received a non-Content repair base');
+    }
+    const events = await this.deps.readEvents(taskId);
+    const contentEvents = events
+      .filter(
+        (event): event is Extract<AuthoritativeReviewEventV2, { type: 'structured_content_repair_batch_committed' }> =>
+          event.type === 'structured_content_repair_batch_committed' &&
+          event.repairPlanId === plan.repairPlanId &&
+          event.planRevisionId === plan.planRevisionId,
+      )
+      .sort((a, b) => a.batchOrdinal - b.batchOrdinal);
+    const committedEvents = events
+      .filter(
+        (event): event is Extract<AuthoritativeReviewEventV2, { type: 'structured_repair_committed' }> =>
+          event.type === 'structured_repair_committed' &&
+          event.repairPlanId === plan.repairPlanId &&
+          event.planRevisionId === plan.planRevisionId,
+      )
+      .sort((a, b) => a.batchOrdinal - b.batchOrdinal);
+    if (contentEvents.length === 0 || contentEvents.length !== committedEvents.length) {
+      throw new RepairError('LEGACY_CONTENT_RECOVERY_NON_RESUMABLE', 'legacy Content batch event pairs are missing or divergent');
+    }
+    const state = await this.deps.readProjection(taskId);
+    let priorManifestRef = plan.repairBase.contentRevisionManifestRef;
+    let priorManifest = await this.deps.resolver(taskId, priorManifestRef) as ContentRevisionManifestV2 | null;
+    if (priorManifest === null || typeof priorManifest !== 'object') {
+      throw new RepairError('LEGACY_CONTENT_RECOVERY_NON_RESUMABLE', 'legacy Content repair base manifest is unresolvable');
+    }
+    let priorStagingRootRef: BlobRefV2 | null = null;
+    const completedBatchOrdinals: number[] = [];
+    for (let index = 0; index < contentEvents.length; index += 1) {
+      const batchOrdinal = index + 1;
+      const contentEvent = contentEvents[index];
+      const committedEvent = committedEvents[index];
+      const scope = plan.orderedBatchScopes[index];
+      if (
+        contentEvent.batchOrdinal !== batchOrdinal ||
+        committedEvent.batchOrdinal !== batchOrdinal ||
+        scope === undefined || scope.kind !== 'content' || scope.batchOrdinal !== batchOrdinal ||
+        !sameRef(contentEvent.stagingRootRef, committedEvent.stagingRootRef)
+      ) {
+        throw new RepairError('LEGACY_CONTENT_RECOVERY_NON_RESUMABLE', `legacy Content batch ${batchOrdinal} event/scope sequence diverged`);
+      }
+      const workItem = state.workItems[committedEvent.workItemId];
+      const attempt = state.attempts[committedEvent.attemptId];
+      if (
+        workItem === undefined || workItem.grantSpecRef === null || attempt === undefined ||
+        attempt.workItemId !== committedEvent.workItemId
+      ) {
+        throw new RepairError('LEGACY_CONTENT_RECOVERY_NON_RESUMABLE', `legacy Content batch ${batchOrdinal} authority binding is unresolvable`);
+      }
+      const grant = await this.deps.resolver(taskId, workItem.grantSpecRef) as RepairBatchGrantSpecV2 | null;
+      if (
+        grant === null || typeof grant !== 'object' || grant.kind !== 'content_repair_batch' ||
+        grant.batchOrdinal !== batchOrdinal || !sameRef(grant.repairPlanSpecRef, planRef) ||
+        !sameRef(grant.authorityBaseRef, workItem.authorityBaseRef)
+      ) {
+        throw new RepairError('LEGACY_CONTENT_RECOVERY_NON_RESUMABLE', `legacy Content batch ${batchOrdinal} grant diverged`);
+      }
+      if (priorStagingRootRef === null) priorStagingRootRef = grant.expectedStagingRootRef;
+      if (!sameRef(grant.expectedStagingRootRef, priorStagingRootRef)) {
+        throw new RepairError('LEGACY_CONTENT_RECOVERY_NON_RESUMABLE', `legacy Content batch ${batchOrdinal} staging CAS chain diverged`);
+      }
+      const authorityBase = await this.deps.resolver(taskId, workItem.authorityBaseRef) as {
+        planSpecRef?: BlobRefV2 | null;
+        stagingManifestRef?: BlobRefV2 | null;
+        contentRevisionManifestRef?: BlobRefV2 | null;
+      } | null;
+      if (
+        authorityBase === null || typeof authorityBase !== 'object' ||
+        authorityBase.planSpecRef === undefined || authorityBase.planSpecRef === null || !sameRef(authorityBase.planSpecRef, planRef) ||
+        authorityBase.stagingManifestRef === undefined || authorityBase.stagingManifestRef === null || !sameRef(authorityBase.stagingManifestRef, priorStagingRootRef) ||
+        authorityBase.contentRevisionManifestRef === undefined || authorityBase.contentRevisionManifestRef === null ||
+        !sameRef(authorityBase.contentRevisionManifestRef, priorManifestRef)
+      ) {
+        throw new RepairError(
+          'LEGACY_CONTENT_RECOVERY_NON_RESUMABLE',
+          `legacy Content batch ${batchOrdinal} authority base does not custody its exact prior manifest`,
+        );
+      }
+      const binding: RepairStagingBindingV2 = {
+        workItemId: committedEvent.workItemId,
+        leaseEpoch: attempt.leaseEpoch,
+        attemptId: committedEvent.attemptId,
+        authorityBaseRef: workItem.authorityBaseRef,
+        grantSpecRef: workItem.grantSpecRef,
+        planRevisionId: plan.planRevisionId,
+        batchOrdinal,
+      };
+      const view = await this.deps.privateStore.readAllRepairStaging(binding);
+      const checkpointEntries = view.committed.filter((entry) => entry.op === 'content_repair_batch_checkpoint');
+      if (checkpointEntries.length !== 1) {
+        throw new RepairError(
+          'LEGACY_CONTENT_RECOVERY_NON_RESUMABLE',
+          `legacy Content batch ${batchOrdinal} has no unique persisted continuation checkpoint`,
+        );
+      }
+      const checkpointEntry = checkpointEntries[0];
+      if (checkpointEntry.clientOperationId !== repairBatchCommitOperationId(taskId, committedEvent.workItemId, batchOrdinal)) {
+        throw new RepairError('LEGACY_CONTENT_RECOVERY_NON_RESUMABLE', `legacy Content batch ${batchOrdinal} checkpoint operation identity diverged`);
+      }
+      if (canonicalJsonSha256(checkpointEntry.body) !== checkpointEntry.bodyDigest) {
+        throw new RepairError('LEGACY_CONTENT_RECOVERY_NON_RESUMABLE', `legacy Content batch ${batchOrdinal} checkpoint body digest diverged`);
+      }
+      const body = checkpointEntry.body as unknown as Partial<ContentRepairCheckpointBodyV1>;
+      if (
+        body.version !== 1 || body.batchOrdinal !== batchOrdinal ||
+        body.repairPlanSpecRef === undefined || !sameRef(body.repairPlanSpecRef, planRef) ||
+        body.priorStagingRootRef === undefined || !sameRef(body.priorStagingRootRef, priorStagingRootRef) ||
+        body.priorManifestRef === undefined || !sameRef(body.priorManifestRef, priorManifestRef) ||
+        !Array.isArray(body.scopeSlotIds) || canonicalJsonSha256(body.scopeSlotIds) !== canonicalJsonSha256([...scope.slotIds].sort()) ||
+        typeof body.slotContentsDigest !== 'string' || !/^[0-9a-f]{64}$/.test(body.slotContentsDigest)
+      ) {
+        throw new RepairError('LEGACY_CONTENT_RECOVERY_NON_RESUMABLE', `legacy Content batch ${batchOrdinal} checkpoint input authority diverged`);
+      }
+      const checkpoint = this.parseContentRepairCheckpoint(checkpointEntry.result);
+      if (
+        checkpoint.workItemId !== committedEvent.workItemId ||
+        checkpoint.attemptId !== committedEvent.attemptId ||
+        !sameRef(checkpoint.stagingRootRef, committedEvent.stagingRootRef)
+      ) {
+        throw new RepairError('LEGACY_CONTENT_RECOVERY_NON_RESUMABLE', `legacy Content batch ${batchOrdinal} checkpoint/event identity diverged`);
+      }
+      await this.validateContentRepairCheckpoint({
+        taskId,
+        plan,
+        planRef,
+        checkpoint,
+        expectedPriorManifest: priorManifest,
+        expectedPriorManifestRef: priorManifestRef,
+        expectedPriorStagingRootRef: priorStagingRootRef,
+        expectedScope: scope,
+      });
+      const nextManifest = await this.deps.resolver(taskId, checkpoint.contentManifestRef) as ContentRevisionManifestV2;
+      priorManifestRef = checkpoint.contentManifestRef;
+      priorManifest = nextManifest;
+      priorStagingRootRef = checkpoint.stagingRootRef;
+      completedBatchOrdinals.push(batchOrdinal);
+    }
+    if (priorStagingRootRef === null || !sameRef(priorStagingRootRef, expectedLastStagingRootRef)) {
+      throw new RepairError('LEGACY_CONTENT_RECOVERY_NON_RESUMABLE', 'legacy Content recovery head does not match the committed checkpoint chain');
+    }
+    return {
+      completedBatchOrdinals,
+      manifestRef: priorManifestRef,
+      manifest: priorManifest,
+    };
+  }
+
+  /** A committed historical Content root cannot name its cumulative manifest
+   * directly. Recovery verifies the attempt-bound checkpoint against the
+   * committed events, Grant, AuthorityBase custody, staging CAS chain, and
+   * validator closure. It then imports that exact prefix into a successor and
+   * starts only at the first unfinished scope; missing/divergent custody fails
+   * closed rather than resetting to the authoritative repair base. */
   private async restartLegacyContentRepair(
     input: { taskId: string; workItemId: string; attemptId: string },
     plan: RepairPlanSpecV2,
@@ -1441,6 +2211,9 @@ export class RepairService {
       plan.planRevisionId,
       historicalStagingRootRef,
     );
+    const recovered = await this.recoverLegacyContentPrefix(input.taskId, plan, planRef, historicalStagingRootRef);
+    const remainingScopes = reordinalRepairScopes(plan.orderedBatchScopes, recovered.completedBatchOrdinals.length);
+    const startWithFinalizer = remainingScopes.length === 0;
     const successor = await this.createSuccessorRepairPlan({
       taskId: input.taskId,
       track: 'content',
@@ -1452,9 +2225,15 @@ export class RepairService {
       findings: await this.projectPlanFindings(input.taskId, plan),
       sourceReceiptRef: plan.sourceReceiptRef,
       repairBase: plan.repairBase,
-      importedStagingManifestRef: plan.importedStagingManifestRef,
+      importedStagingManifestRef: recovered.manifestRef,
       terminal: null,
       supersededWorkItem,
+      contentContinuation: {
+        orderedBatchScopes: startWithFinalizer ? plan.orderedBatchScopes : remainingScopes,
+        contentManifestRef: recovered.manifestRef,
+        contentRootDigest: recovered.manifest.contentRootDigest,
+        startWithFinalizer,
+      },
     });
     return {
       kind: 'restarted',
@@ -1474,8 +2253,22 @@ export class RepairService {
     input: { taskId: string; workItemId: string; attemptId: string; batchOrdinal: number; ctx: V2AttemptContext },
     stagingRootRef: BlobRefV2,
     keyLedgerRef: BlobRefV2,
+    batchResultRefs: readonly BlobRefV2[] = [stagingRootRef],
   ): Promise<RepairBatchOutcome> {
     const track = plan.orderedBatchScopes[0]?.kind === 'map' ? 'map' : 'content';
+    const persistedRoot = await this.deps.resolver(taskId, stagingRootRef) as RepairStagingRootV2 | null;
+    if (persistedRoot === null || typeof persistedRoot !== 'object') {
+      throw new RepairError('STAGING_UNRESOLVED', 'prepared repair staging root is unresolvable');
+    }
+    const contentManifestCustodyRef = track === 'content' && persistedRoot.contentManifestRef === null
+      ? batchResultRefs.find((ref) => ref.kind === 'content_revision_manifest') ?? null
+      : null;
+    if (track === 'content' && persistedRoot.contentManifestRef === null && contentManifestCustodyRef === null) {
+      throw new RepairError(
+        'LEGACY_CONTENT_RECOVERY_NON_RESUMABLE',
+        'historical Content staging root has no event-rooted cumulative manifest custody',
+      );
+    }
     const isLast = input.batchOrdinal === plan.orderedBatchScopes.length;
     const nextWorkItemId = isLast
       ? repairFinalizeWorkItemId(taskId, plan.repairPlanId, plan.planRevisionId)
@@ -1489,18 +2282,21 @@ export class RepairService {
       isLast,
       currentStagingRootRef: stagingRootRef,
       keyLedgerRef,
+      contentManifestCustodyRef,
     });
     const carryErrors = validateRepairSuccessorCarrier(successor.carrier, successor.planSpecRef);
     if (carryErrors.length > 0) {
       throw new RepairError('INVALID_INPUT', `repair successor carry invalid: ${carryErrors.join('; ')}`);
     }
     const operationId = repairBatchCommitOperationId(taskId, input.workItemId, input.batchOrdinal);
-    const blobRefs = [
+    const resultRefs = uniqueBlobRefs([stagingRootRef, ...batchResultRefs]);
+    const blobRefs = uniqueBlobRefs([
       stagingRootRef,
       keyLedgerRef,
       successor.authorityBaseRef,
       ...(successor.grantSpecRef === null ? [] : [successor.grantSpecRef]),
-    ];
+      ...resultRefs,
+    ]);
     await this.publish(taskId, {
       operationId,
       publishKind: 'repair_batch_commit',
@@ -1519,7 +2315,13 @@ export class RepairService {
       }),
       preparedRefs: blobRefs,
     });
-    return { kind: 'committed', stagingRootRef, stagingRoot: (await this.deps.resolver(taskId, stagingRootRef)) as RepairStagingRootV2, nextWorkItemId };
+    return {
+      kind: 'committed',
+      stagingRootRef,
+      stagingRoot: persistedRoot,
+      nextWorkItemId,
+      resultRefs,
+    };
   }
 
   /* ------------------------- finalizer ---------------------------- */
@@ -1553,6 +2355,19 @@ export class RepairService {
     let planRef: BlobRefV2 | null = null;
     try {
       const { taskId } = input;
+      const replayed = await this.deps.committedOperation(
+        taskId,
+        repairFinalizeOperationId(taskId, input.workItemId, input.commandId),
+      );
+      if (replayed !== null) {
+        const resultRefs = embeddedBlobRefs(replayed);
+        const rejected = replayed.some(
+          (event) => event.type === 'structured_map_repair_plan_rejected' || event.type === 'structured_content_repair_plan_rejected',
+        );
+        return rejected
+          ? { kind: 'blocked', failureCode: 'REPAIR_PLAN_BLOCKED', resultRefs }
+          : { kind: 'completed', resultRefs };
+      }
       const state = await this.deps.readProjection(taskId);
       const wi = state.workItems[input.workItemId];
       if (wi === undefined) throw new RepairError('WORK_ITEM_NOT_FOUND', `no workitem '${input.workItemId}'`);
@@ -1576,7 +2391,10 @@ export class RepairService {
       }
       const track = plan.orderedBatchScopes[0]?.kind === 'map' ? 'map' : 'content';
       const current = await this.currentStagingState(taskId, plan, track);
-      if (!sameRef(base.stagingManifestRef, current.stagingRootRef)) {
+      const legacyContentCustodyRef = track === 'content' && base.stagingManifestRef.kind === 'content_revision_manifest'
+        ? base.stagingManifestRef
+        : null;
+      if (legacyContentCustodyRef === null && !sameRef(base.stagingManifestRef, current.stagingRootRef)) {
         throw new RepairError('GRANT_STALE', 'finalize staging base does not match the current staging root');
       }
       if (track === 'content' && current.lastBatchOrdinal > 0) {
@@ -1585,10 +2403,23 @@ export class RepairService {
           throw new RepairError('STAGING_UNRESOLVED', 'current content staging root is unresolvable');
         }
         if (currentRoot.contentManifestRef === null) {
-          // The final batch was committed by the historical schemaVersion=1
-          // writer, so its content closure cannot be reconstructed without
-          // rerunning committed validators. Complete this system command with
-          // one authoritative recovery successor instead.
+          // The final batch used the historical schemaVersion-1 root form.
+          // Recover its exact checkpoint/AuthorityBase-custodied closure and
+          // create a direct-finalizer successor; if the old writer persisted
+          // no verifiable checkpoint, recoverLegacyContentPrefix fails closed.
+          const recovered = await this.recoverLegacyContentPrefix(taskId, plan, base.planSpecRef, current.stagingRootRef);
+          if (legacyContentCustodyRef !== null && !sameRef(legacyContentCustodyRef, recovered.manifestRef)) {
+            throw new RepairError(
+              'LEGACY_CONTENT_RECOVERY_NON_RESUMABLE',
+              'legacy Content finalizer authority custody does not match the persisted checkpoint manifest',
+            );
+          }
+          if (recovered.completedBatchOrdinals.length !== plan.orderedBatchScopes.length) {
+            throw new RepairError(
+              'LEGACY_CONTENT_RECOVERY_NON_RESUMABLE',
+              'legacy Content finalizer head does not have a checkpoint for every repair batch',
+            );
+          }
           const recovery = await this.createSuccessorRepairPlan({
             taskId,
             track: 'content',
@@ -1600,13 +2431,22 @@ export class RepairService {
             findings: await this.projectPlanFindings(taskId, plan),
             sourceReceiptRef: plan.sourceReceiptRef,
             repairBase: plan.repairBase,
-            importedStagingManifestRef: plan.importedStagingManifestRef,
+            importedStagingManifestRef: recovered.manifestRef,
             terminal: {
               workItemId: input.workItemId,
               commandId: input.commandId,
               commandKind: input.commandKind,
               leaseEpoch: input.leaseEpoch,
               authorityBaseRef: input.authorityBaseRef,
+            },
+            contentContinuation: {
+              // Retain the old scopes as immutable finding/track metadata, but
+              // create the successor's system finalizer directly: every batch
+              // represented here is already present in the imported closure.
+              orderedBatchScopes: plan.orderedBatchScopes,
+              contentManifestRef: recovered.manifestRef,
+              contentRootDigest: recovered.manifest.contentRootDigest,
+              startWithFinalizer: true,
             },
           });
           return { kind: 'completed', resultRefs: recovery.resultRefs };
@@ -2787,7 +3627,8 @@ export class RepairService {
       // falsely reject the historical grant's exact CAS binding.
       const state = await this.deps.readProjection(taskId);
       const firstWorkItemId = repairBatchWorkItemId(taskId, plan.repairPlanId, 1, plan.planRevisionId);
-      const firstWorkItem = state.workItems[firstWorkItemId];
+      const directFinalizeWorkItemId = repairFinalizeWorkItemId(taskId, plan.repairPlanId, plan.planRevisionId);
+      const firstWorkItem = state.workItems[firstWorkItemId] ?? state.workItems[directFinalizeWorkItemId];
       if (firstWorkItem !== undefined) {
         const authorityBase = (await this.deps.resolver(taskId, firstWorkItem.authorityBaseRef)) as {
           stagingManifestRef?: BlobRefV2 | null;
@@ -2912,7 +3753,21 @@ export class RepairService {
     slotContents: Readonly<Record<string, { text: string; mediaType: 'text/markdown' | 'text/plain' }>>,
     workItemId: string,
     attemptId: string,
-  ): Promise<{ entries: { slotId: string; versionRef: BlobRefV2 }[]; versions: Map<string, SlotContentVersionV2>; manifest: ContentRevisionManifestV2; manifestRef: BlobRefV2 }> {
+  ): Promise<{
+    entries: { slotId: string; versionRef: BlobRefV2 }[];
+    versions: Map<string, SlotContentVersionV2>;
+    manifest: ContentRevisionManifestV2;
+    manifestRef: BlobRefV2;
+    validationRefs: {
+      commitCoreRef: BlobRefV2;
+      validationCoreRef: BlobRefV2;
+      validatorInputEnvelopeRef: BlobRefV2;
+      validatorAggregateRef: BlobRefV2;
+      validationReceiptRefs: readonly BlobRefV2[];
+      warningRootRef: BlobRefV2;
+      warningCustodyRef: BlobRefV2;
+    };
+  }> {
     const contentBase = plan.repairBase;
     if (contentBase.kind !== 'content') throw new RepairError('REPAIR_BASE_STALE', 'content plan repair base is not content');
     const baseManifest = (await this.deps.resolver(taskId, contentBase.contentRevisionManifestRef)) as ContentRevisionManifestV2 | null;
@@ -3015,7 +3870,24 @@ export class RepairService {
       resolvedVersions: versions,
     });
     const manifestRef = await this.deps.facade.prepareBlob(taskId, 'content_revision_manifest', manifest);
-    return { entries: sortedEntries, versions, manifest, manifestRef };
+    return {
+      entries: sortedEntries,
+      versions,
+      manifest,
+      manifestRef,
+      validationRefs: {
+        commitCoreRef,
+        validationCoreRef,
+        validatorInputEnvelopeRef: validation.run.envelopeRef,
+        validatorAggregateRef: validation.run.aggregateRef,
+        validationReceiptRefs: uniqueBlobRefs([
+          ...validation.run.aggregate.blockingInvalidReceiptRefs,
+          ...validation.run.aggregate.advisoryReceiptRefs,
+        ]),
+        warningRootRef,
+        warningCustodyRef,
+      },
+    };
   }
 
   /** Reconstructs the COMPLETE staged state from committed closures (content)
@@ -3240,6 +4112,10 @@ export class RepairService {
     isLast: boolean;
     currentStagingRootRef: BlobRefV2;
     keyLedgerRef: BlobRefV2;
+    /** Migration custody for a historical Content root whose own bytes lack
+     * contentManifestRef. The event-rooted successor AuthorityBase carries
+     * this ref until recovery imports it into a current successor plan. */
+    contentManifestCustodyRef?: BlobRefV2 | null;
   }): Promise<{
     authorityBaseRef: BlobRefV2;
     grantSpecRef: BlobRefV2 | null;
@@ -3262,7 +4138,7 @@ export class RepairService {
         profileSnapshotRef: this.deps.profileSnapshotRef,
         refs: {
           planSpecRef: input.planRef,
-          stagingManifestRef: currentStagingRootRef,
+          stagingManifestRef: input.contentManifestCustodyRef ?? currentStagingRootRef,
           ...(track === 'map'
             ? plan.repairBase.kind === 'map_candidate'
               ? { mapCandidateRef: plan.repairBase.candidateRef }
@@ -3305,7 +4181,10 @@ export class RepairService {
           ? plan.repairBase.kind === 'map_candidate'
             ? { mapCandidateRef: plan.repairBase.candidateRef }
             : { mapRef: (plan.repairBase as { mapRef: BlobRefV2 }).mapRef }
-          : { mapRef: (plan.repairBase as { mapRef: BlobRefV2 }).mapRef, contentRevisionManifestRef: (plan.repairBase as { contentRevisionManifestRef: BlobRefV2 }).contentRevisionManifestRef }),
+          : {
+              mapRef: (plan.repairBase as { mapRef: BlobRefV2 }).mapRef,
+              contentRevisionManifestRef: input.contentManifestCustodyRef ?? (plan.repairBase as { contentRevisionManifestRef: BlobRefV2 }).contentRevisionManifestRef,
+            }),
       },
       kind: 'agent_assignment',
       agentExecutionKind: 'structured_session',
@@ -4966,7 +5845,12 @@ export function createRepairToolHandlers(deps: {
         },
       });
       if (outcome.kind === 'committed') {
-        return { committed: true, stagingRootRef: outcome.stagingRootRef, nextWorkItemId: outcome.nextWorkItemId };
+        return {
+          committed: true,
+          stagingRootRef: outcome.stagingRootRef,
+          nextWorkItemId: outcome.nextWorkItemId,
+          resultRefs: outcome.resultRefs,
+        };
       }
       return { committed: false, failureCode: outcome.failureCode };
     },
@@ -5023,7 +5907,12 @@ export function createRepairToolHandlers(deps: {
         slotContents,
       });
       if (outcome.kind === 'committed') {
-        return { committed: true, stagingRootRef: outcome.stagingRootRef, nextWorkItemId: outcome.nextWorkItemId };
+        return {
+          committed: true,
+          stagingRootRef: outcome.stagingRootRef,
+          nextWorkItemId: outcome.nextWorkItemId,
+          resultRefs: outcome.resultRefs,
+        };
       }
       return { committed: false, failureCode: outcome.failureCode };
     },

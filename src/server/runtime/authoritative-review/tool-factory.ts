@@ -1101,7 +1101,8 @@ export class V2ToolFactory {
         for (let i = view.committed.length - 1; i >= 0; i--) {
           const entry = view.committed[i];
           if (entry.op !== 'submit_map_patch' && entry.op !== 'submit_content_draft') continue;
-          const result = entry.result as { stagingRootRef?: BlobRefV2 } | null;
+          const result = entry.result as { stagingRootRef?: BlobRefV2; resultRefs?: readonly BlobRefV2[] } | null;
+          if (Array.isArray(result?.resultRefs) && result.resultRefs.length > 0) return result.resultRefs;
           if (result?.stagingRootRef !== undefined && result?.stagingRootRef !== null) return [result.stagingRootRef];
         }
         return [];

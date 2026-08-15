@@ -223,6 +223,10 @@ describe('AuthoritativeReviewPrivateStore repair staging', () => {
       result: { stagingRoot: 'root-1' },
     });
     expect(replay.status).toBe('replayed');
+    const recovered = await store.readAllRepairStaging(rev1);
+    expect(recovered.seq).toBe(1);
+    expect(recovered.committed).toHaveLength(1);
+    expect(recovered.committed[0].result).toEqual({ stagingRoot: 'root-1' });
   });
 });
 
