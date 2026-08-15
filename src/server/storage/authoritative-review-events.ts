@@ -555,7 +555,7 @@ export type AuthoritativeReviewEventV2 =
   | (V2 & { type: 'structured_review_round_settled'; reviewRoundId: string; settlementCoreRef: BlobRefV2; outcome: 'content_repair' | 'seal' })
   | (V2 & { type: 'structured_repair_scope_requested'; requestId: string; repairPlanId: string; planRevisionId: string; track: 'map' | 'content'; findingIds: string[]; requestedNodeIds: string[]; requestedRelationIds: string[]; requestedSlotIds: string[]; reason: string })
   | (V2 & { type: 'structured_repair_scope_expansion_approved_v2'; requestId: string; repairPlanId: string; supersededPlanRevisionId: string; successorPlanRevisionId: string; successorPlanSpecRef: BlobRefV2 })
-  | (V2 & { type: 'structured_repair_scope_expansion_rejected_v2'; requestId: string; repairPlanId: string; planRevisionId: string; reason: string })
+  | (V2 & { type: 'structured_repair_scope_expansion_rejected_v2'; requestId: string; repairPlanId: string; planRevisionId: string; operatorId: string; reason: string })
   | (V2 & { type: 'structured_repair_grant_issued'; grantSpecRef: BlobRefV2; grantSpecId: string; workItemId: string; grantKind: 'initial_structure_chunk' | 'initial_generation_batch' | 'map_repair_batch' | 'content_repair_batch' })
   | (V2 & { type: 'structured_repair_committed'; repairPlanId: string; planRevisionId: string; batchOrdinal: number; workItemId: string; attemptId: string; stagingRootRef: BlobRefV2 })
   | (V2 & { type: 'structured_finding_addressed'; findingId: string; repairStage: 'map' | 'content'; repairPlanId: string })
@@ -1237,6 +1237,7 @@ const MEMBER_KEYS_V2: Record<string, ReadonlySet<string>> = {
     'requestId',
     'repairPlanId',
     'planRevisionId',
+    'operatorId',
     'reason',
   ),
   structured_repair_grant_issued: baseAnd('grantSpecRef', 'grantSpecId', 'workItemId', 'grantKind'),
@@ -2363,6 +2364,7 @@ export function validateAuthoritativeReviewEventV2(
         requestId: assertNonEmptyString(candidate.requestId, '事件 requestId'),
         repairPlanId: assertNonEmptyString(candidate.repairPlanId, '事件 repairPlanId'),
         planRevisionId: assertNonEmptyString(candidate.planRevisionId, '事件 planRevisionId'),
+        operatorId: assertNonEmptyString(candidate.operatorId, '事件 operatorId'),
         reason: assertNonEmptyString(candidate.reason, '事件 reason'),
       };
     case 'structured_repair_grant_issued':

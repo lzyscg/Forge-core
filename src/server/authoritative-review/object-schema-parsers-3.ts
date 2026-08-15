@@ -906,7 +906,7 @@ function parseRepairPublishCarriers(value: unknown): RepairPublishCarriersV2 | n
   ex(o, [
     'track', 'repairPlanId', 'planRevisionId', 'repairPlanSpecRef', 'sourceValidationReceiptRef',
     'supersedesPlanRevisionId', 'successorPlanSpecRef', 'successorPlanRevisionId', 'successorReason', 'batchOrdinal', 'stagingRootRef', 'workItemId',
-    'attemptId', 'validatorAggregateRef', 'validationReceiptRef', 'requestId', 'reason', 'findingIds',
+    'attemptId', 'validatorAggregateRef', 'validationReceiptRef', 'requestId', 'operatorId', 'reason', 'findingIds',
     'requestedNodeIds', 'requestedRelationIds', 'requestedSlotIds', 'grantSpecId', 'grantKind',
     'addressedFindingIds', 'contentRevisionManifestRef', 'taskContentRevision', 'manifestPhase',
     'priorManifestRef', 'repairBuildStart', 'repairBuildFinish', 'mapBuildManifestRef',
@@ -954,6 +954,7 @@ function parseRepairPublishCarriers(value: unknown): RepairPublishCarriersV2 | n
     validatorAggregateRef: rfn(o.validatorAggregateRef, 'repair.validatorAggregateRef'),
     validationReceiptRef: rfn(o.validationReceiptRef, 'repair.validationReceiptRef'),
     requestId: o.requestId === null ? null : str(o.requestId, 'repair.requestId'),
+    operatorId: o.operatorId === null ? null : str(o.operatorId, 'repair.operatorId'),
     reason: o.reason === null ? null : str(o.reason, 'repair.reason'),
     findingIds: o.findingIds === null ? null : sa(o.findingIds, 'repair.findingIds'),
     requestedNodeIds: o.requestedNodeIds === null ? null : sa(o.requestedNodeIds, 'repair.requestedNodeIds'),

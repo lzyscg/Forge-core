@@ -87,6 +87,8 @@ import type {
   AuthoritativeReviewProfile,
   ContributionManifestV2,
   ContentRevisionManifestV2,
+  ContentRevisionCommitCoreV2,
+  ContentValueV2,
   ContentReviewRoundPlanCarrierV2,
   MapCandidateSnapshotV2,
   MapCandidateValidationCoreV2,
@@ -119,12 +121,15 @@ import { attemptContinuationOperationId } from './attempt-coordinator';
 import { buildAuthorityBaseSet, sameRef } from './authority-base';
 import {
   buildContentRevisionCommitCore,
+  buildContentBatchWarningCustodyRoot,
   buildContentSetVersion,
   buildContentValue,
   buildEmptyAdoptionRoot,
   buildFinalizedManifest,
   buildProvisionalManifest,
   contentReviewRoundId,
+  ContentPlanMemoryBlobStore,
+  contentPlanEnrichment,
 } from './content-plan-service';
 import { buildReviewObservationGrantSpec, reviewAssignmentIdOf, reviewBatchWorkItemId, reviewWholeAssignmentId, reviewWholeWorkItemId } from './review-coordinator';
 import {
@@ -145,7 +150,7 @@ import {
   grantSpecPlanKeyLedgerRef,
 } from './grant-service';
 import type { ProjectedFindingLifecycleV2 } from './finding-service';
-import { buildFindingStageRoot, repairRouteOf } from './finding-service';
+import { buildFindingStageRoot, repairRouteOf, REQUIRED_STAGES_BY_DEFECT } from './finding-service';
 import type { V2AttemptContext } from './attempt-coordinator';
 import type { AuthoritativeReviewPrivateStore } from '../../storage/authoritative-review-private-store';
 
@@ -237,8 +242,8 @@ export function repairScopeApprovalOperationId(taskId: string, requestId: string
 }
 
 /** Deterministic scope-rejection publication operation id. */
-export function repairScopeRejectionOperationId(taskId: string, requestId: string): string {
-  return `rj-${canonicalJsonSha256({ taskId, requestId }).slice(0, 32)}`;
+export function repairScopeRejectionOperationId(taskId: string, requestId: string, operatorId = '', reason = ''): string {
+  return `rj-${canonicalJsonSha256({ taskId, requestId, operatorId, reason }).slice(0, 32)}`;
 }
 
 export function repairScopeRejectionReplacementWorkItemId(taskId: string, requestId: string): string {
@@ -795,7 +800,10 @@ export interface RepairServiceDependencies {
   profileBody: AuthoritativeReviewProfileSnapshotV1Body;
   validatorRegistry: import('./validator-registry').ValidatorRegistry;
   sourceResolver?: (handlerKey: string) => string | null;
-  registrationsFor(trigger: 'repair_finalize', phase: 'map' | 'content'): readonly import('../../template/structured-slot-contract-v2').ValidatorRegistrationV2[];
+  registrationsFor(
+    trigger: 'repair_finalize' | 'content_commit',
+    phase: 'map' | 'content' | 'batch_commit',
+  ): readonly import('../../template/structured-slot-contract-v2').ValidatorRegistrationV2[];
   reviewPolicy: ReviewPolicyParameters;
   reviewPolicyDigest: string;
   templateSnapshotRef: BlobRefV2;
@@ -1371,7 +1379,7 @@ export class RepairService {
 
     const currentRoot = (await this.deps.resolver(taskId, current.stagingRootRef)) as RepairStagingRootV2 | null;
     if (currentRoot === null || typeof currentRoot !== 'object') throw new RepairError('STAGING_UNRESOLVED', 'current staging root unresolvable');
-    const staged = await this.stagedContentVersions(taskId, plan, planRef, input.batchOrdinal, slotContents, input.attemptId);
+    const staged = await this.stagedContentVersions(taskId, plan, planRef, input.batchOrdinal, slotContents, input.workItemId, input.attemptId);
     const contentRootDigest = await this.stagedContentRootDigest(taskId, plan, planRef, staged.entries, staged.versions);
     const newLedgerRef = current.keyLedgerRef;
     const stagingRoot = buildRepairStagingRoot({
@@ -2156,6 +2164,12 @@ export class RepairService {
       throw new RepairError('PLAN_STALE', 'the repair plan is not the current active revision');
     }
     const track = plan.orderedBatchScopes[0]?.kind === 'map' ? 'map' : 'content';
+    await this.assertRequestedScopeKnown(taskId, {
+      findingIds: params.findingIds,
+      requestedNodeIds: params.requestedNodeIds ?? [],
+      requestedRelationIds: params.requestedRelationIds ?? [],
+      requestedSlotIds: params.requestedSlotIds ?? [],
+    }, track, plan);
     const requestId = repairScopeRequestId(taskId, ctx.workItemId, params.clientOperationId);
     const operationId = `rs-${canonicalJsonSha256({ taskId, workItemId: ctx.workItemId, clientOperationId: params.clientOperationId }).slice(0, 32)}`;
     await this.publish(taskId, {
@@ -2247,7 +2261,7 @@ export class RepairService {
     if (canonicalJsonSha256(repeatedScope) !== canonicalJsonSha256(requestedScope)) {
       throw new RepairError('REQUEST_SCOPE_MISMATCH', 'approval scope must be byte-equal to the immutable recorded request');
     }
-    await this.assertRequestedScopeKnown(taskId, requestedScope, track);
+    await this.assertRequestedScopeKnown(taskId, requestedScope, track, supersededSpec);
     const requestedScopeDigest = repairRequestedScopeDigest(requestedScope);
     const approvalOperationId = repairScopeApprovalOperationId(taskId, input.requestId, requestedScopeDigest);
     const expanded = this.expandedScopes(supersededSpec, requestedScope, track);
@@ -2402,7 +2416,7 @@ export class RepairService {
     reason: string;
     expectedLastSequence: number;
     expectedTailCommitId: string | null;
-  }): Promise<{ kind: 'completed'; resultRefs: readonly BlobRefV2[] }> {
+  }): Promise<{ kind: 'completed'; resultRefs: readonly BlobRefV2[]; replacementWorkItemId: string }> {
     const { taskId } = input;
     const events = await this.deps.readEvents(taskId);
     const request = events.find(
@@ -2415,8 +2429,16 @@ export class RepairService {
     }
     const priorRejection = events.find((e): e is Extract<AuthoritativeReviewEventV2, { type: 'structured_repair_scope_expansion_rejected_v2' }> => e.type === 'structured_repair_scope_expansion_rejected_v2' && e.requestId === input.requestId);
     if (priorRejection !== undefined) {
-      if (priorRejection.reason !== input.reason) throw new RepairError('OPERATION_CONFLICT', `request '${input.requestId}' was rejected with different decision bytes`);
-      return { kind: 'completed', resultRefs: [] };
+      if (priorRejection.reason !== input.reason || priorRejection.operatorId !== input.operatorId) {
+        throw new RepairError('OPERATION_CONFLICT', `request '${input.requestId}' was rejected with different decision bytes`);
+      }
+      const replacementWorkItemId = repairScopeRejectionReplacementWorkItemId(taskId, input.requestId);
+      const state = await this.deps.readProjection(taskId);
+      const replacement = state.workItems[replacementWorkItemId];
+      if (replacement === undefined || replacement.grantSpecRef === null) {
+        throw new RepairError('OPERATION_CONFLICT', `request '${input.requestId}' rejection result is not reconstructable`);
+      }
+      return { kind: 'completed', resultRefs: [replacement.authorityBaseRef, replacement.grantSpecRef], replacementWorkItemId };
     }
     const tail = await this.deps.tail(taskId);
     if (tail.lastSequence !== input.expectedLastSequence || tail.lastCommitId !== input.expectedTailCommitId) {
@@ -2449,7 +2471,7 @@ export class RepairService {
     });
     const carryErrors = validateRepairSuccessorCarrier(replacement.carrier, head.specRef);
     if (carryErrors.length > 0) throw new RepairError('INVALID_INPUT', `replacement carry invalid: ${carryErrors.join('; ')}`);
-    const operationId = repairScopeRejectionOperationId(taskId, input.requestId);
+    const operationId = repairScopeRejectionOperationId(taskId, input.requestId, input.operatorId, input.reason);
     const blobRefs = [replacement.authorityBaseRef, ...(replacement.grantSpecRef === null ? [] : [replacement.grantSpecRef])];
     await this.publish(taskId, {
       operationId,
@@ -2460,6 +2482,7 @@ export class RepairService {
         repairPlanId: request.repairPlanId,
         planRevisionId: request.planRevisionId,
         requestId: input.requestId,
+        operatorId: input.operatorId,
         reason: input.reason,
         workItemId: replacementWorkItemId,
         batchOrdinal: activeBatchOrdinal,
@@ -2470,7 +2493,7 @@ export class RepairService {
       }),
       preparedRefs: blobRefs,
     });
-    return { kind: 'completed', resultRefs: blobRefs };
+    return { kind: 'completed', resultRefs: blobRefs, replacementWorkItemId };
   }
 
   private repairBatchOrdinalOfWorkItem(taskId: string, plan: RepairPlanSpecV2, workItemId: string): number | null {
@@ -2752,6 +2775,7 @@ export class RepairService {
     planRef: BlobRefV2,
     batchOrdinal: number,
     slotContents: Readonly<Record<string, { text: string; mediaType: 'text/markdown' | 'text/plain' }>>,
+    workItemId: string,
     attemptId: string,
   ): Promise<{ entries: { slotId: string; versionRef: BlobRefV2 }[]; versions: Map<string, SlotContentVersionV2> }> {
     const contentBase = plan.repairBase;
@@ -2768,10 +2792,11 @@ export class RepairService {
     const entries = new Map(baseManifest.entries.map((e) => [e.slotId, e]));
     const scope = plan.orderedBatchScopes[batchOrdinal - 1];
     const batchSlots = scope !== undefined && scope.kind === 'content' ? scope.slotIds : Object.keys(slotContents);
+    const values = new Map<string, ContentValueV2>();
+    const expectedCurrentVersionRefs = new Map(baseManifest.entries.map((entry) => [entry.slotId, entry.versionRef]));
     for (const slotId of batchSlots) {
       const raw = slotContents[slotId];
       if (raw === undefined) throw new RepairError('SLOT_CONTENT_MISSING', `batch ${batchOrdinal} has no content for slot '${slotId}'`);
-      const existing = versions.get(slotId);
       const value = buildContentValue({
         slotId,
         contentSchemaDigest: this.deps.contentSchemaDigestOf(slotId),
@@ -2779,18 +2804,52 @@ export class RepairService {
         mediaType: raw.mediaType,
         text: raw.text,
       });
+      values.set(slotId, value);
+    }
+    const commitCore = buildContentRevisionCommitCore({
+      priorManifestRef: contentBase.contentRevisionManifestRef,
+      producerPlanSpecRef: planRef,
+      batchOrdinal,
+      authorizedReplacementEntriesWithoutValidation: [...batchSlots]
+        .sort()
+        .map((slotId) => ({ slotId, expectedCurrentVersionRef: expectedCurrentVersionRefs.get(slotId) ?? null })),
+      expectedMapRef: state.currentMap.mapSnapshotRef,
+    });
+    const commitCoreRef = await this.deps.facade.prepareBlob(taskId, 'content_revision_commit_core', commitCore);
+    const validation = await this.runContentBatchValidator(
+      taskId,
+      workItemId,
+      attemptId,
+      commitCoreRef,
+      commitCore,
+      batchSlots,
+      values,
+    );
+    await this.persistEngineOutputs(taskId, validation.run, validation.store);
+    if (validation.run.aggregate.outcome !== 'clear') {
+      throw new RepairError(
+        validation.run.aggregate.outcome === 'blocking_invalid' ? 'CONTENT_REPAIR_BATCH_BLOCKED' : 'VALIDATOR_INFRASTRUCTURE_FAILURE',
+        `content repair batch ${batchOrdinal} validation did not clear`,
+      );
+    }
+    const warningRootRef = refOfBlob('validation_warning_root', validation.run.warningRoot);
+    const custody = buildContentBatchWarningCustodyRoot({
+      taskId,
+      inputRef: validation.run.envelopeRef,
+      inputDigest: validation.run.envelopeRef.digest,
+      aggregateRef: validation.run.aggregateRef,
+      warningRootRef,
+      batchOrdinal,
+      planRevisionId: plan.planRevisionId,
+    });
+    const warningCustodyRef = await this.deps.facade.prepareBlob(taskId, 'validation_warning_custody_root', custody);
+    for (const slotId of batchSlots) {
+      const value = values.get(slotId) as ContentValueV2;
       const valueRef = await this.deps.facade.prepareBlob(taskId, 'content_value', value);
-      const commitCore = buildContentRevisionCommitCore({
-        priorManifestRef: contentBase.contentRevisionManifestRef,
-        producerPlanSpecRef: planRef,
-        batchOrdinal,
-        authorizedReplacementEntriesWithoutValidation: [{ slotId, expectedCurrentVersionRef: existing === undefined ? null : refOfBlob('content_version', existing) }],
-        expectedMapRef: state.currentMap.mapSnapshotRef,
-      });
-      const commitCoreRef = await this.deps.facade.prepareBlob(taskId, 'content_revision_commit_core', commitCore);
+      const existing = versions.get(slotId);
       const version = buildContentSetVersion({
         slotId,
-        slotRevision: 1,
+        slotRevision: (existing?.slotRevision ?? 0) + 1,
         taskContentRevision: baseManifest.taskContentRevision + 1,
         mapRef: state.currentMap.mapSnapshotRef,
         mapSemanticDigest: state.currentMap.mapSemanticDigest,
@@ -2798,8 +2857,8 @@ export class RepairService {
         blobRef: valueRef,
         producer: { kind: 'content_repair_batch', planRevisionId: plan.planRevisionId, batchOrdinal, attemptId },
         contentRevisionCommitCoreRef: commitCoreRef,
-        contentCommitValidatorAggregateRef: refOfBlob('validator_aggregate', { outcome: 'clear', aggregateDigest: '0'.repeat(64) }),
-        contentCommitWarningRootRef: refOfBlob('validation_warning_custody_root', { scope: 'content_review', rootDigest: '0'.repeat(64) }),
+        contentCommitValidatorAggregateRef: validation.run.aggregateRef,
+        contentCommitWarningRootRef: warningCustodyRef,
         committedByAttemptId: attemptId,
       });
       const versionRef = await this.deps.facade.prepareBlob(taskId, 'content_version', version);
@@ -2872,7 +2931,7 @@ export class RepairService {
     const entries = new Map<string, { slotId: string; versionRef: BlobRefV2 }>();
     for (const event of committed) {
       const slotContents = await this.readBatchSlotContents(taskId, plan, event.batchOrdinal, event.workItemId, event.attemptId);
-      const staged = await this.stagedContentVersions(taskId, plan, planRef, event.batchOrdinal, slotContents, event.attemptId);
+      const staged = await this.stagedContentVersions(taskId, plan, planRef, event.batchOrdinal, slotContents, event.workItemId, event.attemptId);
       for (const [slotId, version] of staged.versions) versions.set(slotId, version);
       for (const entry of staged.entries) entries.set(entry.slotId, entry);
     }
@@ -3248,10 +3307,23 @@ export class RepairService {
    * targets never become authority merely because an operator echoed them. */
   private async assertRequestedScopeKnown(
     taskId: string,
-    requested: { requestedNodeIds: readonly string[]; requestedRelationIds: readonly string[]; requestedSlotIds: readonly string[] },
+    requested: { findingIds: readonly string[]; requestedNodeIds: readonly string[]; requestedRelationIds: readonly string[]; requestedSlotIds: readonly string[] },
     track: 'map' | 'content',
+    plan: RepairPlanSpecV2,
   ): Promise<void> {
     const state = await this.deps.readProjection(taskId);
+    const planFindingIds = new Set(plan.orderedBatchScopes.flatMap((scope) => scope.findingIds));
+    for (const findingId of requested.findingIds) {
+      const finding = state.findings[findingId];
+      if (finding === undefined) throw new RepairError('REPAIR_SCOPE_INVALID', `requested unknown Finding '${findingId}'`);
+      if (!planFindingIds.has(findingId)) throw new RepairError('REPAIR_SCOPE_INVALID', `Finding '${findingId}' is outside the repair lineage impact closure`);
+      if (finding.severity !== 'blocking' || finding.state === 'verified_closed') {
+        throw new RepairError('REPAIR_SCOPE_INVALID', `Finding '${findingId}' is not a current blocking obligation`);
+      }
+      if (!REQUIRED_STAGES_BY_DEFECT[finding.defectClass].includes(track)) {
+        throw new RepairError('REPAIR_SCOPE_INVALID', `Finding '${findingId}' does not belong to the ${track} repair stage`);
+      }
+    }
     if (track === 'map') {
       const mapRef = state.currentCandidate?.candidateRef ?? state.currentMap?.mapSnapshotRef ?? null;
       if (mapRef === null) throw new RepairError('MAP_UNRESOLVED', 'scope approval requires a map baseline');
@@ -3787,10 +3859,51 @@ export class RepairService {
     return { run, store };
   }
 
+  /** Content-repair batches carry the same real content_commit provenance as
+   * generation batches. A fabricated clear aggregate would make the repaired
+   * content version's live graph unresolvable and would bypass the registered
+   * batch validators. */
+  private async runContentBatchValidator(
+    taskId: string,
+    workItemId: string,
+    attemptId: string,
+    commitCoreRef: BlobRefV2,
+    commitCore: ContentRevisionCommitCoreV2,
+    batchSlotIds: readonly string[],
+    contentValues: ReadonlyMap<string, ContentValueV2>,
+  ): Promise<{ run: TriggerExecutionResult; store: ContentPlanMemoryBlobStore }> {
+    const store = new ContentPlanMemoryBlobStore(
+      contentPlanEnrichment({
+        slotTypeOf: (slotId) => this.deps.slotTypeOf(slotId),
+        versionStateOf: () => 'set',
+      }),
+    );
+    store.put('content_revision_commit_core', commitCore);
+    const targetRefs = batchSlotIds.map((slotId) => store.put('content_value', contentValues.get(slotId) as ContentValueV2));
+    const engine = new ValidatorEngine({
+      registry: this.deps.validatorRegistry,
+      blobs: store,
+      sourceResolver: this.deps.sourceResolver,
+    });
+    const run = await engine.execute({
+      trigger: 'content_commit',
+      executionPhase: 'batch_commit',
+      identity: { taskId, templateSnapshotHash: this.deps.snapshotHash, workItemId, attemptId, commandId: null },
+      coreRef: commitCoreRef,
+      selectedTargetRefs: targetRefs,
+      registrations: this.deps.registrationsFor('content_commit', 'batch_commit'),
+      universe: { slotIds: [...batchSlotIds], relationIds: [], mapNodeIds: [], artifactDigest: null },
+      slotTypes: this.deps.slotTypes,
+      context: { requiredSlotIds: [...batchSlotIds] },
+      profile: this.deps.profileBody,
+    });
+    return { run, store };
+  }
+
   private async persistEngineOutputs(
     taskId: string,
     run: TriggerExecutionResult,
-    store: RepairMemoryBlobStore,
+    store: RepairMemoryBlobStore | ContentPlanMemoryBlobStore,
   ): Promise<void> {
     for (const produced of store.produced) {
       await this.deps.facade.prepareBlob(taskId, produced.kind, produced.value);
@@ -3881,6 +3994,7 @@ export function repairCarrier(carriers: Partial<RepairPublishCarriersV2> = {}): 
     validatorAggregateRef: null,
     validationReceiptRef: null,
     requestId: null,
+    operatorId: null,
     reason: null,
     findingIds: null,
     requestedNodeIds: null,
@@ -4578,7 +4692,9 @@ function registerRepairScopeRejection(registry: PublicationIntentRegistry): void
       need(rp.repairPlanId, 'repairPlanId');
       need(rp.planRevisionId, 'planRevisionId');
       need(rp.requestId, 'requestId');
+      need(rp.operatorId, 'operatorId');
       need(rp.reason, 'reason');
+      const operatorId = rp.operatorId as string;
       const envelopes: PublicationEventEnvelopeV2[] = [
         {
           protocolVersion: 2,
@@ -4587,6 +4703,7 @@ function registerRepairScopeRejection(registry: PublicationIntentRegistry): void
           requestId: rp.requestId,
           repairPlanId: rp.repairPlanId,
           planRevisionId: rp.planRevisionId,
+          operatorId,
           reason: rp.reason,
         },
       ];

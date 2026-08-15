@@ -2049,6 +2049,8 @@ export interface RepairPublishCarriersV2 {
   validationReceiptRef: BlobRefV2 | null;
   // --- scope request / approval / rejection ---
   requestId: string | null;
+  /** Authenticated operator identity for a persisted scope decision. */
+  operatorId: string | null;
   reason: string | null;
   findingIds: readonly string[] | null;
   requestedNodeIds: readonly string[] | null;

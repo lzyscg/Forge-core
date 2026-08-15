@@ -1675,6 +1675,7 @@ const ROWS: Row[] = [
       requestId: 'rs-1',
       repairPlanId: 'rp-1',
       planRevisionId: 'rp-1-r1',
+      operatorId: 'operator-1',
       reason: '证据不足',
     }),
     missing: (p) => {

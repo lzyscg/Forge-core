@@ -204,3 +204,43 @@ The worktree was then staged and committed with the exact message `feat: harden 
 - `npm run build`: passed.
 
 The remaining warnings in the full run are pre-existing React Router/`act(...)` test warnings; there were no test failures or Task 20 changes.
+
+---
+
+## Fix round 2 (scoped re-review findings, 2026-08-16)
+
+**Status:** COMPLETE. All 2 P1 and 2 P2 findings in `task-19-rereview-findings-codex.md` are addressed inside Task 19. No Task 20 behavior, v1 surface, capability fixture, or blob schema version changed; production publication remains facade-only with zero runtime EventStore imports.
+
+### 1. Mixed Map-opened Finding reaches the content tool and authoritative close
+
+- `resolveContentRoundFromCore` now derives reviewer verification targets from the round's frozen `finding_stage_root` and current content stage, rather than the Finding's opening-context kind. A mixed Finding opened in Map therefore exposes exactly `findingId:content` after its ContentRepairPlan finalizes.
+- `validateVerificationSubmission` treats the frozen finding-stage target as stage authority; it no longer rejects a mixed content-stage verification merely because the immutable opening context is Map.
+- The mixed end-to-end regression now continues through ContentRepairPlan batch commit/finalizer, production tool reconstruction, content assignment freeze, `structured_finding_verification_recorded`, settlement, `structured_finding_verified_closed`, and projected `verified_closed`.
+
+### 2. `still_present` atomically routes the next repair cycle
+
+- Projection of a real `still_present` verification resets only that repair stage from `addressStages` and returns the Finding to `open`, preserving other mixed stages while making the rejected stage repair-eligible.
+- Content settlement carries Findings verified in the current content round even when they opened in a prior round, so the same settlement creates the deterministic correction revision instead of returning `CONTENT_REVIEW_BLOCKED` forever. Map uses its frozen carried stage equivalently.
+- Production-flow regressions cover both Map and Content: real repair, real re-review freeze with `still_present`, stage reset, settlement completion, one additional repair revision, and a ready successor Grant.
+
+### 3. Scope Finding ids are immutable, known, current, and track-correct
+
+- Both request and approval validate every requested Finding against the immutable active plan: the Finding must exist, belong to the plan's server-computed Finding closure, remain blocking/unclosed, and require the active repair track.
+- Unknown and wrong-track/out-of-lineage requests fail with `REPAIR_SCOPE_INVALID` before publication; the test asserts zero `structured_repair_scope_requested` events. Approval repeats the same validation after byte-equality against the recorded request, preventing a malformed ledger request from authorizing a corrupt successor.
+
+### 4. Scope rejection replay preserves result identity and operator identity
+
+- The persisted rejection event and carrier now bind `operatorId`; the operation id binds task/request/operator/reason bytes.
+- Replays reconstruct the deterministic replacement WorkItem and return the exact original authority-base and Grant refs plus `replacementWorkItemId`. Same-byte replay is deeply equal to the first result; changed operator or reason fails `OPERATION_CONFLICT`.
+
+### Verification
+
+- Scoped behavior run: **3 files / 39 passed** (scope, Map/Content `still_present`, mixed full lifecycle, tool verification, rejection event schema).
+- Full affected serial run: **5 files / 807 passed** (`repair-service`, `content-review-service`, `tool-factory`, event schema, projector).
+- `npm run check`: passed.
+- `npm run build`: passed.
+
+### Post-review GC hardening
+
+- The extended mixed lifecycle exposed two fabricated provenance refs in repaired `content_version` blobs. Content repair batches now run the registered `content_commit/batch_commit` validators over the frozen commit core and exact staged content values, persist the real envelope/aggregate/receipt/warning graph, and bind a prepared `validation_warning_custody_root` into every repaired version.
+- The mixed regression now runs a complete authoritative GC after content finalization and settlement; the live repaired manifest graph is fully resolvable. The complete `repair-service.test.ts` run passes **28/28** (including the restored GC assertion), followed by a fresh successful `npm run check` and `npm run build` (732 modules).

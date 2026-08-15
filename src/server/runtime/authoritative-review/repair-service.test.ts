@@ -288,11 +288,13 @@ async function makeRepairEnv(opts: { maxRounds?: number; contentBatchTargetSlots
   const finalizeDigest = opts.stagedBlocking === true ? hash('staged-digest') : opts.blocking === true || opts.blockingOnRevision2 === true ? hash('blocking-digest') : '';
   const sourceResolver = (key: string): string | null => {
     if (key === 'test.repair.repair_finalize') return finalizeSource;
+    if (key === 'test.repair.content_commit.batch_commit') return BATCH_VALID_SOURCE;
     return builtinSourceOf(key);
   };
   const repairRegistry = new ValidatorRegistry([
     ...AUTHORITATIVE_REVIEW_BUILTIN_VALIDATOR_ENTRIES,
     testValidatorEntry('repair_finalize', null, finalizeSource, '', finalizeDigest),
+    testValidatorEntry('content_commit', 'batch_commit', BATCH_VALID_SOURCE, '.batch_commit'),
   ]);
   const service = new RepairService({
     facade: env.facade,
@@ -308,10 +310,14 @@ async function makeRepairEnv(opts: { maxRounds?: number; contentBatchTargetSlots
     profileBody: PROFILE_BODY,
     validatorRegistry: repairRegistry,
     sourceResolver,
-    registrationsFor: () =>
-      opts.blocking === true || opts.blockingOnRevision2 === true || opts.stagedBlocking === true
+    registrationsFor: (trigger) => {
+      if (trigger === 'content_commit') {
+        return [testValidatorRegistration('content_commit', 'batch_commit', BATCH_VALID_SOURCE, 'v-content-repair-batch')];
+      }
+      return opts.blocking === true || opts.blockingOnRevision2 === true || opts.stagedBlocking === true
         ? [{ ...testValidatorRegistration('repair_finalize', null, finalizeSource, opts.stagedBlocking === true ? 'v-repair-staged' : 'v-repair-blocking'), implementationDigest: finalizeDigest }]
-        : [testValidatorRegistration('repair_finalize', null, FINALIZE_VALID_SOURCE, 'v-repair-clear')],
+        : [testValidatorRegistration('repair_finalize', null, FINALIZE_VALID_SOURCE, 'v-repair-clear')];
+    },
     reviewPolicy: { ...REVIEW_POLICY, maxRounds, contentBatchTargetSlots: opts.contentBatchTargetSlots ?? 2, reviewAdvisoryRelations: true },
     reviewPolicyDigest: hash('review-policy'),
     templateSnapshotRef,
@@ -1823,7 +1829,10 @@ describe('scope expansion', { timeout: 120_000 }, () => {
   it('request -> approval atomically supersedes the plan head and creates the successor WorkItem/Grant within hard limits', async () => {
     const b = await makeRepairEnv();
     const stack = await driveToContentStack(b, ['s-1', 's-2']);
-    await seedFindings(b, mapBlockingFindings(stack.nodeIds), 'map');
+    await seedFindings(b, [
+      ...mapBlockingFindings(stack.nodeIds),
+      { findingId: 'c-wrong-track', primaryLocation: { kind: 'slot', id: stack.nodeIds[0] as string }, defectClass: 'content', severity: 'blocking' },
+    ], 'map');
     const settlement = await createAndLeaseSettlement(b);
     await b.service.createRepairPlanFromSettlement({
       taskId: b.taskId,
@@ -1843,6 +1852,9 @@ describe('scope expansion', { timeout: 120_000 }, () => {
     const requestLease = await leaseTargeted(b, oldWorkItemId, 'worker-a');
     const requestCtx = ctxOf(b, requestLease);
     const requestedNodeId = stack.nodeIds[1] as string;
+    await expect(b.service.requestScopeExpansion(requestCtx, { findingIds: ['unknown-finding'], requestedNodeIds: [requestedNodeId], reason: 'bad unknown', clientOperationId: 'co-req-unknown' })).rejects.toMatchObject({ code: 'REPAIR_SCOPE_INVALID' });
+    await expect(b.service.requestScopeExpansion(requestCtx, { findingIds: ['c-wrong-track'], requestedNodeIds: [requestedNodeId], reason: 'bad track', clientOperationId: 'co-req-wrong-track' })).rejects.toMatchObject({ code: 'REPAIR_SCOPE_INVALID' });
+    expect((await b.readEvents(b.taskId)).filter((event) => event.type === 'structured_repair_scope_requested')).toHaveLength(0);
     await b.service.requestScopeExpansion(requestCtx, { findingIds: ['m-1'], requestedNodeIds: [requestedNodeId], reason: 'need more nodes', clientOperationId: 'co-req-1' });
     const events = await b.readEvents(b.taskId);
     const request = events.find((e): e is Extract<AuthoritativeReviewEventV2, { type: 'structured_repair_scope_requested' }> => e.type === 'structured_repair_scope_requested');
@@ -1918,7 +1930,7 @@ describe('scope expansion', { timeout: 120_000 }, () => {
     const request = events.find((e): e is Extract<AuthoritativeReviewEventV2, { type: 'structured_repair_scope_requested' }> => e.type === 'structured_repair_scope_requested');
     if (request === undefined) throw new Error('no request');
     const tail = await b.env.eventStore.tail(b.taskId);
-    await b.service.rejectScopeExpansion({
+    const firstRejection = await b.service.rejectScopeExpansion({
       taskId: b.taskId,
       requestId: request.requestId,
       operatorId: 'operator-1',
@@ -1947,7 +1959,10 @@ describe('scope expansion', { timeout: 120_000 }, () => {
     expect(replacementDispatch.scopeDecisionReason).toBe('denied');
     // Same decision bytes replay the same replacement; changed bytes conflict.
     const tailAfter = await b.env.eventStore.tail(b.taskId);
-    await expect(b.service.rejectScopeExpansion({ taskId: b.taskId, requestId: request.requestId, operatorId: 'operator-1', reason: 'denied', expectedLastSequence: tailAfter.lastSequence, expectedTailCommitId: tailAfter.lastCommitId })).resolves.toMatchObject({ kind: 'completed' });
+    const replayedRejection = await b.service.rejectScopeExpansion({ taskId: b.taskId, requestId: request.requestId, operatorId: 'operator-1', reason: 'denied', expectedLastSequence: tailAfter.lastSequence, expectedTailCommitId: tailAfter.lastCommitId });
+    expect(replayedRejection).toEqual(firstRejection);
+    expect(firstRejection.replacementWorkItemId).toBe(replacement?.workItemId);
+    await expect(b.service.rejectScopeExpansion({ taskId: b.taskId, requestId: request.requestId, operatorId: 'operator-2', reason: 'denied', expectedLastSequence: tailAfter.lastSequence, expectedTailCommitId: tailAfter.lastCommitId })).rejects.toMatchObject({ code: 'OPERATION_CONFLICT' });
     await expect(b.service.rejectScopeExpansion({ taskId: b.taskId, requestId: request.requestId, operatorId: 'operator-1', reason: 'different', expectedLastSequence: tailAfter.lastSequence, expectedTailCommitId: tailAfter.lastCommitId })).rejects.toMatchObject({ code: 'OPERATION_CONFLICT' });
   });
 });
@@ -2531,6 +2546,7 @@ function contentReviewServiceOn(b: RepairEnv): ContentReviewService {
     generatorRoleBinding: 'generator',
     orchestratorRoleBinding: 'orchestrator',
     findingService,
+    repairService: b.service,
   });
 }
 
@@ -2710,6 +2726,7 @@ async function completeRepairedMapRound(
   b: RepairEnv,
   plannedRound: Extract<AuthoritativeReviewEventV2, { type: 'structured_map_review_round_planned' }>,
   findingId: string,
+  verdict: 'resolved' | 'still_present' = 'resolved',
 ): Promise<{ review: MapReviewService; settlementWiId: string; settleLease: Awaited<ReturnType<typeof leaseTargeted>>; coverageCoreRef: BlobRefV2 }> {
   const roundId = plannedRound.mapReviewRoundId;
   const review = mapReviewServiceWithRepairSeam(b);
@@ -2733,7 +2750,7 @@ async function completeRepairedMapRound(
     body: { targetId, verdict: 'pass', evidence: [], findingDrafts: [], crossScopeFindingDrafts: [] },
     at: b.env.now.value,
   }));
-  records.push({ op: 'submit_finding_verification', body: { findingId, repairStage: 'map', verdict: 'resolved', evidence: [] }, at: b.env.now.value });
+  records.push({ op: 'submit_finding_verification', body: { findingId, repairStage: 'map', verdict, evidence: [] }, at: b.env.now.value });
   const batchFreeze = buildReviewAssignmentFreeze({
     assignmentId: batchWiId,
     workItemId: batchWiId,
@@ -2779,6 +2796,145 @@ async function completeRepairedMapRound(
   const completed = (await b.readEvents(b.taskId)).find((event) => event.type === 'structured_map_review_round_completed' && event.mapReviewRoundId === roundId);
   if (completed === undefined || completed.type !== 'structured_map_review_round_completed') throw new Error('no repaired map round completion');
   return { review, settlementWiId, settleLease, coverageCoreRef: completed.coverageCoreRef };
+}
+
+describe('still_present verification routes the next repair cycle', { timeout: 120_000 }, () => {
+  it('Map still_present resets the addressed stage and the same settlement creates a deterministic successor plan', async () => {
+    const b = await makeRepairEnv({ maxRounds: 3 });
+    const { finalizeWorkItemId } = await driveMapRepairToFinalizer(b);
+    const finalized = await runFinalizer(b, finalizeWorkItemId);
+    expect(finalized.kind).toBe('completed');
+    const plannedRound = (await b.readEvents(b.taskId))
+      .filter((event): event is Extract<AuthoritativeReviewEventV2, { type: 'structured_map_review_round_planned' }> => event.type === 'structured_map_review_round_planned')
+      .pop();
+    if (plannedRound === undefined) throw new Error('no repaired map round');
+    const settledRound = await completeRepairedMapRound(b, plannedRound, 'm-1', 'still_present');
+    const before = await b.env.readProjection(b.taskId);
+    const revisionCountBefore = Object.values(before.repairPlans).reduce((count, lineage) => count + Object.keys(lineage.revisions).length, 0);
+    expect(before.findings['m-1'].state).toBe('open');
+    expect(before.findings['m-1'].addressStages).not.toContain('map');
+    const outcome = await settledRound.review.executeMapReviewSettlement({
+      taskId: b.taskId,
+      commandId: settledRound.settleLease.commandId ?? '',
+      workItemId: settledRound.settlementWiId,
+      commandKind: 'review_settlement',
+      leaseEpoch: settledRound.settleLease.leaseEpoch,
+      authorityBaseRef: settledRound.settleLease.authorityBaseRef,
+      payloadRef: settledRound.coverageCoreRef,
+    });
+    expect(outcome.kind).toBe('completed');
+    const projected = await b.env.readProjection(b.taskId);
+    const revisionCountAfter = Object.values(projected.repairPlans).reduce((count, lineage) => count + Object.keys(lineage.revisions).length, 0);
+    expect(revisionCountAfter).toBe(revisionCountBefore + 1);
+    expect(Object.values(projected.workItems).some((wi) => wi.sessionKind === 'map_repair' && wi.state === 'ready')).toBe(true);
+  });
+
+  it('Content still_present resets the carried stage and settlement creates a content repair successor instead of retrying forever', async () => {
+    const b = await makeRepairEnv({ maxRounds: 3 });
+    const stack = await driveToContentStack(b, ['s-1']);
+    await seedFindings(b, [{ findingId: 'c-still', primaryLocation: { kind: 'slot', id: stack.nodeIds[0] as string }, defectClass: 'content', severity: 'blocking' }], 'content');
+    const settlement = await createAndLeaseSettlement(b);
+    await b.service.createRepairPlanFromSettlement({ taskId: b.taskId, settlementWorkItemId: settlement.workItemId, settlementCommandId: settlement.commandId, leaseEpoch: settlement.leaseEpoch, authorityBaseRef: settlement.authorityBaseRef, roundId: 'round-1', coverageCoreRef: { kind: 'content_review_coverage_core', digest: 'e'.repeat(64), byteLength: 10, mediaType: 'application/json', schemaVersion: 1 }, findings: blockingFindingsOf(['c-still']) });
+    const state = await b.env.readProjection(b.taskId);
+    const lineage = Object.values(state.repairPlans).find((entry) => entry.track === 'content');
+    if (lineage === undefined || lineage.currentPlanRevisionId === null) throw new Error('no content plan');
+    const plan = (await b.resolver(b.taskId, lineage.revisions[lineage.currentPlanRevisionId].specRef)) as RepairPlanSpecV2;
+    const { plannedEvent } = await finalizeExistingContentPlan(b, plan);
+    const revisionCountBefore = Object.values((await b.env.readProjection(b.taskId)).repairPlans).reduce((count, entry) => count + Object.keys(entry.revisions).length, 0);
+    const outcome = await settleContentRoundWithVerification(b, plannedEvent, 'c-still', 'still_present');
+    if (outcome.kind !== 'completed') throw new Error(`content still_present did not create successor: ${JSON.stringify(outcome)}`);
+    const after = await b.env.readProjection(b.taskId);
+    expect(after.findings['c-still'].state).toBe('open');
+    expect(after.findings['c-still'].addressStages).not.toContain('content');
+    const revisionCountAfter = Object.values(after.repairPlans).reduce((count, entry) => count + Object.keys(entry.revisions).length, 0);
+    expect(revisionCountAfter).toBe(revisionCountBefore + 1);
+    expect(Object.values(after.workItems).some((wi) => wi.sessionKind === 'content_repair' && wi.state === 'ready')).toBe(true);
+  });
+});
+
+/** Commits/finalizes an already-created one-batch ContentRepairPlan and
+ * returns the production planned-core used by its content review tools. */
+async function finalizeExistingContentPlan(
+  b: RepairEnv,
+  plan: RepairPlanSpecV2,
+): Promise<{ plannedEvent: Extract<AuthoritativeReviewEventV2, { type: 'structured_review_round_planned' }>; plannedCore: ContentReviewCoverageCoreV2 }> {
+  const scope = plan.orderedBatchScopes[0];
+  if (scope === undefined || scope.kind !== 'content') throw new Error('expected one content repair scope');
+  const workItemId = repairBatchWorkItemId(b.taskId, plan.repairPlanId, 1, plan.planRevisionId);
+  const leased = await leaseTargeted(b, workItemId, 'worker-mixed-content-repair');
+  const ctx = ctxOf(b, leased);
+  const targetSlot = scope.slotIds[0] as string;
+  const valueBody = { slotId: targetSlot, contentSchemaDigest: hash('schema'), taskContentRevision: 2, mediaType: 'text/markdown', text: 'mixed repaired content' };
+  const contentValueRef = await b.env.facade.prepareBlob(b.taskId, 'content_value', { ...valueBody, selfDigest: canonicalJsonSha256(valueBody) });
+  const state = await b.env.readProjection(b.taskId);
+  await b.privateStore.appendReviewDraft(
+    { workItemId, leaseEpoch: leased.leaseEpoch, attemptId: ctx.attemptId, authorityBaseRef: leased.authorityBaseRef, grantSpecRef: state.workItems[workItemId].grantSpecRef as BlobRefV2 },
+    { clientOperationId: 'co-mixed-content-repair', op: 'write_slot_content', body: { slotId: targetSlot, value: 'mixed repaired content' }, result: { slotId: targetSlot, contentValueRef } },
+  );
+  const committed = await b.service.commitRepairBatch({
+    taskId: b.taskId,
+    workItemId,
+    attemptId: ctx.attemptId,
+    batchOrdinal: 1,
+    ctx,
+    slotContents: { [targetSlot]: { text: 'mixed repaired content', mediaType: 'text/markdown' } },
+  });
+  if (committed.kind !== 'committed') throw new Error(`content batch failed: ${JSON.stringify(committed)}`);
+  await b.env.coordinator.completeWorkItem({
+    taskId: b.taskId,
+    operationId: attemptContinuationOperationId(b.taskId, workItemId, ctx.attemptId, 'complete'),
+    workItemId,
+    attemptId: ctx.attemptId,
+    resultRefs: [committed.stagingRootRef],
+  });
+  const finalized = await runFinalizer(b, repairFinalizeWorkItemId(b.taskId, plan.repairPlanId, plan.planRevisionId));
+  if (finalized.kind !== 'completed') throw new Error(`content finalize failed: ${JSON.stringify(finalized)}`);
+  const plannedEvent = (await b.readEvents(b.taskId))
+    .filter((event): event is Extract<AuthoritativeReviewEventV2, { type: 'structured_review_round_planned' }> => event.type === 'structured_review_round_planned')
+    .pop();
+  if (plannedEvent === undefined) throw new Error('no content re-review round');
+  const reviewWorkItem = Object.values((await b.env.readProjection(b.taskId)).workItems)
+    .find((wi) => wi.roundId === plannedEvent.reviewRoundId && wi.sessionKind === 'review_content_batch');
+  if (reviewWorkItem === undefined) throw new Error('no content review workitem');
+  const base = (await b.resolver(b.taskId, reviewWorkItem.authorityBaseRef)) as { reviewRoundRef: BlobRefV2 };
+  return { plannedEvent, plannedCore: (await b.resolver(b.taskId, base.reviewRoundRef)) as ContentReviewCoverageCoreV2 };
+}
+
+async function settleContentRoundWithVerification(
+  b: RepairEnv,
+  plannedEvent: Extract<AuthoritativeReviewEventV2, { type: 'structured_review_round_planned' }>,
+  findingId: string,
+  verdict: 'resolved' | 'still_present',
+): Promise<Awaited<ReturnType<ContentReviewService['executeContentReviewSettlement']>>> {
+  const content = contentReviewServiceOn(b);
+  const manifest = (await b.resolver(b.taskId, plannedEvent.contentRevisionManifestRef)) as ContentRevisionManifestV2;
+  const slotIds = manifest.entries.map((entry) => entry.slotId).sort();
+  const reviewPlan = planContentReview({ slots: slotIds.map((slotId) => ({ slotId, documentOrder: 0, parentSlotId: null })), relations: [], reviewPolicy: { ...REVIEW_POLICY, contentBatchTargetSlots: 2 }, assignmentCount: plannedEvent.assignmentCount });
+  const batchWiId = reviewBatchWorkItemId(plannedEvent.reviewRoundId, 0);
+  const batchLease = await leaseTargeted(b, batchWiId, 'worker-content-still-review');
+  const attemptId = batchLease.attemptId ?? '';
+  const targets = [...reviewPlan.batches[0].slotIds, ...reviewPlan.batches[0].relationIds];
+  const targetKinds: Record<string, ReviewFactV2['targetKind']> = {};
+  for (const slotId of reviewPlan.batches[0].slotIds) targetKinds[slotId] = 'content_slot';
+  const records: ReviewDraftRecordV2[] = targets.map((targetId) => ({ op: 'submit_slot_review', body: { targetId, verdict: 'pass', evidence: [], findingDrafts: [], crossScopeFindingDrafts: [] }, at: b.env.now.value }));
+  records.push({ op: 'submit_finding_verification', body: { findingId, repairStage: 'content', verdict, evidence: [] }, at: b.env.now.value });
+  const freeze = buildReviewAssignmentFreeze({ assignmentId: batchWiId, workItemId: batchWiId, reviewAssignmentId: reviewAssignmentIdOf(plannedEvent.reviewRoundId, 0), roundKind: 'content', roundId: plannedEvent.reviewRoundId, attemptId, reviewerAttemptId: attemptId, reviewPolicyDigest: hash('review-policy'), records, verificationFindingStages: [`${findingId}:content`], assignmentTargets: targets, baselineTargetKinds: targetKinds, requireOrdinaryCoverage: true });
+  if (!freeze.ok) throw new Error(`content verification freeze failed: ${freeze.errors.join('; ')}`);
+  await content.freezeReviewAssignment(b.taskId, freeze.freeze);
+  await b.env.coordinator.completeWorkItem({ taskId: b.taskId, operationId: attemptContinuationOperationId(b.taskId, batchWiId, attemptId, 'complete'), workItemId: batchWiId, attemptId, resultRefs: [refOfBlob('review_assignment_ledger', freeze.freeze.ledger)] });
+  const wholeWiId = reviewWholeWorkItemId(plannedEvent.reviewRoundId);
+  const wholeLease = await leaseTargeted(b, wholeWiId, 'worker-content-still-review');
+  const wholeAttemptId = wholeLease.attemptId ?? '';
+  const wholeFreeze = buildReviewAssignmentFreeze({ assignmentId: wholeWiId, workItemId: wholeWiId, reviewAssignmentId: reviewWholeAssignmentId(plannedEvent.reviewRoundId), roundKind: 'content', roundId: plannedEvent.reviewRoundId, attemptId: wholeAttemptId, reviewerAttemptId: wholeAttemptId, reviewPolicyDigest: hash('review-policy'), records: [{ op: 'submit_whole_tree_finding', body: { findingDraft: { clientFindingKey: 'still-advisory', defectClass: 'content', severity: 'advisory', primaryLocation: { kind: 'slot', id: slotIds[0] as string }, evidence: [] }, anchoredVerdict: null }, at: b.env.now.value }], verificationFindingStages: [], assignmentTargets: [], baselineTargetKinds: {}, requireOrdinaryCoverage: false });
+  if (!wholeFreeze.ok) throw new Error(`content whole freeze failed: ${wholeFreeze.errors.join('; ')}`);
+  await content.freezeReviewAssignment(b.taskId, wholeFreeze.freeze);
+  await b.env.coordinator.completeWorkItem({ taskId: b.taskId, operationId: attemptContinuationOperationId(b.taskId, wholeWiId, wholeAttemptId, 'complete'), workItemId: wholeWiId, attemptId: wholeAttemptId, resultRefs: [refOfBlob('review_assignment_ledger', wholeFreeze.freeze.ledger)] });
+  if (!(await content.maybeCompleteRound(b.taskId, plannedEvent.reviewRoundId))) throw new Error('content round did not complete');
+  const settlementWiId = deterministicContentSettlementWorkItemId(b.taskId, plannedEvent.reviewRoundId);
+  const settlementLease = await leaseTargeted(b, settlementWiId, 'worker-content-still-settlement');
+  const completed = (await b.readEvents(b.taskId)).find((event) => event.type === 'structured_review_round_completed' && event.reviewRoundId === plannedEvent.reviewRoundId);
+  if (completed === undefined || completed.type !== 'structured_review_round_completed') throw new Error('no completed content round');
+  return content.executeContentReviewSettlement({ taskId: b.taskId, commandId: settlementLease.commandId ?? '', workItemId: settlementWiId, commandKind: 'review_settlement', leaseEpoch: settlementLease.leaseEpoch, authorityBaseRef: settlementLease.authorityBaseRef, payloadRef: completed.coverageCoreRef });
 }
 
 describe('I-1 (review): mixed Findings route Map repair -> ContentRepairPlan before content re-review', { timeout: 120_000 }, () => {
@@ -2911,6 +3067,101 @@ describe('I-1 (review): mixed Findings route Map repair -> ContentRepairPlan bef
     expect(contentPlan.repairBase.mapRef.digest).toBe(activated.mapSnapshotRef.digest);
     expect(contentPlan.orderedBatchScopes[0]?.findingIds).toEqual(['x-1']);
     expect(Object.values(finalState.workItems).some((wi) => wi.sessionKind === 'content_repair' && wi.state === 'ready')).toBe(true);
+    // Continue through the REAL content repair/finalizer and production tool
+    // reconstruction. The Finding was opened by a Map round, but its current
+    // content stage must be exposed to the content reviewer.
+    const { plannedEvent: contentRoundEvent, plannedCore: contentPlannedCore } = await finalizeExistingContentPlan(b, contentPlan);
+    const resolvedContentRound = await resolveContentRoundFromCore(b.taskId, contentPlannedCore, {
+      resolver: b.resolver,
+      readProjection: b.env.readProjection,
+      reviewPolicy: { ...REVIEW_POLICY, contentBatchTargetSlots: 2 },
+    });
+    expect(resolvedContentRound.verificationFindingStages).toEqual(['x-1:content']);
+    const afterContentRepair = await b.env.readProjection(b.taskId);
+    expect(validateVerificationSubmission({
+      submission: { findingId: 'x-1', repairStage: 'content', verdict: 'resolved', evidence: ['content fixed'] },
+      round: resolvedContentRound,
+      findings: afterContentRepair.findings as never,
+    })).toEqual([]);
+    const content = contentReviewServiceOn(b);
+    const contentManifest = (await b.resolver(b.taskId, contentRoundEvent.contentRevisionManifestRef)) as ContentRevisionManifestV2;
+    const repairedSlotId = contentPlan.orderedBatchScopes[0]?.kind === 'content' ? contentPlan.orderedBatchScopes[0].slotIds[0] : undefined;
+    const repairedEntry = contentManifest.entries.find((entry) => entry.slotId === repairedSlotId);
+    if (repairedEntry === undefined) throw new Error('mixed repaired slot missing from finalized manifest');
+    const repairedVersion = (await b.resolver(b.taskId, repairedEntry.versionRef)) as {
+      slotRevision: number;
+      provenance: { contentCommitValidatorAggregateRef: BlobRefV2; contentCommitWarningRootRef: BlobRefV2 };
+    };
+    expect(repairedVersion.slotRevision).toBe(2);
+    await expect(b.resolver(b.taskId, repairedVersion.provenance.contentCommitValidatorAggregateRef)).resolves.toMatchObject({ outcome: 'clear' });
+    await expect(b.resolver(b.taskId, repairedVersion.provenance.contentCommitWarningRootRef)).resolves.toMatchObject({ scope: 'content_review' });
+    const contentSlotIds = contentManifest.entries.map((entry) => entry.slotId).sort();
+    const contentReviewPlan = planContentReview({
+      slots: contentSlotIds.map((slotId) => ({ slotId, documentOrder: 0, parentSlotId: null })),
+      relations: [],
+      reviewPolicy: { ...REVIEW_POLICY, contentBatchTargetSlots: 2 },
+      assignmentCount: contentRoundEvent.assignmentCount,
+    });
+    const contentBatchWiId = reviewBatchWorkItemId(contentRoundEvent.reviewRoundId, 0);
+    const contentBatchLease = await leaseTargeted(b, contentBatchWiId, 'worker-mixed-content-review');
+    const contentBatchAttemptId = contentBatchLease.attemptId ?? '';
+    const contentTargets = [...contentReviewPlan.batches[0].slotIds, ...contentReviewPlan.batches[0].relationIds];
+    const contentTargetKinds: Record<string, ReviewFactV2['targetKind']> = {};
+    for (const slotId of contentReviewPlan.batches[0].slotIds) contentTargetKinds[slotId] = 'content_slot';
+    const contentRecords: ReviewDraftRecordV2[] = contentTargets.map((targetId) => ({
+      op: 'submit_slot_review',
+      body: { targetId, verdict: 'pass', evidence: [], findingDrafts: [], crossScopeFindingDrafts: [] },
+      at: b.env.now.value,
+    }));
+    contentRecords.push({ op: 'submit_finding_verification', body: { findingId: 'x-1', repairStage: 'content', verdict: 'resolved', evidence: ['content fixed'] }, at: b.env.now.value });
+    const contentFreeze = buildReviewAssignmentFreeze({
+      assignmentId: contentBatchWiId,
+      workItemId: contentBatchWiId,
+      reviewAssignmentId: reviewAssignmentIdOf(contentRoundEvent.reviewRoundId, 0),
+      roundKind: 'content',
+      roundId: contentRoundEvent.reviewRoundId,
+      attemptId: contentBatchAttemptId,
+      reviewerAttemptId: contentBatchAttemptId,
+      reviewPolicyDigest: hash('review-policy'),
+      records: contentRecords,
+      verificationFindingStages: ['x-1:content'],
+      assignmentTargets: contentTargets,
+      baselineTargetKinds: contentTargetKinds,
+      requireOrdinaryCoverage: true,
+    });
+    if (!contentFreeze.ok) throw new Error(`mixed content freeze failed: ${contentFreeze.errors.join('; ')}`);
+    await content.freezeReviewAssignment(b.taskId, contentFreeze.freeze);
+    await b.env.coordinator.completeWorkItem({ taskId: b.taskId, operationId: attemptContinuationOperationId(b.taskId, contentBatchWiId, contentBatchAttemptId, 'complete'), workItemId: contentBatchWiId, attemptId: contentBatchAttemptId, resultRefs: [refOfBlob('review_assignment_ledger', contentFreeze.freeze.ledger)] });
+    const contentWholeWiId = reviewWholeWorkItemId(contentRoundEvent.reviewRoundId);
+    const contentWholeLease = await leaseTargeted(b, contentWholeWiId, 'worker-mixed-content-review');
+    const contentWholeAttemptId = contentWholeLease.attemptId ?? '';
+    const contentWholeFreeze = buildReviewAssignmentFreeze({
+      assignmentId: contentWholeWiId,
+      workItemId: contentWholeWiId,
+      reviewAssignmentId: reviewWholeAssignmentId(contentRoundEvent.reviewRoundId),
+      roundKind: 'content',
+      roundId: contentRoundEvent.reviewRoundId,
+      attemptId: contentWholeAttemptId,
+      reviewerAttemptId: contentWholeAttemptId,
+      reviewPolicyDigest: hash('review-policy'),
+      records: [{ op: 'submit_whole_tree_finding', body: { findingDraft: { clientFindingKey: 'mixed-advisory', defectClass: 'content', severity: 'advisory', primaryLocation: { kind: 'slot', id: contentSlotIds[0] as string }, evidence: [] }, anchoredVerdict: null }, at: b.env.now.value }],
+      verificationFindingStages: [],
+      assignmentTargets: [],
+      baselineTargetKinds: {},
+      requireOrdinaryCoverage: false,
+    });
+    if (!contentWholeFreeze.ok) throw new Error(`mixed content whole freeze failed: ${contentWholeFreeze.errors.join('; ')}`);
+    await content.freezeReviewAssignment(b.taskId, contentWholeFreeze.freeze);
+    await b.env.coordinator.completeWorkItem({ taskId: b.taskId, operationId: attemptContinuationOperationId(b.taskId, contentWholeWiId, contentWholeAttemptId, 'complete'), workItemId: contentWholeWiId, attemptId: contentWholeAttemptId, resultRefs: [refOfBlob('review_assignment_ledger', contentWholeFreeze.freeze.ledger)] });
+    expect(await content.maybeCompleteRound(b.taskId, contentRoundEvent.reviewRoundId)).toBe(true);
+    const contentSettlementWiId = deterministicContentSettlementWorkItemId(b.taskId, contentRoundEvent.reviewRoundId);
+    const contentSettlementLease = await leaseTargeted(b, contentSettlementWiId, 'worker-mixed-content-settlement');
+    const contentCompleted = (await b.readEvents(b.taskId)).find((event) => event.type === 'structured_review_round_completed' && event.reviewRoundId === contentRoundEvent.reviewRoundId);
+    if (contentCompleted === undefined || contentCompleted.type !== 'structured_review_round_completed') throw new Error('mixed content round did not complete');
+    const contentSettlement = await content.executeContentReviewSettlement({ taskId: b.taskId, commandId: contentSettlementLease.commandId ?? '', workItemId: contentSettlementWiId, commandKind: 'review_settlement', leaseEpoch: contentSettlementLease.leaseEpoch, authorityBaseRef: contentSettlementLease.authorityBaseRef, payloadRef: contentCompleted.coverageCoreRef });
+    expect(contentSettlement.kind).toBe('completed');
+    expect((await b.env.readProjection(b.taskId)).findings['x-1'].state).toBe('verified_closed');
+    expect((await b.readEvents(b.taskId)).some((event) => event.type === 'structured_finding_verified_closed' && event.findingId === 'x-1')).toBe(true);
     // R2-1: the settlement workitem's authority base binds the PREPARED round
     // blob (byte-identical to the round-2 review workitems' reviewRoundRef —
     // the finalize's blob), NOT a divergent rebuild of the verified projection.
@@ -2921,9 +3172,9 @@ describe('I-1 (review): mixed Findings route Map repair -> ContentRepairPlan bef
     if (round2WorkItem === undefined) throw new Error('no round-2 review workitem');
     const round2Base = (await b.resolver(b.taskId, round2WorkItem.authorityBaseRef)) as { reviewRoundRef: BlobRefV2 };
     expect(settleBase.reviewRoundRef.digest).toBe(round2Base.reviewRoundRef.digest);
-    // The blob exists on disk (GC resolveClosure walks the base-set child) and
-    // the GC completes cleanly over the ENTIRE task (activation + content
-    // round + repair blobs).
+    // The repaired content version must retain real content_commit validator
+    // provenance. A fabricated aggregate/custody ref makes the finalized
+    // manifest live but unwalkable and GC must fail closed.
     const { AuthoritativeReviewGc } = await import('../../storage/authoritative-review-gc');
     const gc = new AuthoritativeReviewGc(b.env.paths, b.env.blobStore, b.env.eventStore, b.env.publicationStore, {});
     await expect(gc.run()).resolves.toBeDefined();

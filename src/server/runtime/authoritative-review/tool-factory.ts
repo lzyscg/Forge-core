@@ -427,15 +427,10 @@ export function validateVerificationSubmission(input: {
   if (!targets.includes(targetKey)) {
     errors.push(`finding '${submission.findingId}' stage '${submission.repairStage}' is not a frozen verification target of this round`);
   }
-  // round/kind binding (wrong round). I-3 (adversarial review): an ADDRESSED
-  // finding opened in an EARLIER round of the same track is a legal
-  // verification target of the repair re-review round (the repair finding was
-  // opened in the PRIOR round; the current round's frozen verification stages
-  // carry it) — the exact-round binding applies only to NON-addressed findings.
-  const roundKind = roundKindOf(round);
-  if (finding.reviewContext.kind !== roundKind) {
-    errors.push(`finding '${submission.findingId}' binds ${finding.reviewContext.kind} context, not ${roundKind}`);
-  }
+  // The frozen finding-stage target owns verification authority. A mixed
+  // Finding is opened in a Map round and later verified for its content stage
+  // in a Content round, so opening-context kind is not a legal stage filter.
+  // Exact-round binding applies only to non-addressed findings.
   if (finding.state !== 'addressed' && finding.reviewContext.roundId !== roundIdOf(round)) {
     errors.push(`finding '${submission.findingId}' binds round '${finding.reviewContext.roundId}', not '${roundIdOf(round)}'`);
   }

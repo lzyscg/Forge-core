@@ -341,23 +341,23 @@ export async function resolveContentRoundFromCore(
     ? (snapshot.relations as MapRelationV2[])
     : [];
   const plan = planContentReview({ slots, relations, reviewPolicy: deps.reviewPolicy, assignmentCount });
-  // Verification stages: I-3 (adversarial review) — the round's targets are
-  // the addressed-but-unverified CONTENT stages ACROSS rounds, not only
-  // same-round findings: a repair finding was OPENED in the PRIOR round and
-  // is addressed by the repair, so a round-scoped derivation never sees it
-  // and the round would Seal with the finding addressed-but-unverified.
-  // System-validator findings are verified by validator rerun, never the tool.
-  let verificationFindingStages: string[] = [];
-  if (state.findings !== undefined) {
-    for (const finding of Object.values(state.findings)) {
-      if (finding.reviewContext.kind !== 'content') continue;
-      if (finding.source === 'system_validator') continue;
-      for (const stage of finding.addressStages) {
-        if (!finding.verifiedStages.includes(stage)) verificationFindingStages.push(`${finding.findingId}:${stage}`);
-      }
-    }
-    verificationFindingStages.sort();
+  // Verification stages are stage-owned, not opening-round-owned. A mixed
+  // Finding is opened by the Map round, then its content stage is carried by
+  // the later ContentRepairPlan. Filtering by reviewContext.kind made that
+  // durable obligation disappear at the production tool boundary. Resolve
+  // exactly the current CONTENT stages, independent of where the Finding was
+  // first opened. System-validator findings are verified by validator rerun.
+  const verificationFindingStages: string[] = [];
+  const stageRoot = (await deps.resolver(taskId, core.findingStageRootRef)) as { entries?: readonly { findingId: string; repairStage: string; state: string }[] } | null;
+  for (const entry of stageRoot?.entries ?? []) {
+    if (entry.repairStage !== 'content' || entry.state !== 'committed') continue;
+    const finding = state.findings?.[entry.findingId];
+    if (finding === undefined || finding.source === 'system_validator') continue;
+    if (finding.defectClass !== 'content' && finding.defectClass !== 'mixed') continue;
+    if (!finding.addressStages.includes('content') || finding.verifiedStages.includes('content')) continue;
+    verificationFindingStages.push(`${finding.findingId}:content`);
   }
+  verificationFindingStages.sort();
   const assignmentSlotIds = plan.batches.flatMap((b) => b.slotIds);
   const assignmentRelationIds = plan.batches.flatMap((b) => b.relationIds);
   const mapSemanticDigest = state.currentMap?.mapSemanticDigest ?? '';
@@ -1073,6 +1073,31 @@ export class ContentReviewService {
     return out;
   }
 
+  /** Blocking Findings owned by this settlement. Besides Findings opened in
+   * the round, include Findings for which this round committed a verification
+   * verdict. This carries a cross-round `still_present` result into the next
+   * deterministic repair plan after its addressed stage is reset to pending. */
+  private async settlementBlockingFindings(taskId: string, roundId: string): Promise<import('./finding-service').ProjectedFindingLifecycleV2[]> {
+    const state = await this.deps.readProjection(taskId);
+    const events = await this.deps.readEvents(taskId);
+    const carriedIds = new Set<string>();
+    for (const event of events) {
+      if (event.type !== 'structured_finding_verification_recorded' && event.type !== 'structured_validator_finding_verification_recorded') continue;
+      if (event.reviewContext.kind === 'content' && event.reviewContext.roundId === roundId && event.repairStage === 'content') {
+        carriedIds.add(event.findingId);
+      }
+    }
+    const { projectFindingLifecycle } = await import('./finding-service');
+    const out: import('./finding-service').ProjectedFindingLifecycleV2[] = [];
+    for (const finding of Object.values(state.findings)) {
+      const openedHere = finding.reviewContext.kind === 'content' && finding.reviewContext.roundId === roundId;
+      if (!openedHere && !carriedIds.has(finding.findingId)) continue;
+      const lifecycle = projectFindingLifecycle({ finding });
+      if (lifecycle.blockingUnclosed) out.push(lifecycle);
+    }
+    return out;
+  }
+
   /** The §16.1 six-condition settlement gate over the round's committed facts,
    * verification records, observations, and findings (F2: enforced BEFORE the
    * validator runs so a stub review_settlement validator can never mask a
@@ -1760,13 +1785,16 @@ export class ContentReviewService {
       const findings = this.deps.findingService
         ? await this.deps.findingService.projectRoundFindings(input.taskId, roundId)
         : [];
+      const settlementBlockingFindings = this.deps.findingService
+        ? await this.settlementBlockingFindings(input.taskId, roundId)
+        : findings.filter((finding) => finding.blockingUnclosed);
       // §16.1 six-condition gate (design §16.1 / spec §13.2 step 8): a
       // reject/violated fact WITHOUT a closed finding, a missing verification
       // record, an incomplete assignment/observation, or an unbound policy
       // blocks settlement — NEVER Seal (F2: the pure gate is enforced here
       // BEFORE the validator runs, so a stub validator cannot mask it).
       const gate = await this.evaluateSettlementGate(input.taskId, roundId, plannedEvent, coverage, plan, findings);
-      const blockingFindings = findings.filter((f) => f.blockingUnclosed);
+      const blockingFindings = settlementBlockingFindings;
       if (!gate.complete || blockingFindings.length > 0) {
         // Any blocking Finding creates repair, NEVER Seal (Task 19 owns the
         // deterministic plan creation; without the repair seam the settlement
@@ -1790,7 +1818,7 @@ export class ContentReviewService {
       const settlementRun = await this.runSettlementValidator(input, base.reviewCoverageCoreRef, coverageCore, manifest, plan, coverage);
       await this.persistEngineOutputs(input.taskId, settlementRun.run, settlementRun.store);
       if (settlementRun.run.aggregate.outcome === 'blocking_invalid') {
-        const blockingFindings = findings.filter((f) => f.blockingUnclosed);
+        const blockingFindings = settlementBlockingFindings;
         if (this.deps.repairService !== undefined && blockingFindings.length > 0) {
           return await this.deps.repairService.createRepairPlanFromSettlement({
             taskId: input.taskId,

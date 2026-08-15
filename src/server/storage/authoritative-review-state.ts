@@ -1876,6 +1876,10 @@ function applyFindingVerification(
   if (event.verdict === 'resolved') {
     finding.verifiedStages.push(event.repairStage);
   } else {
+    // `still_present` is a completed verification whose result is a new
+    // repair obligation. Reset only the rejected stage to pending so the same
+    // settlement creates the deterministic successor RepairPlan.
+    finding.addressStages = finding.addressStages.filter((stage) => stage !== event.repairStage);
     finding.state = 'open';
   }
 }
