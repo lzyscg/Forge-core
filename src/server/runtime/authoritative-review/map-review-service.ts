@@ -133,6 +133,27 @@ export function buildMapReviewRound(input: {
   };
 }
 
+export type MapActivationPathV2 = 'initial' | 'repair' | 'migration';
+
+/**
+ * Task 20 explicit origin routing. A cycle ordinal is a budget counter, never
+ * a proxy for why a candidate exists: ordinary replacement builds can have an
+ * ordinal greater than one and still require content migration, while only a
+ * candidate frozen by `system_repair_finalize` takes the repair path.
+ */
+export function classifyMapActivationPath(input: {
+  producerKind: string;
+  hasCurrentMap: boolean;
+  hasCurrentManifest: boolean;
+}): MapActivationPathV2 {
+  if (!input.hasCurrentMap) {
+    if (input.hasCurrentManifest) throw new MapReviewError('MANIFEST_UNRESOLVED', 'a manifest cannot exist without an active Map');
+    return 'initial';
+  }
+  if (!input.hasCurrentManifest) throw new MapReviewError('MANIFEST_UNRESOLVED', 'an active replacement Map requires the current manifest');
+  return input.producerKind === 'system_repair_finalize' ? 'repair' : 'migration';
+}
+
 export function buildMapReviewCoverageCore(input: {
   mapReviewRoundId: string;
   candidateRef: BlobRefV2;
@@ -349,6 +370,9 @@ export interface MapReviewServiceDependencies {
   /** Task 19 repair seam: the blocking settlement creates the deterministic
    * MapRepairPlan; the repair-round clear creates the content re-review round. */
   repairService?: import('./repair-service').RepairService;
+  /** Task 20 ordinary replacement-Map content migration seam. */
+  migrationService?: Pick<import('./migration-service').MigrationServiceV2, 'beginMigration' | 'executePostMigrationSettlement'>;
+  slotPresenceOf?: (slotType: string) => import('../../authoritative-review/authority-types').SlotPresenceV2;
 }
 
 /** A prepared map-review publication payload (the domain_publish envelope input). */
@@ -406,6 +430,8 @@ export function mapReviewCarrier(carriers: Partial<MapReviewPublishCarriersV2> =
     activationValidatorAggregateRef: null,
     migrationSettlementCoreRef: null,
     migrationActivationDecisionRef: null,
+    migrationProvisionalManifestRef: null,
+    migrationFinalizerAggregateRef: null,
     taskContentRevision: null,
     manifestPhase: null,
     producerPlanSpecRef: null,
@@ -416,6 +442,7 @@ export function mapReviewCarrier(carriers: Partial<MapReviewPublishCarriersV2> =
     reviewWorkItems: null,
     mixedContentRepair: null,
     verifiedClosedFindingIds: null,
+    migrationProgress: null,
     ...carriers,
   };
 }
@@ -570,9 +597,11 @@ function registerMapReviewSettlement(registry: PublicationIntentRegistry): void 
     payloadFamily: 'domain_publish',
     expectedEventTypes: [
       'structured_map_review_round_settled',
+      'structured_migration_validation_settlement_completed',
       'structured_map_activated',
       'structured_content_revision_committed',
       'structured_review_round_planned',
+      'structured_map_repair_plan_started',
       'structured_content_repair_plan_started',
       'structured_repair_grant_issued',
       'structured_work_item_created',
@@ -609,6 +638,21 @@ function registerMapReviewSettlement(registry: PublicationIntentRegistry): void 
         type: 'structured_finding_verified_closed' as const,
         findingId,
       }));
+      if (mr.migrationSettlementCoreRef !== null || mr.migrationActivationDecisionRef !== null) {
+        need(mr.migrationSettlementCoreRef, 'migrationSettlementCoreRef');
+        need(mr.migrationActivationDecisionRef, 'migrationActivationDecisionRef');
+        need(mr.migrationProvisionalManifestRef, 'migrationProvisionalManifestRef');
+        need(mr.migrationFinalizerAggregateRef, 'migrationFinalizerAggregateRef');
+        envelopes.push({
+          protocolVersion: 2,
+          at,
+          type: 'structured_migration_validation_settlement_completed',
+          settlementCoreRef: mr.migrationSettlementCoreRef,
+          provisionalManifestRef: mr.migrationProvisionalManifestRef,
+          finalizerAggregateRef: mr.migrationFinalizerAggregateRef,
+          activationDecisionRef: mr.migrationActivationDecisionRef,
+        });
+      }
       envelopes.push(
         {
           protocolVersion: 2,
@@ -772,6 +816,44 @@ function registerMapReviewSettlement(registry: PublicationIntentRegistry): void 
             grantKind: repair.grantKind,
           });
         }
+      }
+      if (mr.outcome === 'map_repair' && mr.mixedContentRepair !== null) {
+        const repair = mr.mixedContentRepair;
+        need(repair.track, 'mixedContentRepair.track');
+        if (repair.track !== 'map') throw new NotRebuildableError('map_review_settlement', ['map_repair route requires a map RepairPlan']);
+        need(repair.repairPlanId, 'mixedContentRepair.repairPlanId');
+        need(repair.planRevisionId, 'mixedContentRepair.planRevisionId');
+        need(repair.repairPlanSpecRef, 'mixedContentRepair.repairPlanSpecRef');
+        need(repair.successor, 'mixedContentRepair.successor');
+        need(repair.grantSpecId, 'mixedContentRepair.grantSpecId');
+        envelopes.push({
+          protocolVersion: 2,
+          at,
+          type: 'structured_map_repair_plan_started',
+          repairPlanId: repair.repairPlanId,
+          planRevisionId: repair.planRevisionId,
+          repairPlanSpecRef: repair.repairPlanSpecRef,
+          sourceValidationReceiptRef: repair.sourceValidationReceiptRef,
+        });
+        const rw = repair.successor;
+        envelopes.push({
+          protocolVersion: 2, at, type: 'structured_work_item_created',
+          workItemId: rw.workItemId, kind: rw.kind, roleBinding: rw.roleBinding,
+          agentExecutionKind: rw.agentExecutionKind, sessionKind: rw.sessionKind,
+          roundId: rw.roundId, logicalAssignmentId: rw.logicalAssignmentId,
+          reviewAssignmentId: rw.reviewAssignmentId, grantSpecRef: rw.grantSpecRef,
+          inputArtifactDeliveryId: rw.inputArtifactDeliveryId,
+          authorityBaseRef: rw.authorityBaseRef, payloadRef: rw.payloadRef,
+          initialLeaseEpoch: rw.initialLeaseEpoch, maxAutomaticRetries: rw.maxAutomaticRetries,
+        });
+        need(rw.grantSpecRef, 'mixedContentRepair.successor.grantSpecRef');
+        need(repair.workItemId, 'mixedContentRepair.workItemId');
+        need(repair.grantKind, 'mixedContentRepair.grantKind');
+        envelopes.push({
+          protocolVersion: 2, at, type: 'structured_repair_grant_issued',
+          grantSpecId: repair.grantSpecId, grantSpecRef: rw.grantSpecRef,
+          workItemId: repair.workItemId, grantKind: repair.grantKind,
+        });
       }
       envelopes.push(
         {
@@ -1318,6 +1400,33 @@ export class MapReviewService {
     payloadRef: BlobRefV2;
   }): Promise<{ kind: 'completed'; resultRefs: readonly BlobRefV2[] } | { kind: 'retryable_failure'; failureCode: string; failureDigest: string }> {
     try {
+      // Task 20's closed `post_migration` stage is distinguished by the
+      // system-owned payload kind. Ordinary initial settlement payloads are
+      // map_review_coverage_core; no Agent-controlled flag selects the stage.
+      if (input.payloadRef.kind === 'migration_validation_plan_spec') {
+        if (this.deps.migrationService === undefined) throw new MapReviewError('MIGRATION_SEAM_MISSING', 'post-migration settlement requires the migration service');
+        const migrationBase = (await this.deps.resolver(input.taskId, input.authorityBaseRef)) as {
+          reviewCoverageCoreRef: BlobRefV2 | null;
+          reviewRoundRef: BlobRefV2 | null;
+        } | null;
+        if (migrationBase === null || migrationBase.reviewCoverageCoreRef === null || migrationBase.reviewRoundRef === null) {
+          throw new MapReviewError('GRANT_STALE', 'post-migration settlement authority lacks review coverage/round refs');
+        }
+        const outcome = await this.deps.migrationService.executePostMigrationSettlement({
+          taskId: input.taskId,
+          commandId: input.commandId,
+          workItemId: input.workItemId,
+          leaseEpoch: input.leaseEpoch,
+          authorityBaseRef: input.authorityBaseRef,
+          planSpecRef: input.payloadRef,
+          reviewCoverageCoreRef: migrationBase.reviewCoverageCoreRef,
+          reviewRoundRef: migrationBase.reviewRoundRef,
+          settlementOperationId: attemptContinuationOperationId(input.taskId, input.workItemId, input.commandId, 'complete'),
+        });
+        return outcome.kind === 'completed'
+          ? { kind: 'completed', resultRefs: outcome.resultRefs }
+          : outcome;
+      }
       const project = await this.deps.readProjection(input.taskId);
       const wi = project.workItems[input.workItemId];
       if (wi === undefined) throw new MapReviewError('WORK_ITEM_NOT_FOUND', `no workitem '${input.workItemId}'`);
@@ -1395,6 +1504,12 @@ export class MapReviewService {
         return { kind: 'retryable_failure', failureCode: 'VALIDATOR_INFRASTRUCTURE_FAILURE', failureDigest: canonicalJsonSha256({ commandId: input.commandId, aggregateRef: settlementRun.run.aggregateRef }) };
       }
 
+      const activationPath = classifyMapActivationPath({
+        producerKind: candidateCore.candidateProvenanceWithoutValidation.producerKind,
+        hasCurrentMap: project.currentMap !== null,
+        hasCurrentManifest: project.currentManifest !== null,
+      });
+
       // Segment 2: MapReviewSettlementCore.
       const settlementCore = buildMapReviewSettlementCore({
         coverageCoreRef: base.reviewCoverageCoreRef,
@@ -1405,12 +1520,14 @@ export class MapReviewService {
       // Segment 3: ProposedMapCore.
       const scaffoldId = `scaffold-${candidate.candidateId}`;
       const proposedMapId = `map-${canonicalJsonSha256({ candidateId: candidate.candidateId, label: 'proposed' }).slice(0, 24)}`;
+      const proposedSupersedesMapId = activationPath === 'initial' ? null : project.currentMap?.mapId ?? null;
+      const proposedMapRevision = activationPath === 'initial' ? 1 : (project.currentMap?.mapRevision ?? 0) + 1;
       const proposedCore = buildProposedMapCore({
         scaffoldId,
         proposedMapId,
-        supersedesMapId: null,
+        supersedesMapId: proposedSupersedesMapId,
         sourceCandidateRef: base.mapCandidateRef,
-        mapRevision: 1,
+        mapRevision: proposedMapRevision,
         templateSnapshotHash: candidateCore.templateSnapshotHash,
         nodes: candidateCore.nodes,
         relations: candidateCore.relations,
@@ -1452,11 +1569,11 @@ export class MapReviewService {
       const snapshot = buildMapSnapshot({
         scaffoldId,
         mapId: proposedMapId,
-        supersedesMapId: null,
+        supersedesMapId: proposedSupersedesMapId,
         sourceCandidateId: candidate.candidateId,
         proposedMapCoreRef,
         mapReviewBundleRef: bundleRef,
-        mapRevision: 1,
+        mapRevision: proposedMapRevision,
         mapSemanticDigest: proposedCore.mapSemanticDigest,
         positionGraphDigest: proposedCore.positionGraphDigest,
         relationGraphDigest: proposedCore.relationGraphDigest,
@@ -1467,16 +1584,61 @@ export class MapReviewService {
       });
       const snapshotRef = await this.deps.facade.prepareBlob(input.taskId, 'map_snapshot', snapshot);
 
-      // Task 19 repair-round detection: a round after the initial one reviews
-      // a REPAIRED candidate — its activation must NOT regenerate content.
-      const plannedEvents = await this.deps.readEvents(input.taskId);
-      const plannedRound = plannedEvents.find(
-        (e): e is Extract<AuthoritativeReviewEventV2, { type: 'structured_map_review_round_planned' }> =>
-          e.type === 'structured_map_review_round_planned' && e.mapReviewRoundId === round.mapReviewRoundId,
-      );
-      const isRepairRound = plannedRound !== undefined && plannedRound.mapCycleOrdinal > 1;
-      const supersedesMapId = isRepairRound ? (project.currentMap?.mapId ?? null) : null;
-      const mapRevision = isRepairRound ? (project.currentMap?.mapRevision ?? 0) + 1 : 1;
+      const isRepairRound = activationPath === 'repair';
+      const supersedesMapId = proposedSupersedesMapId;
+      const mapRevision = proposedMapRevision;
+
+      // Ordinary Map replacements must pass through Task 20 migration. They
+      // are never allowed to fall through to the initial baseline-unset path.
+      if (activationPath === 'migration') {
+        if (this.deps.migrationService === undefined || project.currentMap === null || project.currentManifest === null) {
+          throw new MapReviewError('MIGRATION_SEAM_MISSING', 'ordinary replacement Map activation requires the Task 20 migration seam');
+        }
+        const sourceManifest = (await this.deps.resolver(input.taskId, project.currentManifest.contentRevisionManifestRef)) as ContentRevisionManifestV2 | null;
+        if (sourceManifest === null || typeof sourceManifest !== 'object') throw new MapReviewError('MANIFEST_UNRESOLVED', 'source migration manifest is unresolvable');
+        const sourceEntries = new Map(sourceManifest.entries.map((entry) => [entry.slotId, entry.versionRef]));
+        const targetSlots: import('./migration-service').MigrationTargetSlotV2[] = [];
+        for (const node of candidateCore.nodes.filter((entry) => entry.contentBearing).sort((a, b) => a.slotId.localeCompare(b.slotId))) {
+          const sourceVersionRef = sourceEntries.get(node.slotId) ?? null;
+          const sourceVersion = sourceVersionRef === null
+            ? null
+            : (await this.deps.resolver(input.taskId, sourceVersionRef)) as SlotContentVersionV2 | null;
+          if (sourceVersionRef !== null && (sourceVersion === null || typeof sourceVersion !== 'object')) {
+            throw new MapReviewError('MANIFEST_UNRESOLVED', `source migration version '${node.slotId}' is unresolvable`);
+          }
+          const mixed = authoritativeBlocking.find((finding) => {
+            if (finding.defectClass !== 'mixed' || finding.verifiedStages.includes('content')) return false;
+            const projected = project.findings[finding.findingId];
+            return projected?.primaryLocation.id === node.slotId;
+          });
+          targetSlots.push({
+            slotId: node.slotId,
+            source: sourceVersionRef === null ? null : { ref: sourceVersionRef, value: sourceVersion as SlotContentVersionV2 },
+            targetContentSchemaDigest: contentSchemaDigestOf(node.slotType),
+            targetPresence: this.deps.slotPresenceOf?.(node.slotType) ?? 'required',
+            mixedFindingStageRootRef: mixed === undefined ? null : coverageCore.findingStageRootRef,
+          });
+        }
+        const begun = await this.deps.migrationService.beginMigration({
+          taskId: input.taskId,
+          commandId: input.commandId,
+          workItemId: input.workItemId,
+          leaseEpoch: input.leaseEpoch,
+          authorityBaseRef: input.authorityBaseRef,
+          mapReviewSettlementCoreRef: settlementCoreRef,
+          reviewCoverageCoreRef: base.reviewCoverageCoreRef,
+          reviewRoundRef: base.reviewRoundRef,
+          candidateRef: base.mapCandidateRef,
+          proposedMapCoreRef,
+          sourceManifestRef: project.currentManifest.contentRevisionManifestRef,
+          sourceMapRef: project.currentMap.mapSnapshotRef,
+          targetMapRef: snapshotRef,
+          impactClosureRef: coverageCore.findingStageRootRef,
+          targetSlots,
+          batchSize: this.deps.reviewPolicy.contentBatchTargetSlots,
+        });
+        return { kind: 'completed', resultRefs: begun.resultRefs };
+      }
 
       // Segment 7: the manifest. Initial activation -> baseline-unset content;
       // repaired activation -> the CURRENT manifest is unchanged (no

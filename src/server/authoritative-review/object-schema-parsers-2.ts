@@ -474,7 +474,7 @@ function parseMigrationIntentDecision(value: unknown, where: string): ContentMig
       findingStageRootRef: rfKind(o.findingStageRootRef, 'finding_stage_root', 'findingStageRootRef'),
     } as ContentMigrationIntentCoreV2['decisions'][number];
   }
-  if (action === 'unset') {
+  if (action === 'new_or_schema_reset') {
     ex(o, ['action', 'slotId', 'unsetReason', 'sourceVersionRef'], where);
     if (o.unsetReason !== 'new_slot' && o.unsetReason !== 'schema_reset') throw new SchemaError('unset decision unsetReason must be new_slot|schema_reset');
     return {
@@ -484,7 +484,7 @@ function parseMigrationIntentDecision(value: unknown, where: string): ContentMig
       sourceVersionRef: rfn(o.sourceVersionRef, 'sourceVersionRef'),
     } as ContentMigrationIntentCoreV2['decisions'][number];
   }
-  throw new SchemaError(`${where}.action must be inherit_or_validate|carry_unset|rewrite_required|unset`);
+  throw new SchemaError(`${where}.action must be inherit_or_validate|carry_unset|rewrite_required|new_or_schema_reset`);
 }
 
 export function parseContentMigrationIntentCore(value: unknown): ContentMigrationIntentCoreV2 {

@@ -356,7 +356,7 @@ describe('migration routing (§11.5)', () => {
         { action: 'inherit_or_validate', slotId: 's1', sourceVersionRef: sourceRef, compatibilityProofRef: proofRef },
         { action: 'carry_unset', slotId: 's2', sourceVersionRef: sourceRef, compatibilityProofRef: proofRef },
         { action: 'rewrite_required', slotId: 's3', sourceVersionRef: sourceRef, rewriteReason: 'mixed_rewrite_required', findingStageRootRef: rootRef },
-        { action: 'unset', slotId: 's4', unsetReason: 'new_slot', sourceVersionRef: null },
+        { action: 'new_or_schema_reset', slotId: 's4', unsetReason: 'new_slot', sourceVersionRef: null },
       ]),
     ).not.toThrow();
     // rewrite_required without its finding stage root

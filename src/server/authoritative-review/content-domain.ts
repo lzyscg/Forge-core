@@ -346,8 +346,8 @@ export function validateMigrationIntentDecisions(decisions: readonly MigrationIn
     if (d.action === 'rewrite_required' && (('findingStageRootRef' in d && d.findingStageRootRef === null) || !('findingStageRootRef' in d))) {
       throw new SchemaError('rewrite_required decision requires a findingStageRootRef');
     }
-    if (d.action === 'unset' && d.unsetReason !== 'new_slot' && d.unsetReason !== 'schema_reset') {
-      throw new SchemaError('unset decision unsetReason must be new_slot|schema_reset');
+    if (d.action === 'new_or_schema_reset' && d.unsetReason !== 'new_slot' && d.unsetReason !== 'schema_reset') {
+      throw new SchemaError('new_or_schema_reset decision unsetReason must be new_slot|schema_reset');
     }
   }
 }

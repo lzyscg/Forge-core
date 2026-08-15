@@ -617,7 +617,7 @@ function parseSuccessorBuildStartCarrier(value: unknown): MapBuildPublishCarrier
 function parseMapReviewPublishCarriers(value: unknown): MapReviewPublishCarriersV2 | null {
   if (value === null || value === undefined) return null;
   const o = rec(value, 'mapReview');
-  ex(o, [
+  const mapReviewKeys = [
     'assignmentId', 'mapReviewRoundId', 'workItemId', 'attemptId', 'reviewAssignmentId',
     'source', 'ledgerRef', 'coverageTargetCount', 'findingCount', 'observations', 'verificationRecords',
     'coverageCoreRef', 'settlementCoreRef', 'outcome',
@@ -626,7 +626,12 @@ function parseMapReviewPublishCarriers(value: unknown): MapReviewPublishCarriers
     'migrationSettlementCoreRef', 'migrationActivationDecisionRef',
     'taskContentRevision', 'manifestPhase', 'producerPlanSpecRef', 'priorManifestRef',
     'successor', 'terminal', 'contentRound', 'reviewWorkItems', 'mixedContentRepair', 'verifiedClosedFindingIds',
-  ], 'mapReview');
+  ];
+  const extendedMapReviewKeys = [...mapReviewKeys];
+  if (Object.prototype.hasOwnProperty.call(o, 'migrationProvisionalManifestRef')) extendedMapReviewKeys.push('migrationProvisionalManifestRef');
+  if (Object.prototype.hasOwnProperty.call(o, 'migrationFinalizerAggregateRef')) extendedMapReviewKeys.push('migrationFinalizerAggregateRef');
+  if (Object.prototype.hasOwnProperty.call(o, 'migrationProgress')) extendedMapReviewKeys.push('migrationProgress');
+  ex(o, extendedMapReviewKeys, 'mapReview');
   const source = o.source === null ? null : str(o.source, 'mapReview.source');
   if (source !== null && source !== 'batch' && source !== 'whole_map_observation') {
     throw new SchemaError('mapReview.source must be batch|whole_map_observation|null');
@@ -665,6 +670,8 @@ function parseMapReviewPublishCarriers(value: unknown): MapReviewPublishCarriers
     activationValidatorAggregateRef: rfn(o.activationValidatorAggregateRef, 'mapReview.activationValidatorAggregateRef'),
     migrationSettlementCoreRef: rfn(o.migrationSettlementCoreRef, 'mapReview.migrationSettlementCoreRef'),
     migrationActivationDecisionRef: rfn(o.migrationActivationDecisionRef, 'mapReview.migrationActivationDecisionRef'),
+    migrationProvisionalManifestRef: o.migrationProvisionalManifestRef === undefined ? null : rfn(o.migrationProvisionalManifestRef, 'mapReview.migrationProvisionalManifestRef'),
+    migrationFinalizerAggregateRef: o.migrationFinalizerAggregateRef === undefined ? null : rfn(o.migrationFinalizerAggregateRef, 'mapReview.migrationFinalizerAggregateRef'),
     taskContentRevision: o.taskContentRevision === null ? null : onn(o.taskContentRevision, 'mapReview.taskContentRevision'),
     manifestPhase,
     producerPlanSpecRef: rfn(o.producerPlanSpecRef, 'mapReview.producerPlanSpecRef'),
@@ -677,7 +684,41 @@ function parseMapReviewPublishCarriers(value: unknown): MapReviewPublishCarriers
       : (o.reviewWorkItems as unknown[]).map((v, i) => parseSuccessorWorkItemCarrier(v)).filter((s): s is SuccessorWorkItemCarrierV2 => s !== null),
     mixedContentRepair: parseRepairPublishCarriers(o.mixedContentRepair),
     verifiedClosedFindingIds: o.verifiedClosedFindingIds === null || o.verifiedClosedFindingIds === undefined ? null : sa(o.verifiedClosedFindingIds, 'mapReview.verifiedClosedFindingIds'),
+    migrationProgress: parseMigrationProgressCarrier(o.migrationProgress),
   };
+}
+
+function parseMigrationProgressCarrier(value: unknown): import('./authority-types').MigrationProgressPublishCarrierV2 | null {
+  if (value === null || value === undefined) return null;
+  const o = rec(value, 'mapReview.migrationProgress');
+  ex(o, ['stage', 'migrationValidationPlanId', 'intentCoreRef', 'planSpecRef', 'batchOrdinal', 'batchResultRootRef', 'batchOutcome', 'successor', 'terminal'], 'mapReview.migrationProgress');
+  const stage = str(o.stage, 'mapReview.migrationProgress.stage');
+  if (stage !== 'initial' && stage !== 'batch') throw new SchemaError('migrationProgress.stage must be initial|batch');
+  const batchOutcome = o.batchOutcome === null ? null : str(o.batchOutcome, 'mapReview.migrationProgress.batchOutcome');
+  if (batchOutcome !== null && !['clear', 'content_repair', 'map_repair', 'infrastructure_failure'].includes(batchOutcome)) {
+    throw new SchemaError('migrationProgress.batchOutcome unknown');
+  }
+  const successor = parseSuccessorWorkItemCarrier(o.successor);
+  const terminal = parseSystemCommandTerminalCarrier(o.terminal);
+  if (successor === null || terminal === null) throw new SchemaError('migrationProgress requires successor and terminal');
+  const out = {
+    stage: stage as 'initial' | 'batch',
+    migrationValidationPlanId: o.migrationValidationPlanId === null ? null : str(o.migrationValidationPlanId, 'migrationValidationPlanId'),
+    intentCoreRef: rfn(o.intentCoreRef, 'migrationProgress.intentCoreRef'),
+    planSpecRef: rfKind(o.planSpecRef, 'migration_validation_plan_spec', 'migrationProgress.planSpecRef'),
+    batchOrdinal: o.batchOrdinal === null ? null : onn(o.batchOrdinal, 'migrationProgress.batchOrdinal'),
+    batchResultRootRef: o.batchResultRootRef === null ? null : rfKind(o.batchResultRootRef, 'migration_validation_batch_result', 'migrationProgress.batchResultRootRef'),
+    batchOutcome: batchOutcome as import('./authority-types').MigrationBatchRouteOutcomeV2 | null,
+    successor,
+    terminal,
+  };
+  if (stage === 'initial' && (out.migrationValidationPlanId === null || out.intentCoreRef === null || out.batchOrdinal !== null || out.batchResultRootRef !== null || out.batchOutcome !== null)) {
+    throw new SchemaError('initial migrationProgress carriers are inconsistent');
+  }
+  if (stage === 'batch' && (out.migrationValidationPlanId !== null || out.intentCoreRef !== null || out.batchOrdinal === null || out.batchResultRootRef === null || out.batchOutcome === null)) {
+    throw new SchemaError('batch migrationProgress carriers are inconsistent');
+  }
+  return out;
 }
 
 /**

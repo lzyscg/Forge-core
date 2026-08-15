@@ -637,7 +637,7 @@ export type MigrationIntentDecisionV2 =
       findingStageRootRef: BlobRefV2;
     }
   | {
-      action: 'unset';
+      action: 'new_or_schema_reset';
       slotId: string;
       unsetReason: 'new_slot' | 'schema_reset';
       sourceVersionRef: BlobRefV2 | null;
@@ -1767,6 +1767,19 @@ export interface MapReviewObservationCarrierV2 {
   childObservationRefs: readonly BlobRefV2[];
 }
 
+/** Task 20 persistent migration command carrier (initial or one batch). */
+export interface MigrationProgressPublishCarrierV2 {
+  stage: 'initial' | 'batch';
+  migrationValidationPlanId: string | null;
+  intentCoreRef: BlobRefV2 | null;
+  planSpecRef: BlobRefV2;
+  batchOrdinal: number | null;
+  batchResultRootRef: BlobRefV2 | null;
+  batchOutcome: MigrationBatchRouteOutcomeV2 | null;
+  successor: SuccessorWorkItemCarrierV2;
+  terminal: SystemCommandTerminalCarrierV2;
+}
+
 /**
  * Task 16 map-review publication carriers (deterministic rebuild; each carrier
  * is null when a publish branch does not use it). Covers the three Task 16
@@ -1805,6 +1818,8 @@ export interface MapReviewPublishCarriersV2 {
   activationValidatorAggregateRef: BlobRefV2 | null;
   migrationSettlementCoreRef: BlobRefV2 | null;
   migrationActivationDecisionRef: BlobRefV2 | null;
+  migrationProvisionalManifestRef: BlobRefV2 | null;
+  migrationFinalizerAggregateRef: BlobRefV2 | null;
   // --- content_revision_committed (baseline_unset) ---
   taskContentRevision: number | null;
   manifestPhase: 'baseline_unset' | 'provisional' | 'finalized' | null;
@@ -1828,6 +1843,8 @@ export interface MapReviewPublishCarriersV2 {
   mixedContentRepair: RepairPublishCarriersV2 | null;
   /** Blocking findings closed by this system settlement before activation. */
   verifiedClosedFindingIds: readonly string[] | null;
+  /** Task 20 initial/batch progress; post-migration uses the activation refs above. */
+  migrationProgress: MigrationProgressPublishCarrierV2 | null;
 }
 
 /**

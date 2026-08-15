@@ -389,6 +389,26 @@ export function validateRepairSuccessorCarrier(
   return errors;
 }
 
+/** Task 20: system migration successors carry no Agent grant, but both their
+ * payload and prepared AuthorityBase must bind the exact immutable plan. */
+export function validateMigrationSuccessorCarrier(
+  carrier: SuccessorWorkItemCarrierV2,
+  planSpecRef: BlobRefV2,
+  preparedAuthorityBaseRef: BlobRefV2,
+): string[] {
+  const errors = validateSuccessorCarrier(carrier);
+  if (carrier.kind !== 'system_migration_validation_batch' && carrier.kind !== 'system_review_settlement') {
+    errors.push('migration successor kind must be system_migration_validation_batch|system_review_settlement');
+  }
+  if (!sameExactRef(carrier.payloadRef, planSpecRef)) {
+    errors.push('migration successor payloadRef must be the exact migration validation plan spec ref');
+  }
+  if (!sameExactRef(carrier.authorityBaseRef, preparedAuthorityBaseRef)) {
+    errors.push('migration successor authorityBaseRef must be the prepared migration base ref');
+  }
+  return errors;
+}
+
 /** workitem kind -> system command kind (§17.2 six closed kinds). */
 const SYSTEM_COMMAND_KIND_BY_WORK_ITEM: Readonly<Record<string, SystemCommandKindV2>> = {
   system_map_finalize: 'map_finalize',

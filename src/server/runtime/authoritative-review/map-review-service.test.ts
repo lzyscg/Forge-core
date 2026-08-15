@@ -46,7 +46,7 @@ import {
   registerMapBuildPublicationHandlers,
   type BuildRelationPolicyV2,
 } from './map-build-service';
-import { createMapReviewSettlementSystemCommandHandler, MapReviewService, buildMapReviewRound, registerMapReviewPublicationHandlers, deterministicSettlementWorkItemId, contentSchemaDigestOf } from './map-review-service';
+import { classifyMapActivationPath, createMapReviewSettlementSystemCommandHandler, MapReviewService, buildMapReviewRound, registerMapReviewPublicationHandlers, deterministicSettlementWorkItemId, contentSchemaDigestOf } from './map-review-service';
 import { ReviewCoordinatorV2, reviewAssignmentIdOf, reviewWholeAssignmentId, reviewBatchWorkItemId, reviewWholeWorkItemId, buildReviewObservationGrantSpec } from './review-coordinator';
 import { planMapReview, type MapReviewPlanV2 } from './observation-planner';
 import { buildReviewAssignmentFreeze, type ReviewDraftRecordV2, type FrozenReviewAssignmentV2 } from './tool-factory';
@@ -57,6 +57,15 @@ import { validateWorkItemCarry } from './authority-base';
 const PROFILE = fullProfileForTests();
 const PROFILE_BODY = buildAuthoritativeReviewTestProfileBody();
 const REGISTRY = new ValidatorRegistry(AUTHORITATIVE_REVIEW_BUILTIN_VALIDATOR_ENTRIES);
+
+describe('Task 20 explicit Map activation origin', () => {
+  it('routes ordinary replacement rounds to migration without using cycle ordinal as a proxy', () => {
+    expect(classifyMapActivationPath({ producerKind: 'system_map_finalize', hasCurrentMap: false, hasCurrentManifest: false })).toBe('initial');
+    expect(classifyMapActivationPath({ producerKind: 'system_map_finalize', hasCurrentMap: true, hasCurrentManifest: true })).toBe('migration');
+    expect(classifyMapActivationPath({ producerKind: 'system_repair_finalize', hasCurrentMap: true, hasCurrentManifest: true })).toBe('repair');
+    expect(() => classifyMapActivationPath({ producerKind: 'system_map_finalize', hasCurrentMap: true, hasCurrentManifest: false })).toThrow(/manifest/);
+  });
+});
 
 /* Test-only validator entries for the map-review settlement/activation
  * triggers (no installed builtin covers them; the map-build completeness

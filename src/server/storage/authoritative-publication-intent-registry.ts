@@ -229,6 +229,8 @@ export function publicationPayloadChildRefs(payload: PublicationOperationPayload
         if (mr.activationValidatorAggregateRef !== null) refs.push(mr.activationValidatorAggregateRef);
         if (mr.migrationSettlementCoreRef !== null) refs.push(mr.migrationSettlementCoreRef);
         if (mr.migrationActivationDecisionRef !== null) refs.push(mr.migrationActivationDecisionRef);
+        if (mr.migrationProvisionalManifestRef !== null) refs.push(mr.migrationProvisionalManifestRef);
+        if (mr.migrationFinalizerAggregateRef !== null) refs.push(mr.migrationFinalizerAggregateRef);
         if (mr.producerPlanSpecRef !== null) refs.push(mr.producerPlanSpecRef);
         if (mr.priorManifestRef !== null) refs.push(mr.priorManifestRef);
         if (mr.terminal !== null) refs.push(mr.terminal.authorityBaseRef);
@@ -245,6 +247,12 @@ export function publicationPayloadChildRefs(payload: PublicationOperationPayload
             refs.push(s.authorityBaseRef, s.payloadRef);
             if (s.grantSpecRef !== null) refs.push(s.grantSpecRef);
           }
+        }
+        if (mr.migrationProgress !== null) {
+          refs.push(mr.migrationProgress.planSpecRef, mr.migrationProgress.successor.authorityBaseRef, mr.migrationProgress.successor.payloadRef, mr.migrationProgress.terminal.authorityBaseRef);
+          if (mr.migrationProgress.intentCoreRef !== null) refs.push(mr.migrationProgress.intentCoreRef);
+          if (mr.migrationProgress.batchResultRootRef !== null) refs.push(mr.migrationProgress.batchResultRootRef);
+          if (mr.migrationProgress.successor.grantSpecRef !== null) refs.push(mr.migrationProgress.successor.grantSpecRef);
         }
       }
       const cp = parsed.contentPlan;
