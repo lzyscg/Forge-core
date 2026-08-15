@@ -61,6 +61,7 @@ function publishPayload(overrides: Record<string, unknown> = {}): Record<string,
     publishKind: 'content_revision_commit',
     blobRefs: [],
     expectedResultIdentity: 'result-1',
+    mapBuild: null,
     ...overrides,
   };
 }

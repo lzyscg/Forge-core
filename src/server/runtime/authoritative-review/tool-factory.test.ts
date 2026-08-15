@@ -487,7 +487,7 @@ function legalBody(name: string): Record<string, unknown> {
     case 'complete_review_assignment':
       return { clientOperationId: 'op-1' };
     case 'append_map_candidate_chunk':
-      return { ordinal: 0, expectedFrontierDigest: 'a'.repeat(64), nodes: [{ slotId: 'n-1', slotType: 'doc', contentBearing: false }], relations: [], clientOperationId: 'op-1' };
+      return { ordinal: 1, expectedFrontierDigest: 'a'.repeat(64), nodes: [{ buildNodeKey: 'bn-1', slotType: 'doc', parentBuildNodeKey: null, documentOrder: 1, siblingOrder: 0, contentBearing: false }], relations: [], clientOperationId: 'op-1' };
     case 'finish_map_build':
       return { expectedChunkCount: 1, expectedFrontierDigest: 'a'.repeat(64), expectedRootCount: 1, clientOperationId: 'op-1' };
     case 'submit_map_patch':
@@ -531,10 +531,10 @@ describe('response-loss replay and conflict (per write family)', () => {
     const env = await makeEnv({ sessionKind: 'structure_chunk' });
     const tools = await env.factory.toolsFor(env.ctx);
     const chunk = tools.find((t) => t.name === 'append_map_candidate_chunk')!;
-    const body = { ordinal: 0, expectedFrontierDigest: 'a'.repeat(64), nodes: [{ slotId: 'n-1', slotType: 'doc', contentBearing: false }], relations: [], clientOperationId: 'op-c1' };
+    const body = { ordinal: 1, expectedFrontierDigest: 'a'.repeat(64), nodes: [{ buildNodeKey: 'bn-1', slotType: 'doc', parentBuildNodeKey: null, documentOrder: 1, siblingOrder: 0, contentBearing: false }], relations: [], clientOperationId: 'op-c1' };
     expect((await runTool(chunk, body)).ok).toBe(true);
     expect((await runTool(chunk, body)).ok).toBe(true);
-    const conflict = await runTool(chunk, { ...body, ordinal: 1 });
+    const conflict = await runTool(chunk, { ...body, ordinal: 2 });
     expect(conflict.code).toBe('OPERATION_CONFLICT');
   });
 

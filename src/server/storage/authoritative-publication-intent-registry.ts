@@ -194,8 +194,31 @@ export function publicationPayloadChildRefs(payload: PublicationOperationPayload
   // Strict closed-union parse first: unparseable values never get guessed.
   const parsed = parsePublicationOperationPayload(payload);
   switch (parsed.family) {
-    case 'domain_publish':
-      return [...parsed.blobRefs];
+    case 'domain_publish': {
+      const refs: BlobRefV2[] = [...parsed.blobRefs];
+      const mb = parsed.mapBuild;
+      if (mb !== null) {
+        if (mb.manifestRef !== null) refs.push(mb.manifestRef);
+        if (mb.contributionManifestRef !== null) refs.push(mb.contributionManifestRef);
+        if (mb.validationReceiptRef !== null) refs.push(mb.validationReceiptRef);
+        if (mb.validatorAggregateRef !== null) refs.push(mb.validatorAggregateRef);
+        if (mb.terminal !== null) refs.push(mb.terminal.authorityBaseRef);
+        if (mb.round !== null) {
+          refs.push(mb.round.candidateRef);
+          if (mb.round.contentRevisionManifestRef !== null) refs.push(mb.round.contentRevisionManifestRef);
+          if (mb.round.consumedOverrideRef !== null) refs.push(mb.round.consumedOverrideRef);
+        }
+        if (mb.successor !== null) {
+          refs.push(mb.successor.authorityBaseRef, mb.successor.payloadRef);
+          if (mb.successor.grantSpecRef !== null) refs.push(mb.successor.grantSpecRef);
+        }
+        if (mb.successorBuildStart !== null) {
+          refs.push(mb.successorBuildStart.mapBuildSpecRef);
+          if (mb.successorBuildStart.sourceValidationReceiptRef !== null) refs.push(mb.successorBuildStart.sourceValidationReceiptRef);
+        }
+      }
+      return refs;
+    }
     case 'lease_or_retry':
       return [parsed.authorityBaseRef];
     case 'lifecycle':

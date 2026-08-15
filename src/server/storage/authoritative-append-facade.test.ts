@@ -1001,6 +1001,7 @@ describe('store lock and fence behavior through the facade', () => {
       publishKind: 'content_revision_commit',
       blobRefs: [preparedRef],
       expectedResultIdentity: 'never-used',
+      mapBuild: null,
     } as const;
     // The handler removed the prepared object after publishing its pin.
     const prepared = await env.facade.preparePublication({

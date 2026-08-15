@@ -21,6 +21,8 @@ import {
   SchemaError,
   type AssignmentLedgerBlobV2,
   type AuthorityBaseSetV2,
+  type MapBuildPublishCarriersV2,
+  type MapReviewRoundPlanCarrierV2,
   type ProjectionCheckpointV2,
   type PublicationOperationPayloadV2,
   type RepairBatchGrantSpecV2,
@@ -33,6 +35,8 @@ import {
   type ReviewFactV2,
   type ReviewFactOriginV2,
   type SealValidationBundleV2,
+  type SuccessorWorkItemCarrierV2,
+  type SystemCommandTerminalCarrierV2,
   type ValidationReceiptV2,
   type ValidationWarningCustodyRootV2,
   type ValidationWarningRootV2,
@@ -241,6 +245,8 @@ const PUBLISH_KINDS = [
   'map_build_commit', 'map_candidate_commit', 'content_revision_commit', 'content_plan_finalize',
   'review_assignment_commit', 'map_review_settlement', 'content_review_settlement', 'map_activation',
   'generation_finalize', 'repair_finalize', 'migration_settlement', 'seal_publish',
+  // Task 15 map-build service: finish proposal + the two finalizer envelopes.
+  'map_build_finish', 'map_finalize_commit', 'map_finalize_rejected',
 ] as const;
 /** Task 10 extended builder set (see authority-types.ts union doc). */
 const EVENT_BUILDERS = [
@@ -265,7 +271,7 @@ export function parsePublicationOperationPayload(value: unknown): PublicationOpe
   const o = rec(value, 'publication_operation_payload');
   const family = str(o.family, 'publication_operation_payload.family');
   if (family === 'domain_publish') {
-    ex(o, ['family', 'operationId', 'taskId', 'publishKind', 'blobRefs', 'expectedResultIdentity'], 'publication_operation_payload');
+    ex(o, ['family', 'operationId', 'taskId', 'publishKind', 'blobRefs', 'expectedResultIdentity', 'mapBuild'], 'publication_operation_payload');
     if (!(PUBLISH_KINDS as readonly string[]).includes(str(o.publishKind, 'publishKind'))) throw new SchemaError('publishKind unknown');
     return {
       family,
@@ -274,6 +280,7 @@ export function parsePublicationOperationPayload(value: unknown): PublicationOpe
       publishKind: str(o.publishKind, 'publishKind') as PublicationOperationPayloadV2 extends infer _ ? never : never,
       blobRefs: rfa(o.blobRefs, 'blobRefs'),
       expectedResultIdentity: str(o.expectedResultIdentity, 'expectedResultIdentity'),
+      mapBuild: parseMapBuildPublishCarriers(o.mapBuild),
     } as PublicationOperationPayloadV2;
   }
   if (family === 'lease_or_retry') {
@@ -542,6 +549,108 @@ export function parsePublicationOperationPayload(value: unknown): PublicationOpe
     } as PublicationOperationPayloadV2;
   }
   throw new SchemaError('publication_operation_payload.family must be domain_publish|lease_or_retry|lifecycle|question|recovery|delete|artifact_publish');
+}
+
+/* ---- Task 15 domain_publish carriers (map-build service) --------- */
+function parseMapBuildPublishCarriers(value: unknown): MapBuildPublishCarriersV2 | null {
+  if (value === null) return null;
+  const o = rec(value, 'mapBuild');
+  ex(o, ['mapBuildId', 'chunkId', 'chunkOrdinal', 'parentFrontierDigest', 'expectedChunkCount', 'expectedRootCount', 'candidateId', 'candidateDigest', 'baseMapId', 'manifestRef', 'contributionManifestRef', 'validationReceiptRef', 'validatorAggregateRef', 'round', 'terminal', 'successor', 'successorBuildStart'], 'mapBuild');
+  return {
+    mapBuildId: o.mapBuildId === null ? null : str(o.mapBuildId, 'mapBuild.mapBuildId'),
+    chunkId: o.chunkId === null ? null : str(o.chunkId, 'mapBuild.chunkId'),
+    chunkOrdinal: o.chunkOrdinal === null ? null : onn(o.chunkOrdinal, 'mapBuild.chunkOrdinal'),
+    parentFrontierDigest: o.parentFrontierDigest === null ? null : hx(o.parentFrontierDigest, 'mapBuild.parentFrontierDigest'),
+    expectedChunkCount: o.expectedChunkCount === null ? null : onn(o.expectedChunkCount, 'mapBuild.expectedChunkCount'),
+    expectedRootCount: o.expectedRootCount === null ? null : onn(o.expectedRootCount, 'mapBuild.expectedRootCount'),
+    candidateId: o.candidateId === null ? null : str(o.candidateId, 'mapBuild.candidateId'),
+    candidateDigest: o.candidateDigest === null ? null : hx(o.candidateDigest, 'mapBuild.candidateDigest'),
+    baseMapId: o.baseMapId === null ? null : str(o.baseMapId, 'mapBuild.baseMapId'),
+    manifestRef: rfn(o.manifestRef, 'mapBuild.manifestRef'),
+    contributionManifestRef: rfn(o.contributionManifestRef, 'mapBuild.contributionManifestRef'),
+    validationReceiptRef: rfn(o.validationReceiptRef, 'mapBuild.validationReceiptRef'),
+    validatorAggregateRef: rfn(o.validatorAggregateRef, 'mapBuild.validatorAggregateRef'),
+    round: parseMapReviewRoundPlanCarrier(o.round),
+    terminal: parseSystemCommandTerminalCarrier(o.terminal),
+    successor: parseSuccessorWorkItemCarrier(o.successor),
+    successorBuildStart: parseSuccessorBuildStartCarrier(o.successorBuildStart),
+  };
+}
+
+function parseSuccessorBuildStartCarrier(value: unknown): MapBuildPublishCarriersV2['successorBuildStart'] {
+  if (value === null) return null;
+  const o = rec(value, 'successorBuildStart');
+  ex(o, ['mapBuildId', 'revision', 'supersedesMapBuildId', 'mapBuildSpecRef', 'sourceValidationReceiptRef'], 'successorBuildStart');
+  return {
+    mapBuildId: str(o.mapBuildId, 'successorBuildStart.mapBuildId'),
+    revision: onn(o.revision, 'successorBuildStart.revision'),
+    supersedesMapBuildId: o.supersedesMapBuildId === null ? null : str(o.supersedesMapBuildId, 'successorBuildStart.supersedesMapBuildId'),
+    mapBuildSpecRef: rfKind(o.mapBuildSpecRef, 'map_build_spec', 'successorBuildStart.mapBuildSpecRef'),
+    sourceValidationReceiptRef: rfn(o.sourceValidationReceiptRef, 'successorBuildStart.sourceValidationReceiptRef'),
+  };
+}
+
+function parseMapReviewRoundPlanCarrier(value: unknown): MapReviewRoundPlanCarrierV2 | null {
+  if (value === null) return null;
+  const o = rec(value, 'round');
+  ex(o, ['mapReviewRoundId', 'mapCycleOrdinal', 'candidateId', 'candidateRef', 'contentRevisionManifestRef', 'reviewPolicyDigest', 'coverageNodeCount', 'coverageRelationCount', 'assignmentCount', 'consumedOverrideRef'], 'round');
+  const candidateRef = rfKind(o.candidateRef, 'map_candidate', 'round.candidateRef');
+  const out: MapReviewRoundPlanCarrierV2 = {
+    mapReviewRoundId: str(o.mapReviewRoundId, 'round.mapReviewRoundId'),
+    mapCycleOrdinal: onn(o.mapCycleOrdinal, 'round.mapCycleOrdinal'),
+    candidateId: str(o.candidateId, 'round.candidateId'),
+    candidateRef,
+    contentRevisionManifestRef: o.contentRevisionManifestRef === null ? null : rfKind(o.contentRevisionManifestRef, 'content_revision_manifest', 'round.contentRevisionManifestRef'),
+    reviewPolicyDigest: hx(o.reviewPolicyDigest, 'round.reviewPolicyDigest'),
+    coverageNodeCount: onn(o.coverageNodeCount, 'round.coverageNodeCount'),
+    coverageRelationCount: onn(o.coverageRelationCount, 'round.coverageRelationCount'),
+    assignmentCount: onn(o.assignmentCount, 'round.assignmentCount'),
+    consumedOverrideRef: rfn(o.consumedOverrideRef, 'round.consumedOverrideRef'),
+  };
+  return out;
+}
+
+function parseSystemCommandTerminalCarrier(value: unknown): SystemCommandTerminalCarrierV2 | null {
+  if (value === null) return null;
+  const o = rec(value, 'terminal');
+  ex(o, ['workItemId', 'commandId', 'commandKind', 'leaseEpoch', 'authorityBaseRef'], 'terminal');
+  if (!(SYSTEM_COMMAND_KINDS as readonly string[]).includes(str(o.commandKind, 'terminal.commandKind'))) throw new SchemaError('terminal.commandKind unknown');
+  const out: SystemCommandTerminalCarrierV2 = {
+    workItemId: str(o.workItemId, 'terminal.workItemId'),
+    commandId: str(o.commandId, 'terminal.commandId'),
+    commandKind: str(o.commandKind, 'terminal.commandKind') as SystemCommandTerminalCarrierV2['commandKind'],
+    leaseEpoch: onn(o.leaseEpoch, 'terminal.leaseEpoch'),
+    authorityBaseRef: rfKind(o.authorityBaseRef, 'authority_base_set', 'terminal.authorityBaseRef'),
+  };
+  return out;
+}
+
+function parseSuccessorWorkItemCarrier(value: unknown): SuccessorWorkItemCarrierV2 | null {
+  if (value === null) return null;
+  const o = rec(value, 'successor');
+  ex(o, ['workItemId', 'kind', 'roleBinding', 'agentExecutionKind', 'sessionKind', 'roundId', 'logicalAssignmentId', 'reviewAssignmentId', 'grantSpecRef', 'inputArtifactDeliveryId', 'authorityBaseRef', 'payloadRef', 'initialLeaseEpoch', 'maxAutomaticRetries'], 'successor');
+  const agentExecutionKind = o.agentExecutionKind === null ? null : str(o.agentExecutionKind, 'successor.agentExecutionKind');
+  if (agentExecutionKind !== null && agentExecutionKind !== 'structured_session' && agentExecutionKind !== 'generic_turn') {
+    throw new SchemaError('successor.agentExecutionKind must be structured_session|generic_turn|null');
+  }
+  const sessionKind = o.sessionKind === null ? null : str(o.sessionKind, 'successor.sessionKind');
+  const out: SuccessorWorkItemCarrierV2 = {
+    workItemId: str(o.workItemId, 'successor.workItemId'),
+    kind: str(o.kind, 'successor.kind') as SuccessorWorkItemCarrierV2['kind'],
+    roleBinding: o.roleBinding === null ? null : str(o.roleBinding, 'successor.roleBinding'),
+    agentExecutionKind,
+    sessionKind: sessionKind as SuccessorWorkItemCarrierV2['sessionKind'],
+    roundId: o.roundId === null ? null : str(o.roundId, 'successor.roundId'),
+    logicalAssignmentId: o.logicalAssignmentId === null ? null : str(o.logicalAssignmentId, 'successor.logicalAssignmentId'),
+    reviewAssignmentId: o.reviewAssignmentId === null ? null : str(o.reviewAssignmentId, 'successor.reviewAssignmentId'),
+    grantSpecRef: rfn(o.grantSpecRef, 'successor.grantSpecRef'),
+    inputArtifactDeliveryId: o.inputArtifactDeliveryId === null ? null : str(o.inputArtifactDeliveryId, 'successor.inputArtifactDeliveryId'),
+    authorityBaseRef: rfKind(o.authorityBaseRef, 'authority_base_set', 'successor.authorityBaseRef'),
+    payloadRef: rf(o.payloadRef, 'successor.payloadRef'),
+    initialLeaseEpoch: onn(o.initialLeaseEpoch, 'successor.initialLeaseEpoch'),
+    maxAutomaticRetries: onn(o.maxAutomaticRetries, 'successor.maxAutomaticRetries'),
+  };
+  return out;
 }
 
 /* ---- repair objects (§13) --------------------------------------- */

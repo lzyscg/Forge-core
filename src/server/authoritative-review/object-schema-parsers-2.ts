@@ -124,7 +124,11 @@ export function parseMapBuildChunk(value: unknown): MapBuildChunkV2 {
   if (new Set(keys).size !== keys.length) throw new SchemaError('map_build_chunk.nodeDeclarations has duplicate buildNodeKey');
   for (let i = 0; i < nodes.length; i++) {
     const parent = nodes[i].parentBuildNodeKey;
-    if (parent !== null && !keys.slice(0, i).includes(parent)) {
+    // Task 15 correction (design §10.2): a parent may reference a PREVIOUS
+    // chunk's committed key (the build service's key ledger validates scope);
+    // the blob parser only enforces SAME-CHUNK ordering — a parent declared
+    // later in this chunk is rejected, a cross-chunk parent is legal.
+    if (parent !== null && keys.includes(parent) && !keys.slice(0, i).includes(parent)) {
       throw new SchemaError(`map_build_chunk: parent '${parent}' must be declared earlier in the chunk or in a previous chunk's ledger`);
     }
   }
@@ -142,11 +146,15 @@ export function parseMapBuildChunk(value: unknown): MapBuildChunkV2 {
   const relKeys = rels.map((r) => r.buildRelationKey);
   if (new Set(relKeys).size !== relKeys.length) throw new SchemaError('map_build_chunk.relationDeclarations has duplicate buildRelationKey');
   for (const r of rels) {
-    if (!keys.includes(r.fromBuildNodeKey)) {
-      throw new SchemaError(`map_build_chunk: relation '${r.buildRelationKey}' references undeclared fromBuildNodeKey '${r.fromBuildNodeKey}'`);
-    }
-    if (!keys.includes(r.toBuildNodeKey)) {
-      throw new SchemaError(`map_build_chunk: relation '${r.buildRelationKey}' references undeclared toBuildNodeKey '${r.toBuildNodeKey}'`);
+    // Task 15 correction + fix round (design §10.2): a relation endpoint may
+    // reference a PREVIOUS chunk's committed node key (the build service's key
+    // ledger validates cross-chunk scope) or a NODE key declared in this chunk
+    // — it can NEVER reference another RELATION key of this chunk (endpoints
+    // are nodes; a relation key is declared later in the declaration order).
+    for (const endpoint of [r.fromBuildNodeKey, r.toBuildNodeKey]) {
+      if (relKeys.includes(endpoint)) {
+        throw new SchemaError(`map_build_chunk: relation '${r.buildRelationKey}' endpoint '${endpoint}' is a relation key, not a node key`);
+      }
     }
   }
   const out: MapBuildChunkV2 = {
@@ -168,13 +176,15 @@ export function parseMapBuildKeyLedger(value: unknown): MapBuildKeyLedgerV2 {
   ex(o, ['mapBuildId', 'revision', 'entries', 'ledgerDigest'], 'map_build_key_ledger');
   const entries = (o.entries as unknown[]).map((v, i) => {
     const e = rec(v, `entries[${i}]`);
-    ex(e, ['buildKey', 'kind', 'officialId', 'declaredByChunkOrdinal'], `entries[${i}]`);
+    ex(e, ['buildKey', 'kind', 'officialId', 'declaredByChunkOrdinal', 'status'], `entries[${i}]`);
     if (e.kind !== 'node' && e.kind !== 'relation') throw new SchemaError('kind must be node|relation');
+    if (e.status !== 'active' && e.status !== 'tombstone') throw new SchemaError('status must be active|tombstone');
     return {
       buildKey: str(e.buildKey, 'buildKey'),
       kind: e.kind as 'node' | 'relation',
       officialId: e.officialId === null ? null : str(e.officialId, 'officialId'),
       declaredByChunkOrdinal: onn(e.declaredByChunkOrdinal, 'declaredByChunkOrdinal'),
+      status: e.status as 'active' | 'tombstone',
     };
   });
   for (let i = 1; i < entries.length; i++) {

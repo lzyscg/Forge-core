@@ -40,6 +40,7 @@ import type {
   AuthorityBaseSetV2,
   GrantInstanceV2,
   PublicationOperationPayloadV2,
+  SuccessorWorkItemCarrierV2,
   WorkItemParkDispositionV2,
   WriteGrantSpecV2,
 } from '../../authoritative-review/authority-types';
@@ -344,6 +345,27 @@ const WRITE_SESSION_KINDS: readonly string[] = ['structure_chunk', 'generation_b
  */
 export function shouldSignGrantInstance(sessionKind: string | null, hasGrantSpec: boolean): boolean {
   return hasGrantSpec && sessionKind !== null && WRITE_SESSION_KINDS.includes(sessionKind);
+}
+
+/**
+ * Task 15: validates a §9.2 successor-WorkItem carrier against the frozen
+ * WorkItem carry rules (design §17.2 discriminants) WITHOUT committing. The
+ * map-build service folds successors into its atomic domain envelope through a
+ * direct publication handler (the `human_answer` pattern), so it re-uses this
+ * pure validator instead of the coordinator's committing createWorkItem path.
+ */
+export function validateSuccessorCarrier(carrier: SuccessorWorkItemCarrierV2): string[] {
+  return validateWorkItemCarry({
+    kind: carrier.kind,
+    roleBinding: carrier.roleBinding,
+    agentExecutionKind: carrier.agentExecutionKind,
+    sessionKind: carrier.sessionKind,
+    roundId: carrier.roundId,
+    logicalAssignmentId: carrier.logicalAssignmentId,
+    reviewAssignmentId: carrier.reviewAssignmentId,
+    grantSpecRef: carrier.grantSpecRef,
+    inputArtifactDeliveryId: carrier.inputArtifactDeliveryId,
+  });
 }
 
 /** workitem kind -> system command kind (§17.2 six closed kinds). */

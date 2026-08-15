@@ -53,6 +53,14 @@ export interface V2AssignmentRunnerDependencies {
   runtime: AgentRuntime;
   toolProvider: V2ToolProvider;
   log?: (line: string) => void;
+  /**
+   * Task 15 wiring seam: the map-build service whose structure-chunk tools the
+   * composition root binds into the `toolProvider` (the V2ToolFactory handlers
+   * `appendMapCandidateChunk`/`finishMapBuild`). The runner itself never calls
+   * it — it documents the Task 15 dependency so the root wires chunk submits to
+   * grant-scoped build-local validation with no aggregate publication.
+   */
+  buildService?: import('./map-build-service').MapBuildService;
 }
 
 export class V2AssignmentRunner {

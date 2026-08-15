@@ -1238,7 +1238,21 @@ export interface MapBuildManifestV2 {
 export interface MapBuildKeyLedgerV2 {
   mapBuildId: string;
   revision: number;
-  entries: readonly { buildKey: string; kind: 'node' | 'relation'; officialId: string | null; declaredByChunkOrdinal: number }[];
+  entries: readonly {
+    buildKey: string;
+    kind: 'node' | 'relation';
+    officialId: string | null;
+    declaredByChunkOrdinal: number;
+    /**
+     * Task 15 (map-build service, design §10.2): build keys are active while a
+     * later chunk may reference them; a `tombstone` key is abandoned history
+     * (a superseded/rejected build's key the successor does NOT import) and
+     * may never be referenced again. schemaVersion stays 1 — the capability is
+     * disabled and no production ledger bytes exist (documented in the Task 15
+     * report).
+     */
+    status: 'active' | 'tombstone';
+  }[];
   ledgerDigest: string;
 }
 
@@ -1635,6 +1649,102 @@ export type WorkItemMutationEventBuilderV2 =
   | 'work_item_completed';
 
 /**
+ * Task 15 §9.2 command-terminal carriers the map_finalize domain-completion
+ * handler folds into its ONE-batch envelope (spec §9.2 "SystemCommand
+ * completion plus domain result, command terminal, WorkItem completion, and
+ * successor"). The payload carries the EXACT command identity so a crashed pin
+ * replays the terminal pair byte-identically.
+ */
+export interface SystemCommandTerminalCarrierV2 {
+  workItemId: string;
+  commandId: string;
+  commandKind: SystemCommandKindV2;
+  leaseEpoch: number;
+  authorityBaseRef: BlobRefV2;
+}
+
+/**
+ * Task 15 §9.2 successor-WorkItem carrier the map-build publication handlers
+ * fold into their atomic envelope (the `human_answer` replacement pattern).
+ * The exact `structured_work_item_created` fields ride the payload so the
+ * successor is byte-rebuildable from the pin alone.
+ */
+export interface SuccessorWorkItemCarrierV2 {
+  workItemId: string;
+  kind: WorkItemKindV2;
+  roleBinding: string | null;
+  agentExecutionKind: 'structured_session' | 'generic_turn' | null;
+  sessionKind: StructuredSessionKindV2 | null;
+  roundId: string | null;
+  logicalAssignmentId: string | null;
+  reviewAssignmentId: string | null;
+  grantSpecRef: BlobRefV2 | null;
+  inputArtifactDeliveryId: string | null;
+  authorityBaseRef: BlobRefV2;
+  payloadRef: BlobRefV2;
+  initialLeaseEpoch: number;
+  maxAutomaticRetries: number;
+}
+
+/**
+ * Task 15 `structured_map_review_round_planned` carrier the map_finalize
+ * clear-path envelope folds (spec §13.1 step 4: clear creates the candidate
+ * AND plans the MapReviewRound atomically).
+ */
+export interface MapReviewRoundPlanCarrierV2 {
+  mapReviewRoundId: string;
+  mapCycleOrdinal: number;
+  candidateId: string;
+  candidateRef: BlobRefV2;
+  contentRevisionManifestRef: BlobRefV2 | null;
+  reviewPolicyDigest: string;
+  coverageNodeCount: number;
+  coverageRelationCount: number;
+  assignmentCount: number;
+  consumedOverrideRef: BlobRefV2 | null;
+}
+
+/**
+ * Task 15 map-build publication carriers (deterministic rebuild; each carrier
+ * is null when a publish branch does not use it). The build-service publication
+ * handlers validate exactly the fields their branch needs and fail closed
+ * (NotRebuildable) on any missing carrier.
+ */
+export interface MapBuildPublishCarriersV2 {
+  mapBuildId: string | null;
+  chunkId: string | null;
+  chunkOrdinal: number | null;
+  parentFrontierDigest: string | null;
+  expectedChunkCount: number | null;
+  expectedRootCount: number | null;
+  candidateId: string | null;
+  candidateDigest: string | null;
+  baseMapId: string | null;
+  manifestRef: BlobRefV2 | null;
+  contributionManifestRef: BlobRefV2 | null;
+  validationReceiptRef: BlobRefV2 | null;
+  validatorAggregateRef: BlobRefV2 | null;
+  /** §13.1 round planning (clear path only). */
+  round: MapReviewRoundPlanCarrierV2 | null;
+  /** §9.2 command-terminal pair (map_finalize completion only). */
+  terminal: SystemCommandTerminalCarrierV2 | null;
+  /** §9.2 successor WorkItem (finish proposal / rejected path). */
+  successor: SuccessorWorkItemCarrierV2 | null;
+  /**
+   * F3 (adversarial review): the blocking path starts the successor MapBuild
+   * revision in the SAME envelope — `structured_map_build_started` registers
+   * the successor lineage so later successor chunks project cleanly.
+   */
+  successorBuildStart: {
+    mapBuildId: string;
+    revision: number;
+    supersedesMapBuildId: string | null;
+    mapBuildSpecRef: BlobRefV2;
+    sourceValidationReceiptRef: BlobRefV2 | null;
+  } | null;
+}
+
+/**
  * §8/§7.1 exact closed union of canonical publication operation payloads.
  * Every branch carries exact keys, authority/event-builder inputs and child
  * refs; pins never persist executable callbacks or raw Agent text.
@@ -1656,9 +1766,14 @@ export type PublicationOperationPayloadV2 =
         | 'generation_finalize'
         | 'repair_finalize'
         | 'migration_settlement'
-        | 'seal_publish';
+        | 'seal_publish'
+        | 'map_build_finish'
+        | 'map_finalize_commit'
+        | 'map_finalize_rejected';
       blobRefs: readonly BlobRefV2[];
       expectedResultIdentity: string;
+      /** Task 15 map-build carriers (null for every non-map-build publish kind). */
+      mapBuild: MapBuildPublishCarriersV2 | null;
     }
   | {
       family: 'lease_or_retry';

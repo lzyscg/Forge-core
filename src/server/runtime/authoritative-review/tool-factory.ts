@@ -261,17 +261,19 @@ const requestScopeExpansionContentSchema = strictObject({
 });
 
 const mapNodeSchema = strictObject({
-  slotId: Type.String({ minLength: 1, maxLength: 512 }),
+  buildNodeKey: Type.String({ minLength: 1, maxLength: 512 }),
   slotType: Type.String({ minLength: 1, maxLength: 256 }),
-  parentSlotId: Type.Optional(Type.String({ maxLength: 512 })),
+  parentBuildNodeKey: Type.Optional(Type.String({ maxLength: 512 })),
+  documentOrder: Type.Integer(),
+  siblingOrder: Type.Integer(),
   contentBearing: Type.Boolean(),
 });
 
 const mapRelationSchema = strictObject({
-  relationId: Type.String({ minLength: 1, maxLength: 512 }),
+  buildRelationKey: Type.String({ minLength: 1, maxLength: 512 }),
   typeId: Type.String({ minLength: 1, maxLength: 256 }),
-  fromSlotId: Type.String({ minLength: 1, maxLength: 512 }),
-  toSlotId: Type.String({ minLength: 1, maxLength: 512 }),
+  fromBuildNodeKey: Type.String({ minLength: 1, maxLength: 512 }),
+  toBuildNodeKey: Type.String({ minLength: 1, maxLength: 512 }),
   attributes: Type.Object({}, { additionalProperties: true }),
 });
 
@@ -294,7 +296,7 @@ const TOOL_SCHEMAS: Readonly<Record<V2ToolName, TSchema>> = {
   read_relation_context: strictObject({ relationId: Type.String({ minLength: 1, maxLength: 512 }), ...pageFields }),
 
   append_map_candidate_chunk: strictObject({
-    ordinal: Type.Integer({ minimum: 0 }),
+    ordinal: Type.Integer({ minimum: 1 }),
     expectedFrontierDigest: DIGEST,
     nodes: Type.Array(mapNodeSchema, { minItems: 1, maxItems: 1024 }),
     relations: Type.Array(mapRelationSchema, { maxItems: 256 }),
@@ -1024,21 +1026,40 @@ export class V2ToolFactory {
   }
 
   /** Domain result refs the completion prepared (the frozen ledger, when the
-   * review assignment completed). The §9.2 completion gate requires gated
-   * sessions to fold their domain result — a completed review assignment MUST
-   * carry its AssignmentLedgerBlob ref or the bare completion is rejected. */
+   * review assignment completed; the committed chunk refs, when the session was
+   * a structure_chunk build). The §9.2 completion gate requires gated sessions
+   * to fold their domain result — a completed review assignment MUST carry its
+   * AssignmentLedgerBlob ref and a completed structure_chunk MUST carry its
+   * committed chunk refs, or the bare completion is rejected. */
   async collectResultRefs(ctx: V2AttemptContext): Promise<readonly BlobRefV2[]> {
-    if (!ctx.sessionKind?.startsWith('review_')) return [];
-    try {
-      const journal = await this.reviewJournal(ctx);
-      const view = await this.deps.privateStore.readAllReviewDraft(journal);
-      const complete = view.committed.find((e) => e.op === 'complete_review_assignment');
-      if (complete === undefined) return [];
-      const result = complete.result as { ledgerRef?: BlobRefV2 } | null;
-      return result?.ledgerRef !== undefined && result?.ledgerRef !== null ? [result.ledgerRef] : [];
-    } catch {
-      return [];
+    if (ctx.sessionKind?.startsWith('review_')) {
+      try {
+        const journal = await this.reviewJournal(ctx);
+        const view = await this.deps.privateStore.readAllReviewDraft(journal);
+        const complete = view.committed.find((e) => e.op === 'complete_review_assignment');
+        if (complete === undefined) return [];
+        const result = complete.result as { ledgerRef?: BlobRefV2 } | null;
+        return result?.ledgerRef !== undefined && result?.ledgerRef !== null ? [result.ledgerRef] : [];
+      } catch {
+        return [];
+      }
     }
+    if (ctx.sessionKind === 'structure_chunk') {
+      try {
+        const journal = await this.reviewJournal(ctx);
+        const view = await this.deps.privateStore.readAllReviewDraft(journal);
+        const chunkRefs: BlobRefV2[] = [];
+        for (const entry of view.committed) {
+          if (entry.op !== 'append_map_candidate_chunk') continue;
+          const result = entry.result as { chunkRef?: BlobRefV2 } | null;
+          if (result?.chunkRef !== undefined && result?.chunkRef !== null) chunkRefs.push(result.chunkRef);
+        }
+        return chunkRefs;
+      } catch {
+        return [];
+      }
+    }
+    return [];
   }
 
   /* ------------------------- PiV2ToolRuntime seam ------------------ */

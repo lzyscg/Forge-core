@@ -122,6 +122,7 @@ describe('publication_operation_payload, recovery payload, round override (ยง8/ย
       publishKind: 'content_revision_commit',
       blobRefs: [refOfBlob('content_revision_manifest', { manifestDigest: 'm' })],
       expectedResultIdentity: 'result-1',
+      mapBuild: null,
     };
     expect(() => parseBlob('publication_operation_payload', domainPublish)).not.toThrow();
 
