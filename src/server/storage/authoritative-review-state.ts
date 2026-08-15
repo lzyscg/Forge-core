@@ -2386,7 +2386,23 @@ function applyOverrideConsumption(
   p.consumedOverrideRefs.push(consumedRef.digest);
 }
 
-/** §13.3.1: the transfer supersedes the single available ref with lineage checks. */
+/**
+ * §13.3.1: the transfer supersedes the single available ref with lineage checks.
+ *
+ * TASK 19 FIX (adversarial review I-2, 2026-08-15): the frozen first check
+ * compared `p.availableOverride.ref` (a round_budget_override blob ref) against
+ * `event.fromRepairPlanRef` (a repair_plan_spec ref) via kind+digest sameRef —
+ * it could NEVER hold, so every emitted transfer corrupted `override_unknown`.
+ * Amended: the transfer must name an EXISTING available override (the atomic
+ * supersede precondition); the ref-level binding of the available ref is
+ * enforced below by the frozen blob checks — the event's override blob
+ * (event.overrideRef) must descend from the available ref
+ * (newBlob.predecessorOverrideRef === available.ref), the available blob's
+ * currentAuthorizedRepairPlanRef must equal event.fromRepairPlanRef (the
+ * superseded plan), and the new blob's currentAuthorizedRepairPlanRef must
+ * equal event.toRepairPlanRef (the successor plan). The event carries the NEW
+ * override blob ref (transferOrdinal = old + 1) per the frozen blob checks.
+ */
 function applyOverrideTransfer(
   fold: Fold,
   event: Extract<AuthoritativeReviewEventV2, { type: 'structured_round_budget_override_transferred_v2' }>,
@@ -2394,8 +2410,8 @@ function applyOverrideTransfer(
 ): void {
   const p = fold.projection;
   const available = p.availableOverride;
-  if (available === null || !sameRef(available.ref, event.fromRepairPlanRef)) {
-    corrupt('override_unknown', event, sequence, `fromRepairPlanRef=${event.fromRepairPlanRef.digest.slice(0, 12)}`);
+  if (available === null) {
+    corrupt('override_unknown', event, sequence, `no available override for the transfer`);
   }
   if (p.consumedOverrideRefs.includes(event.overrideRef.digest)) {
     corrupt('override_transfer_after_consumption', event, sequence, `ref=${event.overrideRef.digest.slice(0, 12)}`);

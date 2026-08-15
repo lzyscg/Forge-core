@@ -37,6 +37,7 @@ import type {
   AuthoritativeReviewProfile,
   AuthorityBaseSetV2,
   GrantInstanceV2,
+  RepairBatchGrantSpecV2,
   WriteGrantSpecV2,
 } from '../../authoritative-review/authority-types';
 import {
@@ -346,6 +347,70 @@ export function assertManifestCurrent(
   what: string,
 ): void {
   assertExactBase(expected, actual, what);
+}
+
+/* ------------------------------------------------------------------ */
+/* Task 19 repair grant builders (design §11.11 / spec §13.3)          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The deterministic `map_repair_batch` / `content_repair_batch` WriteGrantSpec
+ * of one repair batch (spec §13.3): binds the plan spec ref, the repair base
+ * and the batch's staging CAS (`expectedStagingRootRef` = the staging root the
+ * batch must observe; `planKeyLedgerRef` = the ledger the batch extends). The
+ * writeScope is the plan's batch scope — a map batch carries the exact
+ * MapWriteScopeV2 (nodes/relations/plan keys/parents/relation types/
+ * operations), a content batch the exact slot list. The spec digest covers the
+ * canonical bytes minus the self-digest (the frozen parser rule).
+ */
+export function buildRepairBatchGrantSpec(input: {
+  grantSpecId: string;
+  workItemId: string;
+  kind: 'map_repair_batch' | 'content_repair_batch';
+  snapshotHash: string;
+  authorityBaseRef: BlobRefV2;
+  repairPlanSpecRef: BlobRefV2;
+  repairBase: RepairBatchGrantSpecV2['repairBase'];
+  expectedStagingRootRef: BlobRefV2;
+  planKeyLedgerRef: BlobRefV2 | null;
+  batchOrdinal: number;
+  findingIds: readonly string[];
+  maxContextBytes: number;
+  writeScope: RepairBatchGrantSpecV2['writeScope'];
+}): RepairBatchGrantSpecV2 {
+  const body: Omit<RepairBatchGrantSpecV2, 'specDigest'> = {
+    grantSpecId: input.grantSpecId,
+    workItemId: input.workItemId,
+    kind: input.kind,
+    snapshotHash: input.snapshotHash,
+    authorityBaseRef: input.authorityBaseRef,
+    repairPlanSpecRef: input.repairPlanSpecRef,
+    repairBase: input.repairBase,
+    expectedStagingRootRef: input.expectedStagingRootRef,
+    planKeyLedgerRef: input.planKeyLedgerRef,
+    batchOrdinal: input.batchOrdinal,
+    findingIds: [...input.findingIds].sort(),
+    readScope: { maxContextBytes: input.maxContextBytes },
+    writeScope: input.writeScope as RepairBatchGrantSpecV2['writeScope'],
+  };
+  return { ...body, specDigest: canonicalJsonSha256(body) };
+}
+
+/** The plan-key ledger ref a repair grant binds (null for a plan without
+ * keys — never for repair batches, which always carry the revision ledger). */
+export function grantSpecPlanKeyLedgerRef(spec: WriteGrantSpecV2): BlobRefV2 | null {
+  return spec.kind === 'map_repair_batch' || spec.kind === 'content_repair_batch' ? spec.planKeyLedgerRef : null;
+}
+
+/** The expected staging-root CAS of a repair grant (the base staging root for
+ * batch 1; the latest committed staging root for later batches). */
+export function grantSpecExpectedStagingRootRef(spec: WriteGrantSpecV2): BlobRefV2 | null {
+  return spec.kind === 'map_repair_batch' || spec.kind === 'content_repair_batch' ? spec.expectedStagingRootRef : null;
+}
+
+/** The finding set a repair grant is authorized to address (sorted ids). */
+export function grantSpecFindingIds(spec: WriteGrantSpecV2): readonly string[] {
+  return spec.kind === 'map_repair_batch' || spec.kind === 'content_repair_batch' ? spec.findingIds : [];
 }
 
 /* ------------------------------------------------------------------ */

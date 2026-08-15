@@ -213,6 +213,7 @@ describe('ReviewAdoptionService.computeAdoptionRoot', { timeout: 30_000 }, () =>
         mapBuild: null,
         mapReview: null,
         contentPlan: null,
+        repair: null,
         contentReview: {
           assignmentId: 'a-prior',
           reviewRoundId: 'r-1',
@@ -324,6 +325,7 @@ describe('ReviewAdoptionService.computeAdoptionRoot', { timeout: 30_000 }, () =>
         mapBuild: null,
         mapReview: null,
         contentPlan: null,
+        repair: null,
         contentReview: {
           assignmentId: 'a-current',
           reviewRoundId: 'r-2',

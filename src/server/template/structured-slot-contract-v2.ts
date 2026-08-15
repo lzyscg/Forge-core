@@ -212,6 +212,7 @@ export type ValidatorTriggerV2 =
   | 'map_review_settlement'
   | 'map_activation'
   | 'content_commit'
+  | 'repair_finalize'
   | 'review_settlement'
   | 'seal_input'
   | 'seal_output';

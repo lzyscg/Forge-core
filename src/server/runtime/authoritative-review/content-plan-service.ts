@@ -185,7 +185,9 @@ export function buildContentSetVersion(input: {
   mapSemanticDigest: string;
   contentSchemaDigest: string;
   blobRef: BlobRefV2;
-  producer: { kind: 'generation_batch'; planRevisionId: string; batchOrdinal: number; attemptId: string };
+  producer:
+    | { kind: 'generation_batch'; planRevisionId: string; batchOrdinal: number; attemptId: string }
+    | { kind: 'content_repair_batch'; planRevisionId: string; batchOrdinal: number; attemptId: string };
   contentRevisionCommitCoreRef: BlobRefV2;
   contentCommitValidatorAggregateRef: BlobRefV2;
   contentCommitWarningRootRef: BlobRefV2;
@@ -1488,6 +1490,7 @@ export class ContentPlanService {
         mapReview: null,
         contentPlan: input.carriers,
         contentReview: null,
+        repair: null,
       },
       intent: { handlerKind: input.publishKind, handlerVersion: 1 },
       preparedRefs: input.preparedRefs,

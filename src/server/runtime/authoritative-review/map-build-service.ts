@@ -1091,6 +1091,7 @@ export class MapBuildService {
         mapReview: null,
         contentPlan: null,
         contentReview: null,
+        repair: null,
         mapBuild: mapBuildCarrier({ mapBuildId: spec.mapBuildId, chunkId: chunk.chunkId, chunkOrdinal: chunk.chunkOrdinal, parentFrontierDigest: chunk.parentFrontierDigest }),
       },
       intent: { handlerKind: 'map_build_commit', handlerVersion: 1 },
@@ -1187,6 +1188,7 @@ export class MapBuildService {
         mapReview: null,
         contentPlan: null,
         contentReview: null,
+        repair: null,
         mapBuild: mapBuildCarrier({
           mapBuildId: spec.mapBuildId,
           expectedChunkCount: params.expectedChunkCount,
@@ -1469,6 +1471,7 @@ export class MapBuildService {
         mapReview: null,
         contentPlan: null,
         contentReview: null,
+        repair: null,
         mapBuild: mapBuildCarrier({
           mapBuildId: spec.mapBuildId,
           manifestRef,
@@ -1596,6 +1599,7 @@ export class MapBuildService {
         mapReview: null,
         contentPlan: null,
         contentReview: null,
+        repair: null,
         mapBuild: mapBuildCarrier({
           mapBuildId: spec.mapBuildId,
           validationReceiptRef: receiptRef,

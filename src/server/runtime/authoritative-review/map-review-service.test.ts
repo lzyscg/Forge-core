@@ -944,6 +944,7 @@ describe('Map settlement DAG and activation', { timeout: 30_000 }, () => {
         mapBuild: null,
         contentPlan: null,
         contentReview: null,
+        repair: null,
         mapReview: carrier({
           mapReviewRoundId: b.roundId,
           observations: [{ observationId: 'obs-root-only', level: 1, parentObservationId: null, observationRef: obsRef, coveredTargetCount: 1, childObservationRefs: [] }],

@@ -179,6 +179,8 @@ export function buildValidatorEnvelopeV2(input: {
     }
     case 'review_settlement':
       return { trigger, taskId, templateSnapshotHash, contentReviewCoverageCoreRef: coreRef, selectedTargetRefs };
+    case 'repair_finalize':
+      return { trigger, taskId, templateSnapshotHash, repairPlanSpecRef: coreRef, selectedTargetRefs };
     case 'seal_input':
       return { trigger, taskId, templateSnapshotHash, reviewBundleRef: coreRef, selectedTargetRefs };
     case 'seal_output': {
@@ -200,6 +202,8 @@ export function receiptKindOf(trigger: ValidatorTriggerV2): ValidationReceiptV2[
       return 'map_activation';
     case 'content_commit':
       return 'generation';
+    case 'repair_finalize':
+      return 'repair_finalize';
     case 'review_settlement':
       return 'review_settlement';
     case 'seal_input':

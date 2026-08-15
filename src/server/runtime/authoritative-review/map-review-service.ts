@@ -55,6 +55,7 @@ import type {
   AssignmentLedgerBlobV2,
   ContentRevisionManifestV2,
   ContentRevisionManifestPhaseV2,
+  ContentReviewRoundPlanCarrierV2,
   FindingStageRootV2,
   GenerationPlanSpecV2,
   MapCandidateSnapshotV2,
@@ -70,6 +71,7 @@ import type {
   MapSnapshotV2,
   ProposedMapCoreV2,
   PublicationOperationPayloadV2,
+  RepairPlanSpecV2,
   ReviewPolicyParameters,
   SlotContentVersionV2,
   SuccessorWorkItemCarrierV2,
@@ -343,6 +345,9 @@ export interface MapReviewServiceDependencies {
   reviewerRoleBinding: string;
   generatorRoleBinding: string;
   orchestratorRoleBinding: string;
+  /** Task 19 repair seam: the blocking settlement creates the deterministic
+   * MapRepairPlan; the repair-round clear creates the content re-review round. */
+  repairService?: import('./repair-service').RepairService;
 }
 
 /** A prepared map-review publication payload (the domain_publish envelope input). */
@@ -405,6 +410,8 @@ export function mapReviewCarrier(carriers: Partial<MapReviewPublishCarriersV2> =
     priorManifestRef: null,
     successor: null,
     terminal: null,
+    contentRound: null,
+    reviewWorkItems: null,
     ...carriers,
   };
 }
@@ -554,6 +561,7 @@ function registerMapReviewSettlement(registry: PublicationIntentRegistry): void 
       'structured_map_review_round_settled',
       'structured_map_activated',
       'structured_content_revision_committed',
+      'structured_review_round_planned',
       'structured_work_item_created',
       'structured_system_command_completed',
       'structured_work_item_completed',
@@ -614,18 +622,21 @@ function registerMapReviewSettlement(registry: PublicationIntentRegistry): void 
           migrationSettlementCoreRef: mr.migrationSettlementCoreRef,
           migrationActivationDecisionRef: mr.migrationActivationDecisionRef,
         });
-        need(mr.taskContentRevision, 'taskContentRevision');
-        need(mr.manifestPhase, 'manifestPhase');
-        envelopes.push({
-          protocolVersion: 2,
-          at,
-          type: 'structured_content_revision_committed',
-          contentRevisionManifestRef: mr.contentRevisionManifestRef,
-          taskContentRevision: mr.taskContentRevision,
-          manifestPhase: mr.manifestPhase,
-          producerPlanSpecRef: mr.producerPlanSpecRef,
-          priorManifestRef: mr.priorManifestRef,
-        });
+        // Task 19 repair-round activation: the manifest is UNCHANGED by a
+        // Map repair (manifestPhase stays null -> NO content_revision_committed).
+        if (mr.manifestPhase !== null) {
+          need(mr.taskContentRevision, 'taskContentRevision');
+          envelopes.push({
+            protocolVersion: 2,
+            at,
+            type: 'structured_content_revision_committed',
+            contentRevisionManifestRef: mr.contentRevisionManifestRef,
+            taskContentRevision: mr.taskContentRevision,
+            manifestPhase: mr.manifestPhase,
+            producerPlanSpecRef: mr.producerPlanSpecRef,
+            priorManifestRef: mr.priorManifestRef,
+          });
+        }
         const s = mr.successor;
         if (s !== null) {
           envelopes.push({
@@ -647,6 +658,50 @@ function registerMapReviewSettlement(registry: PublicationIntentRegistry): void 
             initialLeaseEpoch: s.initialLeaseEpoch,
             maxAutomaticRetries: s.maxAutomaticRetries,
           });
+        }
+        // Task 19: the content re-review round after a repaired Map activates
+        // (the §13.3.1 content-cycle boundary — the round-planned event +
+        // review WorkItems ride the SAME activation envelope).
+        const cr = mr.contentRound;
+        if (cr !== null) {
+          envelopes.push({
+            protocolVersion: 2,
+            at,
+            type: 'structured_review_round_planned',
+            reviewRoundId: cr.reviewRoundId,
+            contentCycleOrdinal: cr.contentCycleOrdinal,
+            mapRef: cr.mapRef,
+            mapSemanticDigest: cr.mapSemanticDigest,
+            contentRevisionManifestRef: cr.contentRevisionManifestRef,
+            reviewPolicyDigest: cr.reviewPolicyDigest,
+            adoptionRootRef: cr.adoptionRootRef,
+            coverageSlotCount: cr.coverageSlotCount,
+            coverageRelationCount: cr.coverageRelationCount,
+            assignmentCount: cr.assignmentCount,
+            verificationFindingCount: cr.verificationFindingCount,
+            consumedOverrideRef: cr.consumedOverrideRef,
+          });
+          for (const rw of mr.reviewWorkItems ?? []) {
+            envelopes.push({
+              protocolVersion: 2,
+              at,
+              type: 'structured_work_item_created',
+              workItemId: rw.workItemId,
+              kind: rw.kind,
+              roleBinding: rw.roleBinding,
+              agentExecutionKind: rw.agentExecutionKind,
+              sessionKind: rw.sessionKind,
+              roundId: rw.roundId,
+              logicalAssignmentId: rw.logicalAssignmentId,
+              reviewAssignmentId: rw.reviewAssignmentId,
+              grantSpecRef: rw.grantSpecRef,
+              inputArtifactDeliveryId: rw.inputArtifactDeliveryId,
+              authorityBaseRef: rw.authorityBaseRef,
+              payloadRef: rw.payloadRef,
+              initialLeaseEpoch: rw.initialLeaseEpoch,
+              maxAutomaticRetries: rw.maxAutomaticRetries,
+            });
+          }
         }
       }
       envelopes.push(
@@ -1092,12 +1147,52 @@ export class MapReviewService {
         e.type === 'structured_map_review_round_planned' && e.mapReviewRoundId === roundId,
     );
     if (planned === undefined) throw new MapReviewError('ROUND_UNKNOWN', `no round-planned event for '${roundId}'`);
+    // R2-1 (re-review round 2): the round blob the settlement binds must be
+    // BYTE-IDENTICAL to the blob the finalize/planner PREPARED — a
+    // deterministic REBUILD diverges whenever the projection changed since the
+    // round was planned (e.g. the reviewer verified the repair finding, which
+    // would drop the carried verification stages) and would bind bytes that
+    // were never written (GC TASK_CORRUPTED). Resolve the prepared blob via
+    // the round's review WorkItems — their authority base binds reviewRoundRef
+    // = the prepared round blob.
+    const state = await this.deps.readProjection(taskId);
+    const roundWorkItem = Object.values(state.workItems).find(
+      (wi) => wi.roundId === roundId && (wi.sessionKind === 'review_map_batch' || wi.sessionKind === 'review_map_whole'),
+    );
+    if (roundWorkItem !== undefined) {
+      const baseSet = (await this.deps.resolver(taskId, roundWorkItem.authorityBaseRef)) as { reviewRoundRef?: BlobRefV2 } | null;
+      if (baseSet !== null && typeof baseSet === 'object' && baseSet.reviewRoundRef !== undefined) {
+        const prepared = (await this.deps.resolver(taskId, baseSet.reviewRoundRef)) as MapReviewRoundV2 | null;
+        if (prepared !== null && typeof prepared === 'object') {
+          return prepared;
+        }
+      }
+    }
+    // Fallback: the deterministic rebuild. For a repaired candidate the stages
+    // are derived from the plan EXACTLY as the finalize prepared them — with
+    // `subtractVerified: false` (the finalize ran BEFORE any verification, so
+    // its derivation never subtracted the verified state — subtracting it here
+    // would diverge from the prepared bytes).
     const core = (await this.deps.resolver(taskId, planned.candidateRef)) as MapCandidateSnapshotV2 | null;
     if (core === null || typeof core !== 'object') throw new MapReviewError('CANDIDATE_UNRESOLVED', 'candidate unresolvable');
     const candidateCore = (await this.deps.resolver(taskId, core.validationCoreRef)) as MapCandidateValidationCoreV2 | null;
     if (candidateCore === null || typeof candidateCore !== 'object') throw new MapReviewError('CANDIDATE_CORE_UNRESOLVED', 'candidate core unresolvable');
     const assignmentIds = Array.from({ length: planned.assignmentCount }, (_, i) => reviewAssignmentIdOf(roundId, i));
     assignmentIds.push(reviewWholeAssignmentId(roundId));
+    let verificationFindingStages: string[] = [];
+    const provenance = candidateCore.candidateProvenanceWithoutValidation as { producerKind?: string; repairPlanId?: string; repairPlanRevision?: number } | null;
+    if (provenance !== null && provenance.producerKind === 'system_repair_finalize' && typeof provenance.repairPlanId === 'string' && this.deps.repairService !== undefined) {
+      const lineage = state.repairPlans[provenance.repairPlanId];
+      if (lineage !== undefined) {
+        for (const revision of Object.values(lineage.revisions)) {
+          const plan = (await this.deps.resolver(taskId, revision.specRef)) as RepairPlanSpecV2 | null;
+          if (plan !== null && typeof plan === 'object' && plan.revision === provenance.repairPlanRevision) {
+            verificationFindingStages = await this.deps.repairService.verificationStagesOfPlan(taskId, plan, 'map', false);
+            break;
+          }
+        }
+      }
+    }
     return buildMapReviewRound({
       mapReviewRoundId: roundId,
       candidateId: planned.candidateId,
@@ -1108,11 +1203,24 @@ export class MapReviewService {
       coverageNodeIds: candidateCore.nodes.map((n) => n.slotId),
       coverageRelationIds: candidateCore.relations.map((r) => r.relationId),
       assignmentIds,
-      verificationFindingStages: [],
+      verificationFindingStages,
     });
   }
 
   /* ------------------------- settlement --------------------------- */
+
+  /** The round's blocking reviewer-source findings (the repair-route input). */
+  private async settlementBlockingFindings(taskId: string, roundId: string): Promise<readonly import('./finding-service').ProjectedFindingLifecycleV2[]> {
+    const state = await this.deps.readProjection(taskId);
+    const out: import('./finding-service').ProjectedFindingLifecycleV2[] = [];
+    for (const finding of Object.values(state.findings)) {
+      if (finding.reviewContext.kind !== 'map' || finding.reviewContext.roundId !== roundId) continue;
+      const { projectFindingLifecycle } = await import('./finding-service');
+      const lifecycle = projectFindingLifecycle({ finding });
+      if (lifecycle.blockingUnclosed) out.push(lifecycle);
+    }
+    return out;
+  }
 
   /**
    * The `system_review_settlement(stage=initial)` handler — the ONLY activator.
@@ -1155,6 +1263,21 @@ export class MapReviewService {
       const settlementRun = await this.runSettlementValidator(input, base.reviewCoverageCoreRef, coverageCore, candidateCore);
       await this.persistEngineOutputs(input.taskId, settlementRun.run, settlementRun.store);
       if (settlementRun.run.aggregate.outcome === 'blocking_invalid') {
+        const findings = await this.settlementBlockingFindings(input.taskId, round.mapReviewRoundId);
+        if (this.deps.repairService !== undefined && findings.length > 0) {
+          // Task 19: the deterministic MapRepairPlan creation (the settlement
+          // command COMPLETES with the plan envelope — never a bare retry).
+          return await this.deps.repairService.createRepairPlanFromSettlement({
+            taskId: input.taskId,
+            settlementWorkItemId: input.workItemId,
+            settlementCommandId: input.commandId,
+            leaseEpoch: input.leaseEpoch,
+            authorityBaseRef: input.authorityBaseRef,
+            roundId: round.mapReviewRoundId,
+            coverageCoreRef: base.reviewCoverageCoreRef,
+            findings,
+          });
+        }
         return { kind: 'retryable_failure', failureCode: 'MAP_REVIEW_BLOCKED', failureDigest: canonicalJsonSha256({ commandId: input.commandId, aggregateRef: settlementRun.run.aggregateRef }) };
       }
       if (settlementRun.run.aggregate.outcome !== 'clear') {
@@ -1233,38 +1356,95 @@ export class MapReviewService {
       });
       const snapshotRef = await this.deps.facade.prepareBlob(input.taskId, 'map_snapshot', snapshot);
 
-      // Segment 7: baseline-unset ContentRevisionManifest.
-      const contentBearingSlots = candidateCore.nodes
-        .filter((n) => n.contentBearing)
-        .map((n) => ({ slotId: n.slotId, documentOrder: n.documentOrder }));
-      const { manifest, versions } = buildBaselineUnsetManifest({
-        taskId: input.taskId,
-        mapRef: snapshotRef,
-        mapSemanticDigest: proposedCore.mapSemanticDigest,
-        taskContentRevision: 1,
-        contentBearingSlots,
-        contentSchemaOf: (slotId) => contentSchemaDigestOf(candidateCore.nodes.find((n) => n.slotId === slotId)?.slotType ?? 'unknown'),
-      });
-      const manifestRef = await this.deps.facade.prepareBlob(input.taskId, 'content_revision_manifest', manifest);
-      const versionRefs: BlobRefV2[] = [];
-      for (const version of versions) {
-        versionRefs.push(await this.deps.facade.prepareBlob(input.taskId, 'content_version', version));
+      // Task 19 repair-round detection: a round after the initial one reviews
+      // a REPAIRED candidate — its activation must NOT regenerate content.
+      const plannedEvents = await this.deps.readEvents(input.taskId);
+      const plannedRound = plannedEvents.find(
+        (e): e is Extract<AuthoritativeReviewEventV2, { type: 'structured_map_review_round_planned' }> =>
+          e.type === 'structured_map_review_round_planned' && e.mapReviewRoundId === round.mapReviewRoundId,
+      );
+      const isRepairRound = plannedRound !== undefined && plannedRound.mapCycleOrdinal > 1;
+      const supersedesMapId = isRepairRound ? (project.currentMap?.mapId ?? null) : null;
+      const mapRevision = isRepairRound ? (project.currentMap?.mapRevision ?? 0) + 1 : 1;
+
+      // Segment 7: the manifest. Initial activation -> baseline-unset content;
+      // repaired activation -> the CURRENT manifest is unchanged (no
+      // content_revision_committed event rides the envelope).
+      let manifestRef: BlobRefV2;
+      let versionRefs: BlobRefV2[] = [];
+      let manifestPhase: 'baseline_unset' | 'provisional' | 'finalized' | null = null;
+      let taskContentRevision: number | null = null;
+      let producerPlanSpecRef: BlobRefV2 | null = null;
+      let priorManifestRef: BlobRefV2 | null = null;
+      if (isRepairRound) {
+        if (project.currentManifest === null) {
+          throw new MapReviewError('MANIFEST_UNRESOLVED', 'a repaired Map activation requires the current content manifest');
+        }
+        manifestRef = project.currentManifest.contentRevisionManifestRef;
+      } else {
+        const contentBearingSlots = candidateCore.nodes
+          .filter((n) => n.contentBearing)
+          .map((n) => ({ slotId: n.slotId, documentOrder: n.documentOrder }));
+        const { manifest, versions } = buildBaselineUnsetManifest({
+          taskId: input.taskId,
+          mapRef: snapshotRef,
+          mapSemanticDigest: proposedCore.mapSemanticDigest,
+          taskContentRevision: 1,
+          contentBearingSlots,
+          contentSchemaOf: (slotId) => contentSchemaDigestOf(candidateCore.nodes.find((n) => n.slotId === slotId)?.slotType ?? 'unknown'),
+        });
+        manifestRef = await this.deps.facade.prepareBlob(input.taskId, 'content_revision_manifest', manifest);
+        for (const version of versions) {
+          versionRefs.push(await this.deps.facade.prepareBlob(input.taskId, 'content_version', version));
+        }
+        manifestPhase = 'baseline_unset';
+        taskContentRevision = 1;
       }
 
-      // Segment 8: the first generation-batch successor WorkItem + GenerationPlan.
-      const successor = await this.deps.reviewCoordinator.prepareGenerationSuccessor({
-        taskId: input.taskId,
-        mapId: proposedMapId,
-        mapSnapshotRef: snapshotRef,
-        mapSemanticDigest: proposedCore.mapSemanticDigest,
-        manifestRef,
-        contentBearingSlots,
-        profileSnapshotRef: this.deps.profileSnapshotRef,
-        templateSnapshotRef: this.deps.templateSnapshotRef,
-      });
-      const carryErrors = validateSuccessorCarrier(successor.carrier);
-      if (carryErrors.length > 0) {
-        throw new MapReviewError('INVALID_INPUT', `generation successor carry invalid: ${carryErrors.join('; ')}`);
+      // Segment 8: the successor. Initial activation -> the first
+      // generation-batch WorkItem + GenerationPlan; repaired activation -> the
+      // complete content re-review round (the §13.3.1 content-cycle boundary)
+      // folded into the SAME envelope.
+      let successor: import('./review-coordinator').PreparedGenerationSuccessorV2 | null = null;
+      let contentRound: ContentReviewRoundPlanCarrierV2 | null = null;
+      let reviewWorkItems: readonly SuccessorWorkItemCarrierV2[] | null = null;
+      let contentRoundPreparedRefs: readonly BlobRefV2[] = [];
+      if (isRepairRound) {
+        if (this.deps.repairService === undefined) {
+          throw new MapReviewError('REPAIR_SEAM_MISSING', 'a repaired Map activation requires the Task 19 repair seam');
+        }
+        // I-1 (adversarial review): the content re-review round binds the NEW
+        // snapshot being activated (this envelope emits structured_map_activated
+        // BEFORE the round-planned event; the projector demands the round's
+        // mapRef == the CURRENT map). The OLD `state.currentMap` read inside
+        // prepareContentRound would corrupt `map_mismatch` on every repaired-
+        // Map activation.
+        const planned = await this.deps.repairService.prepareContentReReviewRound(input.taskId, manifestRef, {
+          mapRef: snapshotRef,
+          mapSemanticDigest: proposedCore.mapSemanticDigest,
+        });
+        contentRound = planned.round;
+        reviewWorkItems = planned.reviewWorkItems;
+        contentRoundPreparedRefs = planned.preparedRefs;
+      } else {
+        const contentBearingSlots = candidateCore.nodes
+          .filter((n) => n.contentBearing)
+          .map((n) => ({ slotId: n.slotId, documentOrder: n.documentOrder }));
+        const prepared = await this.deps.reviewCoordinator.prepareGenerationSuccessor({
+          taskId: input.taskId,
+          mapId: proposedMapId,
+          mapSnapshotRef: snapshotRef,
+          mapSemanticDigest: proposedCore.mapSemanticDigest,
+          manifestRef,
+          contentBearingSlots,
+          profileSnapshotRef: this.deps.profileSnapshotRef,
+          templateSnapshotRef: this.deps.templateSnapshotRef,
+        });
+        successor = prepared;
+        const carryErrors = validateSuccessorCarrier(prepared.carrier);
+        if (carryErrors.length > 0) {
+          throw new MapReviewError('INVALID_INPUT', `generation successor carry invalid: ${carryErrors.join('; ')}`);
+        }
       }
 
       // Segment 9: the atomic §13.1/§17.5 activation envelope.
@@ -1286,9 +1466,8 @@ export class MapReviewService {
         snapshotRef,
         manifestRef,
         ...versionRefs,
-        successor.planSpecRef,
-        successor.authorityBaseRef,
-        successor.grantSpecRef,
+        ...(successor === null ? [] : [successor.planSpecRef, successor.authorityBaseRef, successor.grantSpecRef]),
+        ...contentRoundPreparedRefs,
       ];
       await this.deps.facade.publishWithPin({
         taskId: input.taskId,
@@ -1303,13 +1482,14 @@ export class MapReviewService {
           mapBuild: null,
           contentPlan: null,
           contentReview: null,
+          repair: null,
           mapReview: mapReviewCarrier({
             mapReviewRoundId: round.mapReviewRoundId,
             settlementCoreRef,
             outcome: 'activate',
             mapId: proposedMapId,
-            mapRevision: 1,
-            supersedesMapId: null,
+            mapRevision,
+            supersedesMapId,
             mapSnapshotRef: snapshotRef,
             mapReviewBundleRef: bundleRef,
             mapSemanticDigest: proposedCore.mapSemanticDigest,
@@ -1317,11 +1497,13 @@ export class MapReviewService {
             activationValidatorAggregateRef: activationRun.run.aggregateRef,
             migrationSettlementCoreRef: null,
             migrationActivationDecisionRef: null,
-            taskContentRevision: 1,
-            manifestPhase: 'baseline_unset',
-            producerPlanSpecRef: null,
-            priorManifestRef: null,
-            successor: successor.carrier,
+            taskContentRevision,
+            manifestPhase,
+            producerPlanSpecRef,
+            priorManifestRef,
+            successor: successor === null ? null : successor.carrier,
+            contentRound,
+            reviewWorkItems,
             terminal,
           }),
         },
@@ -1438,6 +1620,7 @@ export class MapReviewService {
         mapBuild: null,
         contentPlan: null,
         contentReview: null,
+        repair: null,
         mapReview: input.carriers,
       },
       intent: { handlerKind: input.publishKind, handlerVersion: 1 },

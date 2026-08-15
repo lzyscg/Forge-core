@@ -1354,6 +1354,7 @@ export type ValidatorTriggerV2 =
   | 'map_review_settlement'
   | 'map_activation'
   | 'content_commit'
+  | 'repair_finalize'
   | 'review_settlement'
   | 'seal_input'
   | 'seal_output';
@@ -1365,6 +1366,7 @@ export type ValidatorInputEnvelopeV2 =
   | { trigger: 'map_activation'; taskId: string; templateSnapshotHash: string; mapReviewSettlementCoreRef: BlobRefV2; proposedMapCoreRef: BlobRefV2; selectedTargetRefs: readonly BlobRefV2[] }
   | { trigger: 'content_commit'; executionPhase: 'batch_commit' | 'plan_finalize'; taskId: string; templateSnapshotHash: string; contentValidationCoreRef: BlobRefV2; selectedTargetRefs: readonly BlobRefV2[] }
   | { trigger: 'review_settlement'; taskId: string; templateSnapshotHash: string; contentReviewCoverageCoreRef: BlobRefV2; selectedTargetRefs: readonly BlobRefV2[] }
+  | { trigger: 'repair_finalize'; taskId: string; templateSnapshotHash: string; repairPlanSpecRef: BlobRefV2; selectedTargetRefs: readonly BlobRefV2[] }
   | { trigger: 'seal_input'; taskId: string; templateSnapshotHash: string; reviewBundleRef: BlobRefV2; selectedTargetRefs: readonly BlobRefV2[] }
   | { trigger: 'seal_output'; taskId: string; templateSnapshotHash: string; reviewBundleRef: BlobRefV2; artifactRef: BlobRefV2; selectedTargetRefs: readonly BlobRefV2[] };
 
@@ -1433,7 +1435,7 @@ export interface ValidatorFailureV2 {
 
 /** §9/§16 validation receipts (blocking invalid evidence + lineage refs). */
 export interface ValidationReceiptV2 {
-  receiptKind: 'map_build' | 'generation' | 'map_repair' | 'content_repair' | 'map_activation' | 'map_review_settlement' | 'review_settlement' | 'seal_input' | 'seal_output';
+  receiptKind: 'map_build' | 'generation' | 'map_repair' | 'content_repair' | 'map_activation' | 'map_review_settlement' | 'review_settlement' | 'repair_finalize' | 'seal_input' | 'seal_output';
   validatorAggregateRef: BlobRefV2;
   blockerIssues: readonly ValidatorIssueV2[];
   /** deterministic labeled lineage refs (chunk/key ledger/active manifest/etc.). */
@@ -1804,6 +1806,17 @@ export interface MapReviewPublishCarriersV2 {
   // --- §9.2 successor WorkItem + command-terminal pair ---
   successor: SuccessorWorkItemCarrierV2 | null;
   terminal: SystemCommandTerminalCarrierV2 | null;
+  /**
+   * Task 19 (repair-round activation): the complete content re-review round
+   * the map settlement creates AFTER a repaired Map activates (the mixed
+   * finding stays on the Map track until activation; the later required
+   * content re-review is counted by the content track — spec §13.3.1). The
+   * round-planned event + the review WorkItems ride the SAME activation
+   * envelope; `manifestPhase` stays null so NO content_revision_committed is
+   * emitted (the manifest is unchanged by the map repair).
+   */
+  contentRound: ContentReviewRoundPlanCarrierV2 | null;
+  reviewWorkItems: readonly SuccessorWorkItemCarrierV2[] | null;
 }
 
 /**
@@ -1957,6 +1970,147 @@ export interface ContentReviewPublishCarriersV2 {
 }
 
 /**
+ * Task 19 repair publication carriers (deterministic rebuild; each carrier is
+ * null when a publish branch does not use it). Covers the repair-service
+ * domain-publish branches:
+ * - `repair_plan_creation` (the settlement-blocking envelope): the initial
+ *   `structured_map_repair_plan_started` / `structured_content_repair_plan_started`
+ *   + the first repair-batch WorkItem + `structured_repair_grant_issued` + the
+ *   §9.2 command-terminal pair (the settlement command COMPLETES with the plan
+ *   created — the Task 15/17 blocking-envelope pattern);
+ * - `repair_batch_commit` (one serial batch): `structured_*_repair_batch_committed`
+ *   + `structured_repair_committed` + the successor WorkItem (next batch OR the
+ *   `system_repair_finalize` WorkItem) + its `structured_repair_grant_issued`;
+ * - `repair_finalize` (the System finalizer): clear-map publishes the repair
+ *   build chain (`structured_map_build_started` + `structured_map_build_finish_
+ *   proposed` + `structured_map_build_finalized` + `structured_map_candidate_
+ *   committed`) + the complete MapReviewRound (`structured_map_review_round_
+ *   planned` + review WorkItems) + `structured_finding_addressed` + the
+ *   terminal pair; clear-content publishes the repaired FINALIZED manifest
+ *   (`structured_content_revision_committed`) + the complete ContentReviewRound
+ *   (`structured_review_round_planned` + review WorkItems) + finding addressed +
+ *   terminal pair; blocking publishes `structured_*_repair_plan_rejected` +
+ *   ONE `structured_repair_plan_revision_started` (validation_correction) +
+ *   the correction-batch WorkItem/Grant + the terminal pair; infrastructure
+ *   failure retries (no successor);
+ * - `repair_scope_request` (the Task 13 `request_scope_expansion` tool seam):
+ *   `structured_repair_scope_requested`;
+ * - `repair_scope_approval`: `structured_repair_scope_expansion_approved_v2`
+ *   (self-registers the successor revision in the projection) + the successor
+ *   repair WorkItem/Grant + the optional
+ *   `structured_round_budget_override_transferred_v2` (the §13.3.1 override
+ *   follows the authorized plan within the same lineage);
+ * - `repair_scope_rejection`: `structured_repair_scope_expansion_rejected_v2`.
+ */
+export interface RepairPublishCarriersV2 {
+  // --- plan started (initial creation) / revision started (successors) ---
+  track: 'map' | 'content' | null;
+  repairPlanId: string | null;
+  planRevisionId: string | null;
+  repairPlanSpecRef: BlobRefV2 | null;
+  sourceValidationReceiptRef: BlobRefV2 | null;
+  /** The superseded revision of a `structured_repair_plan_revision_started`
+   * successor (null for the initial plan-started event). */
+  supersedesPlanRevisionId: string | null;
+  /** The successor plan revision's spec ref (approval / correction successors). */
+  successorPlanSpecRef: BlobRefV2 | null;
+  /** The successor plan revision id (the approved event registers it). */
+  successorPlanRevisionId: string | null;
+  successorReason: 'scope_expansion' | 'validation_correction' | 'recovery' | null;
+  // --- batch commit ---
+  batchOrdinal: number | null;
+  stagingRootRef: BlobRefV2 | null;
+  workItemId: string | null;
+  attemptId: string | null;
+  // --- plan rejected (blocking finalizer) ---
+  validatorAggregateRef: BlobRefV2 | null;
+  validationReceiptRef: BlobRefV2 | null;
+  // --- scope request / approval / rejection ---
+  requestId: string | null;
+  reason: string | null;
+  findingIds: readonly string[] | null;
+  requestedNodeIds: readonly string[] | null;
+  requestedRelationIds: readonly string[] | null;
+  requestedSlotIds: readonly string[] | null;
+  // --- grant issued (each repair WorkItem carries exactly one) ---
+  grantSpecId: string | null;
+  grantKind: 'map_repair_batch' | 'content_repair_batch' | null;
+  // --- finding addressed (the finalizer envelope, per plan finding) ---
+  addressedFindingIds: readonly string[] | null;
+  // --- clear content finalize: the repaired finalized manifest ---
+  contentRevisionManifestRef: BlobRefV2 | null;
+  taskContentRevision: number | null;
+  manifestPhase: 'provisional' | 'finalized' | null;
+  priorManifestRef: BlobRefV2 | null;
+  // --- clear map finalize: the repair build chain (reuses the Task 15 build
+  // event chain so the projector's candidate rules hold: one candidate per
+  // finalized build, proposal-before-finalize, active head) ---
+  repairBuildStart: {
+    mapBuildId: string;
+    revision: number;
+    mapBuildSpecRef: BlobRefV2;
+    supersedesMapBuildId: string | null;
+    sourceValidationReceiptRef: BlobRefV2 | null;
+  } | null;
+  repairBuildFinish: { mapBuildId: string; expectedChunkCount: number; expectedFrontierDigest: string; expectedRootCount: number } | null;
+  /** `structured_map_build_finalized.manifestRef` — the repair contribution
+   * manifest (the repair build has no chunk manifest; the contribution
+   * manifest IS the complete staged-map manifest; documented decision). */
+  mapBuildManifestRef: BlobRefV2 | null;
+  contributionManifestRef: BlobRefV2 | null;
+  candidateId: string | null;
+  candidateDigest: string | null;
+  candidateRef: BlobRefV2 | null;
+  baseMapId: string | null;
+  // --- complete re-review rounds (the §13.3.1 cycle boundaries) ---
+  mapRound: MapReviewRoundPlanCarrierV2 | null;
+  contentRound: ContentReviewRoundPlanCarrierV2 | null;
+  reviewWorkItems: readonly SuccessorWorkItemCarrierV2[] | null;
+  /** §13.3.1 override transfer inside the same lineage (successor-creation
+   * envelopes only, when an available override is bound to the superseded
+   * plan). */
+  overrideTransfer: {
+    overrideRef: BlobRefV2;
+    fromRepairPlanRef: BlobRefV2;
+    toRepairPlanRef: BlobRefV2;
+    transferOperationId: string;
+  } | null;
+  /** I-4 (adversarial review): the scope-expansion approval atomically
+   * supersedes the OLD WorkItem of the superseded plan revision
+   * (`structured_work_item_superseded`, reason new_authority_base) so it can
+   * never be claimed again — without it the stale WorkItem's retries park the
+   * task into retryable_failure and the successor is starved. Null when the
+   * superseded revision has no claimable WorkItem (the envelope still creates
+   * the successor). R2-2 (re-review round 2): when the old WorkItem is LEASED
+   * mid-session at approval time (the normal operator flow — the request tool
+   * is only callable from a leased session), `attemptAbandonment` carries the
+   * active cycle and the envelope ends it atomically FIRST
+   * (structured_agent_attempt_abandoned_v2 + structured_work_item_lease_
+   * reclaimed — the projector's supersede rule demands the cycle ended), then
+   * supersedes at the post-reclaim lease epoch (leaseEpoch = current + 1). */
+  supersededWorkItem: {
+    workItemId: string;
+    /** the epoch the supersede event carries (post-reclaim for a mid-session
+     * lease: current + 1; the current epoch otherwise). */
+    leaseEpoch: number;
+    reason: 'new_authority_base' | 'human_disposition';
+    authorityBaseRef: BlobRefV2;
+    attemptAbandonment: {
+      attemptId: string;
+      logicalAssignmentId: string;
+      reviewAssignmentId: string | null;
+      sessionKind: StructuredSessionKindV2;
+      /** the CURRENT (pre-reclaim) lease epoch — the abandon + reclaim ride it. */
+      leaseEpoch: number;
+      authorityBaseRef: BlobRefV2;
+    } | null;
+  } | null;
+  // --- §9.2 successor WorkItem + command-terminal pair ---
+  successor: SuccessorWorkItemCarrierV2 | null;
+  terminal: SystemCommandTerminalCarrierV2 | null;
+}
+
+/**
  * §8/§7.1 exact closed union of canonical publication operation payloads.
  * Every branch carries exact keys, authority/event-builder inputs and child
  * refs; pins never persist executable callbacks or raw Agent text.
@@ -1985,7 +2139,12 @@ export type PublicationOperationPayloadV2 =
         | 'seal_publish'
         | 'map_build_finish'
         | 'map_finalize_commit'
-        | 'map_finalize_rejected';
+        | 'map_finalize_rejected'
+        | 'repair_plan_creation'
+        | 'repair_batch_commit'
+        | 'repair_scope_request'
+        | 'repair_scope_approval'
+        | 'repair_scope_rejection';
       blobRefs: readonly BlobRefV2[];
       expectedResultIdentity: string;
       /** Task 15 map-build carriers (null for every non-map-build publish kind). */
@@ -1996,6 +2155,8 @@ export type PublicationOperationPayloadV2 =
       contentPlan: ContentPlanPublishCarriersV2 | null;
       /** Task 18 content-review carriers (null for every non-content-review publish kind). */
       contentReview: ContentReviewPublishCarriersV2 | null;
+      /** Task 19 repair carriers (null for every non-repair publish kind). */
+      repair: RepairPublishCarriersV2 | null;
     }
   | {
       family: 'lease_or_retry';

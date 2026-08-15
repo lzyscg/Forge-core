@@ -427,12 +427,16 @@ export function validateVerificationSubmission(input: {
   if (!targets.includes(targetKey)) {
     errors.push(`finding '${submission.findingId}' stage '${submission.repairStage}' is not a frozen verification target of this round`);
   }
-  // round/kind binding (wrong round).
+  // round/kind binding (wrong round). I-3 (adversarial review): an ADDRESSED
+  // finding opened in an EARLIER round of the same track is a legal
+  // verification target of the repair re-review round (the repair finding was
+  // opened in the PRIOR round; the current round's frozen verification stages
+  // carry it) — the exact-round binding applies only to NON-addressed findings.
   const roundKind = roundKindOf(round);
   if (finding.reviewContext.kind !== roundKind) {
     errors.push(`finding '${submission.findingId}' binds ${finding.reviewContext.kind} context, not ${roundKind}`);
   }
-  if (finding.reviewContext.roundId !== roundIdOf(round)) {
+  if (finding.state !== 'addressed' && finding.reviewContext.roundId !== roundIdOf(round)) {
     errors.push(`finding '${submission.findingId}' binds round '${finding.reviewContext.roundId}', not '${roundIdOf(round)}'`);
   }
   // one record per stage — no duplicate verification already recorded.
@@ -1070,10 +1074,10 @@ export class V2ToolFactory {
         return [];
       }
     }
-    if (ctx.sessionKind === 'generation_batch' || ctx.sessionKind === 'content_repair') {
+    if (ctx.sessionKind === 'generation_batch') {
       // Task 17: a completed generation batch folds its committed provisional
       // manifest ref (the submit_content_draft result) so the §9.2 completion
-      // gate is never bare. Content-repair batches reuse the same carrier.
+      // gate is never bare.
       try {
         const journal = await this.reviewJournal(ctx);
         const view = await this.deps.privateStore.readAllReviewDraft(journal);
@@ -1086,6 +1090,24 @@ export class V2ToolFactory {
           if (entry.op !== 'submit_content_draft') continue;
           const result = entry.result as { manifestRef?: BlobRefV2 } | null;
           if (result?.manifestRef !== undefined && result?.manifestRef !== null) return [result.manifestRef];
+        }
+        return [];
+      } catch {
+        return [];
+      }
+    }
+    if (ctx.sessionKind === 'map_repair' || ctx.sessionKind === 'content_repair') {
+      // Task 19: a committed repair batch folds its staging root ref (the
+      // submit_map_patch / submit_content_draft result) so the §9.2
+      // completion gate is never bare.
+      try {
+        const journal = await this.reviewJournal(ctx);
+        const view = await this.deps.privateStore.readAllReviewDraft(journal);
+        for (let i = view.committed.length - 1; i >= 0; i--) {
+          const entry = view.committed[i];
+          if (entry.op !== 'submit_map_patch' && entry.op !== 'submit_content_draft') continue;
+          const result = entry.result as { stagingRootRef?: BlobRefV2 } | null;
+          if (result?.stagingRootRef !== undefined && result?.stagingRootRef !== null) return [result.stagingRootRef];
         }
         return [];
       } catch {

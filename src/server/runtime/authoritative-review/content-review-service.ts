@@ -341,12 +341,16 @@ export async function resolveContentRoundFromCore(
     ? (snapshot.relations as MapRelationV2[])
     : [];
   const plan = planContentReview({ slots, relations, reviewPolicy: deps.reviewPolicy, assignmentCount });
-  // Verification stages: the round's finding-stage root (resolved when the real
-  // root was prepared; unresolvable → [] — a fresh round has no targets yet).
+  // Verification stages: I-3 (adversarial review) — the round's targets are
+  // the addressed-but-unverified CONTENT stages ACROSS rounds, not only
+  // same-round findings: a repair finding was OPENED in the PRIOR round and
+  // is addressed by the repair, so a round-scoped derivation never sees it
+  // and the round would Seal with the finding addressed-but-unverified.
+  // System-validator findings are verified by validator rerun, never the tool.
   let verificationFindingStages: string[] = [];
   if (state.findings !== undefined) {
     for (const finding of Object.values(state.findings)) {
-      if (finding.reviewContext.kind !== 'content' || finding.reviewContext.roundId !== core.reviewRoundId) continue;
+      if (finding.reviewContext.kind !== 'content') continue;
       if (finding.source === 'system_validator') continue;
       for (const stage of finding.addressStages) {
         if (!finding.verifiedStages.includes(stage)) verificationFindingStages.push(`${finding.findingId}:${stage}`);
@@ -427,6 +431,9 @@ export interface ContentReviewServiceDependencies {
   /** optional seams (wired by the composition; tests may inject). */
   adoptionService?: ReviewAdoptionService;
   findingService?: FindingService;
+  /** Task 19 repair seam: the blocking settlement creates the deterministic
+   * RepairPlan (initial or successor) instead of a bare retryable_failure. */
+  repairService?: import('./repair-service').RepairService;
   /** slot presence map (required|optional). Defaults to required for every slot. */
   slotPresenceOf?(slotId: string): SlotPresenceV2;
 }
@@ -1034,6 +1041,21 @@ export class ContentReviewService {
     return snapshot.relations as MapRelationV2[];
   }
 
+  /** I-3: every CONTENT-track finding with its derived lifecycle (CROSS-ROUND —
+   * the settlement gate's verification targets span the plan's addressed-but-
+   * unverified stages, not only the round-scoped findings: a repair finding was
+   * opened in the PRIOR round). */
+  private async projectContentTrackFindings(taskId: string): Promise<import('./finding-service').ProjectedFindingLifecycleV2[]> {
+    const state = await this.deps.readProjection(taskId);
+    const { projectFindingLifecycle } = await import('./finding-service');
+    const out: import('./finding-service').ProjectedFindingLifecycleV2[] = [];
+    for (const finding of Object.values(state.findings)) {
+      if (finding.reviewContext.kind !== 'content') continue;
+      out.push(projectFindingLifecycle({ finding }));
+    }
+    return out;
+  }
+
   /** The §16.1 six-condition settlement gate over the round's committed facts,
    * verification records, observations, and findings (F2: enforced BEFORE the
    * validator runs so a stub review_settlement validator can never mask a
@@ -1052,6 +1074,7 @@ export class ContentReviewService {
     const slotVerdicts = new Map<string, 'pass' | 'reject'>();
     const relationVerdicts = new Map<string, 'satisfied' | 'violated'>();
     const verificationRecords = new Map<string, unknown>();
+    const duplicateVerificationTargets = new Set<string>();
     const ledgerEvents = events.filter(
       (e): e is Extract<AuthoritativeReviewEventV2, { type: 'structured_content_review_assignment_committed' }> =>
         e.type === 'structured_content_review_assignment_committed' && e.reviewRoundId === roundId,
@@ -1078,7 +1101,12 @@ export class ContentReviewService {
       for (const recordRef of ledger.verificationRecordRefs ?? []) {
         const record = (await this.deps.resolver(taskId, recordRef)) as { findingId?: string; repairStage?: string } | null;
         if (record === null || typeof record !== 'object' || typeof record.findingId !== 'string' || typeof record.repairStage !== 'string') continue;
-        verificationRecords.set(`${record.findingId}:${record.repairStage}`, record);
+        const key = `${record.findingId}:${record.repairStage}`;
+        if (verificationRecords.has(key)) {
+          duplicateVerificationTargets.add(key);
+        } else {
+          verificationRecords.set(key, record);
+        }
       }
     }
     // The presence-aware coverage facts mapped to the committed verdicts.
@@ -1086,7 +1114,14 @@ export class ContentReviewService {
       if (f.disposition === 'absent_not_applicable') return f;
       return { disposition: 'reviewed', slotId: f.slotId, verdict: slotVerdicts.get(f.slotId) ?? 'reject' };
     });
-    const verificationTargets = verificationStagesOf(findings);
+    // I-3 (adversarial review): the round's verification targets span the
+    // addressed-but-unverified CONTENT stages ACROSS rounds — a repair finding
+    // was opened in the PRIOR round, so the round-scoped `findings` never
+    // contains it and the gate would Seal with the finding addressed-but-
+    // unverified. The gate demands a current verification record per target.
+    const verificationTargets = this.deps.findingService
+      ? verificationStagesOf(await this.projectContentTrackFindings(taskId))
+      : verificationStagesOf(findings);
     // Assignment + observation completeness (the round-completed gate already
     // demanded these; recompute for the settlement boundary).
     const completedAssignments = events.filter(
@@ -1100,7 +1135,7 @@ export class ContentReviewService {
     );
     const wholeTreeObservationBoundToBaseline = observations.some((o) => o.parentObservationId === null && o.level === 1);
     const coverageSlotIds = [...coverage.setSlotIds, ...coverage.facts.filter((f) => f.disposition === 'absent_not_applicable').map((f) => f.slotId)];
-    return settleContentRoundCoverage({
+    const result = settleContentRoundCoverage({
       reviewRoundId: roundId,
       coverageSlotIds,
       coverageRelationIds: plan.relationTargets,
@@ -1113,6 +1148,13 @@ export class ContentReviewService {
       findings: findings.map((f) => ({ severity: f.severity, status: f.status })),
       reviewPolicyDigestBound: true,
     });
+    // I-3: more than one verification record for the same target in the
+    // round's ledgers is a corrupted ledger — never last-writer-wins.
+    if (duplicateVerificationTargets.size > 0) {
+      result.unmet.push(...[...duplicateVerificationTargets].sort().map((key) => `duplicate verification records for '${key}'`));
+      result.complete = false;
+    }
+    return result;
   }
 
   /** The Task 13 `freezeReviewAssignment` seam: publishes the assignment ledger
@@ -1696,19 +1738,43 @@ export class ContentReviewService {
       // blocks settlement — NEVER Seal (F2: the pure gate is enforced here
       // BEFORE the validator runs, so a stub validator cannot mask it).
       const gate = await this.evaluateSettlementGate(input.taskId, roundId, plannedEvent, coverage, plan, findings);
-      if (!gate.complete) {
+      const blockingFindings = findings.filter((f) => f.blockingUnclosed);
+      if (!gate.complete || blockingFindings.length > 0) {
+        // Any blocking Finding creates repair, NEVER Seal (Task 19 owns the
+        // deterministic plan creation; without the repair seam the settlement
+        // stays a bare retryable_failure so Task 18 tests keep their surface).
+        if (this.deps.repairService !== undefined && blockingFindings.length > 0) {
+          return await this.deps.repairService.createRepairPlanFromSettlement({
+            taskId: input.taskId,
+            settlementWorkItemId: input.workItemId,
+            settlementCommandId: input.commandId,
+            leaseEpoch: input.leaseEpoch,
+            authorityBaseRef: input.authorityBaseRef,
+            roundId,
+            coverageCoreRef: base.reviewCoverageCoreRef,
+            findings: blockingFindings,
+          });
+        }
         return { kind: 'retryable_failure', failureCode: 'CONTENT_REVIEW_BLOCKED', failureDigest: canonicalJsonSha256({ commandId: input.commandId, roundId, unmet: gate.unmet }) };
-      }
-      const blockingUnclosed = findings.filter((f) => f.blockingUnclosed);
-      if (blockingUnclosed.length > 0) {
-        // Any blocking Finding creates repair, NEVER Seal.
-        return { kind: 'retryable_failure', failureCode: 'CONTENT_REVIEW_BLOCKED', failureDigest: canonicalJsonSha256({ commandId: input.commandId, roundId, findingIds: blockingUnclosed.map((f) => f.findingId).sort() }) };
       }
 
       // Segment 1: content_review_settlement aggregate over the FINAL coverage core.
       const settlementRun = await this.runSettlementValidator(input, base.reviewCoverageCoreRef, coverageCore, manifest, plan, coverage);
       await this.persistEngineOutputs(input.taskId, settlementRun.run, settlementRun.store);
       if (settlementRun.run.aggregate.outcome === 'blocking_invalid') {
+        const blockingFindings = findings.filter((f) => f.blockingUnclosed);
+        if (this.deps.repairService !== undefined && blockingFindings.length > 0) {
+          return await this.deps.repairService.createRepairPlanFromSettlement({
+            taskId: input.taskId,
+            settlementWorkItemId: input.workItemId,
+            settlementCommandId: input.commandId,
+            leaseEpoch: input.leaseEpoch,
+            authorityBaseRef: input.authorityBaseRef,
+            roundId,
+            coverageCoreRef: base.reviewCoverageCoreRef,
+            findings: blockingFindings,
+          });
+        }
         return { kind: 'retryable_failure', failureCode: 'CONTENT_REVIEW_BLOCKED', failureDigest: canonicalJsonSha256({ commandId: input.commandId, aggregateRef: settlementRun.run.aggregateRef }) };
       }
       if (settlementRun.run.aggregate.outcome !== 'clear') {
@@ -1789,6 +1855,7 @@ export class ContentReviewService {
           mapBuild: null,
           mapReview: null,
           contentPlan: null,
+          repair: null,
           contentReview: contentReviewCarrier({
             reviewRoundId: roundId,
             settlementCoreRef,
@@ -1888,6 +1955,7 @@ export class ContentReviewService {
         mapReview: null,
         contentPlan: null,
         contentReview: input.carriers,
+        repair: null,
       },
       intent: { handlerKind: input.publishKind, handlerVersion: 1 },
       preparedRefs: input.preparedRefs,

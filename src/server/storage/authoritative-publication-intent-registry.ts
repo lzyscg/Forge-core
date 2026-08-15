@@ -236,6 +236,16 @@ export function publicationPayloadChildRefs(payload: PublicationOperationPayload
           refs.push(mr.successor.authorityBaseRef, mr.successor.payloadRef);
           if (mr.successor.grantSpecRef !== null) refs.push(mr.successor.grantSpecRef);
         }
+        if (mr.contentRound !== null) {
+          refs.push(mr.contentRound.mapRef, mr.contentRound.contentRevisionManifestRef, mr.contentRound.adoptionRootRef);
+          if (mr.contentRound.consumedOverrideRef !== null) refs.push(mr.contentRound.consumedOverrideRef);
+        }
+        if (mr.reviewWorkItems !== null) {
+          for (const s of mr.reviewWorkItems) {
+            refs.push(s.authorityBaseRef, s.payloadRef);
+            if (s.grantSpecRef !== null) refs.push(s.grantSpecRef);
+          }
+        }
       }
       const cp = parsed.contentPlan;
       if (cp !== null) {
@@ -293,6 +303,45 @@ export function publicationPayloadChildRefs(payload: PublicationOperationPayload
           if (cr.successor.grantSpecRef !== null) refs.push(cr.successor.grantSpecRef);
         }
         if (cr.terminal !== null) refs.push(cr.terminal.authorityBaseRef);
+      }
+      const rp = parsed.repair;
+      if (rp !== null) {
+        if (rp.repairPlanSpecRef !== null) refs.push(rp.repairPlanSpecRef);
+        if (rp.sourceValidationReceiptRef !== null) refs.push(rp.sourceValidationReceiptRef);
+        if (rp.stagingRootRef !== null) refs.push(rp.stagingRootRef);
+        if (rp.validatorAggregateRef !== null) refs.push(rp.validatorAggregateRef);
+        if (rp.validationReceiptRef !== null) refs.push(rp.validationReceiptRef);
+        if (rp.successorPlanSpecRef !== null) refs.push(rp.successorPlanSpecRef);
+        if (rp.contentRevisionManifestRef !== null) refs.push(rp.contentRevisionManifestRef);
+        if (rp.priorManifestRef !== null) refs.push(rp.priorManifestRef);
+        if (rp.repairBuildStart !== null) {
+          refs.push(rp.repairBuildStart.mapBuildSpecRef);
+          if (rp.repairBuildStart.sourceValidationReceiptRef !== null) refs.push(rp.repairBuildStart.sourceValidationReceiptRef);
+        }
+        if (rp.mapBuildManifestRef !== null) refs.push(rp.mapBuildManifestRef);
+        if (rp.contributionManifestRef !== null) refs.push(rp.contributionManifestRef);
+        if (rp.candidateRef !== null) refs.push(rp.candidateRef);
+        if (rp.mapRound !== null) {
+          refs.push(rp.mapRound.candidateRef);
+          if (rp.mapRound.contentRevisionManifestRef !== null) refs.push(rp.mapRound.contentRevisionManifestRef);
+          if (rp.mapRound.consumedOverrideRef !== null) refs.push(rp.mapRound.consumedOverrideRef);
+        }
+        if (rp.contentRound !== null) {
+          refs.push(rp.contentRound.mapRef, rp.contentRound.contentRevisionManifestRef, rp.contentRound.adoptionRootRef);
+          if (rp.contentRound.consumedOverrideRef !== null) refs.push(rp.contentRound.consumedOverrideRef);
+        }
+        if (rp.reviewWorkItems !== null) {
+          for (const s of rp.reviewWorkItems) {
+            refs.push(s.authorityBaseRef, s.payloadRef);
+            if (s.grantSpecRef !== null) refs.push(s.grantSpecRef);
+          }
+        }
+        if (rp.overrideTransfer !== null) refs.push(rp.overrideTransfer.overrideRef, rp.overrideTransfer.fromRepairPlanRef, rp.overrideTransfer.toRepairPlanRef);
+        if (rp.successor !== null) {
+          refs.push(rp.successor.authorityBaseRef, rp.successor.payloadRef);
+          if (rp.successor.grantSpecRef !== null) refs.push(rp.successor.grantSpecRef);
+        }
+        if (rp.terminal !== null) refs.push(rp.terminal.authorityBaseRef);
       }
       return refs;
     }

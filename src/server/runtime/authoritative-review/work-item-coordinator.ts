@@ -368,6 +368,27 @@ export function validateSuccessorCarrier(carrier: SuccessorWorkItemCarrierV2): s
   });
 }
 
+/**
+ * Task 19 additive: the repair-successor carry check — the §17.2 carry rules
+ * PLUS the repair binding: a repair WorkItem's payloadRef must be the exact
+ * plan spec ref its grant binds (so a stale/granted-elsewhere successor can
+ * never be created). The repair service folds this into every envelope that
+ * creates a repair WorkItem.
+ */
+export function validateRepairSuccessorCarrier(
+  carrier: SuccessorWorkItemCarrierV2,
+  planSpecRef: BlobRefV2,
+): string[] {
+  const errors = validateSuccessorCarrier(carrier);
+  const isRepairSession = carrier.sessionKind === 'map_repair' || carrier.sessionKind === 'content_repair';
+  if (isRepairSession && carrier.grantSpecRef !== null) {
+    if (carrier.payloadRef.kind !== 'repair_plan_spec' || carrier.payloadRef.digest !== planSpecRef.digest) {
+      errors.push('repair successor payloadRef must be the exact repair plan spec ref');
+    }
+  }
+  return errors;
+}
+
 /** workitem kind -> system command kind (§17.2 six closed kinds). */
 const SYSTEM_COMMAND_KIND_BY_WORK_ITEM: Readonly<Record<string, SystemCommandKindV2>> = {
   system_map_finalize: 'map_finalize',

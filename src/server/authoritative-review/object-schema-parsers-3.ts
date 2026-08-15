@@ -35,6 +35,7 @@ import {
   type RepairBatchGrantSpecV2,
   type RepairKeyLedgerV2,
   type RepairPlanSpecV2,
+  type RepairPublishCarriersV2,
   type RepairStagingRootV2,
   type ReviewAdoptionLedgerBlobV2,
   type ReviewAdoptionRootV2,
@@ -42,6 +43,7 @@ import {
   type ReviewFactV2,
   type ReviewFactOriginV2,
   type SealValidationBundleV2,
+  type StructuredSessionKindV2,
   type SuccessorWorkItemCarrierV2,
   type SystemCommandTerminalCarrierV2,
   type ValidationReceiptV2,
@@ -256,6 +258,8 @@ const PUBLISH_KINDS = [
   'generation_finalize', 'repair_finalize', 'migration_settlement', 'seal_publish',
   // Task 15 map-build service: finish proposal + the two finalizer envelopes.
   'map_build_finish', 'map_finalize_commit', 'map_finalize_rejected',
+  // Task 19 repair service: plan creation / serial batches / scope flow.
+  'repair_plan_creation', 'repair_batch_commit', 'repair_scope_request', 'repair_scope_approval', 'repair_scope_rejection',
 ] as const;
 /** Task 10 extended builder set (see authority-types.ts union doc). */
 const EVENT_BUILDERS = [
@@ -280,7 +284,7 @@ export function parsePublicationOperationPayload(value: unknown): PublicationOpe
   const o = rec(value, 'publication_operation_payload');
   const family = str(o.family, 'publication_operation_payload.family');
   if (family === 'domain_publish') {
-    ex(o, ['family', 'operationId', 'taskId', 'publishKind', 'blobRefs', 'expectedResultIdentity', 'mapBuild', 'mapReview', 'contentPlan', 'contentReview'], 'publication_operation_payload');
+    ex(o, ['family', 'operationId', 'taskId', 'publishKind', 'blobRefs', 'expectedResultIdentity', 'mapBuild', 'mapReview', 'contentPlan', 'contentReview', 'repair'], 'publication_operation_payload');
     if (!(PUBLISH_KINDS as readonly string[]).includes(str(o.publishKind, 'publishKind'))) throw new SchemaError('publishKind unknown');
     return {
       family,
@@ -293,6 +297,7 @@ export function parsePublicationOperationPayload(value: unknown): PublicationOpe
       mapReview: parseMapReviewPublishCarriers(o.mapReview),
       contentPlan: parseContentPlanPublishCarriers(o.contentPlan),
       contentReview: parseContentReviewPublishCarriers(o.contentReview),
+      repair: parseRepairPublishCarriers(o.repair),
     } as PublicationOperationPayloadV2;
   }
   if (family === 'lease_or_retry') {
@@ -619,7 +624,7 @@ function parseMapReviewPublishCarriers(value: unknown): MapReviewPublishCarriers
     'mapSemanticDigest', 'contentRevisionManifestRef', 'activationValidatorAggregateRef',
     'migrationSettlementCoreRef', 'migrationActivationDecisionRef',
     'taskContentRevision', 'manifestPhase', 'producerPlanSpecRef', 'priorManifestRef',
-    'successor', 'terminal',
+    'successor', 'terminal', 'contentRound', 'reviewWorkItems',
   ], 'mapReview');
   const source = o.source === null ? null : str(o.source, 'mapReview.source');
   if (source !== null && source !== 'batch' && source !== 'whole_map_observation') {
@@ -664,6 +669,10 @@ function parseMapReviewPublishCarriers(value: unknown): MapReviewPublishCarriers
     priorManifestRef: rfn(o.priorManifestRef, 'mapReview.priorManifestRef'),
     successor: parseSuccessorWorkItemCarrier(o.successor),
     terminal: parseSystemCommandTerminalCarrier(o.terminal),
+    contentRound: parseContentReviewRoundPlanCarrier(o.contentRound),
+    reviewWorkItems: o.reviewWorkItems === null
+      ? null
+      : (o.reviewWorkItems as unknown[]).map((v, i) => parseSuccessorWorkItemCarrier(v)).filter((s): s is SuccessorWorkItemCarrierV2 => s !== null),
   };
 }
 
@@ -855,6 +864,159 @@ function parseContentReviewPublishCarriers(value: unknown): ContentReviewPublish
     sealAuthorityBaseRef: rfn(o.sealAuthorityBaseRef, 'contentReview.sealAuthorityBaseRef'),
     successor: parseSuccessorWorkItemCarrier(o.successor),
     terminal: parseSystemCommandTerminalCarrier(o.terminal),
+  };
+}
+
+/** Task 19 `repair` domain-publish carriers (exact-key; null when unused). */
+function parseRepairPublishCarriers(value: unknown): RepairPublishCarriersV2 | null {
+  if (value === null || value === undefined) return null;
+  const o = rec(value, 'repair');
+  ex(o, [
+    'track', 'repairPlanId', 'planRevisionId', 'repairPlanSpecRef', 'sourceValidationReceiptRef',
+    'supersedesPlanRevisionId', 'successorPlanSpecRef', 'successorPlanRevisionId', 'successorReason', 'batchOrdinal', 'stagingRootRef', 'workItemId',
+    'attemptId', 'validatorAggregateRef', 'validationReceiptRef', 'requestId', 'reason', 'findingIds',
+    'requestedNodeIds', 'requestedRelationIds', 'requestedSlotIds', 'grantSpecId', 'grantKind',
+    'addressedFindingIds', 'contentRevisionManifestRef', 'taskContentRevision', 'manifestPhase',
+    'priorManifestRef', 'repairBuildStart', 'repairBuildFinish', 'mapBuildManifestRef',
+    'contributionManifestRef', 'candidateId', 'candidateDigest', 'candidateRef', 'baseMapId',
+    'mapRound', 'contentRound', 'reviewWorkItems', 'overrideTransfer', 'supersededWorkItem', 'successor', 'terminal',
+  ], 'repair');
+  const track = o.track === null ? null : str(o.track, 'repair.track');
+  if (track !== null && track !== 'map' && track !== 'content') {
+    throw new SchemaError('repair.track must be map|content|null');
+  }
+  const successorReason = o.successorReason === null
+    ? null
+    : str(o.successorReason, 'repair.successorReason');
+  if (successorReason !== null && successorReason !== 'scope_expansion' && successorReason !== 'validation_correction' && successorReason !== 'recovery') {
+    throw new SchemaError('repair.successorReason must be scope_expansion|validation_correction|recovery|null');
+  }
+  const manifestPhase = o.manifestPhase === null ? null : str(o.manifestPhase, 'repair.manifestPhase');
+  if (manifestPhase !== null && manifestPhase !== 'provisional' && manifestPhase !== 'finalized') {
+    throw new SchemaError('repair.manifestPhase must be provisional|finalized|null');
+  }
+  const grantKind = o.grantKind === null ? null : str(o.grantKind, 'repair.grantKind');
+  if (grantKind !== null && grantKind !== 'map_repair_batch' && grantKind !== 'content_repair_batch') {
+    throw new SchemaError('repair.grantKind must be map_repair_batch|content_repair_batch|null');
+  }
+  const repairBuildStart = o.repairBuildStart === null ? null : parseRepairBuildStartCarrier(o.repairBuildStart);
+  const repairBuildFinish = o.repairBuildFinish === null ? null : parseRepairBuildFinishCarrier(o.repairBuildFinish);
+  const overrideTransfer = o.overrideTransfer === null ? null : parseOverrideTransferCarrier(o.overrideTransfer);
+  const reviewWorkItems = o.reviewWorkItems === null
+    ? null
+    : (o.reviewWorkItems as unknown[]).map((v, i) => parseSuccessorWorkItemCarrier(v)).filter((s): s is SuccessorWorkItemCarrierV2 => s !== null);
+  return {
+    track,
+    repairPlanId: o.repairPlanId === null ? null : str(o.repairPlanId, 'repair.repairPlanId'),
+    planRevisionId: o.planRevisionId === null ? null : hx(o.planRevisionId, 'repair.planRevisionId'),
+    repairPlanSpecRef: rfn(o.repairPlanSpecRef, 'repair.repairPlanSpecRef'),
+    sourceValidationReceiptRef: rfn(o.sourceValidationReceiptRef, 'repair.sourceValidationReceiptRef'),
+    supersedesPlanRevisionId: o.supersedesPlanRevisionId === null ? null : hx(o.supersedesPlanRevisionId, 'repair.supersedesPlanRevisionId'),
+    successorPlanSpecRef: rfn(o.successorPlanSpecRef, 'repair.successorPlanSpecRef'),
+    successorPlanRevisionId: o.successorPlanRevisionId === null ? null : hx(o.successorPlanRevisionId, 'repair.successorPlanRevisionId'),
+    successorReason,
+    batchOrdinal: o.batchOrdinal === null ? null : onn(o.batchOrdinal, 'repair.batchOrdinal'),
+    stagingRootRef: rfn(o.stagingRootRef, 'repair.stagingRootRef'),
+    workItemId: o.workItemId === null ? null : str(o.workItemId, 'repair.workItemId'),
+    attemptId: o.attemptId === null ? null : str(o.attemptId, 'repair.attemptId'),
+    validatorAggregateRef: rfn(o.validatorAggregateRef, 'repair.validatorAggregateRef'),
+    validationReceiptRef: rfn(o.validationReceiptRef, 'repair.validationReceiptRef'),
+    requestId: o.requestId === null ? null : str(o.requestId, 'repair.requestId'),
+    reason: o.reason === null ? null : str(o.reason, 'repair.reason'),
+    findingIds: o.findingIds === null ? null : sa(o.findingIds, 'repair.findingIds'),
+    requestedNodeIds: o.requestedNodeIds === null ? null : sa(o.requestedNodeIds, 'repair.requestedNodeIds'),
+    requestedRelationIds: o.requestedRelationIds === null ? null : sa(o.requestedRelationIds, 'repair.requestedRelationIds'),
+    requestedSlotIds: o.requestedSlotIds === null ? null : sa(o.requestedSlotIds, 'repair.requestedSlotIds'),
+    grantSpecId: o.grantSpecId === null ? null : str(o.grantSpecId, 'repair.grantSpecId'),
+    grantKind,
+    addressedFindingIds: o.addressedFindingIds === null ? null : sa(o.addressedFindingIds, 'repair.addressedFindingIds'),
+    contentRevisionManifestRef: rfn(o.contentRevisionManifestRef, 'repair.contentRevisionManifestRef'),
+    taskContentRevision: o.taskContentRevision === null ? null : onn(o.taskContentRevision, 'repair.taskContentRevision'),
+    manifestPhase,
+    priorManifestRef: rfn(o.priorManifestRef, 'repair.priorManifestRef'),
+    repairBuildStart,
+    repairBuildFinish,
+    mapBuildManifestRef: rfn(o.mapBuildManifestRef, 'repair.mapBuildManifestRef'),
+    contributionManifestRef: rfn(o.contributionManifestRef, 'repair.contributionManifestRef'),
+    candidateId: o.candidateId === null ? null : str(o.candidateId, 'repair.candidateId'),
+    candidateDigest: o.candidateDigest === null ? null : hx(o.candidateDigest, 'repair.candidateDigest'),
+    candidateRef: rfn(o.candidateRef, 'repair.candidateRef'),
+    baseMapId: o.baseMapId === null ? null : str(o.baseMapId, 'repair.baseMapId'),
+    mapRound: parseMapReviewRoundPlanCarrier(o.mapRound),
+    contentRound: parseContentReviewRoundPlanCarrier(o.contentRound),
+    reviewWorkItems,
+    overrideTransfer,
+    supersededWorkItem: o.supersededWorkItem === null ? null : parseSupersededWorkItemCarrier(o.supersededWorkItem),
+    successor: parseSuccessorWorkItemCarrier(o.successor),
+    terminal: parseSystemCommandTerminalCarrier(o.terminal),
+  };
+}
+
+function parseSupersededWorkItemCarrier(value: unknown): NonNullable<RepairPublishCarriersV2['supersededWorkItem']> {
+  const o = rec(value, 'supersededWorkItem');
+  ex(o, ['workItemId', 'leaseEpoch', 'reason', 'authorityBaseRef', 'attemptAbandonment'], 'supersededWorkItem');
+  const reason = str(o.reason, 'supersededWorkItem.reason');
+  if (reason !== 'new_authority_base' && reason !== 'human_disposition') {
+    throw new SchemaError('supersededWorkItem.reason must be new_authority_base|human_disposition');
+  }
+  const attemptAbandonment = o.attemptAbandonment === null ? null : parseAttemptAbandonmentCarrier(o.attemptAbandonment);
+  return {
+    workItemId: str(o.workItemId, 'supersededWorkItem.workItemId'),
+    leaseEpoch: onn(o.leaseEpoch, 'supersededWorkItem.leaseEpoch'),
+    reason: reason as 'new_authority_base' | 'human_disposition',
+    authorityBaseRef: rfKind(o.authorityBaseRef, 'authority_base_set', 'supersededWorkItem.authorityBaseRef'),
+    attemptAbandonment,
+  };
+}
+
+/** R2-2 (re-review round 2): the mid-session cycle the approval envelope ends
+ * atomically before the supersede (attempt-abandoned + lease-reclaimed). The
+ * session-kind membership is enforced by the EVENT validator (the attempt-
+ * abandoned event demands a registered StructuredSessionKindV2). */
+function parseAttemptAbandonmentCarrier(value: unknown): NonNullable<NonNullable<RepairPublishCarriersV2['supersededWorkItem']>['attemptAbandonment']> {
+  const o = rec(value, 'attemptAbandonment');
+  ex(o, ['attemptId', 'logicalAssignmentId', 'reviewAssignmentId', 'sessionKind', 'leaseEpoch', 'authorityBaseRef'], 'attemptAbandonment');
+  return {
+    attemptId: str(o.attemptId, 'attemptAbandonment.attemptId'),
+    logicalAssignmentId: str(o.logicalAssignmentId, 'attemptAbandonment.logicalAssignmentId'),
+    reviewAssignmentId: o.reviewAssignmentId === null ? null : str(o.reviewAssignmentId, 'attemptAbandonment.reviewAssignmentId'),
+    sessionKind: str(o.sessionKind, 'attemptAbandonment.sessionKind') as StructuredSessionKindV2,
+    leaseEpoch: onn(o.leaseEpoch, 'attemptAbandonment.leaseEpoch'),
+    authorityBaseRef: rfKind(o.authorityBaseRef, 'authority_base_set', 'attemptAbandonment.authorityBaseRef'),
+  };
+}
+
+function parseRepairBuildStartCarrier(value: unknown): NonNullable<RepairPublishCarriersV2['repairBuildStart']> {
+  const o = rec(value, 'repairBuildStart');
+  ex(o, ['mapBuildId', 'revision', 'mapBuildSpecRef', 'supersedesMapBuildId', 'sourceValidationReceiptRef'], 'repairBuildStart');
+  return {
+    mapBuildId: str(o.mapBuildId, 'repairBuildStart.mapBuildId'),
+    revision: onn(o.revision, 'repairBuildStart.revision'),
+    mapBuildSpecRef: rfKind(o.mapBuildSpecRef, 'map_build_spec', 'repairBuildStart.mapBuildSpecRef'),
+    supersedesMapBuildId: o.supersedesMapBuildId === null ? null : str(o.supersedesMapBuildId, 'repairBuildStart.supersedesMapBuildId'),
+    sourceValidationReceiptRef: rfn(o.sourceValidationReceiptRef, 'repairBuildStart.sourceValidationReceiptRef'),
+  };
+}
+
+function parseRepairBuildFinishCarrier(value: unknown): NonNullable<RepairPublishCarriersV2['repairBuildFinish']> {
+  const o = rec(value, 'repairBuildFinish');
+  ex(o, ['mapBuildId', 'expectedChunkCount', 'expectedFrontierDigest', 'expectedRootCount'], 'repairBuildFinish');
+  return {
+    mapBuildId: str(o.mapBuildId, 'repairBuildFinish.mapBuildId'),
+    expectedChunkCount: onn(o.expectedChunkCount, 'repairBuildFinish.expectedChunkCount'),
+    expectedFrontierDigest: hx(o.expectedFrontierDigest, 'repairBuildFinish.expectedFrontierDigest'),
+    expectedRootCount: onn(o.expectedRootCount, 'repairBuildFinish.expectedRootCount'),
+  };
+}
+
+function parseOverrideTransferCarrier(value: unknown): NonNullable<RepairPublishCarriersV2['overrideTransfer']> {
+  const o = rec(value, 'overrideTransfer');
+  ex(o, ['overrideRef', 'fromRepairPlanRef', 'toRepairPlanRef', 'transferOperationId'], 'overrideTransfer');
+  return {
+    overrideRef: rfKind(o.overrideRef, 'round_budget_override', 'overrideTransfer.overrideRef'),
+    fromRepairPlanRef: rfKind(o.fromRepairPlanRef, 'repair_plan_spec', 'overrideTransfer.fromRepairPlanRef'),
+    toRepairPlanRef: rfKind(o.toRepairPlanRef, 'repair_plan_spec', 'overrideTransfer.toRepairPlanRef'),
+    transferOperationId: str(o.transferOperationId, 'overrideTransfer.transferOperationId'),
   };
 }
 
@@ -1335,7 +1497,7 @@ export function parseSystemArtifactDelivery(value: unknown): Record<string, unkn
 }
 
 /* ---- validator objects (§9) ------------------------------------- */
-const TRIGGER_ENUM = ['map_candidate_commit', 'map_review_settlement', 'map_activation', 'content_commit', 'review_settlement', 'seal_input', 'seal_output'] as const;
+const TRIGGER_ENUM = ['map_candidate_commit', 'map_review_settlement', 'map_activation', 'content_commit', 'repair_finalize', 'review_settlement', 'seal_input', 'seal_output'] as const;
 const EXEC_PHASE = ['batch_commit', 'plan_finalize'] as const;
 
 export function parseValidatorInputEnvelope(value: unknown): ValidatorInputEnvelopeV2 {
@@ -1363,6 +1525,10 @@ export function parseValidatorInputEnvelope(value: unknown): ValidatorInputEnvel
   if (trigger === 'review_settlement') {
     ex(o, ['trigger', 'taskId', 'templateSnapshotHash', 'contentReviewCoverageCoreRef', 'selectedTargetRefs'], 'validator_input_envelope');
     return { trigger, taskId: str(o.taskId, 'taskId'), templateSnapshotHash: str(o.templateSnapshotHash, 'templateSnapshotHash'), contentReviewCoverageCoreRef: rfKind(o.contentReviewCoverageCoreRef, 'content_review_coverage_core', 'contentReviewCoverageCoreRef'), selectedTargetRefs: sel };
+  }
+  if (trigger === 'repair_finalize') {
+    ex(o, ['trigger', 'taskId', 'templateSnapshotHash', 'repairPlanSpecRef', 'selectedTargetRefs'], 'validator_input_envelope');
+    return { trigger, taskId: str(o.taskId, 'taskId'), templateSnapshotHash: str(o.templateSnapshotHash, 'templateSnapshotHash'), repairPlanSpecRef: rfKind(o.repairPlanSpecRef, 'repair_plan_spec', 'repairPlanSpecRef'), selectedTargetRefs: sel };
   }
   if (trigger === 'seal_input') {
     ex(o, ['trigger', 'taskId', 'templateSnapshotHash', 'reviewBundleRef', 'selectedTargetRefs'], 'validator_input_envelope');
@@ -1406,7 +1572,7 @@ export function parseValidationReceipt(value: unknown): ValidationReceiptV2 {
   const o = rec(value, 'validation_receipt');
   ex(o, ['receiptKind', 'validatorAggregateRef', 'blockerIssues', 'lineageRefs', 'receiptDigest'], 'validation_receipt');
   const kind = str(o.receiptKind, 'receiptKind');
-  const RECEIPT_KINDS = ['map_build', 'generation', 'map_repair', 'content_repair', 'map_activation', 'map_review_settlement', 'review_settlement', 'seal_input', 'seal_output'];
+  const RECEIPT_KINDS = ['map_build', 'generation', 'map_repair', 'content_repair', 'map_activation', 'map_review_settlement', 'review_settlement', 'repair_finalize', 'seal_input', 'seal_output'];
   if (!(RECEIPT_KINDS as readonly string[]).includes(kind)) throw new SchemaError('receiptKind unknown');
   const lineage = (o.lineageRefs as unknown[]).map((v, i) => {
     const e = rec(v, `lineageRefs[${i}]`);
