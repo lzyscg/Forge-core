@@ -260,11 +260,12 @@ interface RepairEnv {
   snapshotHash: string;
   reviewPolicyDigest: string;
   maxRounds: number;
+  contentBatchValidatorCalls(): number;
 }
 
 let envs: RepairEnv[] = [];
 
-async function makeRepairEnv(opts: { maxRounds?: number; contentBatchTargetSlots?: number; blocking?: boolean; blockingOnRevision2?: boolean; stagedBlocking?: boolean; extraHandlers?: (registry: PublicationIntentRegistry) => void } = {}): Promise<RepairEnv> {
+async function makeRepairEnv(opts: { maxRounds?: number; contentBatchTargetSlots?: number; blocking?: boolean; blockingOnRevision2?: boolean; stagedBlocking?: boolean; blockOnContentBatchCore?: boolean; extraHandlers?: (registry: PublicationIntentRegistry) => void } = {}): Promise<RepairEnv> {
   const registry = new PublicationIntentRegistry();
   registerMapBuildPublicationHandlers(registry);
   registerMapReviewPublicationHandlers(registry);
@@ -286,15 +287,20 @@ async function makeRepairEnv(opts: { maxRounds?: number; contentBatchTargetSlots
   const maxRounds = opts.maxRounds ?? 3;
   const finalizeSource = opts.stagedBlocking === true ? BLOCKING_ON_STAGED_MAP_SOURCE : opts.blocking === true ? BLOCKING_SOURCE : opts.blockingOnRevision2 === true ? BLOCKING_ON_REV2_SOURCE : FINALIZE_VALID_SOURCE;
   const finalizeDigest = opts.stagedBlocking === true ? hash('staged-digest') : opts.blocking === true || opts.blockingOnRevision2 === true ? hash('blocking-digest') : '';
+  const contentBatchSource = opts.blockOnContentBatchCore === true ? CONTENT_BATCH_CORE_BLOCKING_SOURCE : BATCH_VALID_SOURCE;
+  let contentBatchValidatorCalls = 0;
   const sourceResolver = (key: string): string | null => {
     if (key === 'test.repair.repair_finalize') return finalizeSource;
-    if (key === 'test.repair.content_commit.batch_commit') return BATCH_VALID_SOURCE;
+    if (key === 'test.repair.content_commit.batch_commit') {
+      contentBatchValidatorCalls += 1;
+      return contentBatchSource;
+    }
     return builtinSourceOf(key);
   };
   const repairRegistry = new ValidatorRegistry([
     ...AUTHORITATIVE_REVIEW_BUILTIN_VALIDATOR_ENTRIES,
     testValidatorEntry('repair_finalize', null, finalizeSource, '', finalizeDigest),
-    testValidatorEntry('content_commit', 'batch_commit', BATCH_VALID_SOURCE, '.batch_commit'),
+    testValidatorEntry('content_commit', 'batch_commit', contentBatchSource, '.batch_commit'),
   ]);
   const service = new RepairService({
     facade: env.facade,
@@ -312,7 +318,7 @@ async function makeRepairEnv(opts: { maxRounds?: number; contentBatchTargetSlots
     sourceResolver,
     registrationsFor: (trigger) => {
       if (trigger === 'content_commit') {
-        return [testValidatorRegistration('content_commit', 'batch_commit', BATCH_VALID_SOURCE, 'v-content-repair-batch')];
+        return [testValidatorRegistration('content_commit', 'batch_commit', contentBatchSource, 'v-content-repair-batch')];
       }
       return opts.blocking === true || opts.blockingOnRevision2 === true || opts.stagedBlocking === true
         ? [{ ...testValidatorRegistration('repair_finalize', null, finalizeSource, opts.stagedBlocking === true ? 'v-repair-staged' : 'v-repair-blocking'), implementationDigest: finalizeDigest }]
@@ -345,6 +351,7 @@ async function makeRepairEnv(opts: { maxRounds?: number; contentBatchTargetSlots
     snapshotHash: 'a'.repeat(64),
     reviewPolicyDigest: hash('review-policy'),
     maxRounds,
+    contentBatchValidatorCalls: () => contentBatchValidatorCalls,
   };
   envs.push(built);
   return built;
@@ -986,6 +993,34 @@ function testValidatorRegistration(trigger: import('../../authoritative-review/a
 const MAP_SETTLEMENT_SOURCE = alwaysValidSource('map-review-settlement');
 const MAP_ACTIVATION_SOURCE = alwaysValidSource('map-activation');
 const BATCH_VALID_SOURCE = alwaysValidSource('content-batch');
+const CONTENT_BATCH_CORE_BLOCKING_SOURCE = `'use strict';
+module.exports = {
+  validate: function validate(input) {
+    var core = input && typeof input.core === 'object' ? input.core : {};
+    var commit = core.phase === 'batch_commit' && core.contentRevisionCommitCore && typeof core.contentRevisionCommitCore === 'object'
+      ? core.contentRevisionCommitCore
+      : {};
+    var replacements = Array.isArray(commit.authorizedReplacementEntriesWithoutValidation)
+      ? commit.authorizedReplacementEntriesWithoutValidation
+      : [];
+    if (commit.batchOrdinal === 1 && replacements.length === 1) {
+      var slotId = replacements[0].slotId;
+      return {
+        status: 'domain_invalid',
+        issues: [{
+          validatorId: input.validatorId,
+          implementationDigest: input.implementationDigest,
+          issueCode: 'TEST_FROZEN_CONTENT_CORE',
+          location: { targetKind: 'slot', stableTargetId: slotId, jsonPointer: '/authorizedReplacementEntriesWithoutValidation/0' },
+          repairTargets: { mapNodeIds: [], relationIds: [], slotIds: [slotId] },
+          evidenceDigest: ''
+        }],
+        executionDigest: ''
+      };
+    }
+    return { status: 'valid', executionDigest: '${hash('content-core-not-observed')}' };
+  }
+};`;
 const FINALIZE_VALID_SOURCE = alwaysValidSource('content-finalize');
 
 /**
@@ -1699,11 +1734,14 @@ describe('map repair staging + key lineage', { timeout: 120_000 }, () => {
 /* ------------------------------------------------------------------ */
 
 describe('content repair staging + continuity', { timeout: 120_000 }, () => {
-  it('content batches write ONLY targeted slots; batched repairs never trigger early review', async () => {
+  it('content batches cumulatively retain every repaired slot across GC/recovery and never rerun committed validators', async () => {
     const b = await makeRepairEnv({ contentBatchTargetSlots: 1 });
-    const stack = await driveToContentStack(b, ['s-1', 's-2']);
+    const stack = await driveToContentStack(b, ['s-1', 's-2', 's-3']);
     const contentSlot0 = stack.nodeIds[0] as string;
     const contentSlot1 = stack.nodeIds[1] as string;
+    const contentSlot2 = stack.nodeIds[2] as string;
+    const baseManifest = (await b.resolver(b.taskId, stack.manifestRef)) as ContentRevisionManifestV2;
+    const baseEntryRefs = new Map(baseManifest.entries.map((entry) => [entry.slotId, entry.versionRef]));
     await seedFindings(b, [{ findingId: 'c-1', primaryLocation: { kind: 'slot', id: contentSlot0 }, defectClass: 'content', severity: 'blocking', suggestedRepairSlotIds: [contentSlot1] }], 'content');
     const settlement = await createAndLeaseSettlement(b);
     await b.service.createRepairPlanFromSettlement({
@@ -1727,7 +1765,8 @@ describe('content repair staging + continuity', { timeout: 120_000 }, () => {
     // The out-of-scope slot: the OTHER batch's slot (the plan sorts the
     // targets, so the batch order may differ from the finding order).
     const scope2 = plan.orderedBatchScopes[1];
-    const outOfScopeSlot = scope2 !== undefined && scope2.kind === 'content' ? scope2.slotIds[0] as string : (contentSlot1 as string);
+    if (scope2 === undefined || scope2.kind !== 'content') throw new Error('expected second content repair scope');
+    const outOfScopeSlot = scope2.slotIds[0] as string;
     const workItemId = repairBatchWorkItemId(b.taskId, plan.repairPlanId, 1, plan.planRevisionId);
     const grant = (await grantOf(b, workItemId)) as RepairBatchGrantSpecV2 & { kind: 'content_repair_batch' };
     const leased = await leaseTargeted(b, workItemId, 'worker-a');
@@ -1745,13 +1784,19 @@ describe('content repair staging + continuity', { timeout: 120_000 }, () => {
     ).rejects.toThrow(/not in batch|WRITE_OUT_OF_SCOPE/);
     // The granted batch slot commits.
     const targetSlot = scope1.slotIds[0] as string;
+    const batch1ValueBody = { slotId: targetSlot, contentSchemaDigest: hash('schema'), taskContentRevision: baseManifest.taskContentRevision + 1, mediaType: 'text/markdown', text: 'repaired-batch-1' };
+    const batch1ValueRef = await b.env.facade.prepareBlob(b.taskId, 'content_value', { ...batch1ValueBody, selfDigest: canonicalJsonSha256(batch1ValueBody) });
+    await b.privateStore.appendReviewDraft(
+      { workItemId, leaseEpoch: leased.leaseEpoch, attemptId: ctx.attemptId, authorityBaseRef: leased.authorityBaseRef, grantSpecRef: (await b.env.readProjection(b.taskId)).workItems[workItemId].grantSpecRef as BlobRefV2 },
+      { clientOperationId: 'co-content-multibatch-1', op: 'write_slot_content', body: { slotId: targetSlot, value: 'repaired-batch-1' }, result: { slotId: targetSlot, contentValueRef: batch1ValueRef } },
+    );
     const outcome = await b.service.commitRepairBatch({
       taskId: b.taskId,
       workItemId,
       attemptId: ctx.attemptId,
       batchOrdinal: 1,
       ctx,
-      slotContents: { [targetSlot]: { text: 'repaired', mediaType: 'text/markdown' } },
+      slotContents: { [targetSlot]: { text: 'repaired-batch-1', mediaType: 'text/markdown' } },
     });
     expect(outcome.kind).toBe('committed');
     if (outcome.kind !== 'committed') return;
@@ -1764,10 +1809,84 @@ describe('content repair staging + continuity', { timeout: 120_000 }, () => {
     const afterPlan = events.slice(planStartedIndex);
     expect(afterPlan.some((e) => e.type === 'structured_review_round_planned')).toBe(false);
     expect(afterPlan.some((e) => e.type === 'structured_map_review_round_planned')).toBe(false);
+    await b.env.coordinator.completeWorkItem({
+      taskId: b.taskId,
+      operationId: attemptContinuationOperationId(b.taskId, workItemId, ctx.attemptId, 'complete'),
+      workItemId,
+      attemptId: ctx.attemptId,
+      resultRefs: [outcome.stagingRootRef],
+    });
+    expect(b.contentBatchValidatorCalls()).toBe(1);
+    const root1 = (await b.resolver(b.taskId, outcome.stagingRootRef)) as { contentManifestRef?: BlobRefV2 | null };
+    expect(root1.contentManifestRef?.kind).toBe('content_revision_manifest');
+    const batch1Manifest = (await b.resolver(b.taskId, root1.contentManifestRef as BlobRefV2)) as ContentRevisionManifestV2;
+    const batch1VersionRef = batch1Manifest.entries.find((entry) => entry.slotId === targetSlot)?.versionRef;
+    const batch1Version = await b.resolver(b.taskId, batch1VersionRef as BlobRefV2) as { provenance: { contentCommitValidatorAggregateRef: BlobRefV2 } };
+    const batch1Aggregate = await b.resolver(b.taskId, batch1Version.provenance.contentCommitValidatorAggregateRef) as { inputRef: BlobRefV2 };
+    const batch1Envelope = await b.resolver(b.taskId, batch1Aggregate.inputRef) as { contentValidationCoreRef: BlobRefV2 };
+    const validationCore = await b.resolver(b.taskId, batch1Envelope.contentValidationCoreRef) as { phase: string; contentRevisionCommitCoreRef: BlobRefV2 };
+    expect(validationCore.phase).toBe('batch_commit');
+    const frozenCommitCore = await b.resolver(b.taskId, validationCore.contentRevisionCommitCoreRef) as { batchOrdinal: number; authorizedReplacementEntriesWithoutValidation: readonly { slotId: string }[] };
+    expect(frozenCommitCore).toMatchObject({ batchOrdinal: 1, authorizedReplacementEntriesWithoutValidation: [{ slotId: targetSlot }] });
+
+    // A legal GC between committed batches must retain the entire staged
+    // manifest/version/value/validator provenance closure.
+    const { AuthoritativeReviewGc } = await import('../../storage/authoritative-review-gc');
+    const gc = new AuthoritativeReviewGc(b.env.paths, b.env.blobStore, b.env.eventStore, b.env.publicationStore, {});
+    await expect(gc.run()).resolves.toBeDefined();
+    await expect(b.resolver(b.taskId, batch1ValueRef)).resolves.toMatchObject({ text: 'repaired-batch-1' });
+
+    const workItem2 = repairBatchWorkItemId(b.taskId, plan.repairPlanId, 2, plan.planRevisionId);
+    const leased2 = await leaseTargeted(b, workItem2, 'worker-b');
+    const ctx2 = ctxOf(b, leased2);
+    const targetSlot2 = scope2.slotIds[0] as string;
+    const batch2ValueBody = { slotId: targetSlot2, contentSchemaDigest: hash('schema'), taskContentRevision: baseManifest.taskContentRevision + 1, mediaType: 'text/markdown', text: 'repaired-batch-2' };
+    const batch2ValueRef = await b.env.facade.prepareBlob(b.taskId, 'content_value', { ...batch2ValueBody, selfDigest: canonicalJsonSha256(batch2ValueBody) });
+    await b.privateStore.appendReviewDraft(
+      { workItemId: workItem2, leaseEpoch: leased2.leaseEpoch, attemptId: ctx2.attemptId, authorityBaseRef: leased2.authorityBaseRef, grantSpecRef: (await b.env.readProjection(b.taskId)).workItems[workItem2].grantSpecRef as BlobRefV2 },
+      { clientOperationId: 'co-content-multibatch-2', op: 'write_slot_content', body: { slotId: targetSlot2, value: 'repaired-batch-2' }, result: { slotId: targetSlot2, contentValueRef: batch2ValueRef } },
+    );
+    const outcome2 = await b.service.commitRepairBatch({ taskId: b.taskId, workItemId: workItem2, attemptId: ctx2.attemptId, batchOrdinal: 2, ctx: ctx2, slotContents: { [targetSlot2]: { text: 'repaired-batch-2', mediaType: 'text/markdown' } } });
+    expect(outcome2.kind).toBe('committed');
+    if (outcome2.kind !== 'committed') throw new Error('second content repair batch did not commit');
+    await b.env.coordinator.completeWorkItem({ taskId: b.taskId, operationId: attemptContinuationOperationId(b.taskId, workItem2, ctx2.attemptId, 'complete'), workItemId: workItem2, attemptId: ctx2.attemptId, resultRefs: [outcome2.stagingRootRef] });
+    expect(b.contentBatchValidatorCalls()).toBe(2);
+    const finalized = await runFinalizer(b, repairFinalizeWorkItemId(b.taskId, plan.repairPlanId, plan.planRevisionId));
+    expect(finalized.kind).toBe('completed');
+    expect(b.contentBatchValidatorCalls()).toBe(2);
+    const planned = (await b.readEvents(b.taskId)).filter((event): event is Extract<AuthoritativeReviewEventV2, { type: 'structured_review_round_planned' }> => event.type === 'structured_review_round_planned').pop();
+    if (planned === undefined) throw new Error('no repaired content review round');
+    const finalManifest = (await b.resolver(b.taskId, planned.contentRevisionManifestRef)) as ContentRevisionManifestV2;
+    const finalRefs = new Map(finalManifest.entries.map((entry) => [entry.slotId, entry.versionRef]));
+    expect(finalRefs.get(targetSlot)?.digest).not.toBe(baseEntryRefs.get(targetSlot)?.digest);
+    expect(finalRefs.get(targetSlot2)?.digest).not.toBe(baseEntryRefs.get(targetSlot2)?.digest);
+    expect(finalRefs.get(contentSlot2)?.digest).toBe(baseEntryRefs.get(contentSlot2)?.digest);
+    const finalVersion1 = await b.resolver(b.taskId, finalRefs.get(targetSlot) as BlobRefV2) as { blobRef: BlobRefV2 };
+    const finalVersion2 = await b.resolver(b.taskId, finalRefs.get(targetSlot2) as BlobRefV2) as { blobRef: BlobRefV2 };
+    await expect(b.resolver(b.taskId, finalVersion1.blobRef)).resolves.toMatchObject({ text: 'repaired-batch-1' });
+    await expect(b.resolver(b.taskId, finalVersion2.blobRef)).resolves.toMatchObject({ text: 'repaired-batch-2' });
     // The plan's imported base manifest stays the CURRENT manifest.
     const projection = await b.env.readProjection(b.taskId);
-    expect(projection.currentManifest?.manifestPhase).toBe('finalized');
+    expect(projection.currentManifest?.contentRevisionManifestRef.digest).toBe(planned.contentRevisionManifestRef.digest);
     void grant;
+  });
+
+  it('content_commit batch validator receives the frozen wrapper and can reject from commit-core bytes', async () => {
+    const b = await makeRepairEnv({ contentBatchTargetSlots: 1, blockOnContentBatchCore: true });
+    const stack = await driveToContentStack(b, ['s-1']);
+    const slotId = stack.nodeIds[0] as string;
+    await seedFindings(b, [{ findingId: 'c-core', primaryLocation: { kind: 'slot', id: slotId }, defectClass: 'content', severity: 'blocking' }], 'content');
+    const settlement = await createAndLeaseSettlement(b);
+    await b.service.createRepairPlanFromSettlement({ taskId: b.taskId, settlementWorkItemId: settlement.workItemId, settlementCommandId: settlement.commandId, leaseEpoch: settlement.leaseEpoch, authorityBaseRef: settlement.authorityBaseRef, roundId: 'round-core', coverageCoreRef: { kind: 'content_review_coverage_core', digest: 'e'.repeat(64), byteLength: 10, mediaType: 'application/json', schemaVersion: 1 }, findings: blockingFindingsOf(['c-core']) });
+    const state = await b.env.readProjection(b.taskId);
+    const lineage = Object.values(state.repairPlans)[0];
+    const plan = await b.resolver(b.taskId, lineage.revisions[lineage.currentPlanRevisionId as string].specRef) as RepairPlanSpecV2;
+    const workItemId = repairBatchWorkItemId(b.taskId, plan.repairPlanId, 1, plan.planRevisionId);
+    const leased = await leaseTargeted(b, workItemId, 'worker-core');
+    const ctx = ctxOf(b, leased);
+    await expect(b.service.commitRepairBatch({ taskId: b.taskId, workItemId, attemptId: ctx.attemptId, batchOrdinal: 1, ctx, slotContents: { [slotId]: { text: 'blocked-by-core', mediaType: 'text/markdown' } } })).rejects.toMatchObject({ code: 'CONTENT_REPAIR_BATCH_BLOCKED' });
+    expect(b.contentBatchValidatorCalls()).toBe(1);
+    expect((await b.readEvents(b.taskId)).filter((event) => event.type === 'structured_content_repair_batch_committed')).toHaveLength(0);
   });
 
   it('same-root/different-manifest staleness rejects a content repair commit', async () => {

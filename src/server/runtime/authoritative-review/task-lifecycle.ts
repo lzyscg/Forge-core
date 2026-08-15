@@ -1477,6 +1477,13 @@ export class TaskLifecycleServiceV2 {
       batchOrdinal: 1,
       mapRootDigest: track === 'map' ? '0'.repeat(64) : null,
       contentRootDigest: track === 'content' ? '0'.repeat(64) : null,
+      // Root only a real projected manifest.  The recovery placeholder above
+      // is deliberately not lease/GC reachable and is resolved-or-failed by
+      // the repair pipeline once projection state is available.
+      contentManifestRef:
+        track === 'content' && state.currentManifest !== null
+          ? state.currentManifest.contentRevisionManifestRef
+          : null,
       priorStagingRootRef: null,
       keyLedgerRef,
     };

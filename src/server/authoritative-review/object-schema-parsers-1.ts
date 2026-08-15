@@ -11,6 +11,7 @@ import {
   type ContentCompatibilityProofV2,
   type ContentPlanFinalizeCoreV2,
   type ContentRevisionCommitCoreV2,
+  type ContentValidationCoreV2,
   type ContentRevisionManifestV2,
   type ContentReviewCoverageCoreV2,
   type ContentReviewSettlementCoreV2,
@@ -256,6 +257,20 @@ export function parseContentRevisionCommitCore(value: unknown): ContentRevisionC
   };
   hs(out, o.coreDigest, 'coreDigest', 'content_revision_commit_core');
   return { ...out, coreDigest: hx(o.coreDigest, 'coreDigest') };
+}
+
+/** Storage compatibility for the frozen batch ContentValidationCore wrapper.
+ * The closed v2 kind registry has no separate content_validation_core kind,
+ * so the wrapper is stored under the existing content_revision_commit_core
+ * family while the public direct-core parser above remains exact. */
+export function parseContentRevisionCommitCoreBlob(value: unknown): ContentRevisionCommitCoreV2 | Extract<ContentValidationCoreV2, { phase: 'batch_commit' }> {
+  const o = rec(value, 'content_revision_commit_core');
+  if (o.phase !== 'batch_commit') return parseContentRevisionCommitCore(value);
+  ex(o, ['phase', 'contentRevisionCommitCoreRef'], 'content_validation_core(batch_commit)');
+  return {
+    phase: 'batch_commit',
+    contentRevisionCommitCoreRef: rfKind(o.contentRevisionCommitCoreRef, 'content_revision_commit_core', 'contentRevisionCommitCoreRef'),
+  };
 }
 
 /* content_revision_manifest -------------------------------------- */

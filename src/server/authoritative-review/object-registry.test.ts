@@ -17,6 +17,7 @@ import {
 import {
   PROFILE_SNAPSHOT_BOOTSTRAP_MAX_BYTES,
   assertNoSelfReference,
+  childRefsForBlob,
   fullProfileForTests,
   parseBlob,
   refOfBlob,
@@ -362,6 +363,23 @@ describe('grant_instance grantSpecRef kind constraint (Minor #3)', () => {
     const rightKind = { ...base, grantSpecRef: refOfBlob('write_grant_spec', { specDigest: 'gs' }) };
     const rightBody = { ...rightKind, instanceDigest: canonicalJsonSha256(rightKind) };
     expect(() => parseBlob('grant_instance', rightBody)).not.toThrow();
+  });
+});
+
+describe('content batch validation wrapper', () => {
+  it('parses the frozen wrapper under the existing commit-core family and retains its inner core ref', () => {
+    const innerBody = {
+      priorManifestRef: refOfBlob('content_revision_manifest', { manifestDigest: 'prior' }),
+      producerPlanSpecRef: refOfBlob('repair_plan_spec', { specDigest: 'plan' }),
+      batchOrdinal: 1,
+      authorizedReplacementEntriesWithoutValidation: [],
+      expectedMapRef: refOfBlob('map_snapshot', { mapSemanticDigest: 'map' }),
+    };
+    const innerRef = refOfBlob('content_revision_commit_core', { ...innerBody, coreDigest: canonicalJsonSha256(innerBody) });
+    const wrapper = { phase: 'batch_commit' as const, contentRevisionCommitCoreRef: innerRef };
+    expect(parseBlob('content_revision_commit_core', wrapper).object).toEqual(wrapper);
+    expect(childRefsForBlob('content_revision_commit_core', wrapper)).toEqual([innerRef]);
+    expect(() => parseBlob('content_revision_commit_core', { ...wrapper, unknown: true })).toThrow('SCHEMA_INVALID');
   });
 });
 

@@ -288,7 +288,7 @@ function resolveCoreData(
       }
       return { kind: 'ok', core: { phase: 'plan_finalize', contentPlanFinalizeCore: core, provisionalManifest: manifest } };
     }
-    if (isPlainObject(core) && 'authorizedReplacementEntries' in core) {
+    if (isPlainObject(core) && 'authorizedReplacementEntriesWithoutValidation' in core) {
       return { kind: 'ok', core: { phase: 'batch_commit', contentRevisionCommitCore: core } };
     }
     // Case 2: the coreRef points at the thin ContentValidationCoreV2 wrapper.

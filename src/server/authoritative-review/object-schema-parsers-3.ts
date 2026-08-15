@@ -1282,13 +1282,14 @@ export function parseRepairPlanSpec(value: unknown): RepairPlanSpecV2 {
 
 export function parseRepairStagingRoot(value: unknown): RepairStagingRootV2 {
   const o = rec(value, 'repair_staging_root');
-  ex(o, ['repairPlanId', 'planRevisionId', 'batchOrdinal', 'mapRootDigest', 'contentRootDigest', 'priorStagingRootRef', 'keyLedgerRef', 'stagingDigest'], 'repair_staging_root');
+  ex(o, ['repairPlanId', 'planRevisionId', 'batchOrdinal', 'mapRootDigest', 'contentRootDigest', 'contentManifestRef', 'priorStagingRootRef', 'keyLedgerRef', 'stagingDigest'], 'repair_staging_root');
   const out: RepairStagingRootV2 = {
     repairPlanId: str(o.repairPlanId, 'repairPlanId'),
     planRevisionId: hx(o.planRevisionId, 'planRevisionId'),
     batchOrdinal: onn(o.batchOrdinal, 'batchOrdinal'),
     mapRootDigest: o.mapRootDigest === null ? null : hx(o.mapRootDigest, 'mapRootDigest'),
     contentRootDigest: o.contentRootDigest === null ? null : hx(o.contentRootDigest, 'contentRootDigest'),
+    contentManifestRef: o.contentManifestRef === null ? null : rfKind(o.contentManifestRef, 'content_revision_manifest', 'contentManifestRef'),
     priorStagingRootRef: rfn(o.priorStagingRootRef, 'priorStagingRootRef'),
     keyLedgerRef: rfKind(o.keyLedgerRef, 'repair_key_ledger', 'keyLedgerRef'),
     stagingDigest: '',

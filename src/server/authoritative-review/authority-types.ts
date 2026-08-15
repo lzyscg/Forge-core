@@ -1314,6 +1314,10 @@ export interface RepairStagingRootV2 {
   batchOrdinal: number;
   mapRootDigest: string | null;
   contentRootDigest: string | null;
+  /** Complete cumulative staged content artifact for this ordinal. Null for
+   * Map repair roots. This event-rooted edge retains every content version
+   * and its validator provenance before the finalizer publishes a revision. */
+  contentManifestRef: BlobRefV2 | null;
   priorStagingRootRef: BlobRefV2 | null;
   keyLedgerRef: BlobRefV2;
   stagingDigest: string;

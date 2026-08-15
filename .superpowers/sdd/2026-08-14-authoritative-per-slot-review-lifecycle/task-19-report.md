@@ -244,3 +244,40 @@ The remaining warnings in the full run are pre-existing React Router/`act(...)` 
 
 - The extended mixed lifecycle exposed two fabricated provenance refs in repaired `content_version` blobs. Content repair batches now run the registered `content_commit/batch_commit` validators over the frozen commit core and exact staged content values, persist the real envelope/aggregate/receipt/warning graph, and bind a prepared `validation_warning_custody_root` into every repaired version.
 - The mixed regression now runs a complete authoritative GC after content finalization and settlement; the live repaired manifest graph is fully resolvable. The complete `repair-service.test.ts` run passes **28/28** (including the restored GC assertion), followed by a fresh successful `npm run check` and `npm run build` (732 modules).
+
+---
+
+## Fix round 3 (final scoped re-review, 2026-08-16)
+
+**Status:** COMPLETE. Both P1 findings and the P2 finding in `task-19-rereview2-findings-codex.md` are closed inside Task 19. No Task 20 behavior, v1 surface, capability fixture, blob kind, SystemCommand kind, or schema version was added or changed; publication remains facade-only with zero runtime EventStore imports.
+
+### 1. Multi-batch content staging is cumulative
+
+- Every committed content batch now starts from the immediately preceding staging root's complete provisional manifest, not the repair base manifest. Its commit core binds that exact prior staged manifest and exact current version refs.
+- The new cumulative provisional manifest overlays only the current batch. Earlier repaired versions remain byte-identical, later batches cannot restore base refs over them, and untouched slots retain their original version refs.
+- The finalizer resolves the last committed cumulative manifest directly and verifies its content-root digest before resolving every version; it no longer refolds each batch over the base.
+
+### 2. Pre-finalizer validator/provenance custody and restart recovery
+
+- `RepairStagingRootV2` now carries `contentManifestRef` (null for Map roots). Because the committed batch event roots the staging root, recursive GC reaches the complete provisional manifest, content versions/values, commit cores, validator envelopes/aggregates/receipts/warnings, and warning custody before finalization.
+- A legal GC between Batch 1 and Batch 2 no longer deletes the journaled content value or provenance closure. Finalizer recovery resolves the committed closure and never invokes the already-completed batch validator again.
+- The real multi-batch regression commits two one-slot batches, runs authoritative GC between them, finalizes, checks both repaired texts/versions, proves an untargeted slot ref is unchanged, and asserts the batch-validator invocation count remains exactly two across recovery/finalization.
+
+### 3. Frozen `ContentValidationCoreV2` batch wrapper
+
+- Repair batch validation now prepares and persists `{ phase: 'batch_commit', contentRevisionCommitCoreRef }` and binds its ref as `ValidatorInputEnvelopeV2.contentValidationCoreRef`. The engine deep-resolves the wrapper to the exact commit core.
+- The closed registry has no separate content-validation-core blob kind, so the wrapper is stored as the existing `content_revision_commit_core` family variant; its parser is exact, extracts the inner core child ref, retains schemaVersion 1, and rejects unknown fields.
+- The direct-core compatibility branch now recognizes the frozen `authorizedReplacementEntriesWithoutValidation` field. Parser and engine regressions cover the wrapper child edge and direct-core normalization; a production repair validator blocks specifically from `batchOrdinal` and authorized replacement bytes.
+
+### Verification
+
+- RED evidence: the multi-batch test failed because `contentManifestRef` was absent; the core-byte validator test committed instead of blocking because it received the raw core.
+- Focused repair run: **1 file / 29 passed**.
+- Parser/validator/property run: **4 files / 62 passed** (`validator-engine`, object registry, authority properties, repair property).
+- Full affected serial run: **7 files / 820 passed** (`repair-service`, repair property, content review, tool factory, event schema, projector, GC).
+- Recovery lifecycle regression: **1 file / 13 passed**. Round-limit recovery now serializes `contentManifestRef` on its staging root, roots only a real projected manifest, and keeps the deliberately unresolved placeholder outside the lease/GC closure.
+- Full serial suite: **158 files / 3665 passed / 1 skipped** (`npx vitest run --maxWorkers=1 --minWorkers=1`).
+- `npm run check`: passed.
+- `npm run build`: passed (732 modules).
+
+The only full-suite diagnostics were the pre-existing React Router and `act(...)` warnings; there were no test failures.

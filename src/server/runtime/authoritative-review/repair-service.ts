@@ -88,6 +88,7 @@ import type {
   ContributionManifestV2,
   ContentRevisionManifestV2,
   ContentRevisionCommitCoreV2,
+  ContentValidationCoreV2,
   ContentValueV2,
   ContentReviewRoundPlanCarrierV2,
   MapCandidateSnapshotV2,
@@ -322,10 +323,11 @@ export function buildRepairStagingRoot(input: {
   batchOrdinal: number;
   mapRootDigest: string | null;
   contentRootDigest: string | null;
+  contentManifestRef?: BlobRefV2 | null;
   priorStagingRootRef: BlobRefV2 | null;
   keyLedgerRef: BlobRefV2;
 }): RepairStagingRootV2 {
-  const body = { ...input };
+  const body = { ...input, contentManifestRef: input.contentManifestRef ?? null };
   return { ...body, stagingDigest: canonicalJsonSha256(body) };
 }
 
@@ -1379,15 +1381,19 @@ export class RepairService {
 
     const currentRoot = (await this.deps.resolver(taskId, current.stagingRootRef)) as RepairStagingRootV2 | null;
     if (currentRoot === null || typeof currentRoot !== 'object') throw new RepairError('STAGING_UNRESOLVED', 'current staging root unresolvable');
-    const staged = await this.stagedContentVersions(taskId, plan, planRef, input.batchOrdinal, slotContents, input.workItemId, input.attemptId);
-    const contentRootDigest = await this.stagedContentRootDigest(taskId, plan, planRef, staged.entries, staged.versions);
+    const priorManifestRef = currentRoot.contentManifestRef ?? (plan.repairBase.kind === 'content' ? plan.repairBase.contentRevisionManifestRef : null);
+    if (priorManifestRef === null) throw new RepairError('MANIFEST_UNRESOLVED', 'content staging root has no cumulative manifest');
+    const priorManifest = (await this.deps.resolver(taskId, priorManifestRef)) as ContentRevisionManifestV2 | null;
+    if (priorManifest === null || typeof priorManifest !== 'object') throw new RepairError('MANIFEST_UNRESOLVED', 'prior cumulative content manifest unresolvable');
+    const staged = await this.stagedContentVersions(taskId, plan, planRef, priorManifestRef, priorManifest, input.batchOrdinal, slotContents, input.workItemId, input.attemptId);
     const newLedgerRef = current.keyLedgerRef;
     const stagingRoot = buildRepairStagingRoot({
       repairPlanId: plan.repairPlanId,
       planRevisionId: plan.planRevisionId,
       batchOrdinal: input.batchOrdinal,
       mapRootDigest: null,
-      contentRootDigest,
+      contentRootDigest: staged.manifest.contentRootDigest,
+      contentManifestRef: staged.manifestRef,
       priorStagingRootRef: current.stagingRootRef,
       keyLedgerRef: newLedgerRef,
     });
@@ -2642,6 +2648,7 @@ export class RepairService {
       batchOrdinal: 0,
       mapRootDigest: track === 'map' ? this.baseMapDigestOf(plan) : null,
       contentRootDigest: track === 'content' ? this.baseContentRootDigestOf(plan) : null,
+      contentManifestRef: track === 'content' && plan.repairBase.kind === 'content' ? plan.repairBase.contentRevisionManifestRef : null,
       priorStagingRootRef: null,
       keyLedgerRef,
     });
@@ -2683,6 +2690,7 @@ export class RepairService {
         batchOrdinal: 0,
         mapRootDigest: track === 'map' ? this.baseMapDigestOf(plan) : null,
         contentRootDigest: track === 'content' ? this.baseContentRootDigestOf(plan) : null,
+        contentManifestRef: track === 'content' && plan.repairBase.kind === 'content' ? plan.repairBase.contentRevisionManifestRef : null,
         priorStagingRootRef: null,
         keyLedgerRef,
       });
@@ -2766,18 +2774,21 @@ export class RepairService {
     return ops;
   }
 
-  /** The staged content versions of the base manifest + the journaled slots
-   * of batches 1..batchOrdinal. Unchanged slots keep their EXACT version
-   * refs (byte-identical). */
+  /** Applies one batch over the immediately-prior cumulative staged manifest.
+   * The returned complete provisional manifest is linked from the committed
+   * staging root, so recovery resolves it without journal replay or validator
+   * re-execution. */
   private async stagedContentVersions(
     taskId: string,
     plan: RepairPlanSpecV2,
     planRef: BlobRefV2,
+    priorManifestRef: BlobRefV2,
+    priorManifest: ContentRevisionManifestV2,
     batchOrdinal: number,
     slotContents: Readonly<Record<string, { text: string; mediaType: 'text/markdown' | 'text/plain' }>>,
     workItemId: string,
     attemptId: string,
-  ): Promise<{ entries: { slotId: string; versionRef: BlobRefV2 }[]; versions: Map<string, SlotContentVersionV2> }> {
+  ): Promise<{ entries: { slotId: string; versionRef: BlobRefV2 }[]; versions: Map<string, SlotContentVersionV2>; manifest: ContentRevisionManifestV2; manifestRef: BlobRefV2 }> {
     const contentBase = plan.repairBase;
     if (contentBase.kind !== 'content') throw new RepairError('REPAIR_BASE_STALE', 'content plan repair base is not content');
     const baseManifest = (await this.deps.resolver(taskId, contentBase.contentRevisionManifestRef)) as ContentRevisionManifestV2 | null;
@@ -2785,15 +2796,15 @@ export class RepairService {
     const state = await this.deps.readProjection(taskId);
     if (state.currentMap === null) throw new RepairError('MAP_UNRESOLVED', 'content repair requires an active Map');
     const versions = new Map<string, SlotContentVersionV2>();
-    for (const entry of baseManifest.entries) {
+    for (const entry of priorManifest.entries) {
       const version = (await this.deps.resolver(taskId, entry.versionRef)) as SlotContentVersionV2 | null;
       if (version !== null && typeof version === 'object') versions.set(entry.slotId, version);
     }
-    const entries = new Map(baseManifest.entries.map((e) => [e.slotId, e]));
+    const entries = new Map(priorManifest.entries.map((e) => [e.slotId, e]));
     const scope = plan.orderedBatchScopes[batchOrdinal - 1];
     const batchSlots = scope !== undefined && scope.kind === 'content' ? scope.slotIds : Object.keys(slotContents);
     const values = new Map<string, ContentValueV2>();
-    const expectedCurrentVersionRefs = new Map(baseManifest.entries.map((entry) => [entry.slotId, entry.versionRef]));
+    const expectedCurrentVersionRefs = new Map(priorManifest.entries.map((entry) => [entry.slotId, entry.versionRef]));
     for (const slotId of batchSlots) {
       const raw = slotContents[slotId];
       if (raw === undefined) throw new RepairError('SLOT_CONTENT_MISSING', `batch ${batchOrdinal} has no content for slot '${slotId}'`);
@@ -2807,7 +2818,7 @@ export class RepairService {
       values.set(slotId, value);
     }
     const commitCore = buildContentRevisionCommitCore({
-      priorManifestRef: contentBase.contentRevisionManifestRef,
+      priorManifestRef,
       producerPlanSpecRef: planRef,
       batchOrdinal,
       authorizedReplacementEntriesWithoutValidation: [...batchSlots]
@@ -2816,11 +2827,14 @@ export class RepairService {
       expectedMapRef: state.currentMap.mapSnapshotRef,
     });
     const commitCoreRef = await this.deps.facade.prepareBlob(taskId, 'content_revision_commit_core', commitCore);
+    const validationCore: Extract<ContentValidationCoreV2, { phase: 'batch_commit' }> = { phase: 'batch_commit', contentRevisionCommitCoreRef: commitCoreRef };
+    const validationCoreRef = await this.deps.facade.prepareBlob(taskId, 'content_revision_commit_core', validationCore);
     const validation = await this.runContentBatchValidator(
       taskId,
       workItemId,
       attemptId,
-      commitCoreRef,
+      validationCoreRef,
+      validationCore,
       commitCore,
       batchSlots,
       values,
@@ -2865,39 +2879,23 @@ export class RepairService {
       versions.set(slotId, version);
       entries.set(slotId, { slotId, versionRef });
     }
-    return { entries: [...entries.values()].sort((a, b) => (a.slotId < b.slotId ? -1 : 1)), versions };
-  }
-
-  private async stagedContentRootDigest(
-    taskId: string,
-    plan: RepairPlanSpecV2,
-    planRef: BlobRefV2,
-    entries: { slotId: string; versionRef: BlobRefV2 }[],
-    versions: Map<string, SlotContentVersionV2>,
-  ): Promise<string> {
-    const contentBase = plan.repairBase;
-    if (contentBase.kind !== 'content') throw new RepairError('REPAIR_BASE_STALE', 'content plan repair base is not content');
-    const baseManifest = (await this.deps.resolver(taskId, contentBase.contentRevisionManifestRef)) as ContentRevisionManifestV2 | null;
-    if (baseManifest === null || typeof baseManifest !== 'object') throw new RepairError('MANIFEST_UNRESOLVED', 'repair base manifest unresolvable');
-    const state = await this.deps.readProjection(taskId);
-    if (state.currentMap === null) throw new RepairError('MAP_UNRESOLVED', 'content repair requires an active Map');
-    const staged = buildFinalizedManifest({
+    const sortedEntries = [...entries.values()].sort((a, b) => (a.slotId < b.slotId ? -1 : 1));
+    const manifest = buildProvisionalManifest({
       taskId,
       mapRef: state.currentMap.mapSnapshotRef,
       mapSemanticDigest: state.currentMap.mapSemanticDigest,
       taskContentRevision: baseManifest.taskContentRevision + 1,
       priorManifestRef: contentBase.contentRevisionManifestRef,
       producerPlanSpecRef: planRef,
-      entries,
+      entries: sortedEntries,
       resolvedVersions: versions,
-      finalizerValidatorAggregateRefs: [],
-      finalizerWarningRootRefs: [],
     });
-    return staged.contentRootDigest;
+    const manifestRef = await this.deps.facade.prepareBlob(taskId, 'content_revision_manifest', manifest);
+    return { entries: sortedEntries, versions, manifest, manifestRef };
   }
 
-  /** Reconstructs the COMPLETE staged state from the journals + committed
-   * events (the finalizer's deterministic rebuild — no process state). */
+  /** Reconstructs the COMPLETE staged state from committed closures (content)
+   * or journals plus committed events (Map), with no process-local state. */
   private async reconstructStagedState(
     taskId: string,
     plan: RepairPlanSpecV2,
@@ -2927,43 +2925,21 @@ export class RepairService {
       const folded = foldRepairMapState({ baseNodes: base.nodes, baseRelations: base.relations, patches, ledgerByKey });
       return { ...folded, entries: [], versions: new Map(), lastStagingRootRef: current.stagingRootRef, lastLedgerRef: current.keyLedgerRef, attempts };
     }
-    const versions = new Map<string, SlotContentVersionV2>();
-    const entries = new Map<string, { slotId: string; versionRef: BlobRefV2 }>();
-    for (const event of committed) {
-      const slotContents = await this.readBatchSlotContents(taskId, plan, event.batchOrdinal, event.workItemId, event.attemptId);
-      const staged = await this.stagedContentVersions(taskId, plan, planRef, event.batchOrdinal, slotContents, event.workItemId, event.attemptId);
-      for (const [slotId, version] of staged.versions) versions.set(slotId, version);
-      for (const entry of staged.entries) entries.set(entry.slotId, entry);
-    }
     const current = await this.currentStagingState(taskId, plan, 'content');
-    return { nodes: [], relations: [], entries: [...entries.values()].sort((a, b) => (a.slotId < b.slotId ? -1 : 1)), versions, lastStagingRootRef: current.stagingRootRef, lastLedgerRef: current.keyLedgerRef, attempts };
-  }
-
-  private async readBatchSlotContents(taskId: string, plan: RepairPlanSpecV2, batchOrdinal: number, workItemId: string, attemptId: string): Promise<Record<string, { text: string; mediaType: 'text/markdown' | 'text/plain' }>> {
-    const state = await this.deps.readProjection(taskId);
-    const wi = state.workItems[workItemId];
-    const attempt = state.attempts[attemptId];
-    if (wi === undefined || attempt === undefined) throw new RepairError('JOURNAL_UNRESOLVED', `batch ${batchOrdinal} workitem/attempt unresolvable`);
-    const binding = {
-      workItemId,
-      leaseEpoch: attempt.leaseEpoch,
-      attemptId,
-      authorityBaseRef: wi.authorityBaseRef,
-      grantSpecRef: wi.grantSpecRef as BlobRefV2,
-    };
-    const view = await this.deps.privateStore.readAllReviewDraft(binding);
-    const out: Record<string, { text: string; mediaType: 'text/markdown' | 'text/plain' }> = {};
-    for (const entry of view.committed) {
-      if (entry.op !== 'write_slot_content') continue;
-      const body = entry.body as { slotId?: unknown; value?: unknown; mediaType?: unknown };
-      if (typeof body.slotId !== 'string') continue;
-      const valueBlob = (await this.deps.resolver(taskId, (entry.result as { contentValueRef?: BlobRefV2 } | null)?.contentValueRef as BlobRefV2)) as { text?: string; mediaType?: 'text/markdown' | 'text/plain' } | null;
-      out[body.slotId] = {
-        text: valueBlob !== null && typeof valueBlob === 'object' && typeof valueBlob.text === 'string' ? valueBlob.text : String(body.value ?? ''),
-        mediaType: valueBlob !== null && typeof valueBlob === 'object' && valueBlob.mediaType === 'text/plain' ? 'text/plain' : 'text/markdown',
-      };
+    const root = (await this.deps.resolver(taskId, current.stagingRootRef)) as RepairStagingRootV2 | null;
+    if (root === null || root.contentManifestRef === null) throw new RepairError('STAGING_UNRESOLVED', 'committed content staging root has no cumulative manifest');
+    const manifest = (await this.deps.resolver(taskId, root.contentManifestRef)) as ContentRevisionManifestV2 | null;
+    if (manifest === null || typeof manifest !== 'object' || manifest.contentRootDigest !== root.contentRootDigest) {
+      throw new RepairError('STAGING_DIVERGED', 'committed content staging manifest does not match its root');
     }
-    return out;
+    const versions = new Map<string, SlotContentVersionV2>();
+    for (const entry of manifest.entries) {
+      const version = (await this.deps.resolver(taskId, entry.versionRef)) as SlotContentVersionV2 | null;
+      if (version === null || typeof version !== 'object') throw new RepairError('CONTENT_VERSION_UNRESOLVED', `content version '${entry.slotId}' is unresolvable`);
+      versions.set(entry.slotId, version);
+    }
+    void planRef;
+    return { nodes: [], relations: [], entries: [...manifest.entries], versions, lastStagingRootRef: current.stagingRootRef, lastLedgerRef: current.keyLedgerRef, attempts };
   }
 
   /** The plan's finding set blob (kind finding_set — the recovery payload +
@@ -3867,7 +3843,8 @@ export class RepairService {
     taskId: string,
     workItemId: string,
     attemptId: string,
-    commitCoreRef: BlobRefV2,
+    validationCoreRef: BlobRefV2,
+    validationCore: Extract<ContentValidationCoreV2, { phase: 'batch_commit' }>,
     commitCore: ContentRevisionCommitCoreV2,
     batchSlotIds: readonly string[],
     contentValues: ReadonlyMap<string, ContentValueV2>,
@@ -3879,6 +3856,7 @@ export class RepairService {
       }),
     );
     store.put('content_revision_commit_core', commitCore);
+    store.put('content_revision_commit_core', validationCore);
     const targetRefs = batchSlotIds.map((slotId) => store.put('content_value', contentValues.get(slotId) as ContentValueV2));
     const engine = new ValidatorEngine({
       registry: this.deps.validatorRegistry,
@@ -3889,7 +3867,7 @@ export class RepairService {
       trigger: 'content_commit',
       executionPhase: 'batch_commit',
       identity: { taskId, templateSnapshotHash: this.deps.snapshotHash, workItemId, attemptId, commandId: null },
-      coreRef: commitCoreRef,
+      coreRef: validationCoreRef,
       selectedTargetRefs: targetRefs,
       registrations: this.deps.registrationsFor('content_commit', 'batch_commit'),
       universe: { slotIds: [...batchSlotIds], relationIds: [], mapNodeIds: [], artifactDigest: null },

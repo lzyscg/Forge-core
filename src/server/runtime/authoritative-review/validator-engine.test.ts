@@ -13,6 +13,7 @@
  * acyclicity and failed-branch survival.
  */
 import { describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 import type { BlobRefV2, AuthoritativeBlobKindV2 } from '../../../shared/authoritative-review-v2';
 import type { ValidatorRegistrationV2 } from '../../template/structured-slot-contract-v2';
 import { refOfBlob, closureOf, assertNoSelfReference, parseBlob } from '../../authoritative-review/object-registry';
@@ -150,7 +151,7 @@ function contentCommitCore() {
     priorManifestRef: refOfBlob('content_revision_manifest', { manifestDigest: 'prior' }),
     producerPlanSpecRef: refOfBlob('generation_plan_spec', { planSpecId: 'p1' }),
     batchOrdinal: 0,
-    authorizedReplacementEntries: [],
+    authorizedReplacementEntriesWithoutValidation: [],
     expectedMapRef: refOfBlob('map_snapshot', { mapId: 'm1' }),
     coreDigest: '',
   };
@@ -294,6 +295,50 @@ describe('validator engine — canonical envelope construction (spec §12)', () 
     );
     expect(result.aggregate.outcome).toBe('clear');
     expect(result.validExecutionDigests).toHaveLength(1);
+  });
+
+  it('normalizes the direct batch-commit compatibility core using the frozen authorizedReplacementEntriesWithoutValidation field', async () => {
+    const source = `'use strict';
+module.exports = { validate: function validate(input) {
+  var core = input && typeof input.core === 'object' ? input.core : {};
+  var commit = core.phase === 'batch_commit' ? core.contentRevisionCommitCore : null;
+  if (!commit || commit.batchOrdinal !== 0 || !Array.isArray(commit.authorizedReplacementEntriesWithoutValidation)) {
+    return { status: 'valid', executionDigest: '' };
+  }
+  return { status: 'domain_invalid', issues: [{
+    validatorId: input.validatorId, implementationDigest: input.implementationDigest,
+    issueCode: 'TEST_DIRECT_CONTENT_CORE', location: { targetKind: 'slot', stableTargetId: 's1', jsonPointer: '/batchOrdinal' },
+    repairTargets: { mapNodeIds: [], relationIds: [], slotIds: ['s1'] }, evidenceDigest: ''
+  }], executionDigest: '' };
+} };`;
+    const implementationDigest = createHash('sha256').update(source, 'utf8').digest('hex');
+    const installed = {
+      ...entryOf('authoritative.review.slotSchema'),
+      handlerKey: 'test.content.direct-core',
+      implementationDigest,
+      moduleId: '@forge/authoritative-review',
+      exportName: 'directCoreTestHandler',
+    };
+    const blobs = new MemoryBlobStore();
+    const engine = new ValidatorEngine({ registry: new ValidatorRegistry([installed]), blobs, sourceResolver: () => source });
+    const coreRef = blobs.put('content_revision_commit_core', contentCommitCore());
+    const targetRef = blobs.put('content_value', { slotId: 's1', typeId: 'title', content: 'hello' });
+    const result = await engine.execute(baseRequest({
+      trigger: 'content_commit',
+      executionPhase: 'batch_commit',
+      coreRef,
+      selectedTargetRefs: [targetRef],
+      registrations: [{
+        ...registrationFor('authoritative.review.slotSchema'),
+        handlerKey: installed.handlerKey,
+        implementationDigest,
+        implementationRef: { kind: 'builtin', moduleId: installed.moduleId, exportName: installed.exportName },
+      }],
+      universe: { slotIds: ['s1'], relationIds: [], mapNodeIds: [], artifactDigest: null },
+      slotTypes: SLOT_TYPES,
+    }));
+    expect(result.aggregate.outcome).toBe('blocking_invalid');
+    expect(result.receipts[0]?.blockerIssues[0]?.issueCode).toBe('TEST_DIRECT_CONTENT_CORE');
   });
 });
 
