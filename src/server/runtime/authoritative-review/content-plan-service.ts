@@ -87,6 +87,7 @@ import {
   reviewWholeWorkItemId,
 } from './review-coordinator';
 import type { GrantService } from './grant-service';
+import { buildFindingStageRoot } from './finding-service';
 import type { WorkItemCoordinatorV2 } from './work-item-coordinator';
 import { validateSuccessorCarrier } from './work-item-coordinator';
 
@@ -396,6 +397,11 @@ export function buildSuccessorGenerationPlan(input: {
  *   handler can judge required-slot coverage over the resolved manifest.
  */
 export class ContentPlanMemoryBlobStore implements ValidatorBlobStore {
+  /** Every blob the engine produced (validator-input targets incl. enriched
+   * content_value blobs). Persisted by persistEngineOutputs so GC mark never
+   * fails closed on a referenced-but-unprepared blob (Task 18 F1 GC fix). */
+  readonly produced: Array<{ kind: import('../../../shared/authoritative-review-v2').AuthoritativeBlobKindV2; value: unknown }> = [];
+
   private readonly data = new Map<string, unknown>();
 
   constructor(
@@ -406,6 +412,7 @@ export class ContentPlanMemoryBlobStore implements ValidatorBlobStore {
     const ref = refOfBlob(kind, value);
     if (!this.data.has(ref.digest)) {
       this.data.set(ref.digest, value);
+      this.produced.push({ kind, value });
     }
     return ref;
   }
@@ -1029,7 +1036,9 @@ export class ContentPlanService {
     run: TriggerExecutionResult,
     store: ContentPlanMemoryBlobStore,
   ): Promise<void> {
-    void store;
+    for (const produced of store.produced) {
+      await this.deps.facade.prepareBlob(taskId, produced.kind, produced.value);
+    }
     await this.deps.facade.prepareBlob(taskId, 'validator_input_envelope', run.envelope);
     await this.deps.facade.prepareBlob(taskId, 'validator_aggregate', run.aggregate);
     await this.deps.facade.prepareBlob(taskId, 'validation_warning_root', run.warningRoot);
@@ -1306,7 +1315,16 @@ export class ContentPlanService {
       consumedOverrideRef: null,
     };
     // Planned coverage core (empty ledger roots — the workitem matrix binds it
-    // before any ledger exists; Task 18 computes the FINAL coverage core).
+    // before any ledger exists; Task 18 computes the FINAL coverage core). The
+    // finding_stage_root ref must have bytes on disk from creation (GC walks the
+    // planned core's child refs and fails closed on a missing blob), so the
+    // REAL empty root is prepared here — byte-identical to the round-completion
+    // root when no findings exist (Task 18 F1).
+    const plannedFindingStageRootRef = await this.deps.facade.prepareBlob(
+      taskId,
+      'finding_stage_root',
+      buildFindingStageRoot(roundId, []),
+    );
     const coverageCoreBody = {
       reviewRoundId: roundId,
       mapRef,
@@ -1315,11 +1333,11 @@ export class ContentPlanService {
       coverageLedgerRootRefs: [] as readonly BlobRefV2[],
       adoptionRootRef,
       wholeTreeObservationRootRefs: [] as readonly BlobRefV2[],
-      findingStageRootRef: refOfBlob('finding_stage_root', { rootId: `fsr-${roundId}`, roundId, entries: [] }),
+      findingStageRootRef: plannedFindingStageRootRef,
     };
     const coverageCore = { ...coverageCoreBody, coreDigest: canonicalJsonSha256(coverageCoreBody) };
     const coverageCoreRef = await this.deps.facade.prepareBlob(taskId, 'content_review_coverage_core', coverageCore);
-    const preparedRefs: BlobRefV2[] = [adoptionRootRef, coverageCoreRef];
+    const preparedRefs: BlobRefV2[] = [adoptionRootRef, coverageCoreRef, plannedFindingStageRootRef];
     const reviewWorkItems: SuccessorWorkItemCarrierV2[] = [];
     const workItemRefs: BlobRefV2[] = [];
     const maxAutomaticRetries = await this.deps.defaultAutomaticRetries();
@@ -1469,6 +1487,7 @@ export class ContentPlanService {
         mapBuild: null,
         mapReview: null,
         contentPlan: input.carriers,
+        contentReview: null,
       },
       intent: { handlerKind: input.publishKind, handlerVersion: 1 },
       preparedRefs: input.preparedRefs,

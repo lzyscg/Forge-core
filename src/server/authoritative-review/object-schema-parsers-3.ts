@@ -22,6 +22,9 @@ import {
   type AssignmentLedgerBlobV2,
   type AuthorityBaseSetV2,
   type ContentPlanPublishCarriersV2,
+  type ContentReviewFindingOpeningCarrierV2,
+  type ContentReviewObservationCarrierV2,
+  type ContentReviewPublishCarriersV2,
   type ContentReviewRoundPlanCarrierV2,
   type MapBuildPublishCarriersV2,
   type MapReviewObservationCarrierV2,
@@ -248,6 +251,8 @@ export function parseProjectionCheckpoint(value: unknown): ProjectionCheckpointV
 const PUBLISH_KINDS = [
   'map_build_commit', 'map_candidate_commit', 'content_revision_commit', 'content_plan_finalize',
   'review_assignment_commit', 'map_review_settlement', 'map_review_round_completed', 'content_review_settlement', 'map_activation',
+  // Task 18 content-review branches (freeze / round closure / settlement / cycle-boundary round creation).
+  'content_review_assignment_commit', 'content_review_round_completed', 'content_review_round_planned',
   'generation_finalize', 'repair_finalize', 'migration_settlement', 'seal_publish',
   // Task 15 map-build service: finish proposal + the two finalizer envelopes.
   'map_build_finish', 'map_finalize_commit', 'map_finalize_rejected',
@@ -275,7 +280,7 @@ export function parsePublicationOperationPayload(value: unknown): PublicationOpe
   const o = rec(value, 'publication_operation_payload');
   const family = str(o.family, 'publication_operation_payload.family');
   if (family === 'domain_publish') {
-    ex(o, ['family', 'operationId', 'taskId', 'publishKind', 'blobRefs', 'expectedResultIdentity', 'mapBuild', 'mapReview', 'contentPlan'], 'publication_operation_payload');
+    ex(o, ['family', 'operationId', 'taskId', 'publishKind', 'blobRefs', 'expectedResultIdentity', 'mapBuild', 'mapReview', 'contentPlan', 'contentReview'], 'publication_operation_payload');
     if (!(PUBLISH_KINDS as readonly string[]).includes(str(o.publishKind, 'publishKind'))) throw new SchemaError('publishKind unknown');
     return {
       family,
@@ -287,6 +292,7 @@ export function parsePublicationOperationPayload(value: unknown): PublicationOpe
       mapBuild: parseMapBuildPublishCarriers(o.mapBuild),
       mapReview: parseMapReviewPublishCarriers(o.mapReview),
       contentPlan: parseContentPlanPublishCarriers(o.contentPlan),
+      contentReview: parseContentReviewPublishCarriers(o.contentReview),
     } as PublicationOperationPayloadV2;
   }
   if (family === 'lease_or_retry') {
@@ -739,6 +745,117 @@ function parseContentReviewRoundPlanCarrier(value: unknown): ContentReviewRoundP
     consumedOverrideRef: rfn(o.consumedOverrideRef, 'reviewRound.consumedOverrideRef'),
   };
   return out;
+}
+
+function parseContentReviewObservationCarrier(value: unknown, where: string): ContentReviewObservationCarrierV2 {
+  const o = rec(value, where);
+  ex(o, ['observationId', 'level', 'parentObservationId', 'observationRef', 'coveredTargetCount', 'childObservationRefs'], where);
+  return {
+    observationId: str(o.observationId, `${where}.observationId`),
+    level: onn(o.level, `${where}.level`),
+    parentObservationId: o.parentObservationId === null ? null : str(o.parentObservationId, `${where}.parentObservationId`),
+    observationRef: rf(o.observationRef, `${where}.observationRef`),
+    coveredTargetCount: onn(o.coveredTargetCount, `${where}.coveredTargetCount`),
+    childObservationRefs: rfa(o.childObservationRefs, `${where}.childObservationRefs`),
+  };
+}
+
+function parseContentReviewFindingOpeningCarrier(value: unknown, where: string): ContentReviewFindingOpeningCarrierV2 {
+  const o = rec(value, where);
+  ex(o, ['findingId', 'findingRef', 'reviewContext', 'primaryLocation', 'defectClass', 'severity', 'source', 'openedBy'], where);
+  const ctx = rec(o.reviewContext, `${where}.reviewContext`);
+  ex(ctx, ['kind', 'roundId'], `${where}.reviewContext`);
+  if (ctx.kind !== 'map' && ctx.kind !== 'content') throw new SchemaError(`${where}.reviewContext.kind must be map|content`);
+  const loc = rec(o.primaryLocation, `${where}.primaryLocation`);
+  ex(loc, ['kind', 'id'], `${where}.primaryLocation`);
+  const locKind = loc.kind;
+  if (locKind !== 'slot' && locKind !== 'relation' && locKind !== 'map_node' && locKind !== 'map') throw new SchemaError(`${where}.primaryLocation.kind unknown`);
+  const defectClass = str(o.defectClass, `${where}.defectClass`);
+  if (defectClass !== 'content' && defectClass !== 'map' && defectClass !== 'mixed') throw new SchemaError(`${where}.defectClass unknown`);
+  const severity = str(o.severity, `${where}.severity`);
+  if (severity !== 'blocking' && severity !== 'advisory') throw new SchemaError(`${where}.severity unknown`);
+  const source = str(o.source, `${where}.source`);
+  if (source !== 'reviewer' && source !== 'system_validator') throw new SchemaError(`${where}.source unknown`);
+  const opened = rec(o.openedBy, `${where}.openedBy`);
+  const openedBy: ContentReviewFindingOpeningCarrierV2['openedBy'] =
+    opened.kind === 'reviewer'
+      ? { kind: 'reviewer', reviewerAttemptId: str(opened.reviewerAttemptId, `${where}.openedBy.reviewerAttemptId`) }
+      : opened.kind === 'system_validator'
+        ? { kind: 'system_validator', validatorExecutionId: str(opened.validatorExecutionId, `${where}.openedBy.validatorExecutionId`) }
+        : (() => { throw new SchemaError(`${where}.openedBy.kind unknown`); })();
+  return {
+    findingId: str(o.findingId, `${where}.findingId`),
+    findingRef: rf(o.findingRef, `${where}.findingRef`),
+    reviewContext: { kind: ctx.kind as 'map' | 'content', roundId: str(ctx.roundId, `${where}.reviewContext.roundId`) },
+    primaryLocation: { kind: locKind as 'slot' | 'relation' | 'map_node' | 'map', id: str(loc.id, `${where}.primaryLocation.id`) },
+    defectClass: defectClass as ContentReviewFindingOpeningCarrierV2['defectClass'],
+    severity: severity as ContentReviewFindingOpeningCarrierV2['severity'],
+    source: source as ContentReviewFindingOpeningCarrierV2['source'],
+    openedBy,
+  };
+}
+
+/**
+ * Task 18 content-review carriers (deterministic rebuild; exact-key parser).
+ * `roundPlanned` reuses the `content_review_round_planned` round-plan carrier
+ * (the §13.3.1 cycle-boundary round creation); `reviewWorkItems` carries the
+ * batch + whole content review successor carriers.
+ */
+function parseContentReviewPublishCarriers(value: unknown): ContentReviewPublishCarriersV2 | null {
+  if (value === null || value === undefined) return null;
+  const o = rec(value, 'contentReview');
+  ex(o, [
+    'assignmentId', 'reviewRoundId', 'workItemId', 'attemptId', 'reviewAssignmentId',
+    'source', 'ledgerRef', 'coverageTargetCount', 'findingCount', 'observations', 'findingOpenings',
+    'coverageCoreRef', 'roundPlanned', 'reviewWorkItems',
+    'settlementCoreRef', 'outcome', 'reviewBundleRef', 'reviewWarningCustodyRootRef',
+    'mapRef', 'contentRevisionManifestRef', 'reviewSettlementValidatorAggregateRef',
+    'sealWorkItemId', 'sealAuthorityBaseRef', 'successor', 'terminal',
+  ], 'contentReview');
+  const source = o.source === null ? null : str(o.source, 'contentReview.source');
+  if (source !== null && source !== 'batch' && source !== 'whole_tree_observation') {
+    throw new SchemaError('contentReview.source must be batch|whole_tree_observation|null');
+  }
+  const outcome = o.outcome === null ? null : str(o.outcome, 'contentReview.outcome');
+  if (outcome !== null && outcome !== 'content_repair' && outcome !== 'seal') {
+    throw new SchemaError('contentReview.outcome must be content_repair|seal|null');
+  }
+  const observations = o.observations === null
+    ? null
+    : (o.observations as unknown[]).map((v, i) => parseContentReviewObservationCarrier(v, `contentReview.observations[${i}]`));
+  const findingOpenings = o.findingOpenings === null
+    ? null
+    : (o.findingOpenings as unknown[]).map((v, i) => parseContentReviewFindingOpeningCarrier(v, `contentReview.findingOpenings[${i}]`));
+  const reviewWorkItems = o.reviewWorkItems === null
+    ? null
+    : (o.reviewWorkItems as unknown[]).map((v, i) => parseSuccessorWorkItemCarrier(v)).filter((s): s is SuccessorWorkItemCarrierV2 => s !== null);
+  return {
+    assignmentId: o.assignmentId === null ? null : str(o.assignmentId, 'contentReview.assignmentId'),
+    reviewRoundId: o.reviewRoundId === null ? null : str(o.reviewRoundId, 'contentReview.reviewRoundId'),
+    workItemId: o.workItemId === null ? null : str(o.workItemId, 'contentReview.workItemId'),
+    attemptId: o.attemptId === null ? null : str(o.attemptId, 'contentReview.attemptId'),
+    reviewAssignmentId: o.reviewAssignmentId === null ? null : str(o.reviewAssignmentId, 'contentReview.reviewAssignmentId'),
+    source,
+    ledgerRef: rfn(o.ledgerRef, 'contentReview.ledgerRef'),
+    coverageTargetCount: o.coverageTargetCount === null ? null : onn(o.coverageTargetCount, 'contentReview.coverageTargetCount'),
+    findingCount: o.findingCount === null ? null : onn(o.findingCount, 'contentReview.findingCount'),
+    observations,
+    findingOpenings,
+    coverageCoreRef: rfn(o.coverageCoreRef, 'contentReview.coverageCoreRef'),
+    roundPlanned: parseContentReviewRoundPlanCarrier(o.roundPlanned),
+    reviewWorkItems,
+    settlementCoreRef: rfn(o.settlementCoreRef, 'contentReview.settlementCoreRef'),
+    outcome,
+    reviewBundleRef: rfn(o.reviewBundleRef, 'contentReview.reviewBundleRef'),
+    reviewWarningCustodyRootRef: rfn(o.reviewWarningCustodyRootRef, 'contentReview.reviewWarningCustodyRootRef'),
+    mapRef: rfn(o.mapRef, 'contentReview.mapRef'),
+    contentRevisionManifestRef: rfn(o.contentRevisionManifestRef, 'contentReview.contentRevisionManifestRef'),
+    reviewSettlementValidatorAggregateRef: rfn(o.reviewSettlementValidatorAggregateRef, 'contentReview.reviewSettlementValidatorAggregateRef'),
+    sealWorkItemId: o.sealWorkItemId === null ? null : str(o.sealWorkItemId, 'contentReview.sealWorkItemId'),
+    sealAuthorityBaseRef: rfn(o.sealAuthorityBaseRef, 'contentReview.sealAuthorityBaseRef'),
+    successor: parseSuccessorWorkItemCarrier(o.successor),
+    terminal: parseSystemCommandTerminalCarrier(o.terminal),
+  };
 }
 
 function parseMapReviewObservationCarrier(value: unknown, where: string): MapReviewObservationCarrierV2 {

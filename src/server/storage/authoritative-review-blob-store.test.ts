@@ -64,6 +64,7 @@ function publishPayload(overrides: Record<string, unknown> = {}): Record<string,
     mapBuild: null,
     mapReview: null,
     contentPlan: null,
+    contentReview: null,
     ...overrides,
   };
 }

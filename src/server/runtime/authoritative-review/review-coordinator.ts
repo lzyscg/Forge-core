@@ -29,6 +29,7 @@ import type { AuthoritativeReviewProjectionV2 } from '../../storage/authoritativ
 import type {
   AuthoritativeReviewProfile,
   AuthorityBaseSetV2,
+  ContentReviewCoverageCoreV2,
   GenerationPlanSpecV2,
   MapPositionNodeV2,
   MapReviewCoverageCoreV2,
@@ -273,6 +274,38 @@ export class ReviewCoordinatorV2 {
       logicalAssignmentId: null,
       reviewAssignmentId: null,
       payload: { kind: 'map_review_coverage_core', value: input.coverageCore },
+      authorityBase: input.authorityBase,
+      grantSpecRef: null,
+      maxAutomaticRetries: input.maxAutomaticRetries,
+      initialLeaseEpoch: 0,
+    });
+  }
+
+  /**
+   * Task 18 content settlement WorkItem (`system_review_settlement`): the ONLY
+   * content activator. Its authority base binds mapRef + contentRevisionManifestRef
+   * + the FINAL reviewCoverageCoreRef + the reviewRoundRef (the PLANNED coverage
+   * core — the same round carrier the content review WorkItems bind).
+   */
+  async createContentSettlementWorkItem(input: {
+    taskId: string;
+    workItemId: string;
+    authorityBase: AuthorityBaseSetV2;
+    coverageCore: ContentReviewCoverageCoreV2;
+    maxAutomaticRetries: number;
+  }): Promise<void> {
+    await this.deps.coordinator.createWorkItem({
+      taskId: input.taskId,
+      operationId: reviewWorkItemOperationId(input.taskId, input.workItemId),
+      workItemId: input.workItemId,
+      kind: 'system_review_settlement',
+      roleBinding: null,
+      agentExecutionKind: null,
+      sessionKind: null,
+      roundId: null,
+      logicalAssignmentId: null,
+      reviewAssignmentId: null,
+      payload: { kind: 'content_review_coverage_core', value: input.coverageCore },
       authorityBase: input.authorityBase,
       grantSpecRef: null,
       maxAutomaticRetries: input.maxAutomaticRetries,

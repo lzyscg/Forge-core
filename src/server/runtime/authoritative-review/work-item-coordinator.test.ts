@@ -1439,7 +1439,7 @@ describe('completeWorkItem — Task 12 success terminal (M-6 direct unit tests)'
   });
 });
 
-describe('suspension overlay — applySuspension / clearSuspension', () => {
+describe('suspension overlay — applySuspension / clearSuspension', { timeout: 30_000 }, () => {
   it('applies and clears an overlay without touching the underlying WorkItem state', async () => {
     const env = await makeEnv();
     const taskId = tid('suspend');

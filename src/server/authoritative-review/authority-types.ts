@@ -1877,6 +1877,85 @@ export interface ContentPlanPublishCarriersV2 {
   terminal: SystemCommandTerminalCarrierV2 | null;
 }
 
+/** One layered whole-tree observation event carrier (spec §13.2 step 7, design
+ * §12.6): the event-level convention is ROOT-FIRST (level 1 = root, no parent;
+ * children at level 2, …). `observationRef` closes the observation summary; the
+ * whole-tree session publishes these events, never a batch assignment event. */
+export interface ContentReviewObservationCarrierV2 {
+  observationId: string;
+  level: number;
+  parentObservationId: string | null;
+  observationRef: BlobRefV2;
+  coveredTargetCount: number;
+  childObservationRefs: readonly BlobRefV2[];
+}
+
+/** The `structured_finding_opened` carrier of one materialized finding draft. */
+export interface ContentReviewFindingOpeningCarrierV2 {
+  findingId: string;
+  findingRef: BlobRefV2;
+  reviewContext: { kind: 'map' | 'content'; roundId: string };
+  primaryLocation: { kind: 'slot' | 'relation' | 'map_node' | 'map'; id: string };
+  defectClass: 'content' | 'map' | 'mixed';
+  severity: 'blocking' | 'advisory';
+  source: 'reviewer' | 'system_validator';
+  openedBy:
+    | { kind: 'reviewer'; reviewerAttemptId: string }
+    | { kind: 'system_validator'; validatorExecutionId: string };
+}
+
+/**
+ * Task 18 content-review publication carriers (deterministic rebuild; each
+ * carrier is null when a publish branch does not use it). Covers the four
+ * Task 18 domain-publish branches:
+ * - `content_review_assignment_commit` (the §12.4 freeze of one completed
+ *   content review assignment — batch AND whole-tree observation);
+ * - `content_review_round_completed` (the FINAL coverage-core closure);
+ * - `content_review_settlement` (the §13.2 settlement envelope: round settled
+ *   with outcome content_repair | seal + the System Seal WorkItem on clear or
+ *   the deterministic content-repair successor on blocking + the §9.2
+ *   command-terminal pair);
+ * - `content_review_round_planned` (the §13.3.1 cycle-budget boundary that
+ *   atomically creates a NEW complete content round; consumed by the initial
+ *   finalizer clear AND the content-repair finalizer).
+ */
+export interface ContentReviewPublishCarriersV2 {
+  // --- content_review_assignment_commit (batch/whole freeze) ---
+  assignmentId: string | null;
+  reviewRoundId: string | null;
+  workItemId: string | null;
+  attemptId: string | null;
+  reviewAssignmentId: string | null;
+  source: 'batch' | 'whole_tree_observation' | null;
+  ledgerRef: BlobRefV2 | null;
+  coverageTargetCount: number | null;
+  findingCount: number | null;
+  /** whole-session observation events (root-first level closure; batch sessions leave null). */
+  observations: readonly ContentReviewObservationCarrierV2[] | null;
+  /** `structured_finding_opened` carriers for every materialized finding draft
+   * of the freeze (design §11.8: the opening payload is an append-only fact). */
+  findingOpenings: readonly ContentReviewFindingOpeningCarrierV2[] | null;
+  // --- content_review_round_completed ---
+  coverageCoreRef: BlobRefV2 | null;
+  // --- content_review_round_planned (a NEW complete round, cycle budget) ---
+  roundPlanned: ContentReviewRoundPlanCarrierV2 | null;
+  reviewWorkItems: readonly SuccessorWorkItemCarrierV2[] | null;
+  // --- content_review_settlement (settlement envelope) ---
+  settlementCoreRef: BlobRefV2 | null;
+  outcome: 'content_repair' | 'seal' | null;
+  reviewBundleRef: BlobRefV2 | null;
+  reviewWarningCustodyRootRef: BlobRefV2 | null;
+  mapRef: BlobRefV2 | null;
+  contentRevisionManifestRef: BlobRefV2 | null;
+  reviewSettlementValidatorAggregateRef: BlobRefV2 | null;
+  sealWorkItemId: string | null;
+  /** the System Seal WorkItem's authority base set (kind system_seal). */
+  sealAuthorityBaseRef: BlobRefV2 | null;
+  // --- §9.2 successor WorkItem + command-terminal pair ---
+  successor: SuccessorWorkItemCarrierV2 | null;
+  terminal: SystemCommandTerminalCarrierV2 | null;
+}
+
 /**
  * §8/§7.1 exact closed union of canonical publication operation payloads.
  * Every branch carries exact keys, authority/event-builder inputs and child
@@ -1896,6 +1975,9 @@ export type PublicationOperationPayloadV2 =
         | 'map_review_settlement'
         | 'map_review_round_completed'
         | 'content_review_settlement'
+        | 'content_review_round_planned'
+        | 'content_review_round_completed'
+        | 'content_review_assignment_commit'
         | 'map_activation'
         | 'generation_finalize'
         | 'repair_finalize'
@@ -1912,6 +1994,8 @@ export type PublicationOperationPayloadV2 =
       mapReview: MapReviewPublishCarriersV2 | null;
       /** Task 17 content-plan carriers (null for every non-content-plan publish kind). */
       contentPlan: ContentPlanPublishCarriersV2 | null;
+      /** Task 18 content-review carriers (null for every non-content-review publish kind). */
+      contentReview: ContentReviewPublishCarriersV2 | null;
     }
   | {
       family: 'lease_or_retry';

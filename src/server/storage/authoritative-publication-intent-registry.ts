@@ -265,6 +265,35 @@ export function publicationPayloadChildRefs(payload: PublicationOperationPayload
         if (cp.successorPlanRef !== null) refs.push(cp.successorPlanRef);
         if (cp.terminal !== null) refs.push(cp.terminal.authorityBaseRef);
       }
+      const cr = parsed.contentReview;
+      if (cr !== null) {
+        if (cr.ledgerRef !== null) refs.push(cr.ledgerRef);
+        if (cr.observations !== null) for (const o of cr.observations) refs.push(o.observationRef, ...o.childObservationRefs);
+        if (cr.findingOpenings !== null) for (const fo of cr.findingOpenings) refs.push(fo.findingRef);
+        if (cr.coverageCoreRef !== null) refs.push(cr.coverageCoreRef);
+        if (cr.roundPlanned !== null) {
+          refs.push(cr.roundPlanned.mapRef, cr.roundPlanned.contentRevisionManifestRef, cr.roundPlanned.adoptionRootRef);
+          if (cr.roundPlanned.consumedOverrideRef !== null) refs.push(cr.roundPlanned.consumedOverrideRef);
+        }
+        if (cr.reviewWorkItems !== null) {
+          for (const s of cr.reviewWorkItems) {
+            refs.push(s.authorityBaseRef, s.payloadRef);
+            if (s.grantSpecRef !== null) refs.push(s.grantSpecRef);
+          }
+        }
+        if (cr.settlementCoreRef !== null) refs.push(cr.settlementCoreRef);
+        if (cr.reviewBundleRef !== null) refs.push(cr.reviewBundleRef);
+        if (cr.reviewWarningCustodyRootRef !== null) refs.push(cr.reviewWarningCustodyRootRef);
+        if (cr.mapRef !== null) refs.push(cr.mapRef);
+        if (cr.contentRevisionManifestRef !== null) refs.push(cr.contentRevisionManifestRef);
+        if (cr.reviewSettlementValidatorAggregateRef !== null) refs.push(cr.reviewSettlementValidatorAggregateRef);
+        if (cr.sealAuthorityBaseRef !== null) refs.push(cr.sealAuthorityBaseRef);
+        if (cr.successor !== null) {
+          refs.push(cr.successor.authorityBaseRef, cr.successor.payloadRef);
+          if (cr.successor.grantSpecRef !== null) refs.push(cr.successor.grantSpecRef);
+        }
+        if (cr.terminal !== null) refs.push(cr.terminal.authorityBaseRef);
+      }
       return refs;
     }
     case 'lease_or_retry':

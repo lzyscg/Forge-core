@@ -125,6 +125,7 @@ describe('publication_operation_payload, recovery payload, round override (ยง8/ย
       mapBuild: null,
       mapReview: null,
       contentPlan: null,
+      contentReview: null,
     };
     expect(() => parseBlob('publication_operation_payload', domainPublish)).not.toThrow();
 

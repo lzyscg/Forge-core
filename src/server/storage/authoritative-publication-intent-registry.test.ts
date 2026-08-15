@@ -359,7 +359,7 @@ describe('publication_operation_payload child-ref extraction', () => {
     const authority = H_REF('authority_base_set', H1);
     const families: ReadonlyArray<[PublicationOperationPayloadV2, BlobRefV2[]]> = [
       [
-        { family: 'domain_publish', operationId: 'op-1', taskId: 't', publishKind: 'map_build_commit', blobRefs: [H_REF('map_build_spec', H2)], expectedResultIdentity: 'x', mapBuild: null, mapReview: null, contentPlan: null },
+        { family: 'domain_publish', operationId: 'op-1', taskId: 't', publishKind: 'map_build_commit', blobRefs: [H_REF('map_build_spec', H2)], expectedResultIdentity: 'x', mapBuild: null, mapReview: null, contentPlan: null, contentReview: null },
         [H_REF('map_build_spec', H2)],
       ],
       [

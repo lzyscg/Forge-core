@@ -215,6 +215,7 @@ async function publishChunk(env: Env, taskId: string, operationId: string, prepa
       mapBuild: null,
       mapReview: null,
       contentPlan: null,
+      contentReview: null,
     },
     intent: intent('test/gc_chunk'),
     preparedRefs: [preparedRef],

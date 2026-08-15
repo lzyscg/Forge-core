@@ -707,6 +707,15 @@ export class MapReviewService {
     reviewPolicyDigest: string;
   }): Promise<{ roundRef: BlobRefV2; coverageCoreRef: BlobRefV2 }> {
     const roundRef = await this.deps.facade.prepareBlob(input.taskId, 'map_review_round', input.round);
+    // The planned core's finding_stage_root ref must have bytes on disk from
+    // creation (GC walks the planned core's child refs and fails closed on a
+    // missing blob — Task 18 F1). The REAL empty root is prepared here, so the
+    // planned ref is byte-identical to the round-completion root.
+    const plannedFindingStageRootRef = await this.deps.facade.prepareBlob(
+      input.taskId,
+      'finding_stage_root',
+      buildEmptyFindingStageRoot(input.round.mapReviewRoundId),
+    );
     const plannedCore = buildMapReviewCoverageCore({
       mapReviewRoundId: input.round.mapReviewRoundId,
       candidateRef: input.candidateRef,
@@ -715,7 +724,7 @@ export class MapReviewService {
       reviewPolicyDigest: input.reviewPolicyDigest,
       coverageLedgerRootRefs: [],
       wholeMapObservationRootRefs: [],
-      findingStageRootRef: refOfBlob('finding_stage_root', buildEmptyFindingStageRoot(input.round.mapReviewRoundId)),
+      findingStageRootRef: plannedFindingStageRootRef,
     });
     const coverageCoreRef = await this.deps.facade.prepareBlob(input.taskId, 'map_review_coverage_core', plannedCore);
     return { roundRef, coverageCoreRef };
@@ -912,6 +921,11 @@ export class MapReviewService {
     if (missing.length === 0) return false;
     const round = await this.readRoundBlob(taskId, roundId, events);
     const roundRef = refOfBlob('map_review_round', round);
+    const plannedFindingStageRootRef = await this.deps.facade.prepareBlob(
+      taskId,
+      'finding_stage_root',
+      buildEmptyFindingStageRoot(roundId),
+    );
     const plannedCore = buildMapReviewCoverageCore({
       mapReviewRoundId: roundId,
       candidateRef: plannedEvent.candidateRef,
@@ -920,7 +934,7 @@ export class MapReviewService {
       reviewPolicyDigest: plannedEvent.reviewPolicyDigest,
       coverageLedgerRootRefs: [],
       wholeMapObservationRootRefs: [],
-      findingStageRootRef: refOfBlob('finding_stage_root', buildEmptyFindingStageRoot(roundId)),
+      findingStageRootRef: plannedFindingStageRootRef,
     });
     const coverageCoreRef = await this.deps.facade.prepareBlob(taskId, 'map_review_coverage_core', plannedCore);
     const candidate = (await this.deps.resolver(taskId, plannedEvent.candidateRef)) as MapCandidateSnapshotV2 | null;
@@ -1288,6 +1302,7 @@ export class MapReviewService {
           expectedResultIdentity: canonicalJsonSha256({ operationId, publishKind: 'map_review_settlement' }),
           mapBuild: null,
           contentPlan: null,
+          contentReview: null,
           mapReview: mapReviewCarrier({
             mapReviewRoundId: round.mapReviewRoundId,
             settlementCoreRef,
@@ -1422,6 +1437,7 @@ export class MapReviewService {
         expectedResultIdentity: canonicalJsonSha256({ operationId: input.operationId, publishKind: input.publishKind }),
         mapBuild: null,
         contentPlan: null,
+        contentReview: null,
         mapReview: input.carriers,
       },
       intent: { handlerKind: input.publishKind, handlerVersion: 1 },

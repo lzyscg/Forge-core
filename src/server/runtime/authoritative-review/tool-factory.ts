@@ -57,10 +57,12 @@ import { canonicalJsonBytes, canonicalJsonSha256 } from '../../structured-slots/
 import type {
   AssignmentLedgerBlobV2,
   AuthoritativeReviewProfile,
+  ContentReviewCoverageCoreV2,
   FindingVerificationRecordV2,
   FindingV2,
   MapReviewRoundV2,
   ReviewFactV2,
+  ReviewPolicyParameters,
   ReviewRoundV2,
 } from '../../authoritative-review/authority-types';
 import { grantWriteAuthority } from '../../authoritative-review/authority-types';
@@ -71,6 +73,7 @@ import {
   evidenceStringsToReviewEvidence,
   type CrossScopeRoutingObligationV2,
 } from './finding-draft-registry';
+import { resolveContentRoundFromCore } from './content-review-service';
 
 /* ------------------------------------------------------------------ */
 /* Closed per-session tool lists (spec §11.1/§11.2/§11.3, design §9)   */
@@ -933,6 +936,9 @@ export type V2ToolFactoryDependencies = {
   resolveAssignmentTargets?(ctx: V2AttemptContext): Promise<readonly string[] | null>;
   /** The atomic AssignmentLedgerBlob/event publication seam (later facade wiring). */
   freezeReviewAssignment?(taskId: string, freeze: FrozenReviewAssignmentV2): Promise<{ ledgerRef: BlobRefV2; eventId: string }>;
+  /** Task 18: the review policy (needed to reconstruct the content round from
+   * the planned coverage core the workitems bind as reviewRoundRef). */
+  reviewPolicy?: ReviewPolicyParameters;
   log?(line: string): void;
 };
 
@@ -1114,10 +1120,15 @@ export class V2ToolFactory {
   private async hasVerificationTargets(ctx: V2AttemptContext, grant: ResolvedAttemptGrant): Promise<boolean> {
     const ref = grant.baseSet.reviewRoundRef;
     if (ref === null) return false;
-    const round = (await this.deps.resolver(ctx.taskId, ref)) as (MapReviewRoundV2 | ReviewRoundV2) | null;
-    if (round === null || typeof round !== 'object') return false;
-    const stages = (round as { verificationFindingStages?: readonly string[] }).verificationFindingStages ?? [];
-    return stages.length > 0;
+    const resolved = await this.deps.resolver(ctx.taskId, ref);
+    if (resolved === null || typeof resolved !== 'object') return false;
+    if ('verificationFindingStages' in resolved) {
+      const stages = (resolved as { verificationFindingStages?: readonly string[] }).verificationFindingStages ?? [];
+      return stages.length > 0;
+    }
+    // Content rounds: reconstruct the round from the planned coverage core.
+    const round = await this.resolveContentRound(ctx, resolved);
+    return round.verificationFindingStages.length > 0;
   }
 
   private buildToolDefinition(ctx: V2AttemptContext, name: V2ToolName): ToolDefinition {
@@ -1463,11 +1474,39 @@ export class V2ToolFactory {
     if (ref === null) {
       throw new GrantError('GRANT_STALE', `workitem '${ctx.workItemId}' has no current review round in its authority base`);
     }
-    const round = (await this.deps.resolver(ctx.taskId, ref)) as (MapReviewRoundV2 | ReviewRoundV2) | null;
-    if (round === null || typeof round !== 'object' || !('verificationFindingStages' in round)) {
+    const resolved = await this.deps.resolver(ctx.taskId, ref);
+    if (resolved === null || typeof resolved !== 'object' || !('reviewRoundId' in resolved || 'mapReviewRoundId' in resolved)) {
       throw new GrantError('GRANT_STALE', `review round blob '${ref.digest.slice(0, 12)}…' is unresolvable`);
     }
-    return round;
+    if ('verificationFindingStages' in resolved) {
+      return resolved as MapReviewRoundV2 | ReviewRoundV2;
+    }
+    // Content rounds: the workitems bind reviewRoundRef = the PLANNED coverage
+    // core; reconstruct the round from it (no content_review_round blob kind).
+    return this.resolveContentRound(ctx, resolved);
+  }
+
+  /** Reconstructs the content `ReviewRoundV2` from the planned coverage core. */
+  private async resolveContentRound(ctx: V2AttemptContext, resolved: unknown): Promise<ReviewRoundV2> {
+    const core = resolved as ContentReviewCoverageCoreV2;
+    if (core === null || typeof core !== 'object' || typeof core.reviewRoundId !== 'string' || typeof core.coreDigest !== 'string') {
+      throw new GrantError('GRANT_STALE', `review round blob '${ctx.workItemId}' is not a resolvable content review coverage core`);
+    }
+    return resolveContentRoundFromCore(ctx.taskId, core, {
+      resolver: this.deps.resolver,
+      readProjection: this.deps.readProjection,
+      reviewPolicy: this.deps.reviewPolicy ?? {
+        mapReview: 'required',
+        contentSelector: 'content_bearing',
+        mapBatchTargetSlots: 24,
+        contentBatchTargetSlots: 24,
+        assignmentSoftLimit: 64,
+        wholeMapObservation: 'required',
+        wholeContentTreeObservation: 'required',
+        reviewAdvisoryRelations: false,
+        maxRounds: 8,
+      },
+    });
   }
 }
 

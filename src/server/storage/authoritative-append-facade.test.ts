@@ -1004,6 +1004,7 @@ describe('store lock and fence behavior through the facade', () => {
       mapBuild: null,
       mapReview: null,
       contentPlan: null,
+      contentReview: null,
     } as const;
     // The handler removed the prepared object after publishing its pin.
     const prepared = await env.facade.preparePublication({
