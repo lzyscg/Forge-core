@@ -180,7 +180,19 @@ export function buildValidatorEnvelopeV2(input: {
     case 'review_settlement':
       return { trigger, taskId, templateSnapshotHash, contentReviewCoverageCoreRef: coreRef, selectedTargetRefs };
     case 'repair_finalize':
-      return { trigger, taskId, templateSnapshotHash, repairPlanSpecRef: coreRef, selectedTargetRefs };
+      if (input.auxiliaryRefs?.stagingRootRef === undefined || input.auxiliaryRefs?.keyLedgerRef === undefined || input.auxiliaryRefs?.stagedArtifactRef === undefined) {
+        validatorEngineError('repair_finalize requires stagingRootRef, keyLedgerRef and stagedArtifactRef');
+      }
+      return {
+        trigger,
+        taskId,
+        templateSnapshotHash,
+        repairPlanSpecRef: coreRef,
+        stagingRootRef: input.auxiliaryRefs.stagingRootRef,
+        keyLedgerRef: input.auxiliaryRefs.keyLedgerRef,
+        stagedArtifactRef: input.auxiliaryRefs.stagedArtifactRef,
+        selectedTargetRefs,
+      };
     case 'seal_input':
       return { trigger, taskId, templateSnapshotHash, reviewBundleRef: coreRef, selectedTargetRefs };
     case 'seal_output': {
@@ -310,6 +322,21 @@ function resolveCoreData(
       return { kind: 'unresolvable', reason: 'the proposed map core ref is unresolvable' };
     }
     return { kind: 'ok', core: { settlementCore: core, proposedMapCore: proposedCore } };
+  }
+  if (request.trigger === 'repair_finalize') {
+    const stagingRootRef = request.auxiliaryRefs?.stagingRootRef;
+    const keyLedgerRef = request.auxiliaryRefs?.keyLedgerRef;
+    const stagedArtifactRef = request.auxiliaryRefs?.stagedArtifactRef;
+    if (stagingRootRef === undefined || keyLedgerRef === undefined || stagedArtifactRef === undefined) {
+      return { kind: 'unresolvable', reason: 'repair finalizer closure refs are missing' };
+    }
+    const stagingRoot = resolve(stagingRootRef);
+    const keyLedger = resolve(keyLedgerRef);
+    const stagedArtifact = resolve(stagedArtifactRef);
+    if (stagingRoot === null || keyLedger === null || stagedArtifact === null) {
+      return { kind: 'unresolvable', reason: 'repair finalizer closure is unresolvable' };
+    }
+    return { kind: 'ok', core: { ...(core as Record<string, unknown>), repairPlan: core, stagingRoot, keyLedger, stagedArtifact } };
   }
   return { kind: 'ok', core };
 }

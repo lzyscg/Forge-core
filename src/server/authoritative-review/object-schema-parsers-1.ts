@@ -80,7 +80,7 @@ const SESSION_KINDS = [
 
 export function parseAssignmentDispatch(value: unknown): Record<string, unknown> {
   const o = rec(value, 'assignment_dispatch');
-  ex(o, ['dispatchId', 'workItemId', 'logicalAssignmentId', 'reviewAssignmentId', 'attemptId', 'authorityBaseRef', 'agentExecutionKind', 'sessionKind', 'grantInstanceRef', 'inputArtifactDeliveryId', 'dispatchDigest'], 'assignment_dispatch');
+  ex(o, ['dispatchId', 'workItemId', 'logicalAssignmentId', 'reviewAssignmentId', 'attemptId', 'authorityBaseRef', 'agentExecutionKind', 'sessionKind', 'grantInstanceRef', 'inputArtifactDeliveryId', 'scopeDecisionReason', 'dispatchDigest'], 'assignment_dispatch');
   const gen = str(o.agentExecutionKind, 'assignment_dispatch.agentExecutionKind');
   if (gen !== 'structured_session' && gen !== 'generic_turn') throw new SchemaError('assignment_dispatch.agentExecutionKind must be structured_session|generic_turn');
   const session = oStr(o.sessionKind, 'assignment_dispatch.sessionKind');
@@ -110,6 +110,7 @@ export function parseAssignmentDispatch(value: unknown): Record<string, unknown>
     sessionKind: session,
     grantInstanceRef: grant,
     inputArtifactDeliveryId,
+    scopeDecisionReason: oStr(o.scopeDecisionReason, 'assignment_dispatch.scopeDecisionReason'),
   };
   hs(result, o.dispatchDigest, 'dispatchDigest', 'assignment_dispatch');
   result.dispatchDigest = hx(o.dispatchDigest, 'assignment_dispatch.dispatchDigest');

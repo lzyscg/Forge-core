@@ -130,6 +130,7 @@ export interface WorkItemProjectionV2 {
   reviewAssignmentId: string | null;
   grantSpecRef: BlobRefV2 | null;
   inputArtifactDeliveryId: string | null;
+  scopeDecisionReason: string | null;
   authorityBaseRef: BlobRefV2;
   payloadRef: BlobRefV2;
   leaseEpoch: number;
@@ -732,6 +733,7 @@ function applyEvent(fold: Fold, event: AuthoritativeReviewEventV2, sequence: num
         reviewAssignmentId: event.reviewAssignmentId,
         grantSpecRef: event.grantSpecRef,
         inputArtifactDeliveryId: event.inputArtifactDeliveryId,
+        scopeDecisionReason: event.scopeDecisionReason ?? null,
         authorityBaseRef: event.authorityBaseRef,
         payloadRef: event.payloadRef,
         leaseEpoch: event.initialLeaseEpoch,
@@ -1848,8 +1850,22 @@ function applyFindingVerification(
   if (finding === undefined) {
     corrupt('finding_unknown', event, sequence, `findingId=${event.findingId}`);
   }
-  if (finding.reviewContext.kind !== event.reviewContext.kind || finding.reviewContext.roundId !== event.reviewContext.roundId) {
-    corrupt('finding_context_round', event, sequence, `findingId=${event.findingId}`);
+  // Verification is intentionally cross-round: the Finding remains bound to
+  // the round that opened it, while the record is bound to the later round
+  // that reviewed the repaired artifact. The later round must exist and its
+  // track must equal the stage being verified; accepting only the opening
+  // context made every real repair verification impossible.
+  const verificationRound = event.reviewContext.kind === 'map'
+    ? fold.projection.mapRounds[event.reviewContext.roundId]
+    : fold.projection.contentRounds[event.reviewContext.roundId];
+  if (verificationRound === undefined || event.reviewContext.kind !== event.repairStage) {
+    corrupt('finding_context_round', event, sequence, `findingId=${event.findingId} roundId=${event.reviewContext.roundId}`);
+  }
+  if (event.type === 'structured_finding_verification_recorded' && finding.source !== 'reviewer') {
+    corrupt('finding_verifier_source', event, sequence, `findingId=${event.findingId}`);
+  }
+  if (event.type === 'structured_validator_finding_verification_recorded' && finding.source !== 'system_validator') {
+    corrupt('finding_verifier_source', event, sequence, `findingId=${event.findingId}`);
   }
   if (finding.verifiedStages.includes(event.repairStage)) {
     corrupt('verification_stage_repeat', event, sequence, `findingId=${event.findingId} stage=${event.repairStage}`);
@@ -1859,6 +1875,8 @@ function applyFindingVerification(
   }
   if (event.verdict === 'resolved') {
     finding.verifiedStages.push(event.repairStage);
+  } else {
+    finding.state = 'open';
   }
 }
 

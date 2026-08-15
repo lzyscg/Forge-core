@@ -868,6 +868,7 @@ describe('leaseNext — claims, ordering, batch shape', () => {
           reviewAssignmentId: null,
           grantSpecRef: null,
           inputArtifactDeliveryId: null,
+          scopeDecisionReason: null,
           authorityBaseRef: synthRef('authority_base_set', 1),
           payloadRef: synthRef('content_value', 2),
           leaseEpoch: 0,

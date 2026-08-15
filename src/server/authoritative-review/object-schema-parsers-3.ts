@@ -36,6 +36,7 @@ import {
   type RepairKeyLedgerV2,
   type RepairPlanSpecV2,
   type RepairPublishCarriersV2,
+  type ReviewerFindingVerificationCarrierV2,
   type RepairStagingRootV2,
   type ReviewAdoptionLedgerBlobV2,
   type ReviewAdoptionRootV2,
@@ -618,13 +619,13 @@ function parseMapReviewPublishCarriers(value: unknown): MapReviewPublishCarriers
   const o = rec(value, 'mapReview');
   ex(o, [
     'assignmentId', 'mapReviewRoundId', 'workItemId', 'attemptId', 'reviewAssignmentId',
-    'source', 'ledgerRef', 'coverageTargetCount', 'findingCount', 'observations',
+    'source', 'ledgerRef', 'coverageTargetCount', 'findingCount', 'observations', 'verificationRecords',
     'coverageCoreRef', 'settlementCoreRef', 'outcome',
     'mapId', 'mapRevision', 'supersedesMapId', 'mapSnapshotRef', 'mapReviewBundleRef',
     'mapSemanticDigest', 'contentRevisionManifestRef', 'activationValidatorAggregateRef',
     'migrationSettlementCoreRef', 'migrationActivationDecisionRef',
     'taskContentRevision', 'manifestPhase', 'producerPlanSpecRef', 'priorManifestRef',
-    'successor', 'terminal', 'contentRound', 'reviewWorkItems',
+    'successor', 'terminal', 'contentRound', 'reviewWorkItems', 'mixedContentRepair', 'verifiedClosedFindingIds',
   ], 'mapReview');
   const source = o.source === null ? null : str(o.source, 'mapReview.source');
   if (source !== null && source !== 'batch' && source !== 'whole_map_observation') {
@@ -650,6 +651,7 @@ function parseMapReviewPublishCarriers(value: unknown): MapReviewPublishCarriers
     coverageTargetCount: o.coverageTargetCount === null ? null : onn(o.coverageTargetCount, 'mapReview.coverageTargetCount'),
     findingCount: o.findingCount === null ? null : onn(o.findingCount, 'mapReview.findingCount'),
     observations,
+    verificationRecords: parseReviewerVerificationCarriers(o.verificationRecords, 'mapReview.verificationRecords'),
     coverageCoreRef: rfn(o.coverageCoreRef, 'mapReview.coverageCoreRef'),
     settlementCoreRef: rfn(o.settlementCoreRef, 'mapReview.settlementCoreRef'),
     outcome,
@@ -673,6 +675,8 @@ function parseMapReviewPublishCarriers(value: unknown): MapReviewPublishCarriers
     reviewWorkItems: o.reviewWorkItems === null
       ? null
       : (o.reviewWorkItems as unknown[]).map((v, i) => parseSuccessorWorkItemCarrier(v)).filter((s): s is SuccessorWorkItemCarrierV2 => s !== null),
+    mixedContentRepair: parseRepairPublishCarriers(o.mixedContentRepair),
+    verifiedClosedFindingIds: o.verifiedClosedFindingIds === null || o.verifiedClosedFindingIds === undefined ? null : sa(o.verifiedClosedFindingIds, 'mapReview.verifiedClosedFindingIds'),
   };
 }
 
@@ -804,6 +808,32 @@ function parseContentReviewFindingOpeningCarrier(value: unknown, where: string):
   };
 }
 
+function parseReviewerVerificationCarriers(value: unknown, where: string): readonly ReviewerFindingVerificationCarrierV2[] | null {
+  if (value === null || value === undefined) return null;
+  return (value as unknown[]).map((entry, index) => {
+    const at = `${where}[${index}]`;
+    const o = rec(entry, at);
+    ex(o, ['recordId', 'recordRef', 'findingId', 'reviewContext', 'assignmentId', 'repairStage', 'verdict'], at);
+    const context = rec(o.reviewContext, `${at}.reviewContext`);
+    ex(context, ['kind', 'roundId'], `${at}.reviewContext`);
+    const kind = str(context.kind, `${at}.reviewContext.kind`);
+    if (kind !== 'map' && kind !== 'content') throw new SchemaError(`${at}.reviewContext.kind must be map|content`);
+    const repairStage = str(o.repairStage, `${at}.repairStage`);
+    if (repairStage !== 'map' && repairStage !== 'content') throw new SchemaError(`${at}.repairStage must be map|content`);
+    const verdict = str(o.verdict, `${at}.verdict`);
+    if (verdict !== 'resolved' && verdict !== 'still_present') throw new SchemaError(`${at}.verdict must be resolved|still_present`);
+    return {
+      recordId: str(o.recordId, `${at}.recordId`),
+      recordRef: rfKind(o.recordRef, 'finding_verification_record', `${at}.recordRef`),
+      findingId: str(o.findingId, `${at}.findingId`),
+      reviewContext: { kind, roundId: str(context.roundId, `${at}.reviewContext.roundId`) },
+      assignmentId: str(o.assignmentId, `${at}.assignmentId`),
+      repairStage,
+      verdict,
+    };
+  });
+}
+
 /**
  * Task 18 content-review carriers (deterministic rebuild; exact-key parser).
  * `roundPlanned` reuses the `content_review_round_planned` round-plan carrier
@@ -815,11 +845,11 @@ function parseContentReviewPublishCarriers(value: unknown): ContentReviewPublish
   const o = rec(value, 'contentReview');
   ex(o, [
     'assignmentId', 'reviewRoundId', 'workItemId', 'attemptId', 'reviewAssignmentId',
-    'source', 'ledgerRef', 'coverageTargetCount', 'findingCount', 'observations', 'findingOpenings',
+    'source', 'ledgerRef', 'coverageTargetCount', 'findingCount', 'observations', 'findingOpenings', 'verificationRecords',
     'coverageCoreRef', 'roundPlanned', 'reviewWorkItems',
     'settlementCoreRef', 'outcome', 'reviewBundleRef', 'reviewWarningCustodyRootRef',
     'mapRef', 'contentRevisionManifestRef', 'reviewSettlementValidatorAggregateRef',
-    'sealWorkItemId', 'sealAuthorityBaseRef', 'successor', 'terminal',
+    'sealWorkItemId', 'sealAuthorityBaseRef', 'verifiedClosedFindingIds', 'successor', 'terminal',
   ], 'contentReview');
   const source = o.source === null ? null : str(o.source, 'contentReview.source');
   if (source !== null && source !== 'batch' && source !== 'whole_tree_observation') {
@@ -850,6 +880,7 @@ function parseContentReviewPublishCarriers(value: unknown): ContentReviewPublish
     findingCount: o.findingCount === null ? null : onn(o.findingCount, 'contentReview.findingCount'),
     observations,
     findingOpenings,
+    verificationRecords: parseReviewerVerificationCarriers(o.verificationRecords, 'contentReview.verificationRecords'),
     coverageCoreRef: rfn(o.coverageCoreRef, 'contentReview.coverageCoreRef'),
     roundPlanned: parseContentReviewRoundPlanCarrier(o.roundPlanned),
     reviewWorkItems,
@@ -862,6 +893,7 @@ function parseContentReviewPublishCarriers(value: unknown): ContentReviewPublish
     reviewSettlementValidatorAggregateRef: rfn(o.reviewSettlementValidatorAggregateRef, 'contentReview.reviewSettlementValidatorAggregateRef'),
     sealWorkItemId: o.sealWorkItemId === null ? null : str(o.sealWorkItemId, 'contentReview.sealWorkItemId'),
     sealAuthorityBaseRef: rfn(o.sealAuthorityBaseRef, 'contentReview.sealAuthorityBaseRef'),
+    verifiedClosedFindingIds: o.verifiedClosedFindingIds === null || o.verifiedClosedFindingIds === undefined ? null : sa(o.verifiedClosedFindingIds, 'contentReview.verifiedClosedFindingIds'),
     successor: parseSuccessorWorkItemCarrier(o.successor),
     terminal: parseSystemCommandTerminalCarrier(o.terminal),
   };
@@ -1527,8 +1559,21 @@ export function parseValidatorInputEnvelope(value: unknown): ValidatorInputEnvel
     return { trigger, taskId: str(o.taskId, 'taskId'), templateSnapshotHash: str(o.templateSnapshotHash, 'templateSnapshotHash'), contentReviewCoverageCoreRef: rfKind(o.contentReviewCoverageCoreRef, 'content_review_coverage_core', 'contentReviewCoverageCoreRef'), selectedTargetRefs: sel };
   }
   if (trigger === 'repair_finalize') {
-    ex(o, ['trigger', 'taskId', 'templateSnapshotHash', 'repairPlanSpecRef', 'selectedTargetRefs'], 'validator_input_envelope');
-    return { trigger, taskId: str(o.taskId, 'taskId'), templateSnapshotHash: str(o.templateSnapshotHash, 'templateSnapshotHash'), repairPlanSpecRef: rfKind(o.repairPlanSpecRef, 'repair_plan_spec', 'repairPlanSpecRef'), selectedTargetRefs: sel };
+    ex(o, ['trigger', 'taskId', 'templateSnapshotHash', 'repairPlanSpecRef', 'stagingRootRef', 'keyLedgerRef', 'stagedArtifactRef', 'selectedTargetRefs'], 'validator_input_envelope');
+    const stagedArtifactRef = rf(o.stagedArtifactRef, 'stagedArtifactRef');
+    if (stagedArtifactRef.kind !== 'map_candidate_validation_core' && stagedArtifactRef.kind !== 'content_revision_manifest') {
+      throw new SchemaError('repair_finalize stagedArtifactRef must be map_candidate_validation_core|content_revision_manifest');
+    }
+    return {
+      trigger,
+      taskId: str(o.taskId, 'taskId'),
+      templateSnapshotHash: str(o.templateSnapshotHash, 'templateSnapshotHash'),
+      repairPlanSpecRef: rfKind(o.repairPlanSpecRef, 'repair_plan_spec', 'repairPlanSpecRef'),
+      stagingRootRef: rfKind(o.stagingRootRef, 'repair_staging_root', 'stagingRootRef'),
+      keyLedgerRef: rfKind(o.keyLedgerRef, 'repair_key_ledger', 'keyLedgerRef'),
+      stagedArtifactRef,
+      selectedTargetRefs: sel,
+    };
   }
   if (trigger === 'seal_input') {
     ex(o, ['trigger', 'taskId', 'templateSnapshotHash', 'reviewBundleRef', 'selectedTargetRefs'], 'validator_input_envelope');

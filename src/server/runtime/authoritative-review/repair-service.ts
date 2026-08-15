@@ -123,6 +123,7 @@ import {
   buildContentValue,
   buildEmptyAdoptionRoot,
   buildFinalizedManifest,
+  buildProvisionalManifest,
   contentReviewRoundId,
 } from './content-plan-service';
 import { buildReviewObservationGrantSpec, reviewAssignmentIdOf, reviewBatchWorkItemId, reviewWholeAssignmentId, reviewWholeWorkItemId } from './review-coordinator';
@@ -218,14 +219,30 @@ export function repairScopeRequestId(taskId: string, workItemId: string, clientO
   return `rq-${canonicalJsonSha256({ taskId, workItemId, clientOperationId }).slice(0, 24)}`;
 }
 
-/** Deterministic scope-approval publication operation id. */
-export function repairScopeApprovalOperationId(taskId: string, requestId: string): string {
-  return `ra-${canonicalJsonSha256({ taskId, requestId }).slice(0, 32)}`;
+/** Canonical immutable requested-scope digest. */
+export function repairRequestedScopeDigest(input: {
+  findingIds: readonly string[];
+  requestedNodeIds: readonly string[];
+  requestedRelationIds: readonly string[];
+  requestedSlotIds: readonly string[];
+}): string {
+  return canonicalJsonSha256(input);
+}
+
+/** Deterministic scope-approval publication operation id. The approved scope
+ * digest is part of the key, so a request id can never authorize different
+ * bytes under the same successor identity. */
+export function repairScopeApprovalOperationId(taskId: string, requestId: string, requestedScopeDigest = ''): string {
+  return `ra-${canonicalJsonSha256({ taskId, requestId, requestedScopeDigest }).slice(0, 32)}`;
 }
 
 /** Deterministic scope-rejection publication operation id. */
 export function repairScopeRejectionOperationId(taskId: string, requestId: string): string {
   return `rj-${canonicalJsonSha256({ taskId, requestId }).slice(0, 32)}`;
+}
+
+export function repairScopeRejectionReplacementWorkItemId(taskId: string, requestId: string): string {
+  return `wi-reprj-${canonicalJsonSha256({ taskId, requestId }).slice(0, 24)}`;
 }
 
 /** Deterministic override-transfer operation id (scope-expansion successors). */
@@ -1818,6 +1835,17 @@ export class RepairService {
       const version = staged.versions.get(entry.slotId) ?? ((await this.deps.resolver(taskId, entry.versionRef)) as SlotContentVersionV2 | null);
       if (version !== null && typeof version === 'object') resolvedVersions.set(entry.slotId, version);
     }
+    const custody = buildRepairWarningCustodyRoot({
+      taskId,
+      inputRef: run.run.envelopeRef,
+      inputDigest: run.run.envelopeRef.digest,
+      aggregateRef: run.run.aggregateRef,
+      warningRootRef: run.run.warningRootRef,
+      repairPlanId: plan.repairPlanId,
+      planRevisionId: plan.planRevisionId,
+      phase: 'content',
+    });
+    const custodyRef = await this.deps.facade.prepareBlob(taskId, 'validation_warning_custody_root', custody);
     const finalized = buildFinalizedManifest({
       taskId,
       mapRef: state.currentMap.mapSnapshotRef,
@@ -1828,7 +1856,7 @@ export class RepairService {
       entries: finalEntries,
       resolvedVersions,
       finalizerValidatorAggregateRefs: [run.run.aggregateRef],
-      finalizerWarningRootRefs: [],
+      finalizerWarningRootRefs: [custodyRef],
     });
     const finalizedRef = await this.deps.facade.prepareBlob(taskId, 'content_revision_manifest', finalized);
     // The COMPLETE content re-review round (Task 18 seam: contentCycleOrdinal
@@ -1849,6 +1877,8 @@ export class RepairService {
     const blobRefs = [
       findingSetRef,
       run.run.aggregateRef,
+      run.run.warningRootRef,
+      custodyRef,
       finalizedRef,
       ...round.preparedRefs,
     ];
@@ -1990,7 +2020,7 @@ export class RepairService {
     taskId: string;
     commandId: string;
     workItemId: string;
-    commandKind: 'repair_finalize';
+    commandKind: 'repair_finalize' | 'review_settlement';
     leaseEpoch: number;
     authorityBaseRef: BlobRefV2;
     track: 'map' | 'content';
@@ -2026,7 +2056,7 @@ export class RepairService {
         leaseEpoch: input.leaseEpoch,
         eventBuilder: 'work_item_terminal_failed',
         authorityBaseRef: input.authorityBaseRef,
-        kind: 'system_repair_finalize',
+        kind: input.commandKind === 'repair_finalize' ? 'system_repair_finalize' : 'system_review_settlement',
         roleBinding: null,
         agentExecutionKind: null,
         sessionKind: null,
@@ -2045,7 +2075,7 @@ export class RepairService {
         attemptId: null,
         commandId: input.commandId,
         agentId: null,
-        commandKind: 'repair_finalize',
+        commandKind: input.commandKind,
         dispatchRef: null,
         grantInstanceRef: null,
         reason: null,
@@ -2065,6 +2095,42 @@ export class RepairService {
       expectedTailCommitId: tail.lastCommitId,
     });
     return { kind: 'completed', resultRefs: [payloadRef] };
+  }
+
+  /** Atomic content-cycle budget boundary used by repaired-Map activation.
+   * The settlement command terminal-fails the task before map_activated or a
+   * content round can be published. */
+  async publishContentActivationOverLimitFailure(input: {
+    taskId: string;
+    commandId: string;
+    workItemId: string;
+    leaseEpoch: number;
+    authorityBaseRef: BlobRefV2;
+    repairPlanId: string;
+    rejectedManifestRef: BlobRefV2;
+    failedCycleOrdinal: number;
+  }): Promise<{ kind: 'completed'; resultRefs: readonly BlobRefV2[] }> {
+    const state = await this.deps.readProjection(input.taskId);
+    const lineage = state.repairPlans[input.repairPlanId];
+    const revision = lineage?.currentPlanRevisionId === null || lineage?.currentPlanRevisionId === undefined
+      ? undefined
+      : lineage.revisions[lineage.currentPlanRevisionId];
+    if (revision === undefined) throw new RepairError('PLAN_UNRESOLVED', 'repaired-Map budget failure cannot resolve its repair plan');
+    const plan = (await this.deps.resolver(input.taskId, revision.specRef)) as RepairPlanSpecV2 | null;
+    if (plan === null) throw new RepairError('PLAN_UNRESOLVED', 'repaired-Map budget failure plan bytes are unresolvable');
+    const findingSetRef = await this.prepareFindingSet(input.taskId, plan);
+    return this.publishOverLimitFailure({
+      taskId: input.taskId,
+      commandId: input.commandId,
+      workItemId: input.workItemId,
+      commandKind: 'review_settlement',
+      leaseEpoch: input.leaseEpoch,
+      authorityBaseRef: input.authorityBaseRef,
+      track: 'content',
+      failedCycleOrdinal: input.failedCycleOrdinal,
+      rejectedSubjectRef: input.rejectedManifestRef,
+      findingSetRef,
+    });
   }
 
   /* ------------------------- scope expansion ---------------------- */
@@ -2166,7 +2232,25 @@ export class RepairService {
     const supersededSpec = (await this.deps.resolver(taskId, lineage.revisions[headRevisionId].specRef)) as RepairPlanSpecV2 | null;
     if (supersededSpec === null || typeof supersededSpec !== 'object') throw new RepairError('PLAN_UNRESOLVED', 'current repair plan spec unresolvable');
     const track = supersededSpec.orderedBatchScopes[0]?.kind === 'map' ? 'map' : 'content';
-    const expanded = this.expandedScopes(supersededSpec, input, track);
+    const requestedScope = {
+      findingIds: request.findingIds,
+      requestedNodeIds: request.requestedNodeIds,
+      requestedRelationIds: request.requestedRelationIds,
+      requestedSlotIds: request.requestedSlotIds,
+    };
+    const repeatedScope = {
+      findingIds: input.findingIds,
+      requestedNodeIds: input.requestedNodeIds ?? [],
+      requestedRelationIds: input.requestedRelationIds ?? [],
+      requestedSlotIds: input.requestedSlotIds ?? [],
+    };
+    if (canonicalJsonSha256(repeatedScope) !== canonicalJsonSha256(requestedScope)) {
+      throw new RepairError('REQUEST_SCOPE_MISMATCH', 'approval scope must be byte-equal to the immutable recorded request');
+    }
+    await this.assertRequestedScopeKnown(taskId, requestedScope, track);
+    const requestedScopeDigest = repairRequestedScopeDigest(requestedScope);
+    const approvalOperationId = repairScopeApprovalOperationId(taskId, input.requestId, requestedScopeDigest);
+    const expanded = this.expandedScopes(supersededSpec, requestedScope, track);
     // I-4 fix (adversarial review round 2): the successor binds its OWN key
     // ledger (like the blocking-finalize successor) — the superseded
     // revision's ledger would make the successor's batch-1 commit fail
@@ -2181,7 +2265,7 @@ export class RepairService {
     const successor = buildRepairPlanSpec({
       repairPlanId: request.repairPlanId,
       revision: successorRevision,
-      origin: { kind: 'successor', supersedesPlanSpecRef: lineage.revisions[headRevisionId].specRef, successorReason: 'scope_expansion', successorOperationKey: repairScopeApprovalOperationId(taskId, input.requestId) },
+      origin: { kind: 'successor', supersedesPlanSpecRef: lineage.revisions[headRevisionId].specRef, successorReason: 'scope_expansion', successorOperationKey: approvalOperationId },
       sourceReceiptRef: supersededSpec.sourceReceiptRef,
       repairBase: supersededSpec.repairBase,
       orderedBatchScopes: expanded.scopes,
@@ -2206,8 +2290,8 @@ export class RepairService {
     if (carryErrors.length > 0) {
       throw new RepairError('INVALID_INPUT', `repair successor carry invalid: ${carryErrors.join('; ')}`);
     }
-    const overrideTransfer = await this.prepareOverrideTransfer(taskId, lineage.revisions[headRevisionId].specRef, successorRef, repairScopeApprovalOperationId(taskId, input.requestId), track);
-    const operationId = repairScopeApprovalOperationId(taskId, input.requestId);
+    const overrideTransfer = await this.prepareOverrideTransfer(taskId, lineage.revisions[headRevisionId].specRef, successorRef, approvalOperationId, track);
+    const operationId = approvalOperationId;
     // I-4 (adversarial review): the superseded plan revision's claimable
     // WorkItem is superseded atomically (`structured_work_item_superseded`) —
     // without it the stale WorkItem stays claimable forever, its retries park
@@ -2307,8 +2391,10 @@ export class RepairService {
     return null;
   }
 
-  /** The scope-expansion REJECTION: terminal-completes the request without
-   * widening authority (the current plan/grant stay exactly as they are). */
+  /** The scope-expansion REJECTION: preserves the current plan and exact
+   * write scope, but atomically ends the requesting lease/attempt, supersedes
+   * its old Grant-bearing WorkItem, and creates a deterministic same-scope
+   * replacement whose later dispatch carries the rejection reason. */
   async rejectScopeExpansion(input: {
     taskId: string;
     requestId: string;
@@ -2324,29 +2410,74 @@ export class RepairService {
         e.type === 'structured_repair_scope_requested' && e.requestId === input.requestId,
     );
     if (request === undefined) throw new RepairError('REQUEST_UNKNOWN', `no scope-expansion request '${input.requestId}'`);
-    if (events.some((e) => (e.type === 'structured_repair_scope_expansion_approved_v2' || e.type === 'structured_repair_scope_expansion_rejected_v2') && e.requestId === input.requestId)) {
-      throw new RepairError('REQUEST_ALREADY_DECIDED', `request '${input.requestId}' is already decided`);
+    if (events.some((e) => e.type === 'structured_repair_scope_expansion_approved_v2' && e.requestId === input.requestId)) {
+      throw new RepairError('REQUEST_ALREADY_DECIDED', `request '${input.requestId}' is already approved`);
+    }
+    const priorRejection = events.find((e): e is Extract<AuthoritativeReviewEventV2, { type: 'structured_repair_scope_expansion_rejected_v2' }> => e.type === 'structured_repair_scope_expansion_rejected_v2' && e.requestId === input.requestId);
+    if (priorRejection !== undefined) {
+      if (priorRejection.reason !== input.reason) throw new RepairError('OPERATION_CONFLICT', `request '${input.requestId}' was rejected with different decision bytes`);
+      return { kind: 'completed', resultRefs: [] };
     }
     const tail = await this.deps.tail(taskId);
     if (tail.lastSequence !== input.expectedLastSequence || tail.lastCommitId !== input.expectedTailCommitId) {
       throw new RepairError('AUTHORITY_BASE_STALE', 'stale tail: a competing successor committed; re-evaluate on the winner');
     }
     const track = request.track;
+    const state = await this.deps.readProjection(taskId);
+    const lineage = state.repairPlans[request.repairPlanId];
+    const head = lineage?.revisions[request.planRevisionId];
+    if (lineage === undefined || head === undefined || lineage.currentPlanRevisionId !== request.planRevisionId || head.state !== 'active') {
+      throw new RepairError('PLAN_STALE', 'the requested plan revision is no longer the active head');
+    }
+    const plan = await this.deps.resolver(taskId, head.specRef) as RepairPlanSpecV2 | null;
+    if (plan === null || typeof plan !== 'object') throw new RepairError('PLAN_UNRESOLVED', 'scope rejection plan is unresolvable');
+    const supersededWorkItem = this.supersededWorkItemOf(state, plan, taskId);
+    if (supersededWorkItem === null) throw new RepairError('WORK_ITEM_NOT_FOUND', 'scope rejection cannot identify the active repair cycle');
+    const activeBatchOrdinal = this.repairBatchOrdinalOfWorkItem(taskId, plan, supersededWorkItem.workItemId);
+    if (activeBatchOrdinal === null) throw new RepairError('INVALID_INPUT', 'scope rejection only applies to an active repair batch');
+    const current = await this.currentStagingState(taskId, plan, track);
+    const replacementWorkItemId = repairScopeRejectionReplacementWorkItemId(taskId, input.requestId);
+    const replacement = await this.prepareRepairBatchSuccessor({
+      taskId,
+      plan,
+      planRef: head.specRef,
+      batchOrdinal: activeBatchOrdinal - 1,
+      nextWorkItemId: replacementWorkItemId,
+      isLast: false,
+      currentStagingRootRef: current.stagingRootRef,
+      keyLedgerRef: current.keyLedgerRef,
+    });
+    const carryErrors = validateRepairSuccessorCarrier(replacement.carrier, head.specRef);
+    if (carryErrors.length > 0) throw new RepairError('INVALID_INPUT', `replacement carry invalid: ${carryErrors.join('; ')}`);
     const operationId = repairScopeRejectionOperationId(taskId, input.requestId);
+    const blobRefs = [replacement.authorityBaseRef, ...(replacement.grantSpecRef === null ? [] : [replacement.grantSpecRef])];
     await this.publish(taskId, {
       operationId,
       publishKind: 'repair_scope_rejection',
-      blobRefs: [],
+      blobRefs,
       carriers: repairCarrier({
         track,
         repairPlanId: request.repairPlanId,
         planRevisionId: request.planRevisionId,
         requestId: input.requestId,
         reason: input.reason,
+        workItemId: replacementWorkItemId,
+        batchOrdinal: activeBatchOrdinal,
+        grantSpecId: `gs-${replacementWorkItemId}`,
+        grantKind: track === 'map' ? 'map_repair_batch' : 'content_repair_batch',
+        supersededWorkItem,
+        successor: replacement.carrier,
       }),
-      preparedRefs: [],
+      preparedRefs: blobRefs,
     });
-    return { kind: 'completed', resultRefs: [] };
+    return { kind: 'completed', resultRefs: blobRefs };
+  }
+
+  private repairBatchOrdinalOfWorkItem(taskId: string, plan: RepairPlanSpecV2, workItemId: string): number | null {
+    for (let ordinal = 1; ordinal <= plan.orderedBatchScopes.length; ordinal++) {
+      if (repairBatchWorkItemId(taskId, plan.repairPlanId, ordinal, plan.planRevisionId) === workItemId) return ordinal;
+    }
+    return null;
   }
 
   /* ------------------------- internals ---------------------------- */
@@ -2843,8 +2974,7 @@ export class RepairService {
     const out: string[] = [];
     for (const f of findings) {
       if (f.source === 'system_validator') continue;
-      const stages = new Set(f.addressStages);
-      if (addressingTrack !== null) stages.add(addressingTrack);
+      const stages = new Set(addressingTrack === null ? f.addressStages : [addressingTrack]);
       for (const stage of stages) {
         if (subtractVerified && f.verifiedStages.includes(stage)) continue;
         out.push(`${f.findingId}:${stage}`);
@@ -2862,9 +2992,9 @@ export class RepairService {
     const state = await this.deps.readProjection(taskId);
     const out: string[] = [];
     for (const finding of Object.values(state.findings)) {
-      if (finding.reviewContext.kind !== 'content') continue;
       if (finding.source === 'system_validator') continue;
-      for (const stage of finding.addressStages) {
+      if (finding.defectClass !== 'content' && finding.defectClass !== 'mixed') continue;
+      for (const stage of finding.addressStages.filter((value) => value === 'content')) {
         if (finding.verifiedStages.includes(stage)) continue;
         out.push(`${finding.findingId}:${stage}`);
       }
@@ -3114,6 +3244,37 @@ export class RepairService {
     return { scopes, targets: { nodeIds: [...nodeIds].sort(), relationIds: [...relationIds].sort(), slotIds: [...slotIds].sort() }, ledgerEntries };
   }
 
+  /** Approval recomputes the server-side baseline closure; unknown repeated
+   * targets never become authority merely because an operator echoed them. */
+  private async assertRequestedScopeKnown(
+    taskId: string,
+    requested: { requestedNodeIds: readonly string[]; requestedRelationIds: readonly string[]; requestedSlotIds: readonly string[] },
+    track: 'map' | 'content',
+  ): Promise<void> {
+    const state = await this.deps.readProjection(taskId);
+    if (track === 'map') {
+      const mapRef = state.currentCandidate?.candidateRef ?? state.currentMap?.mapSnapshotRef ?? null;
+      if (mapRef === null) throw new RepairError('MAP_UNRESOLVED', 'scope approval requires a map baseline');
+      const mapObject = await this.deps.resolver(taskId, mapRef) as { validationCoreRef?: BlobRefV2; nodes?: readonly { slotId: string }[]; relations?: readonly { relationId: string }[] } | null;
+      const resolved = mapObject !== null && mapObject.validationCoreRef !== undefined
+        ? await this.deps.resolver(taskId, mapObject.validationCoreRef) as { nodes?: readonly { slotId: string }[]; relations?: readonly { relationId: string }[] } | null
+        : mapObject;
+      const nodes = new Set((resolved?.nodes ?? []).map((node) => node.slotId));
+      const relations = new Set((resolved?.relations ?? []).map((relation) => relation.relationId));
+      for (const id of requested.requestedNodeIds) if (!nodes.has(id)) throw new RepairError('REPAIR_SCOPE_INVALID', `requested unknown map node '${id}'`);
+      for (const id of requested.requestedRelationIds) if (!relations.has(id)) throw new RepairError('REPAIR_SCOPE_INVALID', `requested unknown relation '${id}'`);
+      if (requested.requestedSlotIds.length > 0) throw new RepairError('REQUEST_SCOPE_MISMATCH', 'map scope request cannot authorize content slots');
+      return;
+    }
+    if (state.currentManifest === null) throw new RepairError('MANIFEST_UNRESOLVED', 'scope approval requires a content baseline');
+    const manifest = await this.deps.resolver(taskId, state.currentManifest.contentRevisionManifestRef) as { entries?: readonly { slotId: string }[] } | null;
+    const slots = new Set((manifest?.entries ?? []).map((entry) => entry.slotId));
+    for (const id of requested.requestedSlotIds) if (!slots.has(id)) throw new RepairError('REPAIR_SCOPE_INVALID', `requested unknown content slot '${id}'`);
+    if (requested.requestedNodeIds.length > 0 || requested.requestedRelationIds.length > 0) {
+      throw new RepairError('REQUEST_SCOPE_MISMATCH', 'content scope request cannot authorize map targets');
+    }
+  }
+
   /**
    * Task 19 public seam: the complete content re-review round for a repaired
    * finalized manifest — the §13.3.1 content-cycle boundary. Budget-checked
@@ -3163,6 +3324,92 @@ export class RepairService {
       mapContext,
       await this.contentVerificationStagesOf(taskId),
     );
+  }
+
+  /** Prepares the mandatory ContentRepairPlan that follows a repaired-Map
+   * activation when a mixed blocking Finding has completed only its Map
+   * stage. The caller publishes these carriers in the SAME activation
+   * envelope, so no crash window can expose an activated Map without its
+   * content repair successor. */
+  async prepareMixedContentRepairAfterMapActivation(input: {
+    taskId: string;
+    settlementOperationKey: string;
+    settlementWorkItemId: string;
+    newMapRef: BlobRefV2;
+    manifestRef: BlobRefV2;
+  }): Promise<{ carriers: RepairPublishCarriersV2; preparedRefs: readonly BlobRefV2[] } | null> {
+    const state = await this.deps.readProjection(input.taskId);
+    const { projectFindingLifecycle } = await import('./finding-service');
+    const findings = Object.values(state.findings)
+      .filter((finding) => finding.severity === 'blocking' && finding.defectClass === 'mixed')
+      .filter((finding) => finding.verifiedStages.includes('map') && !finding.addressStages.includes('content'))
+      .map((finding) => projectFindingLifecycle({ finding }));
+    if (findings.length === 0) return null;
+
+    const repairPlanId = repairPlanIdOf(input.taskId, `${input.settlementOperationKey}:mixed-content`, 'content');
+    const targets = await this.resolveRepairTargets(input.taskId, 'content', findings);
+    if (targets.slotIds.length === 0) {
+      throw new RepairError('REPAIR_SCOPE_INVALID', 'mixed Finding content stage has no suggested repair slots');
+    }
+    const scopes = buildRepairBatchScopes({
+      track: 'content',
+      repairPlanId,
+      nodeIds: [],
+      relationIds: [],
+      slotIds: targets.slotIds,
+      findingIds: targets.findingIds,
+      reviewPolicy: this.deps.reviewPolicy,
+      profile: this.deps.profile,
+    });
+    const keyLedger = this.initialKeyLedgerOf(repairPlanId, targets, 'content', 1);
+    const keyLedgerRef = await this.deps.facade.prepareBlob(input.taskId, 'repair_key_ledger', keyLedger);
+    const plan = buildRepairPlanSpec({
+      repairPlanId,
+      revision: 1,
+      origin: {
+        kind: 'initial',
+        settlementId: input.settlementWorkItemId,
+        settlementDigest: input.newMapRef.digest,
+        creationOperationKey: `${input.settlementOperationKey}:mixed-content`,
+      },
+      sourceReceiptRef: null,
+      repairBase: { kind: 'content', mapRef: input.newMapRef, contentRevisionManifestRef: input.manifestRef },
+      orderedBatchScopes: scopes,
+      keyLineageRef: keyLedgerRef,
+      importedStagingManifestRef: input.manifestRef,
+    });
+    const planRef = await this.deps.facade.prepareBlob(input.taskId, 'repair_plan_spec', plan);
+    const stagingRoot = this.baseStagingRootOf(plan, keyLedgerRef, input.taskId, 'content', targets);
+    const stagingRootRef = await this.deps.facade.prepareBlob(input.taskId, 'repair_staging_root', stagingRoot);
+    const workItemId = repairBatchWorkItemId(input.taskId, repairPlanId, 1, plan.planRevisionId);
+    const successor = await this.prepareRepairBatchSuccessor({
+      taskId: input.taskId,
+      plan,
+      planRef,
+      batchOrdinal: 0,
+      nextWorkItemId: workItemId,
+      isLast: false,
+      currentStagingRootRef: stagingRootRef,
+      keyLedgerRef,
+    });
+    const errors = validateRepairSuccessorCarrier(successor.carrier, planRef);
+    if (errors.length > 0) throw new RepairError('INVALID_INPUT', `mixed content repair successor invalid: ${errors.join('; ')}`);
+    const preparedRefs = [keyLedgerRef, planRef, stagingRootRef, successor.authorityBaseRef, ...(successor.grantSpecRef === null ? [] : [successor.grantSpecRef])];
+    return {
+      carriers: repairCarrier({
+        track: 'content',
+        repairPlanId,
+        planRevisionId: plan.planRevisionId,
+        repairPlanSpecRef: planRef,
+        sourceValidationReceiptRef: null,
+        workItemId,
+        batchOrdinal: 1,
+        grantSpecId: `gs-${workItemId}`,
+        grantKind: 'content_repair_batch',
+        successor: successor.carrier,
+      }),
+      preparedRefs,
+    };
   }
 
   /** The current active repair plan of the TRACK (the override binding —
@@ -3450,10 +3697,73 @@ export class RepairService {
     input: { taskId: string; commandId: string; workItemId: string },
     plan: RepairPlanSpecV2,
     track: 'map' | 'content',
-    staged: { nodes: readonly MapPositionNodeV2[]; relations: readonly MapRelationV2[]; entries: { slotId: string; versionRef: BlobRefV2 }[] },
+    staged: { nodes: readonly MapPositionNodeV2[]; relations: readonly MapRelationV2[]; entries: { slotId: string; versionRef: BlobRefV2 }[]; versions: Map<string, SlotContentVersionV2>; lastStagingRootRef: BlobRefV2; lastLedgerRef: BlobRefV2; attempts: { workItemId: string; attemptId: string }[] },
   ): Promise<{ run: TriggerExecutionResult; store: RepairMemoryBlobStore }> {
     const store = new RepairMemoryBlobStore();
-    store.put('repair_plan_spec', plan);
+    const planRef = store.put('repair_plan_spec', plan);
+    const stagingRoot = await this.deps.resolver(input.taskId, staged.lastStagingRootRef);
+    const keyLedger = await this.deps.resolver(input.taskId, staged.lastLedgerRef);
+    if (stagingRoot === null || keyLedger === null) throw new RepairError('STAGING_UNRESOLVED', 'repair finalizer staging closure is unresolvable');
+    const stagingRootRef = store.put('repair_staging_root', stagingRoot);
+    const keyLedgerRef = store.put('repair_key_ledger', keyLedger);
+    if (!sameRef(stagingRootRef, staged.lastStagingRootRef) || !sameRef(keyLedgerRef, staged.lastLedgerRef)) {
+      throw new RepairError('STAGING_DIVERGED', 'repair finalizer staging closure bytes do not match the authoritative refs');
+    }
+    let stagedArtifactRef: BlobRefV2;
+    let selectedTargetRefs: readonly BlobRefV2[];
+    if (track === 'map') {
+      const contribution = buildRepairContributionManifest({
+        repairPlanId: plan.repairPlanId,
+        planRevision: plan.revision,
+        stagingRootRef,
+        keyLedgerRefs: [keyLedgerRef],
+        agentAttemptIdentities: staged.attempts,
+      });
+      const contributionRef = store.put('contribution_manifest', contribution);
+      const state = await this.deps.readProjection(input.taskId);
+      const artifact = buildRepairCandidateCore({
+        candidateId: repairCandidateIdOf(plan.repairPlanId, plan.planRevisionId),
+        baseMapId: state.currentMap?.mapId ?? state.currentCandidate?.candidateId ?? null,
+        repairPlanId: plan.repairPlanId,
+        repairPlanRevision: plan.revision,
+        snapshotHash: this.deps.snapshotHash,
+        producerWorkItemId: input.workItemId,
+        commandId: input.commandId,
+        contributionManifestRef: contributionRef,
+        nodes: staged.nodes,
+        relations: staged.relations,
+      });
+      stagedArtifactRef = store.put('map_candidate_validation_core', artifact);
+      selectedTargetRefs = [stagedArtifactRef];
+    } else {
+      const base = plan.repairBase;
+      if (base.kind !== 'content') throw new RepairError('REPAIR_BASE_STALE', 'content finalizer has a non-content base');
+      const baseManifest = (await this.deps.resolver(input.taskId, base.contentRevisionManifestRef)) as ContentRevisionManifestV2 | null;
+      const state = await this.deps.readProjection(input.taskId);
+      if (baseManifest === null || state.currentMap === null) throw new RepairError('MANIFEST_UNRESOLVED', 'content finalizer closure needs base manifest and active Map');
+      const stagedBySlot = new Map(staged.entries.map((entry) => [entry.slotId, entry]));
+      const entries = baseManifest.entries.map((entry) => stagedBySlot.get(entry.slotId) ?? entry);
+      const versions = new Map<string, SlotContentVersionV2>();
+      for (const entry of entries) {
+        const value = staged.versions.get(entry.slotId) ?? ((await this.deps.resolver(input.taskId, entry.versionRef)) as SlotContentVersionV2 | null);
+        if (value === null) throw new RepairError('CONTENT_VERSION_UNRESOLVED', `content version ${entry.slotId} is unresolvable`);
+        const ref = store.put('content_version', value);
+        if (!sameRef(ref, entry.versionRef)) throw new RepairError('STAGING_DIVERGED', `content version ${entry.slotId} bytes diverged`);
+        versions.set(entry.slotId, value);
+      }
+      const artifact = buildProvisionalManifest({
+        taskId: input.taskId,
+        mapRef: state.currentMap.mapSnapshotRef,
+        mapSemanticDigest: state.currentMap.mapSemanticDigest,
+        taskContentRevision: baseManifest.taskContentRevision + 1,
+        priorManifestRef: base.contentRevisionManifestRef,
+        producerPlanSpecRef: planRef,
+        entries,
+        resolvedVersions: versions,
+      });
+      stagedArtifactRef = store.put('content_revision_manifest', artifact);
+      selectedTargetRefs = entries.map((entry) => entry.versionRef);
+    }
     const engine = new ValidatorEngine({
       registry: this.deps.validatorRegistry,
       blobs: store,
@@ -3462,8 +3772,9 @@ export class RepairService {
     const run = await engine.execute({
       trigger: 'repair_finalize',
       identity: { taskId: input.taskId, templateSnapshotHash: this.deps.snapshotHash, workItemId: input.workItemId, attemptId: null, commandId: input.commandId },
-      coreRef: refOfBlob('repair_plan_spec', plan),
-      selectedTargetRefs: [],
+      coreRef: planRef,
+      auxiliaryRefs: { stagingRootRef, keyLedgerRef, stagedArtifactRef },
+      selectedTargetRefs,
       registrations: this.deps.registrationsFor('repair_finalize', track),
       universe: {
         slotIds: track === 'map' ? staged.nodes.map((n) => n.slotId) : staged.entries.map((e) => e.slotId),
@@ -3669,7 +3980,10 @@ function revisionStartedEvent(rp: RepairPublishCarriersV2, at: string): Publicat
   };
 }
 
-function workItemCreatedEvent(s: SuccessorWorkItemCarrierV2, at: string): PublicationEventEnvelopeV2 {
+function workItemCreatedEvent(
+  s: SuccessorWorkItemCarrierV2,
+  at: string,
+): Omit<Extract<AuthoritativeReviewEventV2, { type: 'structured_work_item_created' }>, 'id'> {
   return {
     protocolVersion: 2,
     at,
@@ -4244,7 +4558,14 @@ function registerRepairScopeRejection(registry: PublicationIntentRegistry): void
     handlerKind: 'repair_scope_rejection',
     handlerVersion: 1,
     payloadFamily: 'domain_publish',
-    expectedEventTypes: ['structured_repair_scope_expansion_rejected_v2'],
+    expectedEventTypes: [
+      'structured_repair_scope_expansion_rejected_v2',
+      'structured_agent_attempt_abandoned_v2',
+      'structured_work_item_lease_reclaimed',
+      'structured_work_item_superseded',
+      'structured_work_item_created',
+      'structured_repair_grant_issued',
+    ],
     rebuildable: true,
     missingInputs: [],
     parsePayload: parseDomainPublishPayload,
@@ -4258,7 +4579,7 @@ function registerRepairScopeRejection(registry: PublicationIntentRegistry): void
       need(rp.planRevisionId, 'planRevisionId');
       need(rp.requestId, 'requestId');
       need(rp.reason, 'reason');
-      return [
+      const envelopes: PublicationEventEnvelopeV2[] = [
         {
           protocolVersion: 2,
           at,
@@ -4269,6 +4590,50 @@ function registerRepairScopeRejection(registry: PublicationIntentRegistry): void
           reason: rp.reason,
         },
       ];
+      const sw = rp.supersededWorkItem;
+      need(sw, 'supersededWorkItem');
+      if (sw.attemptAbandonment !== null) {
+        const ab = sw.attemptAbandonment;
+        envelopes.push({
+          protocolVersion: 2,
+          at,
+          type: 'structured_agent_attempt_abandoned_v2',
+          workItemId: sw.workItemId,
+          logicalAssignmentId: ab.logicalAssignmentId,
+          reviewAssignmentId: ab.reviewAssignmentId,
+          attemptId: ab.attemptId,
+          sessionKind: ab.sessionKind,
+          leaseEpoch: ab.leaseEpoch,
+          reason: 'operator_interrupt',
+          authorityBaseRef: ab.authorityBaseRef,
+        });
+        envelopes.push({
+          protocolVersion: 2,
+          at,
+          type: 'structured_work_item_lease_reclaimed',
+          workItemId: sw.workItemId,
+          leaseEpoch: ab.leaseEpoch,
+          reason: 'operator_interrupt',
+          authorityBaseRef: ab.authorityBaseRef,
+        });
+      }
+      envelopes.push({
+        protocolVersion: 2,
+        at,
+        type: 'structured_work_item_superseded',
+        workItemId: sw.workItemId,
+        leaseEpoch: sw.leaseEpoch,
+        reason: sw.reason,
+        authorityBaseRef: sw.authorityBaseRef,
+      });
+      const successor = rp.successor;
+      need(successor, 'successor');
+      envelopes.push({
+        ...workItemCreatedEvent(successor, at),
+        scopeDecisionReason: rp.reason,
+      });
+      envelopes.push(grantIssuedEvent(rp, at));
+      return envelopes;
     },
     expectedResultIdentity: (_payload, events) => sha256Of(events),
   });

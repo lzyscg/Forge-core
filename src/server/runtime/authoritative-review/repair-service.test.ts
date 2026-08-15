@@ -45,7 +45,7 @@ import { buildReviewAssignmentFreeze, validateVerificationSubmission, type Revie
 import { ReviewCoordinatorV2, reviewAssignmentIdOf, reviewBatchWorkItemId, reviewWholeAssignmentId, reviewWholeWorkItemId } from './review-coordinator';
 import { planMapReview } from './observation-planner';
 import { attemptContinuationOperationId } from './attempt-coordinator';
-import { completionKindRequiresResult, type GenerationPlanSpecV2, type MapPositionNodeV2, type MapRelationV2, type ReviewFactV2 } from '../../authoritative-review/authority-types';
+import { completionKindRequiresResult, type AssignmentDispatchV2, type ContentRevisionManifestV2, type GenerationPlanSpecV2, type MapPositionNodeV2, type MapRelationV2, type ReviewFactV2 } from '../../authoritative-review/authority-types';
 import {
   RepairService,
   RepairError,
@@ -146,6 +146,31 @@ module.exports = {
   }
 };`;
 
+/** Blocks only when the repair-finalize input contains the staged Map bytes.
+ * This is the regression oracle for the finalizer closure: a plan-only core
+ * cannot produce the issue. */
+const BLOCKING_ON_STAGED_MAP_SOURCE = `'use strict';
+module.exports = {
+  validate: function validate(input) {
+    var core = input && typeof input.core === 'object' ? input.core : {};
+    var artifact = core && typeof core.stagedArtifact === 'object' ? core.stagedArtifact : {};
+    var nodes = Array.isArray(artifact.nodes) ? artifact.nodes : [];
+    if (nodes.length === 0) return { status: 'valid', executionDigest: '${hash('missing-staged-map')}' };
+    return {
+      status: 'domain_invalid',
+      issues: [{
+        validatorId: 'v-repair-staged',
+        implementationDigest: '${hash('staged-digest')}',
+        issueCode: 'STAGED_MAP_BYTES_REJECTED',
+        location: { targetKind: 'node', stableTargetId: nodes[0].slotId, jsonPointer: '/nodes/0' },
+        repairTargets: { mapNodeIds: [nodes[0].slotId], relationIds: [], slotIds: [] },
+        evidenceDigest: ''
+      }],
+      executionDigest: ''
+    };
+  }
+};`;
+
 let seq = 0;
 
 function opId(label: string): string {
@@ -239,7 +264,7 @@ interface RepairEnv {
 
 let envs: RepairEnv[] = [];
 
-async function makeRepairEnv(opts: { maxRounds?: number; contentBatchTargetSlots?: number; blocking?: boolean; blockingOnRevision2?: boolean; extraHandlers?: (registry: PublicationIntentRegistry) => void } = {}): Promise<RepairEnv> {
+async function makeRepairEnv(opts: { maxRounds?: number; contentBatchTargetSlots?: number; blocking?: boolean; blockingOnRevision2?: boolean; stagedBlocking?: boolean; extraHandlers?: (registry: PublicationIntentRegistry) => void } = {}): Promise<RepairEnv> {
   const registry = new PublicationIntentRegistry();
   registerMapBuildPublicationHandlers(registry);
   registerMapReviewPublicationHandlers(registry);
@@ -259,8 +284,8 @@ async function makeRepairEnv(opts: { maxRounds?: number; contentBatchTargetSlots
   const resolver = (id: string, ref: BlobRefV2) => env.resolverFor(id)(ref);
   const grants = new GrantService({ resolver, readProjection: env.readProjection, profile: PROFILE });
   const maxRounds = opts.maxRounds ?? 3;
-  const finalizeSource = opts.blocking === true ? BLOCKING_SOURCE : opts.blockingOnRevision2 === true ? BLOCKING_ON_REV2_SOURCE : FINALIZE_VALID_SOURCE;
-  const finalizeDigest = opts.blocking === true || opts.blockingOnRevision2 === true ? hash('blocking-digest') : '';
+  const finalizeSource = opts.stagedBlocking === true ? BLOCKING_ON_STAGED_MAP_SOURCE : opts.blocking === true ? BLOCKING_SOURCE : opts.blockingOnRevision2 === true ? BLOCKING_ON_REV2_SOURCE : FINALIZE_VALID_SOURCE;
+  const finalizeDigest = opts.stagedBlocking === true ? hash('staged-digest') : opts.blocking === true || opts.blockingOnRevision2 === true ? hash('blocking-digest') : '';
   const sourceResolver = (key: string): string | null => {
     if (key === 'test.repair.repair_finalize') return finalizeSource;
     return builtinSourceOf(key);
@@ -284,8 +309,8 @@ async function makeRepairEnv(opts: { maxRounds?: number; contentBatchTargetSlots
     validatorRegistry: repairRegistry,
     sourceResolver,
     registrationsFor: () =>
-      opts.blocking === true || opts.blockingOnRevision2 === true
-        ? [{ ...testValidatorRegistration('repair_finalize', null, finalizeSource, 'v-repair-blocking'), implementationDigest: hash('blocking-digest') }]
+      opts.blocking === true || opts.blockingOnRevision2 === true || opts.stagedBlocking === true
+        ? [{ ...testValidatorRegistration('repair_finalize', null, finalizeSource, opts.stagedBlocking === true ? 'v-repair-staged' : 'v-repair-blocking'), implementationDigest: finalizeDigest }]
         : [testValidatorRegistration('repair_finalize', null, FINALIZE_VALID_SOURCE, 'v-repair-clear')],
     reviewPolicy: { ...REVIEW_POLICY, maxRounds, contentBatchTargetSlots: opts.contentBatchTargetSlots ?? 2, reviewAdvisoryRelations: true },
     reviewPolicyDigest: hash('review-policy'),
@@ -1451,7 +1476,7 @@ describe('repair plan identity (pure)', { timeout: 120_000 }, () => {
 
   it('competing successors from the same head are deterministic; a stale-tail approval fails closed (loser re-evaluates)', async () => {
     const b = await makeRepairEnv();
-    const stack = await driveToContentStack(b, ['s-1']);
+    const stack = await driveToContentStack(b, ['s-1', 's-2']);
     await seedFindings(b, mapBlockingFindings(stack.nodeIds), 'map');
     const settlement = await createAndLeaseSettlement(b);
     const outcome = await b.service.createRepairPlanFromSettlement({
@@ -1797,7 +1822,7 @@ describe('content repair staging + continuity', { timeout: 120_000 }, () => {
 describe('scope expansion', { timeout: 120_000 }, () => {
   it('request -> approval atomically supersedes the plan head and creates the successor WorkItem/Grant within hard limits', async () => {
     const b = await makeRepairEnv();
-    const stack = await driveToContentStack(b, ['s-1']);
+    const stack = await driveToContentStack(b, ['s-1', 's-2']);
     await seedFindings(b, mapBlockingFindings(stack.nodeIds), 'map');
     const settlement = await createAndLeaseSettlement(b);
     await b.service.createRepairPlanFromSettlement({
@@ -1817,19 +1842,30 @@ describe('scope expansion', { timeout: 120_000 }, () => {
     const oldWorkItemId = repairBatchWorkItemId(b.taskId, plan.repairPlanId, 1, plan.planRevisionId);
     const requestLease = await leaseTargeted(b, oldWorkItemId, 'worker-a');
     const requestCtx = ctxOf(b, requestLease);
-    await b.service.requestScopeExpansion(requestCtx, { findingIds: ['m-1'], requestedNodeIds: ['n-2'], reason: 'need more nodes', clientOperationId: 'co-req-1' });
+    const requestedNodeId = stack.nodeIds[1] as string;
+    await b.service.requestScopeExpansion(requestCtx, { findingIds: ['m-1'], requestedNodeIds: [requestedNodeId], reason: 'need more nodes', clientOperationId: 'co-req-1' });
     const events = await b.readEvents(b.taskId);
     const request = events.find((e): e is Extract<AuthoritativeReviewEventV2, { type: 'structured_repair_scope_requested' }> => e.type === 'structured_repair_scope_requested');
     expect(request).toBeDefined();
     if (request === undefined) return;
     const tail = await b.env.eventStore.tail(b.taskId);
+    await expect(b.service.approveScopeExpansion({
+      taskId: b.taskId,
+      requestId: request.requestId,
+      operatorId: 'operator-1',
+      expectedLastSequence: tail.lastSequence,
+      expectedTailCommitId: tail.lastCommitId,
+      requestedNodeIds: [stack.nodeIds[0] as string],
+      findingIds: ['m-1'],
+      reason: 'approved',
+    })).rejects.toMatchObject({ code: 'REQUEST_SCOPE_MISMATCH' });
     const approval = await b.service.approveScopeExpansion({
       taskId: b.taskId,
       requestId: request.requestId,
       operatorId: 'operator-1',
       expectedLastSequence: tail.lastSequence,
       expectedTailCommitId: tail.lastCommitId,
-      requestedNodeIds: ['n-2'],
+      requestedNodeIds: [requestedNodeId],
       findingIds: ['m-1'],
       reason: 'approved',
     });
@@ -1846,16 +1882,17 @@ describe('scope expansion', { timeout: 120_000 }, () => {
     // The successor's map scope includes the requested node.
     const scope = successorPlan.orderedBatchScopes[0];
     if (scope === undefined || scope.kind !== 'map') throw new Error('expected map scope');
-    expect(scope.scope.nodeIds).toContain('n-2');
+    expect(scope.scope.nodeIds).toContain(requestedNodeId);
+    expect((successorPlan.origin as { successorOperationKey: string }).successorOperationKey).toContain('ra-');
     // The successor workitem + grant exist; the OLD grant can no longer commit.
     const newWorkItemId = repairBatchWorkItemId(b.taskId, plan.repairPlanId, 1, successorPlan.planRevisionId);
     const newGrant = await grantOf(b, newWorkItemId);
     expect((newGrant as RepairBatchGrantSpecV2 & { kind: 'map_repair_batch' }).repairPlanSpecRef.digest).toBe(newHead.specRef.digest);
   });
 
-  it('rejection terminal-completes the request WITHOUT widening authority', async () => {
+  it('rejection atomically ends the old cycle and creates one deterministic same-scope replacement grant', async () => {
     const b = await makeRepairEnv();
-    const stack = await driveToContentStack(b, ['s-1']);
+    const stack = await driveToContentStack(b, ['s-1', 's-2']);
     await seedFindings(b, mapBlockingFindings(stack.nodeIds), 'map');
     const settlement = await createAndLeaseSettlement(b);
     await b.service.createRepairPlanFromSettlement({
@@ -1875,7 +1912,8 @@ describe('scope expansion', { timeout: 120_000 }, () => {
     const workItemId = repairBatchWorkItemId(b.taskId, plan.repairPlanId, 1, plan.planRevisionId);
     const requestLease = await leaseTargeted(b, workItemId, 'worker-a');
     const requestCtx = ctxOf(b, requestLease);
-    await b.service.requestScopeExpansion(requestCtx, { findingIds: ['m-1'], requestedNodeIds: ['n-2'], reason: 'r', clientOperationId: 'co-req-2' });
+    const requestedNodeId = stack.nodeIds[1] as string;
+    await b.service.requestScopeExpansion(requestCtx, { findingIds: ['m-1'], requestedNodeIds: [requestedNodeId], reason: 'r', clientOperationId: 'co-req-2' });
     const events = await b.readEvents(b.taskId);
     const request = events.find((e): e is Extract<AuthoritativeReviewEventV2, { type: 'structured_repair_scope_requested' }> => e.type === 'structured_repair_scope_requested');
     if (request === undefined) throw new Error('no request');
@@ -1893,8 +1931,24 @@ describe('scope expansion', { timeout: 120_000 }, () => {
     // The head is UNCHANGED (no successor revision, no widening).
     expect(lineageAfter.currentPlanRevisionId).toBe(lineage.currentPlanRevisionId);
     expect(lineageAfter.revisions[lineage.currentPlanRevisionId as string].state).toBe('active');
-    const rejected = (await b.readEvents(b.taskId)).some((e) => e.type === 'structured_repair_scope_expansion_rejected_v2');
-    expect(rejected).toBe(true);
+    const afterEvents = await b.readEvents(b.taskId);
+    expect(afterEvents.some((e) => e.type === 'structured_repair_scope_expansion_rejected_v2')).toBe(true);
+    expect(state.workItems[workItemId].state).toBe('superseded');
+    expect(state.attempts[requestCtx.attemptId].state).toBe('abandoned');
+    const replacement = Object.values(state.workItems).find((wi) => wi.workItemId !== workItemId && wi.sessionKind === 'map_repair' && wi.state === 'ready');
+    expect(replacement).toBeDefined();
+    const replacementGrant = await grantOf(b, replacement?.workItemId as string) as RepairBatchGrantSpecV2;
+    const oldGrant = await grantOf(b, workItemId) as RepairBatchGrantSpecV2;
+    expect(replacementGrant.repairPlanSpecRef.digest).toBe(oldGrant.repairPlanSpecRef.digest);
+    expect(replacementGrant.writeScope).toEqual(oldGrant.writeScope);
+    const replacementLease = await leaseTargeted(b, replacement?.workItemId as string, 'worker-replacement');
+    if (replacementLease.dispatchRef === null) throw new Error('replacement dispatch missing');
+    const replacementDispatch = (await b.resolver(b.taskId, replacementLease.dispatchRef)) as AssignmentDispatchV2;
+    expect(replacementDispatch.scopeDecisionReason).toBe('denied');
+    // Same decision bytes replay the same replacement; changed bytes conflict.
+    const tailAfter = await b.env.eventStore.tail(b.taskId);
+    await expect(b.service.rejectScopeExpansion({ taskId: b.taskId, requestId: request.requestId, operatorId: 'operator-1', reason: 'denied', expectedLastSequence: tailAfter.lastSequence, expectedTailCommitId: tailAfter.lastCommitId })).resolves.toMatchObject({ kind: 'completed' });
+    await expect(b.service.rejectScopeExpansion({ taskId: b.taskId, requestId: request.requestId, operatorId: 'operator-1', reason: 'different', expectedLastSequence: tailAfter.lastSequence, expectedTailCommitId: tailAfter.lastCommitId })).rejects.toMatchObject({ code: 'OPERATION_CONFLICT' });
   });
 });
 
@@ -1903,9 +1957,12 @@ describe('scope expansion', { timeout: 120_000 }, () => {
 /* ------------------------------------------------------------------ */
 
 /** Drives a full map repair: plan -> one batch (journaled) -> finalizer. */
-async function driveMapRepairToFinalizer(b: RepairEnv): Promise<{ plan: RepairPlanSpecV2; finalizeWorkItemId: string }> {
+async function driveMapRepairToFinalizer(b: RepairEnv, options: { mixed?: boolean } = {}): Promise<{ plan: RepairPlanSpecV2; finalizeWorkItemId: string }> {
   const stack = await driveToContentStack(b, ['s-1']);
-  await seedFindings(b, mapBlockingFindings(stack.nodeIds), 'map');
+  const findingId = options.mixed === true ? 'x-1' : 'm-1';
+  await seedFindings(b, options.mixed === true
+    ? [{ findingId, primaryLocation: { kind: 'map_node', id: stack.nodeIds[0] as string }, defectClass: 'mixed', severity: 'blocking', suggestedRepairSlotIds: [stack.nodeIds[0] as string] }]
+    : mapBlockingFindings(stack.nodeIds), 'map');
   const settlement = await createAndLeaseSettlement(b);
   await b.service.createRepairPlanFromSettlement({
     taskId: b.taskId,
@@ -1915,7 +1972,7 @@ async function driveMapRepairToFinalizer(b: RepairEnv): Promise<{ plan: RepairPl
     authorityBaseRef: settlement.authorityBaseRef,
     roundId: 'round-1',
     coverageCoreRef: { kind: 'content_review_coverage_core', digest: 'e'.repeat(64), byteLength: 10, mediaType: 'application/json', schemaVersion: 1 },
-    findings: blockingFindingsOf(['m-1']),
+    findings: blockingFindingsOf([findingId]),
   });
   const state = await b.env.readProjection(b.taskId);
   const lineage = Object.values(state.repairPlans)[0];
@@ -1974,6 +2031,24 @@ async function runFinalizer(b: RepairEnv, finalizeWorkItemId: string): Promise<R
 }
 
 describe('map finalizer routes', { timeout: 120_000 }, () => {
+  it('repair_finalize validator can block from the exact staged Map artifact bytes', async () => {
+    const b = await makeRepairEnv({ stagedBlocking: true });
+    const { finalizeWorkItemId } = await driveMapRepairToFinalizer(b);
+    const outcome = await runFinalizer(b, finalizeWorkItemId);
+    expect(outcome.kind).toBe('blocked');
+    const events = await b.readEvents(b.taskId);
+    const rejection = events.find((event) => event.type === 'structured_map_repair_plan_rejected');
+    expect(rejection).toBeDefined();
+    const aggregateRef = (rejection as Extract<AuthoritativeReviewEventV2, { type: 'structured_map_repair_plan_rejected' }>).validatorAggregateRef;
+    const aggregate = (await b.resolver(b.taskId, aggregateRef)) as { blockingInvalidReceiptRefs: readonly BlobRefV2[]; inputRef: BlobRefV2 };
+    const receipt = (await b.resolver(b.taskId, aggregate.blockingInvalidReceiptRefs[0] as BlobRefV2)) as { blockerIssues: readonly { issueCode: string }[] };
+    expect(receipt.blockerIssues[0]?.issueCode).toBe('STAGED_MAP_BYTES_REJECTED');
+    const envelope = (await b.resolver(b.taskId, aggregate.inputRef)) as { stagingRootRef: BlobRefV2; keyLedgerRef: BlobRefV2; stagedArtifactRef: BlobRefV2; selectedTargetRefs: readonly BlobRefV2[] };
+    expect(envelope.stagingRootRef.kind).toBe('repair_staging_root');
+    expect(envelope.keyLedgerRef.kind).toBe('repair_key_ledger');
+    expect(envelope.stagedArtifactRef.kind).toBe('map_candidate_validation_core');
+  });
+
   it('map finalize clear publishes ONE candidate + the COMPLETE map review round (mapCycleOrdinal+1)', async () => {
     const b = await makeRepairEnv({ maxRounds: 2 });
     const { finalizeWorkItemId } = await driveMapRepairToFinalizer(b);
@@ -2628,98 +2703,88 @@ async function commitMapRepairBatchOne(b: RepairEnv, plan: RepairPlanSpecV2, wor
   });
 }
 
-/** R2-1 test seam: ONE `structured_finding_verification_recorded` event — the
- * runtime has no reviewer-path emitter (the freeze stores verification records
- * in the ledger only), so the probe flips the projected verifiedStages
- * directly. The record blob is PREPARED (the GC enumerates every event's refs),
- * and the event is set into a holder AFTER the drive (its reviewContext roundId
- * must equal the finding's opening round). */
-function verificationRecordedEvent(findingId: string, reviewContextRoundId: string, recordRef: BlobRefV2): PublicationEventEnvelopeV2 {
-  return {
-    protocolVersion: 2,
-    at: '2026-08-15T00:00:00.000Z',
-    type: 'structured_finding_verification_recorded',
-    recordId: `ver-${findingId}`,
-    recordRef,
-    findingId,
-    reviewContext: { kind: 'map', roundId: reviewContextRoundId },
-    assignmentId: `assign-${findingId}`,
-    repairStage: 'map',
-    verdict: 'resolved',
-  } as PublicationEventEnvelopeV2;
-}
-
-function registerVerificationRecordHandler(registry: PublicationIntentRegistry, holder: { event: PublicationEventEnvelopeV2 | null }): void {
-  registry.register({
-    handlerKind: 'test/record_verification',
-    handlerVersion: 1,
-    payloadFamily: 'domain_publish',
-    expectedEventTypes: ['structured_finding_verification_recorded'],
-    rebuildable: true,
-    missingInputs: [],
-    parsePayload: (value) => value as never,
-    childRefsOf: () => [],
-    resolveRefs: () => [],
-    buildEvents: () => {
-      if (holder.event === null) throw new Error('test/record_verification: no event set');
-      return [holder.event];
-    },
-    expectedResultIdentity: (_payload, events) => canonicalJsonSha256(events),
+/** Completes a repaired Map round with a real production verification record
+ * and returns the leased settlement command. Used by the activation budget
+ * boundary regression in addition to the mixed-route test below. */
+async function completeRepairedMapRound(
+  b: RepairEnv,
+  plannedRound: Extract<AuthoritativeReviewEventV2, { type: 'structured_map_review_round_planned' }>,
+  findingId: string,
+): Promise<{ review: MapReviewService; settlementWiId: string; settleLease: Awaited<ReturnType<typeof leaseTargeted>>; coverageCoreRef: BlobRefV2 }> {
+  const roundId = plannedRound.mapReviewRoundId;
+  const review = mapReviewServiceWithRepairSeam(b);
+  const candidate = (await b.resolver(b.taskId, plannedRound.candidateRef)) as { validationCoreRef: BlobRefV2 };
+  const candidateCore = (await b.resolver(b.taskId, candidate.validationCoreRef)) as { nodes: MapPositionNodeV2[]; relations: MapRelationV2[] };
+  const reviewPlan = planMapReview({
+    nodes: candidateCore.nodes,
+    relations: candidateCore.relations,
+    profile: PROFILE,
+    reviewPolicy: { ...REVIEW_POLICY, contentBatchTargetSlots: 2 },
+    assignmentCount: plannedRound.assignmentCount,
   });
-}
-
-/** Publishes the R2-1 verification-recorded event through the test-only handler
- * (the record blob is prepared first — parse-valid, GC-reachable). */
-async function publishVerificationRecorded(b: RepairEnv, holder: { event: PublicationEventEnvelopeV2 | null }): Promise<void> {
-  const state = await b.env.readProjection(b.taskId);
-  const reviewContextRoundId = state.findings['m-1'].reviewContext.roundId;
-  const record = {
-    recordId: 'ver-m-1',
-    reviewContext: { kind: 'map', roundId: reviewContextRoundId },
-    assignmentId: 'assign-m-1',
-    findingId: 'm-1',
-    repairStage: 'map',
-    verdict: 'resolved',
-    candidateId: null,
-    mapId: null,
-    mapContextDigests: {},
-    evidenceSlotDigests: {},
+  const batchWiId = reviewBatchWorkItemId(roundId, 0);
+  const batchLease = await leaseTargeted(b, batchWiId, 'worker-budget-review');
+  const batchAttemptId = batchLease.attemptId ?? '';
+  const batchTargets = [...reviewPlan.batches[0].nodeIds, ...reviewPlan.batches[0].relationIds];
+  const baselineTargetKinds: Record<string, ReviewFactV2['targetKind']> = {};
+  for (const id of reviewPlan.batches[0].nodeIds) baselineTargetKinds[id] = 'map_node';
+  const records: ReviewDraftRecordV2[] = batchTargets.map((targetId) => ({
+    op: 'submit_map_node_review',
+    body: { targetId, verdict: 'pass', evidence: [], findingDrafts: [], crossScopeFindingDrafts: [] },
+    at: b.env.now.value,
+  }));
+  records.push({ op: 'submit_finding_verification', body: { findingId, repairStage: 'map', verdict: 'resolved', evidence: [] }, at: b.env.now.value });
+  const batchFreeze = buildReviewAssignmentFreeze({
+    assignmentId: batchWiId,
+    workItemId: batchWiId,
+    reviewAssignmentId: reviewAssignmentIdOf(roundId, 0),
+    roundKind: 'map',
+    roundId,
+    attemptId: batchAttemptId,
+    reviewerAttemptId: batchAttemptId,
     reviewPolicyDigest: hash('review-policy'),
-    evidence: [],
-    reviewerAttemptId: 'att-seed',
-  };
-  const recordRef = await b.env.facade.prepareBlob(b.taskId, 'finding_verification_record', record);
-  holder.event = verificationRecordedEvent('m-1', reviewContextRoundId, recordRef);
-  const operationId = opId('record-verification');
-  const tail = await b.env.eventStore.tail(b.taskId);
-  await b.env.facade.publishWithPin({
-    taskId: b.taskId,
-    operationId,
-    payload: {
-      family: 'domain_publish',
-      operationId,
-      taskId: b.taskId,
-      publishKind: 'repair_scope_approval',
-      blobRefs: [],
-      expectedResultIdentity: canonicalJsonSha256({ op: 'record-verification' }),
-      mapBuild: null,
-      mapReview: null,
-      contentPlan: null,
-      contentReview: null,
-      repair: null,
-    },
-    intent: { handlerKind: 'test/record_verification', handlerVersion: 1 },
-    preparedRefs: [],
-    expectedTailSequence: tail.lastSequence,
-    expectedTailCommitId: tail.lastCommitId,
+    records,
+    verificationFindingStages: [`${findingId}:map`],
+    assignmentTargets: batchTargets,
+    baselineTargetKinds,
+    requireOrdinaryCoverage: true,
   });
+  if (!batchFreeze.ok) throw new Error(`repaired map batch freeze failed: ${batchFreeze.errors.join('; ')}`);
+  await review.freezeReviewAssignment(b.taskId, batchFreeze.freeze);
+  await b.env.coordinator.completeWorkItem({ taskId: b.taskId, operationId: attemptContinuationOperationId(b.taskId, batchWiId, batchAttemptId, 'complete'), workItemId: batchWiId, attemptId: batchAttemptId, resultRefs: [refOfBlob('review_assignment_ledger', batchFreeze.freeze.ledger)] });
+  const wholeWiId = reviewWholeWorkItemId(roundId);
+  const wholeLease = await leaseTargeted(b, wholeWiId, 'worker-budget-review');
+  const wholeAttemptId = wholeLease.attemptId ?? '';
+  const wholeFreeze = buildReviewAssignmentFreeze({
+    assignmentId: wholeWiId,
+    workItemId: wholeWiId,
+    reviewAssignmentId: reviewWholeAssignmentId(roundId),
+    roundKind: 'map',
+    roundId,
+    attemptId: wholeAttemptId,
+    reviewerAttemptId: wholeAttemptId,
+    reviewPolicyDigest: hash('review-policy'),
+    records: [],
+    verificationFindingStages: [],
+    assignmentTargets: [],
+    baselineTargetKinds: {},
+    requireOrdinaryCoverage: false,
+  });
+  if (!wholeFreeze.ok) throw new Error(`repaired map whole freeze failed: ${wholeFreeze.errors.join('; ')}`);
+  await review.freezeReviewAssignment(b.taskId, wholeFreeze.freeze);
+  await b.env.coordinator.completeWorkItem({ taskId: b.taskId, operationId: attemptContinuationOperationId(b.taskId, wholeWiId, wholeAttemptId, 'complete'), workItemId: wholeWiId, attemptId: wholeAttemptId, resultRefs: [refOfBlob('review_assignment_ledger', wholeFreeze.freeze.ledger)] });
+  if (!(await review.maybeCompleteRound(b.taskId, roundId))) throw new Error('repaired map round did not advance');
+  const settlementWiId = deterministicSettlementWorkItemId(b.taskId, roundId);
+  const settleLease = await leaseTargeted(b, settlementWiId, 'worker-budget-settlement');
+  const completed = (await b.readEvents(b.taskId)).find((event) => event.type === 'structured_map_review_round_completed' && event.mapReviewRoundId === roundId);
+  if (completed === undefined || completed.type !== 'structured_map_review_round_completed') throw new Error('no repaired map round completion');
+  return { review, settlementWiId, settleLease, coverageCoreRef: completed.coverageCoreRef };
 }
 
-describe('I-1 (review): the repaired-Map activation binds the content re-review round to the NEW map snapshot', { timeout: 120_000 }, () => {
-  it('map repair -> round-2 review -> settlement clear -> activation projects cleanly; the content round binds the NEW snapshot', async () => {
-    const verificationHolder: { event: PublicationEventEnvelopeV2 | null } = { event: null };
-    const b = await makeRepairEnv({ maxRounds: 2, extraHandlers: (registry) => registerVerificationRecordHandler(registry, verificationHolder) });
-    const { finalizeWorkItemId } = await driveMapRepairToFinalizer(b);
+describe('I-1 (review): mixed Findings route Map repair -> ContentRepairPlan before content re-review', { timeout: 120_000 }, () => {
+  it('mixed Map repair -> map verification -> activation atomically creates a same-finding ContentRepairPlan on the NEW map', async () => {
+    const b = await makeRepairEnv({ maxRounds: 2 });
+    const { finalizeWorkItemId } = await driveMapRepairToFinalizer(b, { mixed: true });
     const outcome = await runFinalizer(b, finalizeWorkItemId);
     if (outcome.kind !== 'completed') throw new Error(`finalize failed: ${JSON.stringify(outcome)}`);
     const events0 = await b.readEvents(b.taskId);
@@ -2750,7 +2815,7 @@ describe('I-1 (review): the repaired-Map activation binds the content re-review 
       body: { targetId, verdict: 'pass', evidence: [], findingDrafts: [], crossScopeFindingDrafts: [] },
       at: b.env.now.value,
     }));
-    records.push({ op: 'submit_finding_verification', body: { findingId: 'm-1', repairStage: 'map', verdict: 'resolved', evidence: [] }, at: b.env.now.value });
+    records.push({ op: 'submit_finding_verification', body: { findingId: 'x-1', repairStage: 'map', verdict: 'resolved', evidence: [] }, at: b.env.now.value });
     const batchFreeze = buildReviewAssignmentFreeze({
       assignmentId: batchWiId,
       workItemId: batchWiId,
@@ -2761,7 +2826,7 @@ describe('I-1 (review): the repaired-Map activation binds the content re-review 
       reviewerAttemptId: batchAttemptId,
       reviewPolicyDigest: hash('review-policy'),
       records,
-      verificationFindingStages: ['m-1:map'],
+      verificationFindingStages: ['x-1:map'],
       assignmentTargets: batchTargets,
       baselineTargetKinds,
       requireOrdinaryCoverage: true,
@@ -2803,15 +2868,11 @@ describe('I-1 (review): the repaired-Map activation binds the content re-review 
       attemptId: wholeAttemptId,
       resultRefs: [refOfBlob('review_assignment_ledger', wholeFreeze.freeze.ledger)],
     });
-    // R2-1 (re-review round 2): flip the projected verifiedStages (the round
-    // VERIFIED the repair finding — the intended flow) so ANY deterministic
-    // round-blob rebuild would now diverge from the blob the finalize prepared
-    // (the finalize ran BEFORE the verification, so its bytes carry the stage).
-    // The settlement must still bind the PREPARED blob (byte-identical) and
-    // the GC must complete cleanly.
-    await publishVerificationRecorded(b, verificationHolder);
+    // The production freeze envelope records the verification authoritatively;
+    // no test-only event injector is permitted on the repair lifecycle.
     const verifiedAfter = await b.env.readProjection(b.taskId);
-    expect(verifiedAfter.findings['m-1'].verifiedStages).toContain('map');
+    expect(verifiedAfter.findings['x-1'].verifiedStages).toContain('map');
+    expect((await b.readEvents(b.taskId)).some((e) => e.type === 'structured_finding_verification_recorded' && e.findingId === 'x-1')).toBe(true);
     const advanced = await review.maybeCompleteRound(b.taskId, roundId);
     if (!advanced) throw new Error('repaired map round did not advance');
     // The repaired-Map activation (the repair seam wired): the envelope is
@@ -2837,19 +2898,19 @@ describe('I-1 (review): the repaired-Map activation binds the content re-review 
     const activated = activations[activations.length - 1];
     if (activated === undefined || activated.type !== 'structured_map_activated') throw new Error('no activation');
     expect(activated.mapRevision).toBe(2);
-    const contentRoundPlanned = after.filter((e): e is Extract<AuthoritativeReviewEventV2, { type: 'structured_review_round_planned' }> => e.type === 'structured_review_round_planned').pop();
-    if (contentRoundPlanned === undefined) throw new Error('no content re-review round');
-    expect(contentRoundPlanned.contentCycleOrdinal).toBe(2);
-    // I-1: the content re-review round binds the NEW snapshot being activated
-    // (the projector's applyContentRoundPlanned demands the round's mapRef ==
-    // the CURRENT map — the activation lands BEFORE the round-planned event).
-    expect(contentRoundPlanned.mapRef.digest).toBe(activated.mapSnapshotRef.digest);
+    expect(after.filter((e) => e.type === 'structured_review_round_planned')).toHaveLength(1);
+    expect(after.some((e) => e.type === 'structured_content_repair_plan_started')).toBe(true);
     const finalState = await b.env.readProjection(b.taskId);
     expect(finalState.currentMap?.mapSnapshotRef.digest).toBe(activated.mapSnapshotRef.digest);
-    expect(finalState.contentRounds[contentRoundPlanned.reviewRoundId]?.ordinal).toBe(2);
-    // The content re-review round is COMPLETE (its review WorkItems exist).
-    expect(Object.values(finalState.workItems).some((wi) => wi.roundId === contentRoundPlanned.reviewRoundId && wi.sessionKind === 'review_content_batch')).toBe(true);
-    expect(Object.values(finalState.workItems).some((wi) => wi.roundId === contentRoundPlanned.reviewRoundId && wi.sessionKind === 'review_content_whole')).toBe(true);
+    const contentLineage = Object.values(finalState.repairPlans).find((lineage) => lineage.track === 'content');
+    if (contentLineage === undefined || contentLineage.currentPlanRevisionId === null) throw new Error('no mixed content repair plan');
+    const contentPlanRef = contentLineage.revisions[contentLineage.currentPlanRevisionId].specRef;
+    const contentPlan = (await b.resolver(b.taskId, contentPlanRef)) as RepairPlanSpecV2;
+    expect(contentPlan.repairBase.kind).toBe('content');
+    if (contentPlan.repairBase.kind !== 'content') throw new Error('wrong mixed plan base');
+    expect(contentPlan.repairBase.mapRef.digest).toBe(activated.mapSnapshotRef.digest);
+    expect(contentPlan.orderedBatchScopes[0]?.findingIds).toEqual(['x-1']);
+    expect(Object.values(finalState.workItems).some((wi) => wi.sessionKind === 'content_repair' && wi.state === 'ready')).toBe(true);
     // R2-1: the settlement workitem's authority base binds the PREPARED round
     // blob (byte-identical to the round-2 review workitems' reviewRoundRef —
     // the finalize's blob), NOT a divergent rebuild of the verified projection.
@@ -3009,6 +3070,30 @@ describe('I-2 (review): the override transfer projects through the real projecto
     const finalState = await b.env.readProjection(b.taskId);
     expect(finalState.availableOverride).toBeNull();
     expect(finalState.consumedOverrideRefs).toContain(transfer.overrideRef.digest);
+
+    // The repaired Map round can settle, but the NEXT content cycle is also
+    // ordinal 2 and has NO content override. This activation boundary must
+    // terminal-fail exactly once; it must not publish map_activated, a content
+    // round, or a generic retryable settlement failure.
+    const beforeActivationCount = after.filter((event) => event.type === 'structured_map_activated').length;
+    const settledRound = await completeRepairedMapRound(b, roundPlanned as Extract<AuthoritativeReviewEventV2, { type: 'structured_map_review_round_planned' }>, 'm-1');
+    const activationOutcome = await settledRound.review.executeMapReviewSettlement({
+      taskId: b.taskId,
+      commandId: settledRound.settleLease.commandId ?? '',
+      workItemId: settledRound.settlementWiId,
+      commandKind: 'review_settlement',
+      leaseEpoch: settledRound.settleLease.leaseEpoch,
+      authorityBaseRef: settledRound.settleLease.authorityBaseRef,
+      payloadRef: settledRound.coverageCoreRef,
+    });
+    expect(activationOutcome.kind).toBe('completed');
+    const budgetEvents = await b.readEvents(b.taskId);
+    expect(budgetEvents.filter((event) => event.type === 'structured_map_activated')).toHaveLength(beforeActivationCount);
+    expect(budgetEvents.filter((event) => event.type === 'structured_review_round_planned')).toHaveLength(1);
+    const contentFailures = budgetEvents.filter((event): event is Extract<AuthoritativeReviewEventV2, { type: 'structured_task_failed_v2' }> => event.type === 'structured_task_failed_v2' && event.failureCode === 'REVIEW_REPAIR_LIMIT_EXCEEDED');
+    expect(contentFailures).toHaveLength(2); // the earlier Map boundary + this Content boundary
+    const latestRecovery = await b.resolver(b.taskId, contentFailures[1]?.failureRecoveryPayloadRef as BlobRefV2) as { track: string; failedCycleOrdinal: number };
+    expect(latestRecovery).toMatchObject({ track: 'content', failedCycleOrdinal: 2 });
   });
 });
 
@@ -3074,6 +3159,17 @@ describe('I-3 (review): the content re-review round carries the plan verificatio
     const events = await b.readEvents(b.taskId);
     const plannedEvent = events.filter((e): e is Extract<AuthoritativeReviewEventV2, { type: 'structured_review_round_planned' }> => e.type === 'structured_review_round_planned').pop();
     if (plannedEvent === undefined) throw new Error('no content re-review round');
+    const finalizedManifest = (await b.resolver(b.taskId, plannedEvent.contentRevisionManifestRef)) as ContentRevisionManifestV2;
+    expect(finalizedManifest.finalizerWarningRootRefs).toHaveLength(1);
+    expect(finalizedManifest.finalizerWarningRootRefs[0]?.kind).toBe('validation_warning_custody_root');
+    const finalizeAggregate = await b.resolver(b.taskId, finalizedManifest.finalizerValidatorAggregateRefs[0] as BlobRefV2) as { inputRef: BlobRefV2 };
+    const finalizeEnvelope = await b.resolver(b.taskId, finalizeAggregate.inputRef) as { stagedArtifactRef: BlobRefV2; stagingRootRef: BlobRefV2; keyLedgerRef: BlobRefV2; selectedTargetRefs: readonly BlobRefV2[] };
+    expect(finalizeEnvelope.stagedArtifactRef.kind).toBe('content_revision_manifest');
+    expect(finalizeEnvelope.stagingRootRef.kind).toBe('repair_staging_root');
+    expect(finalizeEnvelope.keyLedgerRef.kind).toBe('repair_key_ledger');
+    expect(finalizeEnvelope.selectedTargetRefs.length).toBe(finalizedManifest.entries.length);
+    const finalizerCustody = await b.resolver(b.taskId, finalizedManifest.finalizerWarningRootRefs[0] as BlobRefV2) as { entries: readonly { warningRootRef: BlobRefV2 }[] };
+    expect(finalizerCustody.entries[0]?.warningRootRef.kind).toBe('validation_warning_root');
     const stateAfter = await b.env.readProjection(b.taskId);
     const cr2WorkItem = Object.values(stateAfter.workItems).find((wi) => wi.roundId === plannedEvent.reviewRoundId && wi.sessionKind === 'review_content_batch');
     if (cr2WorkItem === undefined) throw new Error('no cr-2 review workitem');
@@ -3226,13 +3322,15 @@ describe('I-3 (review): the content re-review round carries the plan verificatio
     const finalEvents = await b.readEvents(b.taskId);
     const settled = finalEvents.find((e) => e.type === 'structured_review_round_settled' && e.reviewRoundId === cr2Id);
     expect((settled as { outcome?: string } | undefined)?.outcome).toBe('seal');
+    expect(finalEvents.some((e) => e.type === 'structured_finding_verified_closed' && e.findingId === 'c-1')).toBe(true);
+    expect((await b.env.readProjection(b.taskId)).findings['c-1'].state).toBe('verified_closed');
   });
 });
 
 describe('I-4 (review): scope-expansion approval supersedes the old WorkItem atomically', { timeout: 120_000 }, () => {
   it('approval emits structured_work_item_superseded; the old grant fails PLAN_STALE; the old workitem is not claimable; the successor proceeds to completion', async () => {
     const b = await makeRepairEnv();
-    const stack = await driveToContentStack(b, ['s-1']);
+    const stack = await driveToContentStack(b, ['s-1', 's-2']);
     await seedFindings(b, mapBlockingFindings(stack.nodeIds), 'map');
     const settlement = await createAndLeaseSettlement(b);
     await b.service.createRepairPlanFromSettlement({
@@ -3256,7 +3354,8 @@ describe('I-4 (review): scope-expansion approval supersedes the old WorkItem ato
     // `supersede_without_terminal` — the projector demands the cycle ended).
     const requestLease = await leaseTargeted(b, oldWorkItemId, 'worker-a');
     const requestCtx = ctxOf(b, requestLease);
-    await b.service.requestScopeExpansion(requestCtx, { findingIds: ['m-1'], requestedNodeIds: ['n-2'], reason: 'need more nodes', clientOperationId: 'co-i4-1' });
+    const requestedNodeId = stack.nodeIds[1] as string;
+    await b.service.requestScopeExpansion(requestCtx, { findingIds: ['m-1'], requestedNodeIds: [requestedNodeId], reason: 'need more nodes', clientOperationId: 'co-i4-1' });
     const requestEvents = await b.readEvents(b.taskId);
     const request = requestEvents.find((e) => e.type === 'structured_repair_scope_requested');
     if (request === undefined) throw new Error('no scope request');
@@ -3275,7 +3374,7 @@ describe('I-4 (review): scope-expansion approval supersedes the old WorkItem ato
       operatorId: 'operator-1',
       expectedLastSequence: tail.lastSequence,
       expectedTailCommitId: tail.lastCommitId,
-      requestedNodeIds: ['n-2'],
+      requestedNodeIds: [requestedNodeId],
       findingIds: ['m-1'],
       reason: 'approved',
     });
@@ -3313,7 +3412,7 @@ describe('I-4 (review): scope-expansion approval supersedes the old WorkItem ato
 
   it('R2-2 (re-review round 2): a MID-SESSION approval atomically abandons + reclaims + supersedes the stale workitem; the successor proceeds to completion', async () => {
     const b = await makeRepairEnv();
-    const stack = await driveToContentStack(b, ['s-1']);
+    const stack = await driveToContentStack(b, ['s-1', 's-2']);
     await seedFindings(b, mapBlockingFindings(stack.nodeIds), 'map');
     const settlement = await createAndLeaseSettlement(b);
     await b.service.createRepairPlanFromSettlement({
@@ -3335,7 +3434,8 @@ describe('I-4 (review): scope-expansion approval supersedes the old WorkItem ato
     // the old workitem is LEASED with a STARTED attempt at approval time.
     const requestLease = await leaseTargeted(b, oldWorkItemId, 'worker-a');
     const requestCtx = ctxOf(b, requestLease);
-    await b.service.requestScopeExpansion(requestCtx, { findingIds: ['m-1'], requestedNodeIds: ['n-2'], reason: 'need more nodes', clientOperationId: 'co-r2-1' });
+    const requestedNodeId = stack.nodeIds[1] as string;
+    await b.service.requestScopeExpansion(requestCtx, { findingIds: ['m-1'], requestedNodeIds: [requestedNodeId], reason: 'need more nodes', clientOperationId: 'co-r2-1' });
     const requestEvents = await b.readEvents(b.taskId);
     const request = requestEvents.find((e) => e.type === 'structured_repair_scope_requested');
     if (request === undefined) throw new Error('no scope request');
@@ -3348,7 +3448,7 @@ describe('I-4 (review): scope-expansion approval supersedes the old WorkItem ato
       operatorId: 'operator-1',
       expectedLastSequence: tail.lastSequence,
       expectedTailCommitId: tail.lastCommitId,
-      requestedNodeIds: ['n-2'],
+      requestedNodeIds: [requestedNodeId],
       findingIds: ['m-1'],
       reason: 'approved',
     });

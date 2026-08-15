@@ -97,6 +97,7 @@ import {
 } from './review-coordinator';
 import { validateSuccessorCarrier } from './work-item-coordinator';
 import { parseBlob } from '../../authoritative-review/object-registry';
+import { REQUIRED_STAGES_BY_DEFECT } from './finding-service';
 
 /* ------------------------------------------------------------------ */
 /* Pure builders (design §11.3/§10.1/§11.5/§16.2)                      */
@@ -391,6 +392,7 @@ export function mapReviewCarrier(carriers: Partial<MapReviewPublishCarriersV2> =
     coverageTargetCount: null,
     findingCount: null,
     observations: null,
+    verificationRecords: null,
     coverageCoreRef: null,
     settlementCoreRef: null,
     outcome: null,
@@ -412,6 +414,8 @@ export function mapReviewCarrier(carriers: Partial<MapReviewPublishCarriersV2> =
     terminal: null,
     contentRound: null,
     reviewWorkItems: null,
+    mixedContentRepair: null,
+    verifiedClosedFindingIds: null,
     ...carriers,
   };
 }
@@ -452,7 +456,7 @@ function registerReviewAssignmentCommit(registry: PublicationIntentRegistry): vo
     handlerKind: 'review_assignment_commit',
     handlerVersion: 1,
     payloadFamily: 'domain_publish',
-    expectedEventTypes: ['structured_map_review_assignment_committed', 'structured_map_observation_recorded'],
+    expectedEventTypes: ['structured_map_review_assignment_committed', 'structured_map_observation_recorded', 'structured_finding_verification_recorded'],
     rebuildable: true,
     missingInputs: [],
     parsePayload: parseDomainPublishPayload,
@@ -467,10 +471,16 @@ function registerReviewAssignmentCommit(registry: PublicationIntentRegistry): vo
       const p = asDomain(payload);
       const mr = p.mapReview;
       need(mr, 'mapReview');
+      const verificationEvents: PublicationEventEnvelopeV2[] = (mr.verificationRecords ?? []).map((record) => ({
+        protocolVersion: 2,
+        at,
+        type: 'structured_finding_verification_recorded' as const,
+        ...record,
+      }));
       if (mr.observations !== null && mr.observations.length > 0) {
         // Whole-map observation: emit the layered observation events (level order).
         need(mr.mapReviewRoundId, 'mapReviewRoundId');
-        return mr.observations.map((o) => ({
+        return [...verificationEvents, ...mr.observations.map((o) => ({
           protocolVersion: 2,
           at,
           type: 'structured_map_observation_recorded' as const,
@@ -481,7 +491,7 @@ function registerReviewAssignmentCommit(registry: PublicationIntentRegistry): vo
           observationRef: o.observationRef,
           coveredTargetCount: o.coveredTargetCount,
           childObservationRefs: o.childObservationRefs,
-        }));
+        }))];
       }
       const ledgerRef = mr.ledgerRef ?? refs?.get('ledger');
       if (ledgerRef === null || ledgerRef === undefined) throw new NotRebuildableError('review_assignment_commit', ['ledgerRef']);
@@ -493,6 +503,7 @@ function registerReviewAssignmentCommit(registry: PublicationIntentRegistry): vo
       need(mr.coverageTargetCount, 'coverageTargetCount');
       need(mr.findingCount, 'findingCount');
       return [
+        ...verificationEvents,
         {
           protocolVersion: 2,
           at,
@@ -562,9 +573,12 @@ function registerMapReviewSettlement(registry: PublicationIntentRegistry): void 
       'structured_map_activated',
       'structured_content_revision_committed',
       'structured_review_round_planned',
+      'structured_content_repair_plan_started',
+      'structured_repair_grant_issued',
       'structured_work_item_created',
       'structured_system_command_completed',
       'structured_work_item_completed',
+      'structured_finding_verified_closed',
     ],
     rebuildable: true,
     missingInputs: [],
@@ -589,7 +603,13 @@ function registerMapReviewSettlement(registry: PublicationIntentRegistry): void 
       need(mr.outcome, 'outcome');
       need(mr.terminal, 'terminal');
       const t = mr.terminal;
-      const envelopes: PublicationEventEnvelopeV2[] = [
+      const envelopes: PublicationEventEnvelopeV2[] = (mr.verifiedClosedFindingIds ?? []).map((findingId) => ({
+        protocolVersion: 2,
+        at,
+        type: 'structured_finding_verified_closed' as const,
+        findingId,
+      }));
+      envelopes.push(
         {
           protocolVersion: 2,
           at,
@@ -598,7 +618,7 @@ function registerMapReviewSettlement(registry: PublicationIntentRegistry): void 
           settlementCoreRef: mr.settlementCoreRef,
           outcome: mr.outcome,
         },
-      ];
+      );
       if (mr.outcome === 'activate') {
         need(mr.mapId, 'mapId');
         need(mr.mapRevision, 'mapRevision');
@@ -702,6 +722,55 @@ function registerMapReviewSettlement(registry: PublicationIntentRegistry): void 
               maxAutomaticRetries: rw.maxAutomaticRetries,
             });
           }
+        }
+        const repair = mr.mixedContentRepair;
+        if (repair !== null) {
+          need(repair.repairPlanId, 'mixedContentRepair.repairPlanId');
+          need(repair.planRevisionId, 'mixedContentRepair.planRevisionId');
+          need(repair.repairPlanSpecRef, 'mixedContentRepair.repairPlanSpecRef');
+          need(repair.successor, 'mixedContentRepair.successor');
+          need(repair.grantSpecId, 'mixedContentRepair.grantSpecId');
+          envelopes.push({
+            protocolVersion: 2,
+            at,
+            type: 'structured_content_repair_plan_started',
+            repairPlanId: repair.repairPlanId,
+            planRevisionId: repair.planRevisionId,
+            repairPlanSpecRef: repair.repairPlanSpecRef,
+            sourceValidationReceiptRef: repair.sourceValidationReceiptRef,
+          });
+          const rw = repair.successor;
+          envelopes.push({
+            protocolVersion: 2,
+            at,
+            type: 'structured_work_item_created',
+            workItemId: rw.workItemId,
+            kind: rw.kind,
+            roleBinding: rw.roleBinding,
+            agentExecutionKind: rw.agentExecutionKind,
+            sessionKind: rw.sessionKind,
+            roundId: rw.roundId,
+            logicalAssignmentId: rw.logicalAssignmentId,
+            reviewAssignmentId: rw.reviewAssignmentId,
+            grantSpecRef: rw.grantSpecRef,
+            inputArtifactDeliveryId: rw.inputArtifactDeliveryId,
+            authorityBaseRef: rw.authorityBaseRef,
+            payloadRef: rw.payloadRef,
+            initialLeaseEpoch: rw.initialLeaseEpoch,
+            maxAutomaticRetries: rw.maxAutomaticRetries,
+          });
+          need(rw.grantSpecRef, 'mixedContentRepair.successor.grantSpecRef');
+          need(repair.workItemId, 'mixedContentRepair.workItemId');
+          need(repair.grantKind, 'mixedContentRepair.grantKind');
+          envelopes.push({
+            protocolVersion: 2,
+            at,
+            type: 'structured_repair_grant_issued',
+            grantSpecId: repair.grantSpecId,
+            grantSpecRef: rw.grantSpecRef,
+            workItemId: repair.workItemId,
+            grantKind: repair.grantKind,
+          });
         }
       }
       envelopes.push(
@@ -842,6 +911,15 @@ export class MapReviewService {
     }
     const ledgerRef = await this.deps.facade.prepareBlob(taskId, 'review_assignment_ledger', freeze.ledger);
     const blobRefs = [...freeze.factRefs, ...freeze.verificationRecordRefs, ...freeze.findingDraftRefs, ledgerRef];
+    const verificationRecords = freeze.verifications.map((record) => ({
+      recordId: record.recordId,
+      recordRef: refOfBlob('finding_verification_record', record),
+      findingId: record.findingId,
+      reviewContext: record.reviewContext,
+      assignmentId: record.assignmentId,
+      repairStage: record.repairStage,
+      verdict: record.verdict,
+    }));
 
     if (isWhole) {
       const observations = await this.buildObservationEvents(taskId, freeze.ledger, ledgerRef);
@@ -853,6 +931,7 @@ export class MapReviewService {
           mapReviewRoundId: freeze.ledger.roundId,
           workItemId: freeze.ledger.workItemId,
           observations,
+          verificationRecords,
         }),
         preparedRefs: blobRefs,
       });
@@ -873,6 +952,7 @@ export class MapReviewService {
         ledgerRef,
         coverageTargetCount: freeze.ledger.coverageTargetIds.length,
         findingCount: freeze.findingDraftRefs.length,
+        verificationRecords,
       }),
       preparedRefs: blobRefs,
     });
@@ -1210,11 +1290,13 @@ export class MapReviewService {
   /* ------------------------- settlement --------------------------- */
 
   /** The round's blocking reviewer-source findings (the repair-route input). */
-  private async settlementBlockingFindings(taskId: string, roundId: string): Promise<readonly import('./finding-service').ProjectedFindingLifecycleV2[]> {
+  private async settlementBlockingFindings(taskId: string, round: MapReviewRoundV2): Promise<readonly import('./finding-service').ProjectedFindingLifecycleV2[]> {
     const state = await this.deps.readProjection(taskId);
+    const carriedFindingIds = new Set(round.verificationFindingStages.map((entry) => entry.split(':')[0] ?? ''));
     const out: import('./finding-service').ProjectedFindingLifecycleV2[] = [];
     for (const finding of Object.values(state.findings)) {
-      if (finding.reviewContext.kind !== 'map' || finding.reviewContext.roundId !== roundId) continue;
+      const openedHere = finding.reviewContext.kind === 'map' && finding.reviewContext.roundId === round.mapReviewRoundId;
+      if (!openedHere && !carriedFindingIds.has(finding.findingId)) continue;
       const { projectFindingLifecycle } = await import('./finding-service');
       const lifecycle = projectFindingLifecycle({ finding });
       if (lifecycle.blockingUnclosed) out.push(lifecycle);
@@ -1259,11 +1341,40 @@ export class MapReviewService {
       const candidateCore = (await this.deps.resolver(input.taskId, candidate.validationCoreRef)) as MapCandidateValidationCoreV2 | null;
       if (candidateCore === null || typeof candidateCore !== 'object') throw new MapReviewError('CANDIDATE_CORE_UNRESOLVED', 'candidate validation core unresolvable');
 
+      // Findings are authoritative gates independent of validator outcome.
+      // An open Map obligation creates repair; an addressed-but-unverified
+      // obligation fail-closes until a real verification record is committed.
+      const authoritativeBlocking = await this.settlementBlockingFindings(input.taskId, round);
+      const needsMapRepair = authoritativeBlocking.filter((finding) =>
+        REQUIRED_STAGES_BY_DEFECT[finding.defectClass].includes('map') && !finding.addressStages.includes('map'),
+      );
+      if (needsMapRepair.length > 0) {
+        if (this.deps.repairService === undefined) {
+          return { kind: 'retryable_failure', failureCode: 'MAP_REVIEW_BLOCKED', failureDigest: canonicalJsonSha256({ commandId: input.commandId, reason: 'repair seam missing' }) };
+        }
+        return await this.deps.repairService.createRepairPlanFromSettlement({
+          taskId: input.taskId,
+          settlementWorkItemId: input.workItemId,
+          settlementCommandId: input.commandId,
+          leaseEpoch: input.leaseEpoch,
+          authorityBaseRef: input.authorityBaseRef,
+          roundId: round.mapReviewRoundId,
+          coverageCoreRef: base.reviewCoverageCoreRef,
+          findings: needsMapRepair,
+        });
+      }
+      const awaitingMapVerification = authoritativeBlocking.some((finding) =>
+        REQUIRED_STAGES_BY_DEFECT[finding.defectClass].includes('map') && !finding.verifiedStages.includes('map'),
+      );
+      if (awaitingMapVerification) {
+        return { kind: 'retryable_failure', failureCode: 'MAP_REVIEW_BLOCKED', failureDigest: canonicalJsonSha256({ commandId: input.commandId, reason: 'authoritative finding verification missing' }) };
+      }
+
       // Segment 1: map_review_settlement aggregate over the frozen coverage core.
       const settlementRun = await this.runSettlementValidator(input, base.reviewCoverageCoreRef, coverageCore, candidateCore);
       await this.persistEngineOutputs(input.taskId, settlementRun.run, settlementRun.store);
       if (settlementRun.run.aggregate.outcome === 'blocking_invalid') {
-        const findings = await this.settlementBlockingFindings(input.taskId, round.mapReviewRoundId);
+        const findings = await this.settlementBlockingFindings(input.taskId, round);
         if (this.deps.repairService !== undefined && findings.length > 0) {
           // Task 19: the deterministic MapRepairPlan creation (the settlement
           // command COMPLETES with the plan envelope — never a bare retry).
@@ -1409,6 +1520,7 @@ export class MapReviewService {
       let contentRound: ContentReviewRoundPlanCarrierV2 | null = null;
       let reviewWorkItems: readonly SuccessorWorkItemCarrierV2[] | null = null;
       let contentRoundPreparedRefs: readonly BlobRefV2[] = [];
+      let mixedContentRepair: import('../../authoritative-review/authority-types').RepairPublishCarriersV2 | null = null;
       if (isRepairRound) {
         if (this.deps.repairService === undefined) {
           throw new MapReviewError('REPAIR_SEAM_MISSING', 'a repaired Map activation requires the Task 19 repair seam');
@@ -1419,13 +1531,44 @@ export class MapReviewService {
         // mapRef == the CURRENT map). The OLD `state.currentMap` read inside
         // prepareContentRound would corrupt `map_mismatch` on every repaired-
         // Map activation.
-        const planned = await this.deps.repairService.prepareContentReReviewRound(input.taskId, manifestRef, {
-          mapRef: snapshotRef,
-          mapSemanticDigest: proposedCore.mapSemanticDigest,
+        const settlementOperationKey = attemptContinuationOperationId(input.taskId, input.workItemId, input.commandId, 'complete');
+        const mixed = await this.deps.repairService.prepareMixedContentRepairAfterMapActivation({
+          taskId: input.taskId,
+          settlementOperationKey,
+          settlementWorkItemId: input.workItemId,
+          newMapRef: snapshotRef,
+          manifestRef,
         });
-        contentRound = planned.round;
-        reviewWorkItems = planned.reviewWorkItems;
-        contentRoundPreparedRefs = planned.preparedRefs;
+        if (mixed !== null) {
+          mixedContentRepair = mixed.carriers;
+          contentRoundPreparedRefs = mixed.preparedRefs;
+        } else {
+          try {
+            const planned = await this.deps.repairService.prepareContentReReviewRound(input.taskId, manifestRef, {
+              mapRef: snapshotRef,
+              mapSemanticDigest: proposedCore.mapSemanticDigest,
+            });
+            contentRound = planned.round;
+            reviewWorkItems = planned.reviewWorkItems;
+            contentRoundPreparedRefs = planned.preparedRefs;
+          } catch (error) {
+            if (!(error instanceof Error) || (error as { code?: string }).code !== 'REVIEW_REPAIR_LIMIT_EXCEEDED') throw error;
+            const repairProvenance = candidateCore.candidateProvenanceWithoutValidation;
+            if (repairProvenance.producerKind !== 'system_repair_finalize') {
+              throw new MapReviewError('PLAN_UNRESOLVED', 'repaired-Map content budget boundary lacks repair provenance');
+            }
+            return await this.deps.repairService.publishContentActivationOverLimitFailure({
+              taskId: input.taskId,
+              commandId: input.commandId,
+              workItemId: input.workItemId,
+              leaseEpoch: input.leaseEpoch,
+              authorityBaseRef: input.authorityBaseRef,
+              repairPlanId: repairProvenance.repairPlanId,
+              rejectedManifestRef: manifestRef,
+              failedCycleOrdinal: project.contentCycleOrdinal + 1,
+            });
+          }
+        }
       } else {
         const contentBearingSlots = candidateCore.nodes
           .filter((n) => n.contentBearing)
@@ -1457,6 +1600,12 @@ export class MapReviewService {
       };
       const operationId = attemptContinuationOperationId(input.taskId, input.workItemId, input.commandId, 'complete');
       const tail = await this.deps.tail(input.taskId);
+      const projectedBeforeSettlement = await this.deps.readProjection(input.taskId);
+      const verifiedClosedFindingIds = Object.values(projectedBeforeSettlement.findings)
+        .filter((finding) => finding.severity === 'blocking' && finding.state !== 'verified_closed')
+        .filter((finding) => REQUIRED_STAGES_BY_DEFECT[finding.defectClass].every((stage) => finding.verifiedStages.includes(stage)))
+        .map((finding) => finding.findingId)
+        .sort();
       const resultRefs = [
         settlementCoreRef,
         proposedMapCoreRef,
@@ -1504,6 +1653,8 @@ export class MapReviewService {
             successor: successor === null ? null : successor.carrier,
             contentRound,
             reviewWorkItems,
+            mixedContentRepair,
+            verifiedClosedFindingIds,
             terminal,
           }),
         },

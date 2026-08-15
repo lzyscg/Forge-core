@@ -108,7 +108,7 @@ import {
 } from './review-coordinator';
 import { validateSuccessorCarrier } from './work-item-coordinator';
 import { ReviewAdoptionService } from './review-adoption-service';
-import { FindingService, buildFindingStageRoot, verificationStagesOf } from './finding-service';
+import { FindingService, REQUIRED_STAGES_BY_DEFECT, buildFindingStageRoot, verificationStagesOf } from './finding-service';
 import { selectContentRelationTargets } from './observation-planner';
 
 /* ------------------------------------------------------------------ */
@@ -484,6 +484,7 @@ export function contentReviewCarrier(carriers: Partial<ContentReviewPublishCarri
     findingCount: null,
     observations: null,
     findingOpenings: null,
+    verificationRecords: null,
     coverageCoreRef: null,
     roundPlanned: null,
     reviewWorkItems: null,
@@ -496,6 +497,7 @@ export function contentReviewCarrier(carriers: Partial<ContentReviewPublishCarri
     reviewSettlementValidatorAggregateRef: null,
     sealWorkItemId: null,
     sealAuthorityBaseRef: null,
+    verifiedClosedFindingIds: null,
     successor: null,
     terminal: null,
     ...carriers,
@@ -545,6 +547,7 @@ function registerContentReviewAssignmentCommit(registry: PublicationIntentRegist
       'structured_review_assignment_completed',
       'structured_whole_tree_observation_recorded',
       'structured_finding_opened',
+      'structured_finding_verification_recorded',
     ],
     rebuildable: true,
     missingInputs: [],
@@ -573,6 +576,12 @@ function registerContentReviewAssignmentCommit(registry: PublicationIntentRegist
         source: fo.source,
         openedBy: fo.openedBy,
       }));
+      const verificationEvents: PublicationEventEnvelopeV2[] = (cr.verificationRecords ?? []).map((record) => ({
+        protocolVersion: 2,
+        at,
+        type: 'structured_finding_verification_recorded' as const,
+        ...record,
+      }));
       if (cr.observations !== null && cr.observations.length > 0) {
         // Whole-tree observation: layered observation events (root-first).
         need(cr.reviewRoundId, 'reviewRoundId');
@@ -588,7 +597,7 @@ function registerContentReviewAssignmentCommit(registry: PublicationIntentRegist
           coveredTargetCount: o.coveredTargetCount,
           childObservationRefs: o.childObservationRefs,
         }));
-        return [...findingOpenings, ...observationEvents];
+        return [...findingOpenings, ...verificationEvents, ...observationEvents];
       }
       const ledgerRef = cr.ledgerRef ?? refs?.get('ledger');
       if (ledgerRef === null || ledgerRef === undefined) throw new NotRebuildableError('content_review_assignment_commit', ['ledgerRef']);
@@ -601,6 +610,7 @@ function registerContentReviewAssignmentCommit(registry: PublicationIntentRegist
       need(cr.findingCount, 'findingCount');
       return [
         ...findingOpenings,
+        ...verificationEvents,
         {
           protocolVersion: 2,
           at,
@@ -764,6 +774,7 @@ function registerContentReviewSettlement(registry: PublicationIntentRegistry): v
       'structured_work_item_created',
       'structured_system_command_completed',
       'structured_work_item_completed',
+      'structured_finding_verified_closed',
     ],
     rebuildable: true,
     missingInputs: [],
@@ -788,7 +799,13 @@ function registerContentReviewSettlement(registry: PublicationIntentRegistry): v
       need(cr.outcome, 'outcome');
       need(cr.terminal, 'terminal');
       const t = cr.terminal;
-      const envelopes: PublicationEventEnvelopeV2[] = [
+      const envelopes: PublicationEventEnvelopeV2[] = (cr.verifiedClosedFindingIds ?? []).map((findingId) => ({
+        protocolVersion: 2,
+        at,
+        type: 'structured_finding_verified_closed' as const,
+        findingId,
+      }));
+      envelopes.push(
         {
           protocolVersion: 2,
           at,
@@ -797,7 +814,7 @@ function registerContentReviewSettlement(registry: PublicationIntentRegistry): v
           settlementCoreRef: cr.settlementCoreRef,
           outcome: cr.outcome,
         },
-      ];
+      );
       if (cr.outcome === 'seal') {
         need(cr.reviewBundleRef, 'reviewBundleRef');
         need(cr.mapRef, 'mapRef');
@@ -1050,7 +1067,7 @@ export class ContentReviewService {
     const { projectFindingLifecycle } = await import('./finding-service');
     const out: import('./finding-service').ProjectedFindingLifecycleV2[] = [];
     for (const finding of Object.values(state.findings)) {
-      if (finding.reviewContext.kind !== 'content') continue;
+      if (finding.defectClass !== 'content' && finding.defectClass !== 'mixed') continue;
       out.push(projectFindingLifecycle({ finding }));
     }
     return out;
@@ -1175,6 +1192,15 @@ export class ContentReviewService {
     const ledgerRef = await this.deps.facade.prepareBlob(taskId, 'review_assignment_ledger', freeze.ledger);
     const blobRefs = [...freeze.factRefs, ...freeze.verificationRecordRefs, ...freeze.findingDraftRefs, ledgerRef];
     const findingOpenings = this.findingOpeningCarriersOf(freeze);
+    const verificationRecords = freeze.verifications.map((record) => ({
+      recordId: record.recordId,
+      recordRef: refOfBlob('finding_verification_record', record),
+      findingId: record.findingId,
+      reviewContext: record.reviewContext,
+      assignmentId: record.assignmentId,
+      repairStage: record.repairStage,
+      verdict: record.verdict,
+    }));
 
     if (isWhole) {
       const observations = await this.buildWholeTreeObservationEvents(taskId, freeze.ledger, ledgerRef);
@@ -1187,6 +1213,7 @@ export class ContentReviewService {
           workItemId: freeze.ledger.workItemId,
           observations,
           findingOpenings,
+          verificationRecords,
         }),
         preparedRefs: blobRefs,
       });
@@ -1208,6 +1235,7 @@ export class ContentReviewService {
         coverageTargetCount: freeze.ledger.coverageTargetIds.length,
         findingCount: freeze.findingDraftRefs.length,
         findingOpenings,
+        verificationRecords,
       }),
       preparedRefs: blobRefs,
     });
@@ -1835,6 +1863,20 @@ export class ContentReviewService {
       };
       const operationId = attemptContinuationOperationId(input.taskId, input.workItemId, input.commandId, 'complete');
       const tail = await this.deps.tail(input.taskId);
+      const projectedBeforeSettlement = await this.deps.readProjection(input.taskId);
+      const verifiedClosedFindingIds = Object.values(projectedBeforeSettlement.findings)
+        .filter((finding) => finding.severity === 'blocking' && finding.state !== 'verified_closed')
+        .filter((finding) => REQUIRED_STAGES_BY_DEFECT[finding.defectClass].every((stage) => finding.verifiedStages.includes(stage)))
+        .map((finding) => finding.findingId)
+        .sort();
+      const unresolvedBlocking = Object.values(projectedBeforeSettlement.findings).filter(
+        (finding) => finding.severity === 'blocking'
+          && finding.state !== 'verified_closed'
+          && !verifiedClosedFindingIds.includes(finding.findingId),
+      );
+      if (unresolvedBlocking.length > 0) {
+        return { kind: 'retryable_failure', failureCode: 'CONTENT_REVIEW_BLOCKED', failureDigest: canonicalJsonSha256({ commandId: input.commandId, unresolvedFindingIds: unresolvedBlocking.map((f) => f.findingId).sort() }) };
+      }
       const resultRefs = [
         settlementCoreRef,
         custodyRef,
@@ -1867,6 +1909,7 @@ export class ContentReviewService {
             reviewSettlementValidatorAggregateRef: settlementRun.run.aggregateRef,
             sealWorkItemId,
             sealAuthorityBaseRef: sealBaseRef,
+            verifiedClosedFindingIds,
             terminal,
           }),
         },

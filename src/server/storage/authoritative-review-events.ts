@@ -480,7 +480,7 @@ type V2 = AuthoritativeReviewEventV2Base; // alias for member literals below
  * widened here.
  */
 export type AuthoritativeReviewEventV2 =
-  | (V2 & { type: 'structured_work_item_created'; workItemId: string; kind: WorkItemKindV2; roleBinding: string | null; agentExecutionKind: 'structured_session' | 'generic_turn' | null; sessionKind: StructuredSessionKindV2 | null; roundId: string | null; logicalAssignmentId: string | null; reviewAssignmentId: string | null; grantSpecRef: BlobRefV2 | null; inputArtifactDeliveryId: string | null; authorityBaseRef: BlobRefV2; payloadRef: BlobRefV2; initialLeaseEpoch: number; maxAutomaticRetries: number })
+  | (V2 & { type: 'structured_work_item_created'; workItemId: string; kind: WorkItemKindV2; roleBinding: string | null; agentExecutionKind: 'structured_session' | 'generic_turn' | null; sessionKind: StructuredSessionKindV2 | null; roundId: string | null; logicalAssignmentId: string | null; reviewAssignmentId: string | null; grantSpecRef: BlobRefV2 | null; inputArtifactDeliveryId: string | null; scopeDecisionReason?: string | null; authorityBaseRef: BlobRefV2; payloadRef: BlobRefV2; initialLeaseEpoch: number; maxAutomaticRetries: number })
   | (V2 & { type: 'structured_work_item_leased'; workItemId: string; leaseEpoch: number; leaseOwner: string; leaseExpiresAt: string; expectedLastSequence: number; authorityBaseRef: BlobRefV2 })
   | (V2 & { type: 'structured_work_item_completed'; workItemId: string; leaseEpoch: number; authorityBaseRef: BlobRefV2 })
   | (V2 & { type: 'structured_work_item_retryable_failed'; workItemId: string; leaseEpoch: number; failureCode: string; failureDigest: string; retryOrdinal: number; retryNotBefore: string; maxAutomaticRetries: number; validatorAggregateRef: BlobRefV2 | null; authorityBaseRef: BlobRefV2 })
@@ -668,6 +668,7 @@ const MEMBER_KEYS_V2: Record<string, ReadonlySet<string>> = {
     'reviewAssignmentId',
     'grantSpecRef',
     'inputArtifactDeliveryId',
+    'scopeDecisionReason',
     'authorityBaseRef',
     'payloadRef',
     'initialLeaseEpoch',
@@ -1399,6 +1400,7 @@ export function validateAuthoritativeReviewEventV2(
           throw invalidEvent('structured_session WorkItem 不得携带 inputArtifactDeliveryId。');
         }
       }
+      const scopeDecisionReason = nullableString(candidate.scopeDecisionReason, '事件 scopeDecisionReason');
       return {
         protocolVersion: 2,
         id,
@@ -1414,6 +1416,7 @@ export function validateAuthoritativeReviewEventV2(
         reviewAssignmentId,
         grantSpecRef,
         inputArtifactDeliveryId,
+        ...(candidate.scopeDecisionReason === undefined ? {} : { scopeDecisionReason }),
         authorityBaseRef: validateBlobRefV2(candidate.authorityBaseRef, '事件 authorityBaseRef'),
         payloadRef: validateBlobRefV2(candidate.payloadRef, '事件 payloadRef'),
         initialLeaseEpoch: assertNonNegativeInteger(candidate.initialLeaseEpoch, '事件 initialLeaseEpoch'),

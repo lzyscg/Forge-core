@@ -1366,7 +1366,7 @@ export type ValidatorInputEnvelopeV2 =
   | { trigger: 'map_activation'; taskId: string; templateSnapshotHash: string; mapReviewSettlementCoreRef: BlobRefV2; proposedMapCoreRef: BlobRefV2; selectedTargetRefs: readonly BlobRefV2[] }
   | { trigger: 'content_commit'; executionPhase: 'batch_commit' | 'plan_finalize'; taskId: string; templateSnapshotHash: string; contentValidationCoreRef: BlobRefV2; selectedTargetRefs: readonly BlobRefV2[] }
   | { trigger: 'review_settlement'; taskId: string; templateSnapshotHash: string; contentReviewCoverageCoreRef: BlobRefV2; selectedTargetRefs: readonly BlobRefV2[] }
-  | { trigger: 'repair_finalize'; taskId: string; templateSnapshotHash: string; repairPlanSpecRef: BlobRefV2; selectedTargetRefs: readonly BlobRefV2[] }
+  | { trigger: 'repair_finalize'; taskId: string; templateSnapshotHash: string; repairPlanSpecRef: BlobRefV2; stagingRootRef: BlobRefV2; keyLedgerRef: BlobRefV2; stagedArtifactRef: BlobRefV2; selectedTargetRefs: readonly BlobRefV2[] }
   | { trigger: 'seal_input'; taskId: string; templateSnapshotHash: string; reviewBundleRef: BlobRefV2; selectedTargetRefs: readonly BlobRefV2[] }
   | { trigger: 'seal_output'; taskId: string; templateSnapshotHash: string; reviewBundleRef: BlobRefV2; artifactRef: BlobRefV2; selectedTargetRefs: readonly BlobRefV2[] };
 
@@ -1550,6 +1550,8 @@ export interface AssignmentDispatchV2 {
   sessionKind: StructuredSessionKindV2 | null;
   grantInstanceRef: BlobRefV2 | null;
   inputArtifactDeliveryId: string | null;
+  /** Human scope-disposition carried into a same-scope replacement dispatch. */
+  scopeDecisionReason: string | null;
   dispatchDigest: string;
 }
 
@@ -1783,6 +1785,7 @@ export interface MapReviewPublishCarriersV2 {
   findingCount: number | null;
   /** whole-session observation events (level closure; batch sessions leave null). */
   observations: readonly MapReviewObservationCarrierV2[] | null;
+  verificationRecords: readonly ReviewerFindingVerificationCarrierV2[] | null;
   // --- map_review_round_completed ---
   coverageCoreRef: BlobRefV2 | null;
   // --- map_review_settlement (activation envelope) ---
@@ -1817,6 +1820,10 @@ export interface MapReviewPublishCarriersV2 {
    */
   contentRound: ContentReviewRoundPlanCarrierV2 | null;
   reviewWorkItems: readonly SuccessorWorkItemCarrierV2[] | null;
+  /** Mixed Finding route: activation creates a ContentRepairPlan, not a review round. */
+  mixedContentRepair: RepairPublishCarriersV2 | null;
+  /** Blocking findings closed by this system settlement before activation. */
+  verifiedClosedFindingIds: readonly string[] | null;
 }
 
 /**
@@ -1917,6 +1924,18 @@ export interface ContentReviewFindingOpeningCarrierV2 {
     | { kind: 'system_validator'; validatorExecutionId: string };
 }
 
+/** One reviewer verification fact frozen with its assignment ledger. The
+ * event is authoritative state; the ledger ref alone is only custody. */
+export interface ReviewerFindingVerificationCarrierV2 {
+  recordId: string;
+  recordRef: BlobRefV2;
+  findingId: string;
+  reviewContext: { kind: 'map' | 'content'; roundId: string };
+  assignmentId: string;
+  repairStage: 'map' | 'content';
+  verdict: 'resolved' | 'still_present';
+}
+
 /**
  * Task 18 content-review publication carriers (deterministic rebuild; each
  * carrier is null when a publish branch does not use it). Covers the four
@@ -1948,6 +1967,7 @@ export interface ContentReviewPublishCarriersV2 {
   /** `structured_finding_opened` carriers for every materialized finding draft
    * of the freeze (design §11.8: the opening payload is an append-only fact). */
   findingOpenings: readonly ContentReviewFindingOpeningCarrierV2[] | null;
+  verificationRecords: readonly ReviewerFindingVerificationCarrierV2[] | null;
   // --- content_review_round_completed ---
   coverageCoreRef: BlobRefV2 | null;
   // --- content_review_round_planned (a NEW complete round, cycle budget) ---
@@ -1964,6 +1984,8 @@ export interface ContentReviewPublishCarriersV2 {
   sealWorkItemId: string | null;
   /** the System Seal WorkItem's authority base set (kind system_seal). */
   sealAuthorityBaseRef: BlobRefV2 | null;
+  /** Blocking findings closed by this system settlement before Seal creation. */
+  verifiedClosedFindingIds: readonly string[] | null;
   // --- §9.2 successor WorkItem + command-terminal pair ---
   successor: SuccessorWorkItemCarrierV2 | null;
   terminal: SystemCommandTerminalCarrierV2 | null;

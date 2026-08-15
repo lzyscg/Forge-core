@@ -906,6 +906,7 @@ export class WorkItemCoordinatorV2 {
         sessionKind: wi.sessionKind as AssignmentDispatchV2['sessionKind'],
         grantInstanceRef,
         inputArtifactDeliveryId: wi.inputArtifactDeliveryId,
+        scopeDecisionReason: wi.scopeDecisionReason ?? null,
         dispatchDigest: '',
       };
       const { dispatchDigest: _dd, ...dispatchWithout } = dispatch;
