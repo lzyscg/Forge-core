@@ -91,7 +91,7 @@ function finalizerHarness(scenario: FinalizerRouteScenario) {
     : scenario === 'map_repair_slot_primary'
       ? "{ mapNodeIds: ['slot-00001'], relationIds: [], slotIds: ['slot-00000'] }"
       : scenario === 'map_repair_map_primary'
-        ? "{ mapNodeIds: ['slot-00001'], relationIds: [], slotIds: [] }"
+        ? "{ mapNodeIds: [], relationIds: [], slotIds: [] }"
         : scenario === 'map_repair_multi_target'
           ? "{ mapNodeIds: ['slot-00000', 'slot-00001'], relationIds: ['rel-00000'], slotIds: [] }"
           : "{ mapNodeIds: ['slot-00000'], relationIds: [], slotIds: ['slot-00000'] }";
@@ -136,7 +136,12 @@ const frozenV2 = {
 async function prepareDurable10kFixture(
   env: WorkItemCoordinatorEnvironment,
   taskId: string,
-  options: { slotCount?: number; validatableSlotCount?: number; withRelation?: boolean } = {},
+  options: {
+    slotCount?: number;
+    validatableSlotCount?: number;
+    withRelation?: boolean;
+    sourceCorruption?: 'manifest_map' | 'version_map' | 'aggregate_map';
+  } = {},
 ) {
   const slotCount = options.slotCount ?? 10_000;
   const validatableSlotCount = options.validatableSlotCount ?? 600;
@@ -303,12 +308,32 @@ async function prepareDurable10kFixture(
     orderedBatchSlotIds: [validatableSlotIds],
   });
   const generationPlanRef = await env.facade.prepareBlob(taskId, 'generation_plan_spec', generationPlan);
+  const sourceContentBySlot = new Map<string, { value: typeof content; ref: BlobRefV2 }>();
+  const preparedSourceContents = await mapWithBoundedConcurrency(validatableSlotIds, async (slotId) => {
+    const isSharedFixtureSlot = slotId === contentBody.slotId;
+    const slotContentBody = isSharedFixtureSlot ? contentBody : {
+      slotId,
+      contentSchemaDigest: H('durable-schema'),
+      taskContentRevision: 1,
+      mediaType: 'text/plain' as const,
+      text: `durable content for ${slotId}`,
+    };
+    const slotContent = isSharedFixtureSlot ? content : { ...slotContentBody, selfDigest: canonicalJsonSha256(slotContentBody) };
+    const slotContentRef = isSharedFixtureSlot
+      ? contentRef
+      : await env.facade.prepareBlob(taskId, 'content_value', slotContent);
+    return { slotId, value: slotContent, ref: slotContentRef };
+  });
+  for (const prepared of preparedSourceContents) sourceContentBySlot.set(prepared.slotId, prepared);
+  // Mirror one real content-plan batch exactly: the plan's complete 600-slot
+  // selected set, the commit replacement closure, and every produced version
+  // share the same immutable core/input/aggregate/custody provenance.
   const sourceCommitCore = buildContentRevisionCommitCore({
     priorManifestRef: baselineRef,
     producerPlanSpecRef: generationPlanRef,
     batchOrdinal: 0,
-    authorizedReplacementEntriesWithoutValidation: [],
-    expectedMapRef: sourceMapRef,
+    authorizedReplacementEntriesWithoutValidation: validatableSlotIds.map((slotId) => ({ slotId, expectedCurrentVersionRef: null })),
+    expectedMapRef: options.sourceCorruption === 'aggregate_map' ? targetMapRef : sourceMapRef,
   });
   const sourceCommitCoreRef = await env.facade.prepareBlob(taskId, 'content_revision_commit_core', sourceCommitCore);
   const sourceInput = {
@@ -317,7 +342,7 @@ async function prepareDurable10kFixture(
     taskId,
     templateSnapshotHash: 'a'.repeat(64),
     contentValidationCoreRef: sourceCommitCoreRef,
-    selectedTargetRefs: [contentRef],
+    selectedTargetRefs: validatableSlotIds.map((slotId) => sourceContentBySlot.get(slotId)!.ref),
   };
   const sourceInputRef = await env.facade.prepareBlob(taskId, 'validator_input_envelope', sourceInput);
   const sourceWarningBody = {
@@ -364,65 +389,16 @@ async function prepareDurable10kFixture(
   const entries: Array<{ slotId: string; versionRef: BlobRefV2 }> = [];
   const versionsBySlot = new Map<string, { version: SlotContentVersionV2; ref: BlobRefV2 }>();
   const preparedVersions = await mapWithBoundedConcurrency(validatableSlotIds, async (slotId) => {
-    const isSharedFixtureSlot = slotId === contentBody.slotId;
-    const slotContentBody = isSharedFixtureSlot ? contentBody : {
-      slotId,
-      contentSchemaDigest: H('durable-schema'),
-      taskContentRevision: 1,
-      mediaType: 'text/plain' as const,
-      text: `durable content for ${slotId}`,
-    };
-    const slotContent = isSharedFixtureSlot ? content : { ...slotContentBody, selfDigest: canonicalJsonSha256(slotContentBody) };
-    const slotContentRef = isSharedFixtureSlot
-      ? contentRef
-      : await env.facade.prepareBlob(taskId, 'content_value', slotContent);
-    const slotInput = isSharedFixtureSlot ? sourceInput : { ...sourceInput, selectedTargetRefs: [slotContentRef] };
-    const slotInputRef = isSharedFixtureSlot
-      ? sourceInputRef
-      : await env.facade.prepareBlob(taskId, 'validator_input_envelope', slotInput);
-    const slotWarningBody = {
-      ...sourceWarningBody,
-      inputRef: slotInputRef,
-      inputDigest: slotInputRef.digest,
-    };
-    const slotWarning = isSharedFixtureSlot ? sourceWarning : { ...slotWarningBody, rootDigest: canonicalJsonSha256(slotWarningBody) };
-    const slotWarningRef = isSharedFixtureSlot
-      ? sourceWarningRef
-      : await env.facade.prepareBlob(taskId, 'validation_warning_root', slotWarning);
-    const slotAggregateBody = {
-      ...sourceAggregateBody,
-      inputRef: slotInputRef,
-      inputDigest: slotInputRef.digest,
-      validExecutionDigests: [H(`durable-source-valid-${slotId}`)],
-      warningRootRef: slotWarningRef,
-    };
-    const slotAggregate = isSharedFixtureSlot ? sourceAggregate : { ...slotAggregateBody, aggregateDigest: canonicalJsonSha256(slotAggregateBody) };
-    const slotAggregateRef = isSharedFixtureSlot
-      ? sourceAggregateRef
-      : await env.facade.prepareBlob(taskId, 'validator_aggregate', slotAggregate);
-    const slotCustodyBody = {
-      ...sourceCustodyBody,
-      baseRefs: [slotInputRef],
-      entries: [{
-        ...sourceCustodyBody.entries[0]!,
-        inputRef: slotInputRef,
-        inputDigest: slotInputRef.digest,
-        validatorAggregateRef: slotAggregateRef,
-        warningRootRef: slotWarningRef,
-      }],
-    };
-    const slotCustody = isSharedFixtureSlot ? sourceCustody : { ...slotCustodyBody, rootDigest: canonicalJsonSha256(slotCustodyBody) };
-    const slotCustodyRef = isSharedFixtureSlot
-      ? sourceCustodyRef
-      : await env.facade.prepareBlob(taskId, 'validation_warning_custody_root', slotCustody);
+    const slotContentRef = sourceContentBySlot.get(slotId)!.ref;
     const version: SlotContentVersionV2 = {
-      state: 'set', slotId, slotRevision: 1, taskContentRevision: 2, mapRef: sourceMapRef,
+      state: 'set', slotId, slotRevision: 1, taskContentRevision: 2,
+      mapRef: options.sourceCorruption === 'version_map' && slotId === validatableSlotIds[0] ? targetMapRef : sourceMapRef,
       mapSemanticDigest: sourceSnapshot.mapSemanticDigest, contentSchemaDigest: contentBody.contentSchemaDigest,
       contentDigest: slotContentRef.digest, blobRef: slotContentRef,
       provenance: {
         kind: 'generated', producer: { kind: 'generation_batch', planRevisionId: generationPlan.generationPlanId, batchOrdinal: 0, attemptId: 'att-durable' },
-        contentRevisionCommitCoreRef: sourceCommitCoreRef, contentCommitValidatorAggregateRef: slotAggregateRef,
-        contentCommitWarningRootRef: slotCustodyRef, committedByAttemptId: 'att-durable',
+        contentRevisionCommitCoreRef: sourceCommitCoreRef, contentCommitValidatorAggregateRef: sourceAggregateRef,
+        contentCommitWarningRootRef: sourceCustodyRef, committedByAttemptId: 'att-durable',
       },
     };
     const versionRef = await env.facade.prepareBlob(taskId, 'content_version', version);
@@ -433,7 +409,10 @@ async function prepareDurable10kFixture(
     entries.push({ slotId, versionRef });
   }
   const manifestBody = {
-    taskId, mapRef: sourceMapRef, mapSemanticDigest: sourceSnapshot.mapSemanticDigest, taskContentRevision: 2, manifestPhase: 'finalized' as const,
+    taskId,
+    mapRef: options.sourceCorruption === 'manifest_map' ? targetMapRef : sourceMapRef,
+    mapSemanticDigest: sourceSnapshot.mapSemanticDigest,
+    taskContentRevision: 2, manifestPhase: 'finalized' as const,
     entries, producerPlanSpecRef: generationPlanRef, priorManifestRef: baselineRef,
     finalizerValidatorAggregateRefs: [sourceAggregateRef], finalizerWarningRootRefs: [sourceCustodyRef], contentRootDigest: H('durable-content-root'),
   };
@@ -814,6 +793,7 @@ async function runDurable10k(
     slotCount?: number;
     validatableSlotCount?: number;
     withRelation?: boolean;
+    sourceCorruption?: 'manifest_map' | 'version_map' | 'aggregate_map';
     finalizerScenario?: FinalizerRouteScenario;
     requiredSlotIdsOverride?: readonly string[];
     repairCoordinator?: Parameters<typeof createProductionMigrationRuntime>[0]['repairCoordinator'];
@@ -1055,6 +1035,23 @@ describe('Task 20 production command integration', () => {
       expect(migratedVersion.provenance.migratedBatchWarningRootRef?.kind).toBe('validation_warning_custody_root');
     }
   }, 120_000);
+
+  it.each(['manifest_map', 'version_map', 'aggregate_map'] as const)(
+    'does not reuse validator custody when the authoritative source %s lineage disagrees',
+    async (sourceCorruption) => {
+      const result = await runDurable10k(null, {
+        slotCount: 2,
+        validatableSlotCount: 1,
+        finalizerScenario: 'clear',
+        sourceCorruption,
+      });
+      expect(result.equivalenceRefs).toHaveLength(0);
+      expect(result.revalidatedCount).toBe(1);
+      expect(result.settlementOutcome, JSON.stringify(result.settlementOutcome)).toMatchObject({ kind: 'completed' });
+      expect(result.route).toBe('clear');
+    },
+    120_000,
+  );
 
   it('keeps finalizer infrastructure failure retryable and publishes no migration settlement/activation', async () => {
     const result = await runDurable10k(null, { slotCount: 2, validatableSlotCount: 1, finalizerScenario: 'infrastructure_failure' });

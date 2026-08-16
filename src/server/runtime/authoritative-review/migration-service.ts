@@ -591,6 +591,7 @@ export async function validateAndClassifyMigrationBatchResults(input: {
           slotId: slotResult.slotId,
           sourceVersionRef: intentDecision.sourceVersionRef,
           sourceVersion,
+          sourceManifestRef: input.plan.sourceManifestRef,
           sourceMapRef: input.intent.sourceMapRef,
           targetMapRef: input.intent.targetMapRef,
           proof,
@@ -1130,7 +1131,12 @@ function findingsFromValidatorRun(run: TriggerExecutionResult, roundId: string):
   const findings: FindingV2[] = [];
   for (const receipt of run.receipts) {
     for (const issue of receipt.blockerIssues) {
-      const hasMap = issue.repairTargets.mapNodeIds.length > 0 || issue.repairTargets.relationIds.length > 0;
+      const primaryIsMap = issue.location.targetKind === 'map'
+        || issue.location.targetKind === 'node'
+        || issue.location.targetKind === 'relation';
+      const hasMap = primaryIsMap
+        || issue.repairTargets.mapNodeIds.length > 0
+        || issue.repairTargets.relationIds.length > 0;
       const hasContent = issue.repairTargets.slotIds.length > 0;
       const defectClass: FindingV2['defectClass'] = hasMap ? (hasContent ? 'mixed' : 'map') : 'content';
       const findingId = `migration-finding-${canonicalJsonSha256({ roundId, issue }).slice(0, 24)}`;
@@ -1213,6 +1219,8 @@ async function resolveAuthoritativeSourceValidatorCustody(input: {
   taskId: string;
   slotId: string;
   sourceVersionRef: BlobRefV2;
+  sourceManifestRef: BlobRefV2;
+  sourceMapRef: BlobRefV2;
   expectedRegistrationSetDigest: string;
   resolve(ref: BlobRefV2): Promise<unknown> | unknown;
 }): Promise<AuthoritativeSourceValidatorCustodyV2> {
@@ -1223,6 +1231,20 @@ async function resolveAuthoritativeSourceValidatorCustody(input: {
     ref: currentRef, kind: 'content_version', label: `migration source version '${input.slotId}'`, resolve: input.resolve,
   });
   if (initial.state !== 'set' || initial.slotId !== input.slotId) throw new Error('migration source custody is not a set version for the requested slot');
+  const sourceManifest = await resolveVerifiedMigrationBlob<ContentRevisionManifestV2>({
+    ref: input.sourceManifestRef, kind: 'content_revision_manifest', label: 'migration authoritative source manifest', resolve: input.resolve,
+  });
+  validateCanonicalSelfDigest(sourceManifest as unknown as Record<string, unknown>, 'manifestDigest', 'migration authoritative source manifest');
+  const sourceMap = await resolveVerifiedMigrationBlob<MapSnapshotV2>({
+    ref: input.sourceMapRef, kind: 'map_snapshot', label: 'migration authoritative source Map', resolve: input.resolve,
+  });
+  const exactManifestEntries = sourceManifest.entries.filter((entry) => entry.slotId === input.slotId);
+  if (sourceManifest.taskId !== input.taskId || !sameRef(sourceManifest.mapRef, input.sourceMapRef)
+    || sourceManifest.mapSemanticDigest !== sourceMap.mapSemanticDigest
+    || exactManifestEntries.length !== 1 || !sameRef(exactManifestEntries[0]!.versionRef, input.sourceVersionRef)
+    || !sameRef(initial.mapRef, input.sourceMapRef) || initial.mapSemanticDigest !== sourceMap.mapSemanticDigest) {
+    throw new Error('migration source manifest, source Map, and source version do not form one authoritative lineage');
+  }
   let current: SetSlotContentVersionV2 = initial;
 
   while (current.provenance.kind === 'inherited_after_map_activation'
@@ -1291,7 +1313,7 @@ async function resolveAuthoritativeSourceValidatorCustody(input: {
     ref: aggregate.inputRef, kind: 'validator_input_envelope', label: `migration source input '${input.slotId}'`, resolve: input.resolve,
   });
   if (envelope.trigger !== 'content_commit' || envelope.executionPhase !== 'batch_commit' || envelope.taskId !== input.taskId
-    || envelope.selectedTargetRefs.length !== 1 || !sameRef(envelope.selectedTargetRefs[0]!, current.blobRef)) {
+    || !hasExactRef(envelope.selectedTargetRefs, current.blobRef)) {
     throw new Error('migration source input does not bind the source content batch');
   }
   for (const proof of inheritedProofs) {
@@ -1304,9 +1326,124 @@ async function resolveAuthoritativeSourceValidatorCustody(input: {
     ref: envelope.contentValidationCoreRef, kind: 'content_revision_commit_core', label: `migration source commit core '${input.slotId}'`, resolve: input.resolve,
   });
   validateCanonicalSelfDigest(core as unknown as Record<string, unknown>, 'coreDigest', `migration source commit core '${input.slotId}'`);
-  if (!sameRef(core.expectedMapRef, current.mapRef)) throw new Error('migration source commit core does not bind the validated Map');
+  const validatedMap = await resolveVerifiedMigrationBlob<MapSnapshotV2>({
+    ref: current.mapRef, kind: 'map_snapshot', label: `migration originating validated Map '${input.slotId}'`, resolve: input.resolve,
+  });
+  if (!sameRef(core.expectedMapRef, current.mapRef) || current.mapSemanticDigest !== validatedMap.mapSemanticDigest) {
+    throw new Error('migration source commit core/version does not bind the originating validated Map');
+  }
   if (current.provenance.kind === 'generated' && !sameRef(current.provenance.contentRevisionCommitCoreRef, envelope.contentValidationCoreRef)) {
     throw new Error('generated source version does not bind the validator commit core');
+  }
+  if (current.provenance.kind === 'generated' && !sameRef(current.provenance.contentCommitValidatorAggregateRef, aggregateRef)) {
+    throw new Error('generated source version does not bind the validator aggregate');
+  }
+  if (current.provenance.kind === 'inherited_after_map_activation'
+    && (current.provenance.migratedBatchValidatorAggregateRef === null
+      || !sameRef(current.provenance.migratedBatchValidatorAggregateRef, aggregateRef))) {
+    throw new Error('revalidated inherited source version does not bind the validator aggregate');
+  }
+  const producerPlanRaw = await resolveVerifiedMigrationBlob<Record<string, unknown>>({
+    ref: core.producerPlanSpecRef,
+    kind: core.producerPlanSpecRef.kind as Parameters<typeof refOfBlob>[0],
+    label: `migration source producer plan '${input.slotId}'`, resolve: input.resolve,
+  });
+  validateCanonicalSelfDigest(producerPlanRaw, 'specDigest', `migration source producer plan '${input.slotId}'`);
+  let frozenBatchSlotIds: readonly string[];
+  if (core.producerPlanSpecRef.kind === 'generation_plan_spec') {
+    const producerPlan = producerPlanRaw as unknown as import('../../authoritative-review/authority-types').GenerationPlanSpecV2;
+    frozenBatchSlotIds = producerPlan.orderedBatchSlotIds[core.batchOrdinal] ?? [];
+    if (!sameRef(producerPlan.activeMapRef, current.mapRef)
+      || current.provenance.kind !== 'generated'
+      || current.provenance.producer.kind !== 'generation_batch'
+      || current.provenance.producer.planRevisionId !== producerPlan.generationPlanId
+      || current.provenance.producer.batchOrdinal !== core.batchOrdinal) {
+      throw new Error('migration source generation plan does not bind the version producer/Map/batch');
+    }
+  } else if (core.producerPlanSpecRef.kind === 'repair_plan_spec') {
+    const producerPlan = producerPlanRaw as unknown as import('../../authoritative-review/authority-types').RepairPlanSpecV2;
+    const batch = producerPlan.orderedBatchScopes.find((candidate) => candidate.batchOrdinal === core.batchOrdinal);
+    frozenBatchSlotIds = batch?.kind === 'content' ? batch.slotIds : [];
+    if ((producerPlan.repairBase.kind !== 'content' && producerPlan.repairBase.kind !== 'map_active')
+      || !sameRef(producerPlan.repairBase.mapRef, current.mapRef)
+      || current.provenance.kind !== 'generated'
+      || current.provenance.producer.kind !== 'content_repair_batch'
+      || current.provenance.producer.planRevisionId !== producerPlan.planRevisionId
+      || current.provenance.producer.batchOrdinal !== core.batchOrdinal) {
+      throw new Error('migration source repair plan does not bind the version producer/Map/batch');
+    }
+  } else if (core.producerPlanSpecRef.kind === 'migration_validation_plan_spec') {
+    const producerPlan = producerPlanRaw as unknown as ContentMigrationValidationPlanSpecV2;
+    frozenBatchSlotIds = producerPlan.orderedBatchSlotIds[core.batchOrdinal] ?? [];
+    if (current.provenance.kind !== 'inherited_after_map_activation') {
+      throw new Error('migration source validation plan does not bind an inherited revalidated version');
+    }
+    const producerIntent = await resolveVerifiedMigrationBlob<ContentMigrationIntentCoreV2>({
+      ref: producerPlan.migrationIntentCoreRef,
+      kind: 'migration_intent_core',
+      label: `migration source producer intent '${input.slotId}'`,
+      resolve: input.resolve,
+    });
+    validateCanonicalSelfDigest(producerIntent as unknown as Record<string, unknown>, 'coreDigest', `migration source producer intent '${input.slotId}'`);
+    const producerSettlement = await resolveVerifiedMigrationBlob<ContentMigrationSettlementCoreV2>({
+      ref: current.provenance.contentMigrationSettlementCoreRef,
+      kind: 'migration_settlement_core',
+      label: `migration source producer settlement '${input.slotId}'`,
+      resolve: input.resolve,
+    });
+    validateCanonicalSelfDigest(producerSettlement as unknown as Record<string, unknown>, 'settlementDigest', `migration source producer settlement '${input.slotId}'`);
+    const settlementDecision = producerSettlement.decisions.find((decision) => decision.slotId === input.slotId);
+    if (!sameRef(producerIntent.targetMapRef, current.mapRef)
+      || !sameRef(core.priorManifestRef, producerPlan.sourceManifestRef)
+      || !sameRef(producerSettlement.migrationValidationPlanSpecRef, core.producerPlanSpecRef)
+      || settlementDecision?.outcome !== 'inherit_revalidated'
+      || !sameRef(settlementDecision.migratedBatchValidatorAggregateRef, aggregateRef)) {
+      throw new Error('migration source plan/intent/settlement does not close the revalidated producer lineage');
+    }
+  } else {
+    throw new Error('migration source validator core names an unsupported producer plan');
+  }
+  const frozenSet = new Set(frozenBatchSlotIds);
+  if (!frozenSet.has(input.slotId)) throw new Error('migration source slot is absent from its frozen producer batch');
+  const replacementSlotIds = core.authorizedReplacementEntriesWithoutValidation.map((entry) => entry.slotId);
+  if (new Set(replacementSlotIds).size !== replacementSlotIds.length
+    || !replacementSlotIds.includes(input.slotId)
+    || replacementSlotIds.some((slotId) => !frozenSet.has(slotId))) {
+    throw new Error('migration source commit replacements do not belong to the frozen producer batch');
+  }
+  if (core.producerPlanSpecRef.kind !== 'migration_validation_plan_spec'
+    && canonicalJsonSha256([...replacementSlotIds].sort()) !== canonicalJsonSha256([...frozenBatchSlotIds].sort())) {
+    throw new Error('migration source commit replacements do not exactly cover the frozen producer batch');
+  }
+  const selectedSlotIds: string[] = [];
+  for (const targetRef of envelope.selectedTargetRefs) {
+    const target = await resolveVerifiedMigrationBlob<{ slotId?: unknown }>({
+      ref: targetRef, kind: targetRef.kind as Parameters<typeof refOfBlob>[0],
+      label: `migration source selected target '${input.slotId}'`, resolve: input.resolve,
+    });
+    if (typeof target.slotId !== 'string') throw new Error('migration source selected target lacks a stable slot ID');
+    selectedSlotIds.push(target.slotId);
+  }
+  if (new Set(selectedSlotIds).size !== selectedSlotIds.length
+    || !selectedSlotIds.includes(input.slotId)
+    || selectedSlotIds.some((slotId) => !frozenSet.has(slotId))
+    || canonicalJsonSha256([...selectedSlotIds].sort()) !== canonicalJsonSha256([...replacementSlotIds].sort())) {
+    throw new Error('migration source validator targets do not exactly match the committed replacement batch');
+  }
+  const validatedContent = await resolveVerifiedMigrationBlob<{ slotId?: unknown }>({
+    ref: current.blobRef,
+    kind: current.blobRef.kind as Parameters<typeof refOfBlob>[0],
+    label: `migration originating validated content '${input.slotId}'`,
+    resolve: input.resolve,
+  });
+  if (validatedContent.slotId !== input.slotId || current.contentDigest !== current.blobRef.digest) {
+    throw new Error('migration source version does not bind the originating content bytes/slot');
+  }
+  const originatingLocal = localMapDimensions(validatedMap, input.slotId);
+  const migrationSourceLocal = localMapDimensions(sourceMap, input.slotId);
+  if (originatingLocal.subgraph !== migrationSourceLocal.subgraph
+    || originatingLocal.relations !== migrationSourceLocal.relations) {
+    throw new Error('migration source Map differs from the Map lineage actually validated for this slot');
   }
   const custodyRef = current.provenance.kind === 'generated'
     ? current.provenance.contentCommitWarningRootRef
@@ -1337,6 +1474,7 @@ async function validateEquivalentMigrationResult(input: {
   slotId: string;
   sourceVersionRef: BlobRefV2;
   sourceVersion: SlotContentVersionV2 & { state: 'set' };
+  sourceManifestRef: BlobRefV2;
   sourceMapRef: BlobRefV2;
   targetMapRef: BlobRefV2;
   proof: LocalValidatorEquivalenceProofV2;
@@ -1345,6 +1483,7 @@ async function validateEquivalentMigrationResult(input: {
 }): Promise<void> {
   const custody = await resolveAuthoritativeSourceValidatorCustody({
     taskId: input.taskId, slotId: input.slotId, sourceVersionRef: input.sourceVersionRef,
+    sourceManifestRef: input.sourceManifestRef, sourceMapRef: input.sourceMapRef,
     expectedRegistrationSetDigest: input.expectedRegistrationSetDigest, resolve: input.resolve,
   });
   if (!sameRef(input.proof.sourceBatchInputRef, custody.aggregate.inputRef)) throw new Error('migration equivalence proof does not bind the authoritative source input');
@@ -1366,8 +1505,7 @@ async function validateEquivalentMigrationResult(input: {
   });
   const exact = custody.aggregate.registrationSetDigest === input.expectedRegistrationSetDigest
     && input.proof.frozenRegistrationSetDigest === input.expectedRegistrationSetDigest
-    && canonicalJsonSha256(custody.envelope.selectedTargetRefs) === canonicalJsonSha256([input.sourceVersion.blobRef])
-    && input.proof.selectorExpansionDigest === canonicalJsonSha256([input.sourceVersion.blobRef])
+    && input.proof.selectorExpansionDigest === canonicalJsonSha256(custody.envelope.selectedTargetRefs)
     && canonicalJsonSha256(sourceBytes) === canonicalJsonSha256(targetBytes)
     && sourceLocal.subgraph === targetLocal.subgraph && input.proof.localMapSubgraphDigest === sourceLocal.subgraph
     && sourceLocal.relations === targetLocal.relations && input.proof.localRelationContextDigest === sourceLocal.relations;
@@ -1418,13 +1556,26 @@ export function createProductionMigrationRuntime(input: ProductionMigrationRunti
   }
   const persistableStore = (versionStateOf: (slotId: string) => 'set' | 'unset' | 'rewrite_required') =>
     new ContentPlanMemoryBlobStore(contentPlanEnrichment({ slotTypeOf: input.slotTypeOf, versionStateOf }));
-  const resolveRequired = async <T>(taskId: string, ref: BlobRefV2, label: string): Promise<T> => {
+  // Every authoritative blob is content-addressed and immutable. Reusing
+  // successful resolutions keeps large migrations from rereading the same
+  // source manifest/Map/producer batch hundreds of times. Missing refs are not
+  // cached because a later command in this runtime may prepare that exact ref.
+  const immutableResolutionCache = new Map<string, unknown>();
+  const resolveImmutable = async (taskId: string, ref: BlobRefV2): Promise<unknown> => {
+    const key = `${taskId}:${ref.kind}:${ref.digest}`;
+    if (immutableResolutionCache.has(key)) return immutableResolutionCache.get(key);
     const value = await input.resolve(taskId, ref);
+    if (value !== null) immutableResolutionCache.set(key, value);
+    return value;
+  };
+  const resolveRequired = async <T>(taskId: string, ref: BlobRefV2, label: string): Promise<T> => {
+    const value = await resolveImmutable(taskId, ref);
     if (value === null || typeof value !== 'object') throw new Error(`${label} is unresolvable`);
     return value as T;
   };
   const deps: MigrationServiceDependenciesV2 = {
     ...input,
+    resolve: resolveImmutable,
     finalizerRegistrationSetDigest: registrationSetDigestOf(registrations.plan_finalize),
     async readCurrentAuthority(taskId, workItemId) {
       const state = await input.readProjection(taskId);
@@ -1452,8 +1603,10 @@ export function createProductionMigrationRuntime(input: ProductionMigrationRunti
         taskId,
         slotId,
         sourceVersionRef: decision.sourceVersionRef,
+        sourceManifestRef: plan.sourceManifestRef,
+        sourceMapRef: (await resolveRequired<ContentMigrationIntentCoreV2>(taskId, plan.migrationIntentCoreRef, 'migration intent')).sourceMapRef,
         expectedRegistrationSetDigest: installedBatchRegistrationSetDigest,
-        resolve: (ref) => input.resolve(taskId, ref),
+        resolve: (ref) => resolveImmutable(taskId, ref),
       });
       const aggregate = resolved.aggregate;
       const envelope = resolved.envelope;
@@ -1474,7 +1627,7 @@ export function createProductionMigrationRuntime(input: ProductionMigrationRunti
         },
         target: {
           frozenRegistrationSetDigest: installedBatchRegistrationSetDigest,
-          selectorExpansionDigest: canonicalJsonSha256([version.blobRef]),
+          selectorExpansionDigest: canonicalJsonSha256(envelope.selectedTargetRefs),
           contentBytesDigest: canonicalJsonSha256(content),
           localMapSubgraphDigest: targetLocal.subgraph,
           localRelationContextDigest: targetLocal.relations,

@@ -95,3 +95,19 @@
 - Capability/profile/append-facade guard regression: **4 files / 75 passed**.
 - `npm run check`, `npm run build`, and `git diff --check`: passed.
 - Runtime boundary remains facade-only with no production `EventStore` import; schemaVersion remains `1`; v1/capability/profile sources are unchanged.
+
+## Adversarial re-review fix round 4
+
+- **P1-1 — source provenance/Map custody:** validator reuse now starts from the exact content-addressed source manifest and migration source Map. It self-validates the manifest digest and requires one exact slot entry, task/Map/semantic identity, and the source version's Map binding. The originating clear execution must close its version, content bytes, commit core, producer plan, frozen batch membership, complete replacement set, complete validator selector, aggregate, warning root, and warning custody. Revalidated migration sources additionally close through the producing intent/settlement decision. The Map actually bound by that originating execution is resolved and its local node/relation dimensions must equal the migration source Map before target equivalence is considered. Any missing or corrupt link falls back to fresh target-Map validation; settlement repeats the same proof before accepting an equivalence result.
+- **Durable source fixture:** the 600 populated source slots now represent one semantically exact generation batch: the plan batch, commit replacement closure, validator selected-target closure, versions, shared clear aggregate, and custody root all agree. The runtime caches only successful immutable content-addressed resolutions (never missing refs), eliminating repeated disk reads without weakening validation.
+- **P1-2 — primary-location routing:** `map`, `map_node`, and `relation` primary locations now force the Map track, while simultaneous content slot targets yield `mixed`. A legal `$map` primary with empty explicit targets reaches Map repair and expands to the complete candidate-bound target Map node/relation scope.
+- **Corruption/route regressions:** manifest-Map, version-Map, and originating-core-Map disagreement each prove zero equivalence reuse and one fresh validation. The real AttemptCoordinator `$map`/empty-target case projects one candidate-bound ready MapRepairPlan with the exact bounded full-Map scope.
+
+### Re-review-3 fix qualification (2026-08-16)
+
+- RED→GREEN: `$map` with empty repair targets originally threw `migration Content Finding has no resolvable slot target`; after primary-location classification it completes on the Map track.
+- Source-custody corruption cases: **3 passed**; each produced `equivalenceRefs=0`, `revalidatedCount=1`, and a clear system route after fresh validation.
+- Real durable 10,000-slot GC/reopen/restart proof: **1 passed** in **629.974 s** (uninterrupted and restart-at-73 roots/settlement/decision/manifest/event root byte-identical; 599 equivalence proofs + 1 fresh result).
+- Focused migration/repair/Map/validator/attempt/projector/facade/capability/profile regression: **14 files / 281 passed, 1 skipped**. The skipped test is only the separately executed real 10k proof above.
+- `npm run check`, `npm run build`, and `git diff --check`: passed.
+- Runtime boundary remains facade-only with no production `EventStore` import; blob/event schemaVersion remains `1`; v1/capability/profile sources are unchanged.
