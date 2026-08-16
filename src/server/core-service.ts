@@ -62,7 +62,7 @@ import {
   requiredAuthoritativeReviewAbiAvailable,
   type AuthoritativeReviewRuntimeEnvironmentV1,
 } from './structured-slots/authoritative-review-capability';
-import type { AgentRuntime, AgentTurnInput } from './runtime/agent-runtime';
+import { RuntimeFailure, type AgentRuntime, type AgentTurnInput } from './runtime/agent-runtime';
 import type { AcceptanceStopHook } from './acceptance-boundary';
 import {
   PiAgentRuntime,
@@ -121,6 +121,11 @@ import {
   type ReopenRequestV2,
 } from './runtime/authoritative-review/task-lifecycle';
 import { WorkItemCoordinatorV2 } from './runtime/authoritative-review/work-item-coordinator';
+import {
+  installAuthoritativeReviewRuntime,
+  type AuthoritativeReviewCompositionV2,
+} from './runtime/authoritative-review/production-composition';
+import { V2AssignmentRunner } from './runtime/authoritative-review/assignment-runner';
 import type { BlobRefV2, AuthoritativeReviewExecutionEligibilityV1 } from '../shared/authoritative-review-v2';
 import { STORAGE_ERROR_CODES, StorageError } from './storage/atomic-file';
 import type { PublicationOperationPayloadV2 } from './authoritative-review/authority-types';
@@ -308,6 +313,17 @@ export class CoreService {
 
   /** The deterministic v2 scheduling engine (§10.4 — the v2 loop). */
   readonly v2Scheduling: AuthoritativeV2SchedulingEngine;
+
+  /**
+   * Task 21 P1#1: the production composition root — the SIX real system-command
+   * handlers (the seal is ALWAYS the real SystemSealServiceV2; the five domain
+   * handlers are installed as their services are wired), the attempt
+   * coordinator that EXECUTES leased work items, and the scheduling tick that
+   * runs pass + executeLeased after every v2 mutation (the pass-only driver
+   * below never executed anything). Dormant while the authoritative capability
+   * is disabled — nothing is leased/executed.
+   */
+  readonly v2Composition: AuthoritativeReviewCompositionV2;
 
   private readonly v2PublicationStore: AuthoritativePublicationStore;
 
@@ -586,6 +602,58 @@ export class CoreService {
       ...(options.acceptanceStopAfterCommit !== undefined
         ? { acceptanceStopAfterCommit: options.acceptanceStopAfterCommit }
         : {}),
+    });
+    // Task 21 P1#1: install the production composition — the six real
+    // system-command handlers + the attempt coordinator + the pass+execute
+    // tick. The runner's tool provider is the Task 13 V2ToolFactory seam
+    // (empty here); the seal command path never uses Agent tools, and the
+    // disabled capability keeps everything idle until qualified.
+    this.v2Composition = installAuthoritativeReviewRuntime({
+      coordinator: this.v2Coordinator,
+      facade: this.v2Facade,
+      blobStore: this.v2BlobStore,
+      wakeups: this.v2Wakeups,
+      artifacts: this.artifacts,
+      scheduling: this.v2Scheduling,
+      readProjection: (taskId) => this.v2Projection(taskId),
+      resolver: (taskId, ref) => this.v2BlobStore.readJson(taskId, ref, ref.kind),
+      frozenProfile: (taskId) => this.frozenProfileV2(taskId),
+      frozenTemplate: (taskId) => this.tasks.readFrozenTemplate(taskId),
+      profileBody: async (taskId) => {
+        // The profile_snapshot blob parser strips the limit/installed-handler
+        // groups, so the FULL body (the validator registry resolves against its
+        // budgetProfiles/installedHandlers) is read from the raw snapshot file.
+        const profile = await this.frozenProfileV2(taskId);
+        const file = this.paths.taskStructuredV2BlobFile(taskId, 'profile_snapshot', profile.profileSnapshotRef.digest);
+        const raw = await readFile(file, 'utf8');
+        return JSON.parse(raw) as never;
+      },
+      frozenAutomaticRetries: (taskId) => this.frozenAutomaticRetries(taskId),
+      eligibility: (frozenProfileDigest) => this.executionEligibilityOf(frozenProfileDigest),
+      runner: new V2AssignmentRunner({
+        runtime: this.runtime,
+        // Task 13 wires the real V2ToolFactory here. Until then an Agent
+        // session has no domain tools and therefore cannot produce its §9.2
+        // domain result carriers — `collectResultRefs` fails RETRYABLE (the
+        // runner classifies RuntimeFailure.transient as retryable), so the
+        // leased work item parks on a durable retry_due wakeup instead of
+        // crashing the mutation driver with a bare-completion rejection. The
+        // System Command (seal) path never touches the runner.
+        toolProvider: {
+          async toolsFor() { return []; },
+          async collectResultRefs() {
+            throw RuntimeFailure.transient(
+              'V2_AGENT_TOOLS_NOT_WIRED',
+              'v2 Agent tool factory is not wired; the session cannot produce domain result refs',
+            );
+          },
+        },
+      }),
+      clock: () => new Date().toISOString(),
+      traces: this.traces,
+      terminalFail: (taskId, input) => this.v2Lifecycle.terminalFailWorkItem(taskId, input),
+      eventStore: this.events,
+      publicationStore: this.v2PublicationStore,
     });
   }
 
@@ -1035,7 +1103,7 @@ export class CoreService {
   /** V2 start: one atomic batch, then the v2 scheduling pass. */
   async startTaskV2(taskId: string): Promise<TaskSummary> {
     await this.v2Lifecycle.startV2(taskId, { operationId: randomUUID(), userInputText: '' });
-    await this.runV2SchedulingPass();
+    await this.runV2SchedulingTick();
     return (await this.getWorkspace(taskId)).task;
   }
 
@@ -1048,7 +1116,7 @@ export class CoreService {
   /** V2 resume (clears the exact suspension overlay, reactivates wakeups). */
   async resumeTaskV2(taskId: string): Promise<TaskSummary> {
     await this.v2Lifecycle.resumeV2(taskId, { operationId: randomUUID() });
-    await this.runV2SchedulingPass();
+    await this.runV2SchedulingTick();
     return (await this.getWorkspace(taskId)).task;
   }
 
@@ -1068,7 +1136,7 @@ export class CoreService {
       );
     }
     await this.v2Lifecycle.manualRetryV2(taskId, { operationId: randomUUID(), workItemId });
-    await this.runV2SchedulingPass();
+    await this.runV2SchedulingTick();
     return (await this.getWorkspace(taskId)).task;
   }
 
@@ -1089,7 +1157,7 @@ export class CoreService {
         answer: 'answer' in body ? body.answer : body.text,
       });
     }
-    await this.runV2SchedulingPass();
+    await this.runV2SchedulingTick();
     return (await this.getWorkspace(taskId)).task;
   }
 
@@ -1113,13 +1181,25 @@ export class CoreService {
       // Unreadable identity: let the lifecycle path fail closed as corruption.
     }
     await this.v2Lifecycle.reopenFailed(taskId, request as unknown as ReopenRequestV2);
-    await this.runV2SchedulingPass();
+    await this.runV2SchedulingTick();
     return (await this.getWorkspace(taskId)).task;
   }
 
   /** One deterministic v2 scheduling pass (the §10.4 loop; idempotent per tail). */
   runV2SchedulingPass(now?: string): Promise<Awaited<ReturnType<AuthoritativeV2SchedulingEngine['runPass']>>> {
     return this.v2Scheduling.runPass(now);
+  }
+
+  /**
+   * Task 21 P1#1: one deterministic v2 scheduling TICK — the pass (reclaim/
+   * requeue/lease ONE work item per task) followed by EXECUTING every freshly
+   * leased work item through the installed real system-command registry +
+   * attempt coordinator. Every v2 mutation driver calls this (replacing the
+   * pass-only driver, which never executed anything). With the authoritative
+   * capability disabled the pass leases nothing and the tick is a no-op.
+   */
+  runV2SchedulingTick(now?: string): Promise<import('./runtime/authoritative-review/attempt-coordinator').V2SchedulingTickResult> {
+    return this.v2Composition.runTick(now);
   }
 
   /** The current v2 projection of one task (corrupt histories fail closed). */
