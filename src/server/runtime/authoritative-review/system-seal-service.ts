@@ -1,98 +1,50 @@
 /**
- * Task 21 system-owned Seal Gate.  The Gate is a pure ten-condition predicate;
- * assembler/validators/publication are injected platform capabilities and are
- * reached only after the exact authority refs pass.
+ * Task 21 system-owned Seal service (design §16.2/§16.3; spec §13.5).
+ *
+ * P1#2: the Seal Gate is the PURE ten-condition gate
+ * (`evaluateSealGate`, seal-gate.ts). The service never accepts a caller-
+ * supplied boolean digest of readiness or caller-supplied authority refs; it
+ * consumes `ResolvedSealAuthorityV2` derived by `seal-authority-resolver.ts`
+ * from the event projection + resolved blob graph (exact-ref bound to the
+ * active Map / finalized manifest / MapReviewBundle / ReviewBundle / profile /
+ * template). Any unmet condition (frozen `sealConditionCodes`, stable order)
+ * fails the command closed before the Assembler/validators are reached.
+ *
+ * P2#8: the canonical Seal warning custody root is BUILT from the seal_input
+ * advisory validator custody (seal_output warning entries stay empty in the
+ * first release). `sealWarningCustodyRootRef` on `SealValidationBundleV2` is
+ * never copied from a validator/supplier-supplied ref; it is the system-
+ * authored, replayable seal-scope custody, so SealRecord → SealValidationBundle
+ * replay makes the seal_input advisory warnings visible.
  */
 import { createHash } from 'node:crypto';
 
 import type { BlobRefV2, SealRecordV2, SystemArtifactDeliveryV2 } from '../../../shared/authoritative-review-v2';
-import type { SealValidationBundleV2, ValidatorAggregateOutcomeV2 } from '../../authoritative-review/authority-types';
-import type { AssemblerRegistrationV2 } from '../../template/structured-slot-contract-v2';
-import { canonicalJson, canonicalJsonSha256 } from '../../structured-slots/canonical-json';
+import type { SealValidationBundleV2, ValidatorAggregateOutcomeV2, ValidatorAggregateV2, ValidationWarningCustodyRootV2 } from '../../authoritative-review/authority-types';
+import { canonicalJsonSha256 } from '../../structured-slots/canonical-json';
+import { assertTemplateIdentityMatchesSeal, evaluateSealGate, sealConditionCodes } from '../../authoritative-review/seal-gate';
+import { sameRef } from './authority-base';
 import type { SystemCommandHandler, SystemCommandOutcome } from './system-command-registry';
-import type { ZhihuChapterAssemblerInputV1 } from './builtin-assemblers/zhihu-chapter-v1';
 import { AssemblerRegistryV2 } from './assembler-registry';
 import { buildReviewObservationGrantSpec } from './review-coordinator';
 import type { AuthoritativeAppendFacadeV2 } from '../../storage/authoritative-append-facade';
 import type { ArtifactStore, PromoteSystemArtifactInputV2, StageSystemArtifactInputV2 } from '../../storage/artifact-store';
+import {
+  SealAuthorityError,
+  type ResolvedSealAuthorityV2,
+  type SealAuthorityResolverV2,
+} from './seal-authority-resolver';
 
-export const SEAL_GATE_UNMET_REASONS = [
-  'ACTIVE_MAP_REF_MISMATCH',
-  'FINALIZED_MANIFEST_REF_MISMATCH',
-  'MAP_REVIEW_BUNDLE_NOT_CURRENT',
-  'CONTENT_FACTS_NOT_PASSING',
-  'BLOCKING_RELATIONS_NOT_SATISFIED',
-  'WHOLE_TREE_OBSERVATION_INCOMPLETE',
-  'BLOCKING_FINDINGS_OPEN',
-  'REVIEW_OR_REPAIR_PENDING',
-  'PRESEAL_VALIDATORS_NOT_CLEAR',
-  'ASSEMBLER_TEMPLATE_IDENTITY_MISMATCH',
-] as const;
-
-export type SealGateUnmetReasonV2 = (typeof SEAL_GATE_UNMET_REASONS)[number];
-
-export interface SealGateInputV2 {
-  activeMapRef: BlobRefV2;
-  reviewMapRef: BlobRefV2;
-  activeManifestRef: BlobRefV2;
-  reviewManifestRef: BlobRefV2;
-  activeMapReviewBundleRef: BlobRefV2;
-  reviewMapReviewBundleRef: BlobRefV2;
-  allContentFactsPassing: boolean;
-  allBlockingRelationsSatisfied: boolean;
-  wholeTreeObservationComplete: boolean;
-  blockingFindingCount: number;
-  pendingOrStaleReviewCount: number;
-  activeRepairGrantCount: number;
-  preSealAggregatesClearAndBound: boolean;
-  frozenAssembler: AssemblerRegistrationV2;
-  installedAssembler: AssemblerRegistrationV2 | null;
-  frozenTemplateSnapshotHash: string;
-  resolvedTemplateSnapshotHash: string;
-}
-
-export interface SealGateResultV2 {
-  ready: boolean;
-  unmetReasons: readonly SealGateUnmetReasonV2[];
-}
-
-function sameRef(a: BlobRefV2, b: BlobRefV2): boolean {
-  return a.kind === b.kind
-    && a.digest === b.digest
-    && a.byteLength === b.byteLength
-    && a.mediaType === b.mediaType
-    && a.schemaVersion === b.schemaVersion;
-}
-
-/** Stable reason order is the frozen condition order, never discovery order. */
-export function evaluateSystemSealGate(input: SealGateInputV2): SealGateResultV2 {
-  const unmet: SealGateUnmetReasonV2[] = [];
-  if (!sameRef(input.activeMapRef, input.reviewMapRef)) unmet.push('ACTIVE_MAP_REF_MISMATCH');
-  if (!sameRef(input.activeManifestRef, input.reviewManifestRef)) unmet.push('FINALIZED_MANIFEST_REF_MISMATCH');
-  if (!sameRef(input.activeMapReviewBundleRef, input.reviewMapReviewBundleRef)) unmet.push('MAP_REVIEW_BUNDLE_NOT_CURRENT');
-  if (!input.allContentFactsPassing) unmet.push('CONTENT_FACTS_NOT_PASSING');
-  if (!input.allBlockingRelationsSatisfied) unmet.push('BLOCKING_RELATIONS_NOT_SATISFIED');
-  if (!input.wholeTreeObservationComplete) unmet.push('WHOLE_TREE_OBSERVATION_INCOMPLETE');
-  if (input.blockingFindingCount !== 0) unmet.push('BLOCKING_FINDINGS_OPEN');
-  if (input.pendingOrStaleReviewCount !== 0 || input.activeRepairGrantCount !== 0) unmet.push('REVIEW_OR_REPAIR_PENDING');
-  if (!input.preSealAggregatesClearAndBound) unmet.push('PRESEAL_VALIDATORS_NOT_CLEAR');
-  if (
-    input.installedAssembler === null
-    || canonicalJson(input.frozenAssembler) !== canonicalJson(input.installedAssembler)
-    || input.frozenTemplateSnapshotHash !== input.resolvedTemplateSnapshotHash
-  ) unmet.push('ASSEMBLER_TEMPLATE_IDENTITY_MISMATCH');
-  return Object.freeze({ ready: unmet.length === 0, unmetReasons: Object.freeze(unmet) });
-}
+export const SEAL_WARNING_CUSTODY_SUPERSESSION_POLICY_VERSION = 'seal-v1';
 
 export interface SealValidatorRunV2 {
   outcome: ValidatorAggregateOutcomeV2;
   aggregateRef: BlobRefV2;
   blockingReceiptRef: BlobRefV2 | null;
-  warningCustodyRootRef: BlobRefV2;
 }
 
 export interface SystemSealBlobWriter {
-  prepare(kind: 'artifact' | 'seal_validation_bundle' | 'seal_record' | 'system_artifact_delivery' | 'write_grant_spec', value: unknown): Promise<BlobRefV2>;
+  prepare(kind: 'artifact' | 'seal_validation_bundle' | 'seal_record' | 'system_artifact_delivery' | 'write_grant_spec' | 'validation_warning_custody_root', value: unknown): Promise<BlobRefV2>;
 }
 
 export interface SystemSealPublisherV2 {
@@ -137,6 +89,10 @@ export interface SystemSealServiceDependenciesV2 {
   validate(stage: 'seal_input' | 'seal_output', artifactRef: BlobRefV2 | null): Promise<SealValidatorRunV2>;
   routeInputBlocking(aggregateRef: BlobRefV2, receiptRef: BlobRefV2): Promise<SystemCommandOutcome>;
   recordOutputBlocking(aggregateRef: BlobRefV2, receiptRef: BlobRefV2): Promise<SystemCommandOutcome>;
+  /** Resolve any registered blob (Seal custody replay, P2#8). */
+  resolveBlob(taskId: string, ref: BlobRefV2): Promise<unknown>;
+  /** System-derived gate authority (P1#2). */
+  resolveSealAuthority: SealAuthorityResolverV2;
 }
 
 export interface ExecuteSystemSealInputV2 {
@@ -145,18 +101,7 @@ export interface ExecuteSystemSealInputV2 {
   sealWorkItemId: string;
   sealLeaseEpoch: number;
   sealAuthorityBaseRef: BlobRefV2;
-  operationId: string;
-  gate: SealGateInputV2;
-  assemblerInput: ZhihuChapterAssemblerInputV1;
-  mapSemanticDigest: string;
-  contentRootDigest: string;
-  reviewBundleRef: BlobRefV2;
-  templateSnapshotHash: string;
-  submitterWorkItemId: string;
-  submitterAgentId: string;
-  submitterAuthorityBaseRef: BlobRefV2;
-  submitterLogicalAssignmentId: string;
-  submitterMaxAutomaticRetries: number;
+  payloadRef: BlobRefV2;
 }
 
 function failure(code: string, aggregateRef?: BlobRefV2): SystemCommandOutcome {
@@ -168,17 +113,95 @@ function failure(code: string, aggregateRef?: BlobRefV2): SystemCommandOutcome {
   };
 }
 
+function authorityFailure(error: SealAuthorityError): SystemCommandOutcome {
+  return failure(`SEAL_AUTHORITY:${error.code}`);
+}
+
+/** §16.3 seal-scope publication operation id (replayable from immutable bytes). */
+export function sealPublishOperationId(sealWorkItemId: string, artifactDigest: string): string {
+  return canonicalJsonSha256({ sealWorkItemId, artifactDigest });
+}
+
+/**
+ * §16.3 canonical Seal advisory custody: ONE entry for the seal_input validators
+ * (advisory receipts are visible through the aggregate/warning root); seal_output
+ * warning entries stay EMPTY in the first release. Building it here from the
+ * RESOLVED seal_input aggregate keeps the bundle's warning custody system-owned
+ * and replayable — never a supplier-supplied ref.
+ */
+export function buildSealWarningCustodyRoot(input: {
+  taskId: string;
+  sealWorkItemId: string;
+  reviewBundleRef: BlobRefV2;
+  sealInputAggregateRef: BlobRefV2;
+  sealInputAggregate: ValidatorAggregateV2;
+}): ValidationWarningCustodyRootV2 {
+  const baseRefs = [input.reviewBundleRef, input.sealInputAggregateRef]
+    .sort((a, b) => (a.digest < b.digest ? -1 : a.digest > b.digest ? 1 : 0));
+  const record = {
+    scope: 'seal' as const,
+    taskId: input.taskId,
+    baseRefs,
+    entries: [
+      {
+        trigger: 'seal_input' as const,
+        inputRef: input.sealInputAggregate.inputRef,
+        inputDigest: input.sealInputAggregate.inputRef.digest,
+        executionScope: { sealWorkItemId: input.sealWorkItemId },
+        validatorAggregateRef: input.sealInputAggregateRef,
+        warningRootRef: input.sealInputAggregate.warningRootRef,
+      },
+    ],
+    supersessionPolicyVersion: SEAL_WARNING_CUSTODY_SUPERSESSION_POLICY_VERSION,
+    rootDigest: '',
+  };
+  const { rootDigest: _ignored, ...body } = record;
+  return { ...record, rootDigest: canonicalJsonSha256(body) };
+}
+
 export class SystemSealServiceV2 {
   constructor(private readonly deps: SystemSealServiceDependenciesV2) {}
 
   async execute(input: ExecuteSystemSealInputV2): Promise<SystemCommandOutcome> {
-    const gate = evaluateSystemSealGate(input.gate);
-    if (!gate.ready) return failure(`SEAL_GATE_UNMET:${gate.unmetReasons.join(',')}`);
-    if (
-      input.templateSnapshotHash !== input.gate.frozenTemplateSnapshotHash
-      || input.templateSnapshotHash !== input.gate.resolvedTemplateSnapshotHash
-    ) {
-      return failure('SEAL_GATE_UNMET:ASSEMBLER_TEMPLATE_IDENTITY_MISMATCH');
+    let resolved: ResolvedSealAuthorityV2;
+    try {
+      resolved = await this.deps.resolveSealAuthority({
+        taskId: input.taskId,
+        workItemId: input.sealWorkItemId,
+        commandId: input.commandId,
+        leaseEpoch: input.sealLeaseEpoch,
+        authorityBaseRef: input.sealAuthorityBaseRef,
+        payloadRef: input.payloadRef,
+      });
+    } catch (error) {
+      if (error instanceof SealAuthorityError) return authorityFailure(error);
+      return failure('SEAL_AUTHORITY_RESOLUTION_INFRASTRUCTURE');
+    }
+
+    const gate = resolved.gate;
+    const gateResult = assertTemplateIdentityMatchesSeal({
+      templateSnapshotHash: gate.templateSnapshotHash,
+      assemblerDigest: gate.assemblerDigest,
+      resourceManifestDigest: gate.resourceManifestDigest,
+      frozenTemplateSnapshotHash: gate.frozenTemplateSnapshotHash,
+      frozenAssemblerDigest: gate.frozenAssemblerDigest,
+      frozenResourceManifestDigest: gate.frozenResourceManifestDigest,
+    });
+    if (gateResult.length > 0) {
+      return failure(`SEAL_GATE_UNMET:${sealConditionCodes.TEMPLATE_MISMATCH}`);
+    }
+
+    // The pure §16.2 ten-condition gate. Unresolvable derivation paths already
+    // surfaced as unmet conditions (frozen codes, stable order) — never guessed.
+    const gateConclusion = evaluateSealGate(gate);
+    if (!gateConclusion.eligible) {
+      return failure(`SEAL_GATE_UNMET:${gateConclusion.unmetConditions.map((c) => c.code).join(',')}`);
+    }
+    // Condition 3 guarantees a non-null active MapReviewBundle; the pure gate's
+    // nullable field needs a narrowing guard before it reaches the record.
+    const activeMapReviewBundleRef = gate.activeMapReviewBundleRef;
+    if (activeMapReviewBundleRef === null) {
+      return failure(`SEAL_GATE_UNMET:${sealConditionCodes.MAP_REVIEW_BUNDLE_MISSING}`);
     }
 
     const sealInput = await this.deps.validate('seal_input', null);
@@ -190,10 +213,10 @@ export class SystemSealServiceV2 {
 
     let outputs;
     try {
-      outputs = await this.deps.assemblerRegistry.assemble(input.gate.frozenAssembler, input.assemblerInput, {
-        mapRef: input.gate.activeMapRef,
-        contentRevisionManifestRef: input.gate.activeManifestRef,
-        templateSnapshotHash: input.templateSnapshotHash,
+      outputs = await this.deps.assemblerRegistry.assemble(resolved.assembler, resolved.assemblerInput, {
+        mapRef: gate.activeMapRef,
+        contentRevisionManifestRef: gate.baseFinalizedManifestRef,
+        templateSnapshotHash: gate.templateSnapshotHash,
       });
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -210,14 +233,29 @@ export class SystemSealServiceV2 {
       return this.deps.recordOutputBlocking(sealOutput.aggregateRef, sealOutput.blockingReceiptRef);
     }
 
+    // P2#8: canonical Seal advisory custody built from the RESOLVED seal_input
+    // aggregate (seal_output warnings stay empty). Never a supplier-supplied ref.
+    const rawSealInputAggregate = await this.deps.resolveBlob(input.taskId, sealInput.aggregateRef);
+    if (rawSealInputAggregate === null || rawSealInputAggregate === undefined || typeof rawSealInputAggregate !== 'object') {
+      return failure('SEAL_INPUT_AGGREGATE_UNRESOLVED', sealInput.aggregateRef);
+    }
+    const sealInputAggregate = rawSealInputAggregate as ValidatorAggregateV2;
+    const sealWarningCustodyRootRef = await this.deps.blobs.prepare('validation_warning_custody_root', buildSealWarningCustodyRoot({
+      taskId: input.taskId,
+      sealWorkItemId: input.sealWorkItemId,
+      reviewBundleRef: gate.reviewBundleRef,
+      sealInputAggregateRef: sealInput.aggregateRef,
+      sealInputAggregate,
+    }));
+
     const bundleCore = {
       sealWorkItemId: input.sealWorkItemId,
-      reviewBundleRef: input.reviewBundleRef,
-      contentRevisionManifestRef: input.gate.activeManifestRef,
+      reviewBundleRef: gate.reviewBundleRef,
+      contentRevisionManifestRef: gate.baseFinalizedManifestRef,
       sealInputAggregateRef: sealInput.aggregateRef,
       sealOutputAggregateRef: sealOutput.aggregateRef,
-      sealWarningCustodyRootRef: sealOutput.warningCustodyRootRef,
-      assemblerDigest: input.gate.frozenAssembler.implementationDigest,
+      sealWarningCustodyRootRef,
+      assemblerDigest: resolved.assembler.implementationDigest,
       artifactRef,
       artifactDigest: artifactRef.digest,
     };
@@ -228,15 +266,15 @@ export class SystemSealServiceV2 {
     const bundleRef = await this.deps.blobs.prepare('seal_validation_bundle', bundle);
     const record: SealRecordV2 = {
       taskId: input.taskId,
-      mapRef: input.gate.activeMapRef,
-      mapSemanticDigest: input.mapSemanticDigest,
-      mapReviewBundleRef: input.gate.activeMapReviewBundleRef,
-      contentRevisionManifestRef: input.gate.activeManifestRef,
-      contentRootDigest: input.contentRootDigest,
-      reviewBundleRef: input.reviewBundleRef,
+      mapRef: gate.activeMapRef,
+      mapSemanticDigest: gate.activeMapSemanticDigest,
+      mapReviewBundleRef: activeMapReviewBundleRef,
+      contentRevisionManifestRef: gate.baseFinalizedManifestRef,
+      contentRootDigest: gate.contentRootDigest,
+      reviewBundleRef: gate.reviewBundleRef,
       sealValidationBundleRef: bundleRef,
-      templateSnapshotHash: input.templateSnapshotHash,
-      assemblerDigest: input.gate.frozenAssembler.implementationDigest,
+      templateSnapshotHash: gate.templateSnapshotHash,
+      assemblerDigest: resolved.assembler.implementationDigest,
       artifactRef,
       artifactDigest: artifactRef.digest,
     };
@@ -247,13 +285,14 @@ export class SystemSealServiceV2 {
         taskId: input.taskId,
         sealWorkItemId: input.sealWorkItemId,
         sealRecordRef,
-        templateSnapshotHash: input.templateSnapshotHash,
+        templateSnapshotHash: gate.templateSnapshotHash,
         artifactRef,
         files: outputs.map((item) => ({ name: item.artifactFile, mediaType: item.mediaType, content: item.content })),
       });
     } catch {
       return failure('ARTIFACT_STAGE_INFRASTRUCTURE', sealOutput.aggregateRef);
     }
+    const operationId = sealPublishOperationId(input.sealWorkItemId, artifactRef.digest);
     const delivery: SystemArtifactDeliveryV2 = {
       deliveryId: `delivery-${sealRecordRef.digest}`,
       producer: 'system:structured_seal',
@@ -264,27 +303,27 @@ export class SystemSealServiceV2 {
       artifactDigest: artifactRef.digest,
       custodyRef: staged.custodyRef,
       custodyDigest: staged.custodyRef.digest,
-      submitterWorkItemId: input.submitterWorkItemId,
-      submitterAgentId: input.submitterAgentId,
-      templateSnapshotHash: input.templateSnapshotHash,
+      submitterWorkItemId: resolved.submitter.workItemId,
+      submitterAgentId: resolved.submitter.agentId,
+      templateSnapshotHash: gate.templateSnapshotHash,
     };
     const deliveryRef = await this.deps.blobs.prepare('system_artifact_delivery', delivery);
     const submitterGrantSpecRef = await this.deps.blobs.prepare('write_grant_spec', buildReviewObservationGrantSpec({
-      grantSpecId: `grant-${input.submitterWorkItemId}`,
-      workItemId: input.submitterWorkItemId,
-      authorityBaseRef: input.submitterAuthorityBaseRef,
+      grantSpecId: `grant-${resolved.submitter.workItemId}`,
+      workItemId: resolved.submitter.workItemId,
+      authorityBaseRef: input.sealAuthorityBaseRef,
       sessionKind: null,
       reviewAssignmentId: null,
       roundId: null,
       roundKind: null,
-      snapshotHash: input.templateSnapshotHash,
-      maxContextBytes: input.gate.frozenAssembler.budget.maxInputBytes,
+      snapshotHash: gate.templateSnapshotHash,
+      maxContextBytes: resolved.assembler.budget.maxInputBytes,
     }));
     let published: Awaited<ReturnType<SystemSealPublisherV2['publish']>>;
     try {
       published = await this.deps.publisher.publish({
       taskId: input.taskId,
-      operationId: input.operationId,
+      operationId,
       sealWorkItemId: input.sealWorkItemId,
       sealCommandId: input.commandId,
       sealLeaseEpoch: input.sealLeaseEpoch,
@@ -295,13 +334,13 @@ export class SystemSealServiceV2 {
       custodyRef: staged.custodyRef,
       deliveryRef,
       delivery,
-      submitterAuthorityBaseRef: input.submitterAuthorityBaseRef,
+      submitterAuthorityBaseRef: input.sealAuthorityBaseRef,
       submitterGrantSpecRef,
-      submitterLogicalAssignmentId: input.submitterLogicalAssignmentId,
-      submitterMaxAutomaticRetries: input.submitterMaxAutomaticRetries,
-      mapRef: input.gate.activeMapRef,
-      contentRevisionManifestRef: input.gate.activeManifestRef,
-      reviewBundleRef: input.reviewBundleRef,
+      submitterLogicalAssignmentId: resolved.submitter.logicalAssignmentId,
+      submitterMaxAutomaticRetries: resolved.submitter.maxAutomaticRetries,
+      mapRef: gate.activeMapRef,
+      contentRevisionManifestRef: gate.baseFinalizedManifestRef,
+      reviewBundleRef: gate.reviewBundleRef,
       files: outputs.map((item) => ({
         name: item.artifactFile,
         mediaType: item.mediaType,
@@ -311,7 +350,9 @@ export class SystemSealServiceV2 {
     } catch {
       return failure('SEAL_PUBLISH_INFRASTRUCTURE', sealOutput.aggregateRef);
     }
-    if (!sameRef(published.deliveryRef, deliveryRef)) return failure('DELIVERY_REF_MISMATCH');
+    if (!sameRef(published.deliveryRef, deliveryRef)) {
+      return failure('DELIVERY_REF_MISMATCH');
+    }
     return { kind: 'completed', resultRefs: [bundleRef, sealRecordRef, artifactRef, deliveryRef] };
   }
 }
@@ -415,18 +456,25 @@ export function createArtifactStoreSystemSealPublisher(input: {
   });
 }
 
+/**
+ * The SystemCommand `seal` handler. All authority (lease/work item/base/
+ * payload) is derived system-side by the service's `resolveSealAuthority`;
+ * nothing caller-supplied reaches the Gate.
+ */
 export function createSystemSealCommandHandler(
   service: SystemSealServiceV2,
-  resolveInput: (taskId: string, payloadRef: BlobRefV2) => Promise<ExecuteSystemSealInputV2>,
 ): SystemCommandHandler {
   return {
     commandKind: 'seal',
     async execute(ctx) {
-      const input = await resolveInput(ctx.taskId, ctx.payloadRef);
-      if (input.taskId !== ctx.taskId || input.commandId !== ctx.commandId || input.sealWorkItemId !== ctx.workItemId) {
-        return failure('SEAL_COMMAND_AUTHORITY_MISMATCH');
-      }
-      return service.execute(input);
+      return service.execute({
+        taskId: ctx.taskId,
+        commandId: ctx.commandId,
+        sealWorkItemId: ctx.workItemId,
+        sealLeaseEpoch: ctx.leaseEpoch,
+        sealAuthorityBaseRef: ctx.authorityBaseRef,
+        payloadRef: ctx.payloadRef,
+      });
     },
   };
 }
