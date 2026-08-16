@@ -45,6 +45,7 @@
  */
 import type { BlobRefV2, RecoveryRecipeKeyV2 } from '../../shared/authoritative-review-v2';
 import type { AuthoritativeReviewEventV2 } from './authoritative-review-events';
+import type { LegacyTaskEvent } from './task-events';
 import { canonicalJsonSha256 } from '../structured-slots/canonical-json';
 import { parseBlob } from '../authoritative-review/object-registry';
 import { SchemaError } from '../authoritative-review/authority-types';
@@ -90,7 +91,7 @@ export class ProjectionCorruptionError extends Error {
   }
 }
 
-function corrupt(reason: string, event: AuthoritativeReviewEventV2, sequence: number, detail = ''): never {
+function corrupt(reason: string, event: { id: string; type: string }, sequence: number, detail = ''): never {
   throw new ProjectionCorruptionError({
     reason,
     message: `v2 事件历史违反不变量 ${reason}（序列 ${sequence}，事件 ${event.id}）。`,
@@ -304,6 +305,14 @@ export interface AuthoritativeReviewProjectionV2 {
     artifactRef: BlobRefV2;
     custodyRef: BlobRefV2;
   } | null;
+  /**
+   * Highest artifact version committed across the merged v1/v2 publication
+   * stream (spec §13.5.1). Both the legacy `artifact_published` (v1) and the
+   * authoritative `artifact_published_v2` advance it; a v2 publication's
+   * version must equal this +1, so the v2 event can never drift from recorded
+   * v1 history (legacy v1 members otherwise stay legal companions).
+   */
+  mergedArtifactVersion: number;
   delivery: {
     deliveryId: string;
     deliveryRef: BlobRefV2;
@@ -486,6 +495,7 @@ function createFold(resolver: BlobObjectResolver | undefined): Fold {
       findings: {},
       currentSeal: null,
       publishedArtifact: null,
+      mergedArtifactVersion: 0,
       delivery: null,
       availableOverride: null,
       consumedOverrideRefs: [],
@@ -2305,6 +2315,29 @@ function applySealed(
   };
 }
 
+/**
+ * §13.5.1 merged v1/v2 version allocation. A legacy `artifact_published` is a
+ * legal companion the v2 projection never folds into the v2 authority object,
+ * but its version still occupies the SHARED artifact version namespace (the
+ * ArtifactStore allocates each next version from the combined committed
+ * maximum). The v2 projection folds v1 publications into the same
+ * monotonically +1 merged maximum, so a v2 event's version can never drift
+ * from the recorded v1 history; an out-of-order v1 publication (gap or
+ * rewind) is corruption, never a partial fold.
+ */
+function applyLegacyArtifactPublished(
+  fold: Fold,
+  event: Extract<LegacyTaskEvent, { type: 'artifact_published' }>,
+  sequence: number,
+): void {
+  const p = fold.projection;
+  const expected = p.mergedArtifactVersion + 1;
+  if (event.artifact.version !== expected) {
+    corrupt('publish_version', event, sequence, `version=${event.artifact.version}`);
+  }
+  p.mergedArtifactVersion = event.artifact.version;
+}
+
 function applyArtifactPublished(
   fold: Fold,
   event: Extract<AuthoritativeReviewEventV2, { type: 'artifact_published_v2' }>,
@@ -2322,7 +2355,9 @@ function applyArtifactPublished(
     // signal of a double publish.
     corrupt('publish_duplicate', event, sequence, `artifactId=${event.artifactId}`);
   }
-  if (event.artifactVersion !== priorVersion + 1) {
+  // §13.5.1: the v2 publication occupies the next version after the MERGED
+  // v1/v2 committed maximum, not merely after the last v2 publication.
+  if (event.artifactVersion !== p.mergedArtifactVersion + 1) {
     corrupt('publish_version', event, sequence, `version=${event.artifactVersion}`);
   }
   if (seal !== null && event.provenance.producerWorkItemId !== seal.sealWorkItemId) {
@@ -2345,6 +2380,7 @@ function applyArtifactPublished(
     artifactRef: event.provenance.artifactRef,
     custodyRef: event.provenance.custodyRef,
   };
+  p.mergedArtifactVersion = event.artifactVersion;
 }
 
 function applyDeliveryCreated(
@@ -2921,11 +2957,19 @@ function runProjectionFold(
   (fold as unknown as { bookkeeping: Record<string, Record<string, unknown>> }).bookkeeping = prior?.bookkeeping ?? {};
   for (let index = 0; index < events.length; index += 1) {
     const event = events[index];
+    const sequence = prior === undefined ? index + 1 : prior.projection.lastSequence + index + 1;
     if ((event as { protocolVersion?: unknown }).protocolVersion !== 2) {
-      continue; // legacy members are legal companions, never folded
+      // Legacy members are legal companions, never folded — EXCEPT the v1
+      // `artifact_published`, whose version still occupies the shared artifact
+      // version namespace and counts toward the merged v1/v2 allocation
+      // (spec §13.5.1).
+      if ((event as { type?: unknown }).type === 'artifact_published') {
+        applyLegacyArtifactPublished(fold, event as unknown as Extract<LegacyTaskEvent, { type: 'artifact_published' }>, sequence);
+      }
+      continue;
     }
     // The fold is synchronous: corruption throws here, never as a rejection.
-    applyEvent(fold, event, prior === undefined ? index + 1 : prior.projection.lastSequence + index + 1);
+    applyEvent(fold, event, sequence);
   }
   checkEndObligations(fold, events.length);
   fold.projection.taskStatus = deriveTaskStatusV2(fold.projection);
@@ -2978,6 +3022,10 @@ function resumeFold(prior: ProjectionFoldDataV2, resolver: BlobObjectResolver | 
   );
   fold.planToLineage = { ...prior.planToLineage };
   fold.projection = structuredClone(prior.projection);
+  // Checkpoints written by projector versions before the merged v1/v2
+  // allocation carry no `mergedArtifactVersion`; normalize defensively so an
+  // incremental tail replay never sees undefined and corrupts on NaN.
+  fold.projection.mergedArtifactVersion = fold.projection.mergedArtifactVersion ?? 0;
   (fold as unknown as { bookkeeping: Record<string, Record<string, unknown>> }).bookkeeping = Object.fromEntries(
     Object.entries(prior.bookkeeping).map(([k, v]) => [k, { ...v }]),
   );

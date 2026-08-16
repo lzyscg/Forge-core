@@ -907,6 +907,7 @@ describe('leaseNext — claims, ordering, batch shape', () => {
       findings: {},
       currentSeal: null,
       publishedArtifact: null,
+      mergedArtifactVersion: 0,
       delivery: null,
       availableOverride: null,
       consumedOverrideRefs: [],

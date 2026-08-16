@@ -2441,3 +2441,124 @@ describe('projectAuthoritativeReviewState — review fix round 2', () => {
     expect(projected.state.migrationSettled).toBe(false);
   });
 });
+
+/* ------------------------------------------------------------------ */
+/* §13.5.1 merged v1/v2 artifact version allocation                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A legacy v1 `artifact_published` companion (carries no `protocolVersion`,
+ * so the v2 projector never folds it into a v2 authority object). Its
+ * `artifact.version` still occupies the SHARED artifact version namespace and
+ * must count toward the merged v1/v2 allocation (spec §13.5.1).
+ */
+function legacyPublishedV1(id: string, version: number): AuthoritativeReviewEventV2 {
+  return {
+    id,
+    at: AT,
+    type: 'artifact_published',
+    artifact: {
+      version,
+      title: `legacy-${version}`,
+      sourceNodeId: `node-${version}`,
+      format: 'markdown',
+      files: [{ name: 'legacy.md', hash: digestFor('legacy', version) }],
+      artifactType: null,
+      artifactId: null,
+    },
+  } as unknown as AuthoritativeReviewEventV2;
+}
+
+describe('projectAuthoritativeReviewState — §13.5.1 merged v1/v2 artifact version allocation', () => {
+  it('A: v1 version 1 then v2 version 2 replays legally (v2 commits on the merged maximum)', async () => {
+    const base = buildFullLifecycle('merged-a');
+    const idx = base.findIndex((e) => e.type === 'artifact_published_v2');
+    expect(idx).toBeGreaterThanOrEqual(0);
+    const publish = base[idx] as Extract<AuthoritativeReviewEventV2, { type: 'artifact_published_v2' }>;
+    const v2 = validateAuthoritativeReviewEventV2({
+      ...(publish as unknown as Record<string, unknown>),
+      id: publish.id,
+      artifactVersion: 2,
+    });
+    const events = [...base.slice(0, idx), legacyPublishedV1('evt-a-v1', 1), v2, ...base.slice(idx + 1)];
+    const state = await projectOk(events);
+    expect(state.mergedArtifactVersion).toBe(2);
+    expect(state.publishedArtifact?.artifactVersion).toBe(2);
+  });
+
+  it('B: v1 then v2 then v1 (versions 1/2/3) replays legally', async () => {
+    const base = buildFullLifecycle('merged-b');
+    const idx = base.findIndex((e) => e.type === 'artifact_published_v2');
+    expect(idx).toBeGreaterThanOrEqual(0);
+    const publish = base[idx] as Extract<AuthoritativeReviewEventV2, { type: 'artifact_published_v2' }>;
+    const v2 = validateAuthoritativeReviewEventV2({
+      ...(publish as unknown as Record<string, unknown>),
+      id: publish.id,
+      artifactVersion: 2,
+    });
+    const events = [
+      ...base.slice(0, idx),
+      legacyPublishedV1('evt-b-v1-1', 1),
+      v2,
+      legacyPublishedV1('evt-b-v1-2', 3),
+      ...base.slice(idx + 1),
+    ];
+    const state = await projectOk(events);
+    expect(state.mergedArtifactVersion).toBe(3);
+    expect(state.publishedArtifact?.artifactVersion).toBe(2);
+  });
+
+  it('C: a second v2 publication after v1+v2 stays corrupt (one-v2-publication invariant)', async () => {
+    const base = buildFullLifecycle('merged-c');
+    const idx = base.findIndex((e) => e.type === 'artifact_published_v2');
+    expect(idx).toBeGreaterThanOrEqual(0);
+    const publish = base[idx] as Extract<AuthoritativeReviewEventV2, { type: 'artifact_published_v2' }>;
+    const v2a = validateAuthoritativeReviewEventV2({
+      ...(publish as unknown as Record<string, unknown>),
+      id: publish.id,
+      artifactVersion: 2,
+    });
+    const v2b = validateAuthoritativeReviewEventV2({
+      ...(v2a as unknown as Record<string, unknown>),
+      id: 'evt-c-v2-second',
+      artifactId: 'artifact-c-second',
+      artifactVersion: 3,
+    });
+    const events = [...base.slice(0, idx), legacyPublishedV1('evt-c-v1', 1), v2a, v2b];
+    await expectCorrupt(events, 'publish_duplicate', idx + 3);
+  });
+
+  it('D1: a v2 version that skips the merged maximum (claims 3 after v1 at 1) is corrupt', async () => {
+    const base = buildFullLifecycle('merged-d1');
+    const idx = base.findIndex((e) => e.type === 'artifact_published_v2');
+    expect(idx).toBeGreaterThanOrEqual(0);
+    const publish = base[idx] as Extract<AuthoritativeReviewEventV2, { type: 'artifact_published_v2' }>;
+    const v2skip = validateAuthoritativeReviewEventV2({
+      ...(publish as unknown as Record<string, unknown>),
+      id: publish.id,
+      artifactVersion: 3,
+    });
+    const events = [...base.slice(0, idx), legacyPublishedV1('evt-d1-v1', 1), v2skip];
+    await expectCorrupt(events, 'publish_version', idx + 2);
+  });
+
+  it('D2: a v1 publication that skips the merged maximum (claims 3 after v2 at 1) is corrupt', async () => {
+    const base = buildFullLifecycle('merged-d2');
+    const idx = base.findIndex((e) => e.type === 'artifact_published_v2');
+    expect(idx).toBeGreaterThanOrEqual(0);
+    const events = [...base.slice(0, idx + 1), legacyPublishedV1('evt-d2-v1', 3)];
+    await expectCorrupt(events, 'publish_version', idx + 2);
+  });
+
+  it('E: a pure legacy v1 publication stream advances the merged count and stays legal', async () => {
+    const events = [legacyPublishedV1('evt-e-v1-1', 1), legacyPublishedV1('evt-e-v1-2', 2)] as unknown as AuthoritativeReviewEventV2[];
+    const state = await projectOk(events);
+    expect(state.mergedArtifactVersion).toBe(2);
+    expect(state.publishedArtifact).toBeNull();
+  });
+
+  it('F: a pure legacy v1 publication stream with a version gap is corrupt', async () => {
+    const events = [legacyPublishedV1('evt-f-v1-1', 1), legacyPublishedV1('evt-f-v1-3', 3)] as unknown as AuthoritativeReviewEventV2[];
+    await expectCorrupt(events, 'publish_version', 2);
+  });
+});
