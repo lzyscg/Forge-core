@@ -76,3 +76,22 @@
 - `MigrationServiceV2` is dependency-injected into `MapReviewService`; the capability remains disabled, so production bootstrap/profile activation is intentionally deferred to the later activation task.
 - The clear/content/Map route preparers and the target-Map validator/finalizer are explicit system-owned dependency seams. The service validates their authority-bearing carriers before publication rather than trusting a caller-supplied route.
 - Independent review should attack GC closure for every migration ref, response-loss replay for initial/batch/post envelopes, mixed Finding routing, schemaVersion-1 parser compatibility, and the zero-validation direct-post path.
+
+## Adversarial re-review fix round 3
+
+- **P1-1 — sequential equivalence custody:** production migration now follows any equivalence-only `sourceVersionRef` chain to the originating clear `content_commit/batch_commit` aggregate. Every inherited link is hash-checked and recomputes the frozen registration, selector, content bytes, local Map subgraph, and relation-context dimensions. The originating input/core/raw-warning/custody closure must be exact. Missing or corrupt historic custody is conservatively treated as `fresh_validation_required`, never as a migration crash. Settlement repeats the complete custody proof before accepting an `equivalent` result.
+- **P1-2 — system-owned required coverage:** the production finalizer derives the complete content-bearing and required slot sets from the exact target Map plus frozen slot types. The compatibility callback is comparison-only and any disagreement fails closed. The manifest must exactly cover all content-bearing target nodes with target-Map-bound versions, and `clear` additionally requires every system-derived required slot to be set.
+- **P1-3 — complete Map Finding scope:** migration Findings retain the union of authoritative content-slot and Map-node stable IDs plus every relation target. Map repair preparation consumes slot-primary mixed targets, related Map nodes, related relations, and the closed `$map` whole-Map location. Whole-Map expansion is still bounded by the exact target Map and the repair profile limits.
+- **Durable fixture correction:** the 10,000-node production proof now gives each of the 600 required source slots its own valid `ContentValue`, validator input, clear aggregate, warning root, and warning-custody root. The remaining 9,400 target nodes use a frozen optional slot type, so the system-derived required set is exactly the 600 populated slots; the callback can no longer clear required unset content by returning `[]`.
+
+### Re-review-2 fix qualification (2026-08-16)
+
+- Sequential real replacement after GC/reopen: first replacement produces `inherit_equivalent`; the second production migration follows its source custody, completes clear, and two executions produce the same terminal batch root.
+- Real AttemptCoordinator Map routes: slot-primary mixed, `$map` primary, and multi-node/relation targets all project a candidate-bound ready `MapRepairPlan` with complete bounded scopes.
+- Required-slot disagreement case: fails closed and publishes no replacement Map activation.
+- Non-10k production integration: **10 passed, 1 skipped** (the skipped case is only the separately-run 10k proof).
+- Real 10,000-node durable GC/reopen proof: **1 passed** in **752.38 s**, then re-run at the final source state and **1 passed** in **761.46 s**, with uninterrupted/restarted byte-identical roots and valid per-slot source provenance.
+- Migration/repair/Map/attempt/validator focused regression: **7 files / 144 tests; 143 passed initially, then the one updated 10k fast property passed independently**. Repair service alone: **36 passed**; Map review: **16 passed**; AttemptCoordinator: **23 passed**; ValidatorEngine: **34 passed**.
+- Capability/profile/append-facade guard regression: **4 files / 75 passed**.
+- `npm run check`, `npm run build`, and `git diff --check`: passed.
+- Runtime boundary remains facade-only with no production `EventStore` import; schemaVersion remains `1`; v1/capability/profile sources are unchanged.

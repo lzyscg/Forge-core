@@ -695,6 +695,24 @@ describe('validator engine — trigger/target matrix', () => {
     };
     expect(validateIssueTargets('map_candidate_commit', issue, universe)).toBe('map triggers must not carry slot repair targets');
   });
+
+  it('accepts only the closed $map whole-Map location and still bounds every repair target', () => {
+    const universe: ValidatorTargetUniverse = { slotIds: ['s1'], relationIds: ['r1'], mapNodeIds: ['s1'], artifactDigest: null };
+    const wholeMap = {
+      validatorId: 'v', implementationDigest: '0'.repeat(64), issueCode: 'WHOLE_MAP_CONTRADICTION',
+      location: { targetKind: 'map', stableTargetId: '$map', jsonPointer: null },
+      repairTargets: { mapNodeIds: ['s1'], relationIds: ['r1'], slotIds: [] }, evidenceDigest: '',
+    };
+    expect(validateIssueTargets('content_commit', wholeMap, universe)).toBeNull();
+    expect(validateIssueTargets('content_commit', {
+      ...wholeMap,
+      location: { ...wholeMap.location, stableTargetId: 'caller-map-id' },
+    }, universe)).toBe('target outside the selected snapshot');
+    expect(validateIssueTargets('content_commit', {
+      ...wholeMap,
+      repairTargets: { ...wholeMap.repairTargets, relationIds: ['outside'] },
+    }, universe)).toBe('repair target outside the selected snapshot');
+  });
 });
 
 /* ------------------------------------------------------------------ */

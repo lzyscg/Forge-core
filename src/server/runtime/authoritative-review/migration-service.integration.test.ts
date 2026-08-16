@@ -28,6 +28,7 @@ import {
   buildMigrationValidationPlanSpec,
   createProductionMigrationRuntime,
   registerMigrationPublicationHandlers,
+  validateAndClassifyMigrationBatchResults,
 } from './migration-service';
 import { buildAuthorityBaseSet } from './authority-base';
 import { buildContentRevisionCommitCore, buildEmptyAdoptionRoot } from './content-plan-service';
@@ -74,17 +75,35 @@ function registration(handlerKey: string): ValidatorRegistrationV2 {
   };
 }
 
-type FinalizerRouteScenario = 'clear' | 'content_repair' | 'map_repair' | 'infrastructure_failure';
+type FinalizerRouteScenario =
+  | 'clear'
+  | 'content_repair'
+  | 'map_repair'
+  | 'map_repair_slot_primary'
+  | 'map_repair_map_primary'
+  | 'map_repair_multi_target'
+  | 'infrastructure_failure';
 
 function finalizerHarness(scenario: FinalizerRouteScenario) {
   if (scenario === 'clear') return null;
   const repairTargets = scenario === 'content_repair'
     ? "{ mapNodeIds: [], relationIds: [], slotIds: ['slot-00000'] }"
-    : "{ mapNodeIds: ['slot-00000'], relationIds: [], slotIds: ['slot-00000'] }";
-  const targetKind = scenario === 'map_repair' ? 'node' : 'slot';
+    : scenario === 'map_repair_slot_primary'
+      ? "{ mapNodeIds: ['slot-00001'], relationIds: [], slotIds: ['slot-00000'] }"
+      : scenario === 'map_repair_map_primary'
+        ? "{ mapNodeIds: ['slot-00001'], relationIds: [], slotIds: [] }"
+        : scenario === 'map_repair_multi_target'
+          ? "{ mapNodeIds: ['slot-00000', 'slot-00001'], relationIds: ['rel-00000'], slotIds: [] }"
+          : "{ mapNodeIds: ['slot-00000'], relationIds: [], slotIds: ['slot-00000'] }";
+  const targetKind = scenario === 'map_repair' || scenario === 'map_repair_multi_target'
+    ? 'node'
+    : scenario === 'map_repair_map_primary'
+      ? 'map'
+      : 'slot';
+  const stableTargetId = scenario === 'map_repair_map_primary' ? '$map' : 'slot-00000';
   const body = scenario === 'infrastructure_failure'
     ? "throw new Error('injected plan-finalize infrastructure failure');"
-    : `return { status: 'domain_invalid', issues: [{ validatorId: input.validatorId, implementationDigest: input.implementationDigest, issueCode: 'MIGRATION_${scenario.toUpperCase()}', location: { targetKind: '${targetKind}', stableTargetId: 'slot-00000', jsonPointer: null }, repairTargets: ${repairTargets}, evidenceDigest: '' }], executionDigest: '' };`;
+    : `return { status: 'domain_invalid', issues: [{ validatorId: input.validatorId, implementationDigest: input.implementationDigest, issueCode: 'MIGRATION_${scenario.toUpperCase()}', location: { targetKind: '${targetKind}', stableTargetId: '${stableTargetId}', jsonPointer: null }, repairTargets: ${repairTargets}, evidenceDigest: '' }], executionDigest: '' };`;
   const source = `'use strict'; module.exports = { validate: function validate(input) { ${body} } };`;
   const builtin = AUTHORITATIVE_REVIEW_BUILTIN_VALIDATOR_ENTRIES.find((entry) => entry.handlerKey === 'authoritative.review.coverage');
   if (builtin === undefined) throw new Error('missing coverage builtin');
@@ -117,7 +136,7 @@ const frozenV2 = {
 async function prepareDurable10kFixture(
   env: WorkItemCoordinatorEnvironment,
   taskId: string,
-  options: { slotCount?: number; validatableSlotCount?: number } = {},
+  options: { slotCount?: number; validatableSlotCount?: number; withRelation?: boolean } = {},
 ) {
   const slotCount = options.slotCount ?? 10_000;
   const validatableSlotCount = options.validatableSlotCount ?? 600;
@@ -129,7 +148,7 @@ async function prepareDurable10kFixture(
   const nodes = slotIds.map((slotId, documentOrder) => {
     const body = {
       slotId,
-      slotType: 'doc',
+      slotType: documentOrder < validatableSlotCount ? 'doc' : 'optional-doc',
       contentBearing: true,
       parentSlotId: documentOrder === 0 ? null : slotIds[0]!,
       documentOrder,
@@ -137,6 +156,12 @@ async function prepareDurable10kFixture(
     };
     return { ...body, nodeSpecDigest: canonicalJsonSha256(body) };
   });
+  const relations = options.withRelation === true && slotIds.length >= 2
+    ? [{
+        relationId: 'rel-00000', typeId: 'sequence', fromSlotId: slotIds[0]!, toSlotId: slotIds[1]!,
+        attributes: {}, relationDigest: H('durable-relation-00000'),
+      }]
+    : [];
   const contentBody = {
     slotId: validatableSlotIds[validatableSlotIds.length - 1] ?? slotIds[0]!,
     contentSchemaDigest: H('durable-schema'), taskContentRevision: 1,
@@ -158,7 +183,7 @@ async function prepareDurable10kFixture(
   const contributionRef = await env.facade.prepareBlob(taskId, 'contribution_manifest', contribution);
   const candidateCoreBody = {
     candidateId: 'candidate-durable', baseMapId: null, positionGraphDigest: H('durable-position'), relationGraphDigest: H('durable-relations'),
-    templateSnapshotHash: 'a'.repeat(64), nodes, relations: [],
+    templateSnapshotHash: 'a'.repeat(64), nodes, relations,
     candidateProvenanceWithoutValidation: {
       producerKind: 'system_map_finalize' as const, producerWorkItemId: 'wi-map-finalize', commandId: 'cmd-map-finalize',
       mapBuildId: 'build-durable', mapBuildRevision: 1, contributionManifestRef: contributionRef,
@@ -226,7 +251,7 @@ async function prepareDurable10kFixture(
   const proposedBody = {
     scaffoldId: 'scaffold-durable', proposedMapId: 'map-durable-target', supersedesMapId: 'map-durable-source', sourceCandidateRef: candidateRef,
     mapRevision: 2, mapSemanticDigest: H('durable-semantic'), positionGraphDigest: H('durable-position'), relationGraphDigest: H('durable-relations'),
-    templateSnapshotHash: 'a'.repeat(64), nodes, relations: [],
+    templateSnapshotHash: 'a'.repeat(64), nodes, relations,
   };
   const proposed = { ...proposedBody, coreDigest: canonicalJsonSha256(proposedBody) };
   const proposedRef = await env.facade.prepareBlob(taskId, 'proposed_map_core', proposed);
@@ -237,7 +262,7 @@ async function prepareDurable10kFixture(
     scaffoldId: 'scaffold-durable', mapId: 'map-durable-target', supersedesMapId: 'map-durable-source', sourceCandidateId: candidate.candidateId,
     proposedMapCoreRef: proposedRef, mapReviewBundleRef: bundleRef, mapRevision: 2,
     mapSemanticDigest: proposed.mapSemanticDigest, positionGraphDigest: proposed.positionGraphDigest, relationGraphDigest: proposed.relationGraphDigest,
-    templateSnapshotHash: proposed.templateSnapshotHash, nodes, relations: [], activatedAt: env.now.value,
+    templateSnapshotHash: proposed.templateSnapshotHash, nodes, relations, activatedAt: env.now.value,
   };
   const targetMapRef = await env.facade.prepareBlob(taskId, 'map_snapshot', targetSnapshot);
   // Force one real target-Map revalidation while the other 599 validatable
@@ -339,14 +364,65 @@ async function prepareDurable10kFixture(
   const entries: Array<{ slotId: string; versionRef: BlobRefV2 }> = [];
   const versionsBySlot = new Map<string, { version: SlotContentVersionV2; ref: BlobRefV2 }>();
   const preparedVersions = await mapWithBoundedConcurrency(validatableSlotIds, async (slotId) => {
+    const isSharedFixtureSlot = slotId === contentBody.slotId;
+    const slotContentBody = isSharedFixtureSlot ? contentBody : {
+      slotId,
+      contentSchemaDigest: H('durable-schema'),
+      taskContentRevision: 1,
+      mediaType: 'text/plain' as const,
+      text: `durable content for ${slotId}`,
+    };
+    const slotContent = isSharedFixtureSlot ? content : { ...slotContentBody, selfDigest: canonicalJsonSha256(slotContentBody) };
+    const slotContentRef = isSharedFixtureSlot
+      ? contentRef
+      : await env.facade.prepareBlob(taskId, 'content_value', slotContent);
+    const slotInput = isSharedFixtureSlot ? sourceInput : { ...sourceInput, selectedTargetRefs: [slotContentRef] };
+    const slotInputRef = isSharedFixtureSlot
+      ? sourceInputRef
+      : await env.facade.prepareBlob(taskId, 'validator_input_envelope', slotInput);
+    const slotWarningBody = {
+      ...sourceWarningBody,
+      inputRef: slotInputRef,
+      inputDigest: slotInputRef.digest,
+    };
+    const slotWarning = isSharedFixtureSlot ? sourceWarning : { ...slotWarningBody, rootDigest: canonicalJsonSha256(slotWarningBody) };
+    const slotWarningRef = isSharedFixtureSlot
+      ? sourceWarningRef
+      : await env.facade.prepareBlob(taskId, 'validation_warning_root', slotWarning);
+    const slotAggregateBody = {
+      ...sourceAggregateBody,
+      inputRef: slotInputRef,
+      inputDigest: slotInputRef.digest,
+      validExecutionDigests: [H(`durable-source-valid-${slotId}`)],
+      warningRootRef: slotWarningRef,
+    };
+    const slotAggregate = isSharedFixtureSlot ? sourceAggregate : { ...slotAggregateBody, aggregateDigest: canonicalJsonSha256(slotAggregateBody) };
+    const slotAggregateRef = isSharedFixtureSlot
+      ? sourceAggregateRef
+      : await env.facade.prepareBlob(taskId, 'validator_aggregate', slotAggregate);
+    const slotCustodyBody = {
+      ...sourceCustodyBody,
+      baseRefs: [slotInputRef],
+      entries: [{
+        ...sourceCustodyBody.entries[0]!,
+        inputRef: slotInputRef,
+        inputDigest: slotInputRef.digest,
+        validatorAggregateRef: slotAggregateRef,
+        warningRootRef: slotWarningRef,
+      }],
+    };
+    const slotCustody = isSharedFixtureSlot ? sourceCustody : { ...slotCustodyBody, rootDigest: canonicalJsonSha256(slotCustodyBody) };
+    const slotCustodyRef = isSharedFixtureSlot
+      ? sourceCustodyRef
+      : await env.facade.prepareBlob(taskId, 'validation_warning_custody_root', slotCustody);
     const version: SlotContentVersionV2 = {
       state: 'set', slotId, slotRevision: 1, taskContentRevision: 2, mapRef: sourceMapRef,
       mapSemanticDigest: sourceSnapshot.mapSemanticDigest, contentSchemaDigest: contentBody.contentSchemaDigest,
-      contentDigest: contentRef.digest, blobRef: contentRef,
+      contentDigest: slotContentRef.digest, blobRef: slotContentRef,
       provenance: {
         kind: 'generated', producer: { kind: 'generation_batch', planRevisionId: generationPlan.generationPlanId, batchOrdinal: 0, attemptId: 'att-durable' },
-        contentRevisionCommitCoreRef: sourceCommitCoreRef, contentCommitValidatorAggregateRef: sourceAggregateRef,
-        contentCommitWarningRootRef: sourceCustodyRef, committedByAttemptId: 'att-durable',
+        contentRevisionCommitCoreRef: sourceCommitCoreRef, contentCommitValidatorAggregateRef: slotAggregateRef,
+        contentCommitWarningRootRef: slotCustodyRef, committedByAttemptId: 'att-durable',
       },
     };
     const versionRef = await env.facade.prepareBlob(taskId, 'content_version', version);
@@ -366,7 +442,7 @@ async function prepareDurable10kFixture(
   const round = {
     mapReviewRoundId: 'round-durable', candidateId: candidate.candidateId, candidateDigest: candidate.candidateDigest,
     contentRevisionManifestRef: manifestRef, contentRootDigest: manifest.contentRootDigest, reviewPolicyDigest: coverage.reviewPolicyDigest,
-    coverageNodeIds: slotIds, coverageRelationIds: [], assignmentIds: [], inheritedRecordRefs: [], wholeMapObservationRefs: [],
+    coverageNodeIds: slotIds, coverageRelationIds: relations.map((relation) => relation.relationId), assignmentIds: [], inheritedRecordRefs: [], wholeMapObservationRefs: [],
     verificationFindingStages: [], state: 'completed' as const, settlementRef: null,
   };
   const roundRef = await env.facade.prepareBlob(taskId, 'map_review_round', round);
@@ -466,7 +542,7 @@ async function prepareDurable10kFixture(
   });
   const planRef = await env.facade.prepareBlob(taskId, 'migration_validation_plan_spec', plan);
   return {
-    slotCount, validatableSlotCount,
+    slotCount, validatableSlotCount, relationCount: relations.length,
     plan, planRef, intentRef, candidateRef, roundRef, batchReg, sourceMapRef, targetMapRef,
     bundleRef, coverageRef, settlementRef, manifestRef, baselineRef, mapBuildSpecRef, contributionRef,
     aggregateRef, inputRef, warningRef, custodyRef, sourceAggregateRef, sourceInputRef, sourceWarningRef, sourceCustodyRef,
@@ -510,7 +586,10 @@ function createMigrationRepairHarness(env: WorkItemCoordinatorEnvironment, taskI
     privateStore,
     slotTypeOf: () => 'doc',
     contentSchemaDigestOf: () => H('durable-schema'),
-    slotTypes: [{ id: 'doc', name: 'doc', description: 'doc', contentPresence: 'required', contentSchema: { type: 'string' } }],
+    slotTypes: [
+      { id: 'doc', name: 'doc', description: 'doc', contentPresence: 'required', contentSchema: { type: 'string' } },
+      { id: 'optional-doc', name: 'optional-doc', description: 'optional doc', contentPresence: 'optional', contentSchema: { type: 'string' } },
+    ],
     defaultAutomaticRetries: async () => 3,
   });
   return { service, privateStore };
@@ -575,6 +654,7 @@ function openDurableRuntime(
   options: {
     finalizerScenario?: FinalizerRouteScenario;
     repairCoordinator?: Parameters<typeof createProductionMigrationRuntime>[0]['repairCoordinator'];
+    requiredSlotIdsOverride?: readonly string[];
   } = {},
 ) {
   const finalizer = finalizerHarness(options.finalizerScenario ?? 'clear');
@@ -594,19 +674,26 @@ function openDurableRuntime(
     },
   };
   const commands = new SystemCommandRegistry();
-  createProductionMigrationRuntime({
+  const { service } = createProductionMigrationRuntime({
     facade: env.facade, tail: (id) => env.eventStore.tail(id), templateSnapshotRef: env.templateSnapshotRef,
     profileSnapshotRef: env.profileSnapshotRef, frozenRegistrationSetDigest: registrationSetDigestOf([fixture.batchReg]),
     migrationPolicyVersion: '1', equivalencePolicyVersion: '1', maxAutomaticRetries: 3, clock: () => env.now.value,
     resolve: (id, blobRef) => env.blobStore.readJson(id, blobRef, blobRef.kind),
-    completedBatches: async (id) => (await env.eventStore.read(id)).flatMap((entry) => entry.event.type === 'structured_migration_validation_batch_completed'
+    completedBatches: async (id, requestedPlanRef) => (await env.eventStore.read(id)).flatMap((entry) => entry.event.type === 'structured_migration_validation_batch_completed'
+      && entry.event.planSpecRef.digest === requestedPlanRef.digest
       ? [{ batchOrdinal: entry.event.batchOrdinal, batchResultRootRef: entry.event.batchResultRootRef }]
       : []),
     validatorRegistry: new ValidatorRegistry(finalizer === null ? AUTHORITATIVE_REVIEW_BUILTIN_VALIDATOR_ENTRIES : [...AUTHORITATIVE_REVIEW_BUILTIN_VALIDATOR_ENTRIES, finalizer.entry]),
     profileBody: runtimeProfileBody, templateSnapshotHash: 'a'.repeat(64),
     registrationsFor: (phase) => phase === 'batch_commit' ? [fixture.batchReg] : [finalizer?.registration ?? registration('authoritative.review.coverage')],
-    slotTypes: [{ id: 'doc', name: 'doc', description: 'doc', contentPresence: 'required', contentSchema: { type: 'string' } }],
-    slotTypeOf: () => 'doc', requiredSlotIdsOf: () => [], readProjection: env.readProjection,
+    slotTypes: [
+      { id: 'doc', name: 'doc', description: 'doc', contentPresence: 'required', contentSchema: { type: 'string' } },
+      { id: 'optional-doc', name: 'optional-doc', description: 'optional doc', contentPresence: 'optional', contentSchema: { type: 'string' } },
+    ],
+    slotTypeOf: (slotId) => Number(slotId.slice(5)) < fixture.validatableSlotCount ? 'doc' : 'optional-doc',
+    requiredSlotIdsOf: () => options.requiredSlotIdsOverride
+      ?? Array.from({ length: fixture.validatableSlotCount }, (_, index) => `slot-${String(index).padStart(5, '0')}`),
+    readProjection: env.readProjection,
     sourceResolver: (handlerKey) => finalizer !== null && handlerKey === finalizer.entry.handlerKey ? finalizer.source : builtinSourceOf(handlerKey),
     reviewCoordinator: {
       async prepareClearActivation(input) {
@@ -683,7 +770,7 @@ function openDurableRuntime(
               reviewPolicyDigest: H('durable-review-policy'),
               adoptionRootRef,
               coverageSlotCount: fixture.slotCount,
-              coverageRelationCount: 0,
+              coverageRelationCount: fixture.relationCount,
               assignmentCount: 1,
               verificationFindingCount: 0,
               consumedOverrideRef: null,
@@ -718,7 +805,7 @@ function openDurableRuntime(
     systemCommands: commands, agentForRole: async () => null, frozenFor: async () => frozenV2,
     wakeups: new AuthoritativeWakeupIndexV1({ paths: env.paths }), traces: new TraceStore(env.paths), clock: () => env.now.value,
   });
-  return { attempts };
+  return { attempts, service };
 }
 
 async function runDurable10k(
@@ -726,7 +813,9 @@ async function runDurable10k(
   options: {
     slotCount?: number;
     validatableSlotCount?: number;
+    withRelation?: boolean;
     finalizerScenario?: FinalizerRouteScenario;
+    requiredSlotIdsOverride?: readonly string[];
     repairCoordinator?: Parameters<typeof createProductionMigrationRuntime>[0]['repairCoordinator'];
   } = {},
 ) {
@@ -790,7 +879,7 @@ async function runDurable10k(
       protocolVersion: 2, at: env.now.value, type: 'structured_map_review_round_planned', mapReviewRoundId: 'round-durable',
       mapCycleOrdinal: 1, candidateId: 'candidate-durable', candidateRef: fixture.candidateRef,
       contentRevisionManifestRef: fixture.manifestRef, reviewPolicyDigest: H('durable-review-policy'),
-      coverageNodeCount: fixture.slotCount, coverageRelationCount: 0, assignmentCount: 1, consumedOverrideRef: null,
+      coverageNodeCount: fixture.slotCount, coverageRelationCount: fixture.relationCount, assignmentCount: 1, consumedOverrideRef: null,
     },
     {
       protocolVersion: 2, at: env.now.value, type: 'structured_work_item_created', workItemId: fixture.seedReviewWorkItemId,
@@ -881,7 +970,12 @@ async function runDurable10k(
     const outcome = await runtime.attempts.runNext(taskId, `worker-${ordinal}`);
     expect(outcome).toMatchObject({ kind: 'completed' });
   }
-  const settlementOutcome = await runtime.attempts.runNext(taskId, 'worker-post-migration');
+  let settlementOutcome: Awaited<ReturnType<typeof runtime.attempts.runNext>> | { kind: 'threw'; error: string };
+  try {
+    settlementOutcome = await runtime.attempts.runNext(taskId, 'worker-post-migration');
+  } catch (error) {
+    settlementOutcome = { kind: 'threw', error: (error as Error).message };
+  }
   const events = (await env.eventStore.read(taskId)).map((entry) => entry.event);
   const roots = events.flatMap((event) => event.type === 'structured_migration_validation_batch_completed'
     ? [{ ordinal: event.batchOrdinal, ref: event.batchResultRootRef }]
@@ -1067,6 +1161,186 @@ describe('Task 20 production command integration', () => {
     expect(Object.values(projected.repairPlans).some((lineage) => lineage.track === 'map' && lineage.currentPlanRevisionId !== null)).toBe(true);
     expect(Object.values(projected.workItems).some((item) => item.sessionKind === 'map_repair' && item.state === 'ready')).toBe(true);
   }, 120_000);
+
+  it('fails closed when configured required slots disagree with the system-derived target-Map coverage', async () => {
+    const result = await runDurable10k(null, {
+      slotCount: 2,
+      validatableSlotCount: 1,
+      requiredSlotIdsOverride: [],
+    });
+    expect(result.settlementOutcome).not.toMatchObject({ kind: 'completed' });
+    expect(result.route).toBeNull();
+    expect(result.events.some((event) => event.type === 'structured_map_activated' && event.mapId === 'map-durable-target')).toBe(false);
+  }, 120_000);
+
+  it.each([
+    {
+      scenario: 'map_repair_slot_primary' as const,
+      expectedNodes: ['slot-00000', 'slot-00001'],
+      expectedRelations: [] as string[],
+    },
+    {
+      scenario: 'map_repair_map_primary' as const,
+      expectedNodes: ['slot-00000', 'slot-00001'],
+      expectedRelations: ['rel-00000'],
+    },
+    {
+      scenario: 'map_repair_multi_target' as const,
+      expectedNodes: ['slot-00000', 'slot-00001'],
+      expectedRelations: ['rel-00000'],
+    },
+  ])('keeps complete $scenario targets through AttemptCoordinator into a ready candidate-bound MapRepairPlan', async ({ scenario, expectedNodes, expectedRelations }) => {
+    const result = await runDurable10k(null, {
+      slotCount: 2,
+      validatableSlotCount: 1,
+      withRelation: true,
+      finalizerScenario: scenario,
+    });
+    expect(result.settlementOutcome, JSON.stringify(result.settlementOutcome)).toMatchObject({ kind: 'completed' });
+    expect(result.route).toBe('map_repair');
+    const projection = await result.env.readProjection('task-migration-durable-10k');
+    const lineage = Object.values(projection.repairPlans).find((candidate) => candidate.track === 'map');
+    expect(lineage?.currentPlanRevisionId).not.toBeNull();
+    const revision = lineage?.revisions[lineage.currentPlanRevisionId as string];
+    if (revision === undefined) throw new Error('projected migration MapRepairPlan revision is absent');
+    const plan = await result.env.blobStore.readJson('task-migration-durable-10k', revision.specRef, 'repair_plan_spec') as {
+      repairBase: { kind: string; candidateRef?: BlobRefV2 };
+      orderedBatchScopes: Array<{ kind: string; scope?: { nodeIds: string[]; relationIds: string[] } }>;
+    };
+    expect(plan.repairBase).toMatchObject({ kind: 'map_candidate' });
+    const nodeIds = [...new Set(plan.orderedBatchScopes.flatMap((scope) => scope.scope?.nodeIds ?? []))].sort();
+    const relationIds = [...new Set(plan.orderedBatchScopes.flatMap((scope) => scope.scope?.relationIds ?? []))].sort();
+    expect(nodeIds).toEqual(expectedNodes);
+    expect(relationIds).toEqual(expectedRelations);
+    expect(Object.values(projection.workItems).some((item) => item.sessionKind === 'map_repair' && item.state === 'ready')).toBe(true);
+  }, 120_000);
+
+  it('uses an equivalence-inherited version in a second Map replacement after GC/reopen and produces the same terminal batch root', async () => {
+    const first = await runDurable10k(null, { slotCount: 3, validatableSlotCount: 2 });
+    expect(first.route).toBe('clear');
+    expect(first.equivalenceRefs).toHaveLength(1);
+    if (first.manifestRef === null) throw new Error('first migration did not publish a manifest');
+
+    const gc = new AuthoritativeReviewGc(first.env.paths, first.env.blobStore, first.env.eventStore, first.env.publicationStore, { rootsProvider: async () => ({}) });
+    await gc.run();
+    const reopened = await createWorkItemCoordinatorEnvironment({ paths: first.env.paths, registry: durableMigrationRegistry() });
+    const taskId = 'task-migration-durable-10k';
+    const sourceManifest = await reopened.blobStore.readJson<{ entries: Array<{ slotId: string; versionRef: BlobRefV2 }> }>(taskId, first.manifestRef, 'content_revision_manifest');
+    const inheritedEntry = sourceManifest.entries.find((entry) => entry.slotId === 'slot-00000');
+    if (inheritedEntry === undefined) throw new Error('first migration lost the equivalence-inherited slot');
+    const inheritedVersion = await reopened.blobStore.readJson<SlotContentVersionV2>(taskId, inheritedEntry.versionRef, 'content_version');
+    expect(inheritedVersion.state === 'set' ? inheritedVersion.provenance : null).toMatchObject({
+      kind: 'inherited_after_map_activation',
+      migratedBatchValidatorAggregateRef: null,
+      localValidatorEquivalenceProofRef: { kind: 'local_validator_equivalence_proof' },
+    });
+    const firstTargetMap = await reopened.blobStore.readJson<{
+      nodes: Array<Record<string, unknown>>;
+      relations: Array<Record<string, unknown>>;
+      mapSemanticDigest: string;
+    }>(taskId, first.fixture.targetMapRef, 'map_snapshot');
+    const secondMap = {
+      ...firstTargetMap,
+      mapId: 'map-durable-target-2',
+      supersedesMapId: 'map-durable-target',
+      mapRevision: 3,
+      nodes: [firstTargetMap.nodes[0]!],
+      relations: [],
+      activatedAt: '2026-08-16T00:00:00.000Z',
+    };
+    const secondMapRef = await reopened.facade.prepareBlob(taskId, 'map_snapshot', secondMap);
+    const impactBody = { findingSetId: 'migration-impact-second', findingRefs: [] as BlobRefV2[] };
+    const impact = { ...impactBody, setDigest: canonicalJsonSha256(impactBody) };
+    const impactRef = await reopened.facade.prepareBlob(taskId, 'finding_set', impact);
+    const migrationSpec = buildContentMigrationSpec({
+      migrationId: 'migration-durable-second',
+      mapReviewSettlementCoreRef: first.fixture.settlementRef,
+      sourceManifestRef: first.manifestRef,
+      sourceMapRef: first.fixture.targetMapRef,
+      targetMapRef: secondMapRef,
+      impactClosureRef: impactRef,
+      migrationPolicyVersion: '1',
+    });
+    const migrationSpecRef = await reopened.facade.prepareBlob(taskId, 'migration_spec', migrationSpec);
+    const compatibilityBody = {
+      taskId,
+      slotId: 'slot-00000',
+      sourceVersionRef: inheritedEntry.versionRef,
+      sourceMapRef: first.fixture.targetMapRef,
+      targetMapRef: secondMapRef,
+      sourceContentSchemaDigest: inheritedVersion.contentSchemaDigest,
+      targetContentSchemaDigest: inheritedVersion.contentSchemaDigest,
+      stableIdentityEvidenceRef: impactRef,
+      proofPolicyVersion: '1',
+    };
+    const compatibility = { ...compatibilityBody, proofDigest: canonicalJsonSha256(compatibilityBody) };
+    const compatibilityRef = await reopened.facade.prepareBlob(taskId, 'content_compatibility_proof', compatibility);
+    const intent = buildMigrationIntent({
+      taskId,
+      migrationSpecRef,
+      sourceManifestRef: first.manifestRef,
+      sourceMapRef: first.fixture.targetMapRef,
+      targetMapRef: secondMapRef,
+      decisions: [{ action: 'inherit_or_validate', slotId: 'slot-00000', sourceVersionRef: inheritedEntry.versionRef, compatibilityProofRef: compatibilityRef }],
+      impactClosureRef: impactRef,
+      migrationPolicyVersion: '1',
+    });
+    const intentRef = await reopened.facade.prepareBlob(taskId, 'migration_intent_core', intent);
+    const plan = buildMigrationValidationPlanSpec({
+      migrationValidationPlanId: 'mvp-durable-second',
+      migrationIntentCoreRef: intentRef,
+      candidateRef: first.fixture.candidateRef,
+      proposedMapCoreRef: first.fixture.plan.proposedMapCoreRef,
+      sourceManifestRef: first.manifestRef,
+      frozenRegistrationSetDigest: registrationSetDigestOf([first.fixture.batchReg]),
+      orderedBatchSlotIds: [['slot-00000']],
+      profileRef: reopened.profileSnapshotRef,
+    });
+    const planRef = await reopened.facade.prepareBlob(taskId, 'migration_validation_plan_spec', plan);
+    const published: Array<{ payload: unknown }> = [];
+    const commands = new SystemCommandRegistry();
+    const { service } = createProductionMigrationRuntime({
+      facade: {
+        prepareBlob: (id, kind, value) => reopened.facade.prepareBlob(id, kind, value),
+        async publishWithPin(pin) { published.push({ payload: pin.payload }); return {} as never; },
+      },
+      tail: async () => ({ lastSequence: 0, lastCommitId: null }),
+      templateSnapshotRef: reopened.templateSnapshotRef,
+      profileSnapshotRef: reopened.profileSnapshotRef,
+      frozenRegistrationSetDigest: plan.frozenRegistrationSetDigest,
+      migrationPolicyVersion: '1', equivalencePolicyVersion: '1', maxAutomaticRetries: 3,
+      clock: () => '2026-08-16T00:00:00.000Z',
+      resolve: (id, ref) => reopened.blobStore.readJson(id, ref, ref.kind),
+      completedBatches: async () => [],
+      validatorRegistry: new ValidatorRegistry(AUTHORITATIVE_REVIEW_BUILTIN_VALIDATOR_ENTRIES),
+      profileBody: buildAuthoritativeReviewTestProfileBody(), templateSnapshotHash: 'a'.repeat(64),
+      registrationsFor: (phase) => phase === 'batch_commit' ? [first.fixture.batchReg] : [registration('authoritative.review.coverage')],
+      slotTypes: [{ id: 'doc', name: 'doc', description: 'doc', contentPresence: 'required', contentSchema: { type: 'string' } }],
+      slotTypeOf: () => 'doc', requiredSlotIdsOf: () => ['slot-00000'], readProjection: reopened.readProjection,
+      sourceResolver: builtinSourceOf,
+      reviewCoordinator: { async prepareClearActivation() { throw new Error('not used'); } },
+      repairCoordinator: { async prepareContentRepairActivation() { throw new Error('not used'); }, async prepareMapRepair() { throw new Error('not used'); } },
+      systemCommands: commands,
+    });
+    const execute = () => service.executeNextBatch({
+      taskId, commandId: 'cmd-second-map-batch', workItemId: 'wi-second-map-batch', leaseEpoch: 1,
+      authorityBaseRef: R('authority_base_set', 'second-map-base'), planSpecRef: planRef,
+      reviewCoverageCoreRef: first.fixture.coverageRef, reviewRoundRef: first.fixture.roundRef,
+    });
+    const secondA = await execute();
+    const secondB = await execute();
+    expect(secondA).toMatchObject({ kind: 'completed', batchOrdinal: 0 });
+    expect(secondB).toMatchObject({ kind: 'completed', batchOrdinal: 0 });
+    if (secondA.kind !== 'completed' || secondB.kind !== 'completed') throw new Error('second migration did not complete');
+    expect(secondB.batchResultRootRef).toEqual(secondA.batchResultRootRef);
+    const result = await reopened.blobStore.readJson<{ slotResults: Array<{ outcome: string }> }>(taskId, secondA.batchResultRootRef, 'migration_validation_batch_result');
+    expect(result.slotResults).toEqual([{ outcome: 'equivalent', slotId: 'slot-00000', localValidatorEquivalenceProofRef: expect.any(Object) }]);
+    await expect(validateAndClassifyMigrationBatchResults({
+      taskId, plan, planSpecRef: planRef, intent, orderedResultRefs: [secondA.batchResultRootRef],
+      resolve: (ref) => reopened.blobStore.readJson(taskId, ref, ref.kind),
+    })).resolves.toMatchObject({ batchRouteOutcome: 'clear' });
+    expect(published).toHaveLength(2);
+  }, 180_000);
 
   it('recovers a real 10k migration after GC and runtime reconstruction with byte-identical durable results', async () => {
     const uninterrupted = await runDurable10k(null);

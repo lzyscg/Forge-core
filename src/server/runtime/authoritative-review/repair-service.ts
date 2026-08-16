@@ -1027,6 +1027,15 @@ export class RepairService {
       if (track === 'map') {
         if (finding.primaryLocation.kind === 'map_node') nodeIds.add(finding.primaryLocation.id);
         if (finding.primaryLocation.kind === 'relation') relationIds.add(finding.primaryLocation.id);
+        if (finding.primaryLocation.kind === 'slot' && knownNodeIds.has(finding.primaryLocation.id)) nodeIds.add(finding.primaryLocation.id);
+        for (const nodeId of finding.relatedSlotIds) {
+          if (knownNodeIds.has(nodeId)) nodeIds.add(nodeId);
+        }
+        for (const relationId of finding.relatedRelationIds) relationIds.add(relationId);
+        if (finding.primaryLocation.kind === 'map') {
+          for (const nodeId of knownNodeIds) nodeIds.add(nodeId);
+          for (const relationId of knownRelationIds) relationIds.add(relationId);
+        }
       } else {
         if (finding.primaryLocation.kind === 'slot') slotIds.add(finding.primaryLocation.id);
         for (const slotId of finding.suggestedRepairSlotIds) slotIds.add(slotId);

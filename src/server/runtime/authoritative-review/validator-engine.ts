@@ -575,7 +575,10 @@ export function validateIssueTargets(
   const inUniverse =
     (targetKind === 'slot' && universe.slotIds.includes(stableTargetId)) ||
     (targetKind === 'relation' && universe.relationIds.includes(stableTargetId)) ||
-    (targetKind === 'node' && universe.mapNodeIds.includes(stableTargetId));
+    (targetKind === 'node' && universe.mapNodeIds.includes(stableTargetId)) ||
+    // `$map` is the closed whole-Map location. Its repair targets remain
+    // independently bounded to the exact frozen node/relation universe below.
+    (targetKind === 'map' && stableTargetId === '$map' && universe.mapNodeIds.length > 0);
   const repairTargetsInUniverse =
     rt.slotIds.every((id) => universe.slotIds.includes(id)) &&
     rt.relationIds.every((id) => universe.relationIds.includes(id)) &&

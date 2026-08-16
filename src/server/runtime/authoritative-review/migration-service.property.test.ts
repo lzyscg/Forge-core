@@ -146,7 +146,6 @@ function buildStressModelRun(seed?: Pick<StressModelRun, 'objects' | 'completed'
       };
     },
     async localValidatorCustody({ slotId }) {
-      const index = Number(slotId.slice(5));
       const source = {
         frozenRegistrationSetDigest: hash('10k-registry'), selectorExpansionDigest: hash(`selector-${slotId}`),
         contentBytesDigest: hash(`bytes-${slotId}`), localMapSubgraphDigest: hash(`subgraph-${slotId}`),
@@ -157,7 +156,12 @@ function buildStressModelRun(seed?: Pick<StressModelRun, 'objects' | 'completed'
       objects.set(sourceBatchInputRef.digest, sourceEnvelope);
       return {
         sourceBatchInputRef, source,
-        target: index % 97 === 0 ? { ...source, selectorExpansionDigest: hash(`changed-selector-${slotId}`) } : { ...source },
+        // This fast model exercises deterministic high-volume fresh
+        // validation. Exact equivalence custody, including 599 inherited
+        // versions and sequential Map replacement, is covered by the durable
+        // production integration suite where real aggregate/input/warning
+        // lineage is available.
+        target: { ...source, selectorExpansionDigest: hash(`changed-selector-${slotId}`) },
       };
     },
     async freshValidate({ taskId, slotId, decision, plan, planSpecRef, batchOrdinal }) {
