@@ -3,7 +3,7 @@
   "profileIdentity": "forge-authoritative-review/v1",
   "profileVersion": 3,
   "qualificationState": "provisional",
-  "profileDigest": "19dd1ec9c0bd9309fdc1a6265761b3bc5d8b7becb5127873f2b80d133dc81cd1",
+  "profileDigest": "fde5a5e561a183dac3cbe6113319cead78be9adb0f6a4d801163952e59167bed",
   "abi": {
     "validatorAbi": "forge-validator/v2",
     "assemblerAbi": "forge-assembler/v2",
@@ -12,6 +12,7 @@
   "runtime": {
     "maxBytesByKind": {
       "artifact": 4194304,
+      "artifact_custody": 4194304,
       "assignment_dispatch": 4194304,
       "authority_base_set": 4194304,
       "content_compatibility_proof": 4194304,
