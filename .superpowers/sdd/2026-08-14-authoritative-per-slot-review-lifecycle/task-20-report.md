@@ -1,6 +1,6 @@
 # Task 20 Report — Migrate content across approved Map replacements
 
-**Status:** IMPLEMENTED; the four material findings from adversarial re-review 1 are closed locally and qualified. The orchestrator still owns the next independent re-review gate.
+**Status:** IMPLEMENTED; adversarial re-review fix round 5 is closed locally and qualified. The orchestrator still owns the next independent re-review gate.
 
 ## Delivered behavior
 
@@ -111,3 +111,20 @@
 - Focused migration/repair/Map/validator/attempt/projector/facade/capability/profile regression: **14 files / 281 passed, 1 skipped**. The skipped test is only the separately executed real 10k proof above.
 - `npm run check`, `npm run build`, and `git diff --check`: passed.
 - Runtime boundary remains facade-only with no production `EventStore` import; blob/event schemaVersion remains `1`; v1/capability/profile sources are unchanged.
+
+## Adversarial re-review fix round 5
+
+- **P1 — independently derived target selector expansion:** equivalence no longer copies the source validator envelope into the target custody dimension. Production reconstructs the canonical ordered expansion per installed validator selector from the exact target Map and frozen migration intent/plan. Every source-selected target must have an unchanged, target-authoritative `inherit_or_validate` counterpart with the same content bytes; a removed, rewritten, or schema-reset companion changes the expansion and forces the existing real target-Map validator path. Post-migration settlement independently performs the same reconstruction before accepting an equivalence proof. The installed registration list is a required service dependency rather than an optional production-only hint.
+- **P1 regression:** a real source batch selects A+B while the exact target Map changes B's slot schema and the migration intent freezes B as `schema_reset`. A is now fresh-validated exactly once and no equivalence proof is emitted. The 10,000-node durable fixture obtains its 599 equivalences from the independently derived 600-target expansion, not copied source refs.
+- **P2 — producer-plan identity by kind:** source custody branches on producer plan kind before identity validation. `repair_plan_spec` uses its canonical two-field identity (`specDigest` excludes both digest fields; `planRevisionId` binds repairPlanId/revision/specDigest), while generation/migration plans retain the canonical single self-digest rule.
+- **P2 regressions:** a real content-repair-produced two-slot batch reuses the unchanged slot and fresh-validates the locally changed slot. Independently corrupting either `specDigest` or `planRevisionId` yields zero equivalence reuse and two real fresh validations.
+- **Sequential custody:** the second-replacement GC/reopen fixture now preserves the complete original selector expansion in its target Map/intent; the unchanged slot remains equivalent and replay produces the same terminal batch root. Removing/resetting a companion is covered separately as a mandatory cache miss.
+
+### Re-review-4 fix qualification (2026-08-16)
+
+- Selector/repair/sequential production integrations: **5 passed**.
+- Migration/repair/Map/validator/attempt focused regression: **7 files / 158 passed, 1 skipped**. The skipped case is only the separately executed real 10k proof.
+- Real 10,000-node durable EventStore/projector/GC/reopen proof: **1 passed** in **634.610 s**; uninterrupted and restart-at-73 roots, settlement, decision, manifest, route, and complete event root are byte-identical with **599 independently justified equivalence proofs + 1 real fresh result**.
+- Projector/append-facade/capability/profile guards: **5 files / 105 passed**.
+- `npm run check`, `npm run build`, and `git diff --check`: passed.
+- Runtime boundary remains facade-only with no production `EventStore` import; schemaVersion remains `1`; v1/capability/profile sources are unchanged.

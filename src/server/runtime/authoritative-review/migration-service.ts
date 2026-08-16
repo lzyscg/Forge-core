@@ -520,6 +520,7 @@ export async function validateAndClassifyMigrationBatchResults(input: {
   plan: ContentMigrationValidationPlanSpecV2;
   planSpecRef: BlobRefV2;
   intent: ContentMigrationIntentCoreV2;
+  selectorRegistrations: readonly ValidatorRegistrationV2[];
   orderedResultRefs: readonly BlobRefV2[];
   resolve(ref: BlobRefV2): Promise<unknown> | unknown;
 }): Promise<{
@@ -529,6 +530,7 @@ export async function validateAndClassifyMigrationBatchResults(input: {
   findingSetRefs: readonly BlobRefV2[];
   batchRouteOutcome: MigrationBatchRouteOutcomeV2;
 }> {
+  const targetSelectorExpansionCache = new Map<string, Promise<string>>();
   const results: MigrationValidationBatchResultV2[] = [];
   const resultBySlot = new Map<string, MigrationBatchSlotResultV2>();
   const rejectedFindingSetRefs = new Map<string, BlobRefV2>();
@@ -594,8 +596,12 @@ export async function validateAndClassifyMigrationBatchResults(input: {
           sourceManifestRef: input.plan.sourceManifestRef,
           sourceMapRef: input.intent.sourceMapRef,
           targetMapRef: input.intent.targetMapRef,
+          plan: input.plan,
+          intent: input.intent,
           proof,
           expectedRegistrationSetDigest: input.plan.frozenRegistrationSetDigest,
+          selectorRegistrations: input.selectorRegistrations,
+          targetSelectorExpansionCache,
           resolve: input.resolve,
         });
         continue;
@@ -1009,6 +1015,9 @@ export interface MigrationServiceDependenciesV2 {
    * always supplies this; fakes may omit it only when both phases share the
    * same frozen registration set. */
   finalizerRegistrationSetDigest?: string;
+  /** Installed batch registrations are required by production equivalence
+   * custody so settlement can independently reconstruct selector expansion. */
+  batchRegistrations: readonly ValidatorRegistrationV2[];
   migrationPolicyVersion: string;
   equivalencePolicyVersion: string;
   maxAutomaticRetries: number;
@@ -1094,7 +1103,7 @@ export interface MigrationProductionRepairCoordinatorV2 {
 
 export type ProductionMigrationRuntimeInputV2 = Omit<
   MigrationServiceDependenciesV2,
-  'localValidatorCustody' | 'freshValidate' | 'runMigrationFinalizer' | 'prepareActivationRoute' | 'readCurrentAuthority'
+  'localValidatorCustody' | 'freshValidate' | 'runMigrationFinalizer' | 'prepareActivationRoute' | 'readCurrentAuthority' | 'batchRegistrations'
 > & {
   validatorRegistry: ValidatorRegistry;
   profileBody: AuthoritativeReviewProfileSnapshotV1Body;
@@ -1207,6 +1216,7 @@ interface AuthoritativeSourceValidatorCustodyV2 {
   aggregate: ValidatorAggregateV2;
   envelope: ValidatorInputEnvelopeV2;
   validatedVersion: SlotContentVersionV2 & { state: 'set' };
+  selectorExpansionDigest: string;
 }
 
 type SetSlotContentVersionV2 = Extract<SlotContentVersionV2, { state: 'set' }>;
@@ -1222,6 +1232,7 @@ async function resolveAuthoritativeSourceValidatorCustody(input: {
   sourceManifestRef: BlobRefV2;
   sourceMapRef: BlobRefV2;
   expectedRegistrationSetDigest: string;
+  selectorRegistrations: readonly ValidatorRegistrationV2[];
   resolve(ref: BlobRefV2): Promise<unknown> | unknown;
 }): Promise<AuthoritativeSourceValidatorCustodyV2> {
   const seen = new Set<string>();
@@ -1317,8 +1328,7 @@ async function resolveAuthoritativeSourceValidatorCustody(input: {
     throw new Error('migration source input does not bind the source content batch');
   }
   for (const proof of inheritedProofs) {
-    if (!sameRef(proof.sourceBatchInputRef, aggregate.inputRef)
-      || proof.selectorExpansionDigest !== canonicalJsonSha256(envelope.selectedTargetRefs)) {
+    if (!sameRef(proof.sourceBatchInputRef, aggregate.inputRef)) {
       throw new Error('migration inherited equivalence proof does not bind the authoritative selector/input lineage');
     }
   }
@@ -1348,7 +1358,13 @@ async function resolveAuthoritativeSourceValidatorCustody(input: {
     kind: core.producerPlanSpecRef.kind as Parameters<typeof refOfBlob>[0],
     label: `migration source producer plan '${input.slotId}'`, resolve: input.resolve,
   });
-  validateCanonicalSelfDigest(producerPlanRaw, 'specDigest', `migration source producer plan '${input.slotId}'`);
+  if (core.producerPlanSpecRef.kind === 'repair_plan_spec') {
+    validateMigrationRepairPlanIdentity(
+      producerPlanRaw as unknown as import('../../authoritative-review/authority-types').RepairPlanSpecV2,
+    );
+  } else {
+    validateCanonicalSelfDigest(producerPlanRaw, 'specDigest', `migration source producer plan '${input.slotId}'`);
+  }
   let frozenBatchSlotIds: readonly string[];
   if (core.producerPlanSpecRef.kind === 'generation_plan_spec') {
     const producerPlan = producerPlanRaw as unknown as import('../../authoritative-review/authority-types').GenerationPlanSpecV2;
@@ -1430,6 +1446,22 @@ async function resolveAuthoritativeSourceValidatorCustody(input: {
     || canonicalJsonSha256([...selectedSlotIds].sort()) !== canonicalJsonSha256([...replacementSlotIds].sort())) {
     throw new Error('migration source validator targets do not exactly match the committed replacement batch');
   }
+  const selectorExpansionDigest = selectorExpansionDigestFor({
+    registrations: input.selectorRegistrations,
+    candidates: envelope.selectedTargetRefs.map((ref, index) => {
+      const slotId = selectedSlotIds[index]!;
+      const node = validatedMap.nodes.find((candidate) => candidate.slotId === slotId);
+      if (node === undefined || !node.contentBearing) {
+        throw new Error(`migration source selector target '${slotId}' is absent from its validated Map`);
+      }
+      return { ref, slotId, typeId: node.slotType };
+    }),
+  });
+  for (const proof of inheritedProofs) {
+    if (proof.selectorExpansionDigest !== selectorExpansionDigest) {
+      throw new Error('migration inherited equivalence proof does not bind the authoritative selector/input lineage');
+    }
+  }
   const validatedContent = await resolveVerifiedMigrationBlob<{ slotId?: unknown }>({
     ref: current.blobRef,
     kind: current.blobRef.kind as Parameters<typeof refOfBlob>[0],
@@ -1466,7 +1498,7 @@ async function resolveAuthoritativeSourceValidatorCustody(input: {
     aggregate, envelopeRef: aggregate.inputRef, coreRef: envelope.contentValidationCoreRef,
     targetRefs: envelope.selectedTargetRefs, resolve: input.resolve,
   });
-  return { aggregateRef, aggregate, envelope, validatedVersion: current };
+  return { aggregateRef, aggregate, envelope, validatedVersion: current, selectorExpansionDigest };
 }
 
 async function validateEquivalentMigrationResult(input: {
@@ -1477,14 +1509,20 @@ async function validateEquivalentMigrationResult(input: {
   sourceManifestRef: BlobRefV2;
   sourceMapRef: BlobRefV2;
   targetMapRef: BlobRefV2;
+  plan: ContentMigrationValidationPlanSpecV2;
+  intent: ContentMigrationIntentCoreV2;
   proof: LocalValidatorEquivalenceProofV2;
   expectedRegistrationSetDigest: string;
+  selectorRegistrations: readonly ValidatorRegistrationV2[];
+  targetSelectorExpansionCache?: Map<string, Promise<string>>;
   resolve(ref: BlobRefV2): Promise<unknown> | unknown;
 }): Promise<void> {
   const custody = await resolveAuthoritativeSourceValidatorCustody({
     taskId: input.taskId, slotId: input.slotId, sourceVersionRef: input.sourceVersionRef,
     sourceManifestRef: input.sourceManifestRef, sourceMapRef: input.sourceMapRef,
-    expectedRegistrationSetDigest: input.expectedRegistrationSetDigest, resolve: input.resolve,
+    expectedRegistrationSetDigest: input.expectedRegistrationSetDigest,
+    selectorRegistrations: input.selectorRegistrations,
+    resolve: input.resolve,
   });
   if (!sameRef(input.proof.sourceBatchInputRef, custody.aggregate.inputRef)) throw new Error('migration equivalence proof does not bind the authoritative source input');
   const sourceMap = await resolveVerifiedMigrationBlob<MapSnapshotV2>({
@@ -1503,9 +1541,30 @@ async function validateEquivalentMigrationResult(input: {
     ref: input.sourceVersion.blobRef, kind: input.sourceVersion.blobRef.kind as Parameters<typeof refOfBlob>[0],
     label: `migration current source bytes '${input.slotId}'`, resolve: input.resolve,
   });
+  const targetSelectorCacheKey = canonicalJsonSha256({
+    planDigest: input.plan.specDigest,
+    sourceInputDigest: custody.aggregate.inputRef.digest,
+    sourceMapDigest: input.sourceMapRef.digest,
+    targetMapDigest: input.targetMapRef.digest,
+  });
+  let targetSelectorPromise = input.targetSelectorExpansionCache?.get(targetSelectorCacheKey);
+  if (targetSelectorPromise === undefined) {
+    targetSelectorPromise = deriveTargetSelectorExpansionDigest({
+      sourceEnvelope: custody.envelope,
+      sourceMap,
+      targetMap,
+      plan: input.plan,
+      intent: input.intent,
+      registrations: input.selectorRegistrations,
+      resolve: input.resolve,
+    });
+    input.targetSelectorExpansionCache?.set(targetSelectorCacheKey, targetSelectorPromise);
+  }
+  const targetSelectorExpansionDigest = await targetSelectorPromise;
   const exact = custody.aggregate.registrationSetDigest === input.expectedRegistrationSetDigest
     && input.proof.frozenRegistrationSetDigest === input.expectedRegistrationSetDigest
-    && input.proof.selectorExpansionDigest === canonicalJsonSha256(custody.envelope.selectedTargetRefs)
+    && input.proof.selectorExpansionDigest === custody.selectorExpansionDigest
+    && input.proof.selectorExpansionDigest === targetSelectorExpansionDigest
     && canonicalJsonSha256(sourceBytes) === canonicalJsonSha256(targetBytes)
     && sourceLocal.subgraph === targetLocal.subgraph && input.proof.localMapSubgraphDigest === sourceLocal.subgraph
     && sourceLocal.relations === targetLocal.relations && input.proof.localRelationContextDigest === sourceLocal.relations;
@@ -1521,6 +1580,83 @@ function localMapDimensions(map: MapSnapshotV2, slotId: string): { subgraph: str
     subgraph: canonicalJsonSha256({ node, parent: map.nodes.find((candidate) => candidate.slotId === node?.parentSlotId) ?? null }),
     relations: canonicalJsonSha256(relations),
   };
+}
+
+interface SelectorExpansionCandidateV2 {
+  ref: BlobRefV2;
+  slotId: string;
+  typeId: string;
+}
+
+/** Freeze the selector result per installed validator identity. Registration
+ * set identity deliberately excludes selectors, so selector custody must bind
+ * both the selector bytes and their canonical ordered target expansion. */
+function selectorExpansionDigestFor(input: {
+  registrations: readonly ValidatorRegistrationV2[];
+  candidates: readonly SelectorExpansionCandidateV2[];
+}): string {
+  const expansion = [...input.registrations]
+    .sort((a, b) => a.validatorId.localeCompare(b.validatorId))
+    .map((registration) => ({
+      validatorId: registration.validatorId,
+      selector: registration.selector,
+      selectedTargetRefs: input.candidates
+        .filter((candidate) => registration.selector.kind === 'all'
+          || registration.selector.typeIds.includes(candidate.typeId))
+        .map((candidate) => candidate.ref),
+    }));
+  return canonicalJsonSha256(expansion);
+}
+
+/** Reconstruct the target-side selector expansion without consulting the old
+ * envelope as target authority. The envelope supplies only the source batch's
+ * ordered slots. Every target counterpart is independently justified by the
+ * frozen migration intent and exact target Map; reset/removed/rewritten slots
+ * therefore disappear and force a fresh target-Map validation. */
+async function deriveTargetSelectorExpansionDigest(input: {
+  sourceEnvelope: ValidatorInputEnvelopeV2;
+  sourceMap: MapSnapshotV2;
+  targetMap: MapSnapshotV2;
+  plan: ContentMigrationValidationPlanSpecV2;
+  intent: ContentMigrationIntentCoreV2;
+  registrations: readonly ValidatorRegistrationV2[];
+  resolve(ref: BlobRefV2): Promise<unknown> | unknown;
+}): Promise<string> {
+  if (!sameRef(input.plan.migrationIntentCoreRef, refOfBlob('migration_intent_core', input.intent))) {
+    throw new Error('migration target selector expansion does not bind the frozen intent');
+  }
+  const decisions = new Map(input.intent.decisions.map((decision) => [decision.slotId, decision]));
+  const targetCandidates: SelectorExpansionCandidateV2[] = [];
+  const seen = new Set<string>();
+  for (const sourceRef of input.sourceEnvelope.selectedTargetRefs) {
+    const sourceTarget = await resolveVerifiedMigrationBlob<{ slotId?: unknown }>({
+      ref: sourceRef,
+      kind: sourceRef.kind as Parameters<typeof refOfBlob>[0],
+      label: 'migration source selector target',
+      resolve: input.resolve,
+    });
+    if (typeof sourceTarget.slotId !== 'string' || seen.has(sourceTarget.slotId)) {
+      throw new Error('migration source selector expansion lacks unique stable slot identities');
+    }
+    seen.add(sourceTarget.slotId);
+    const sourceNode = input.sourceMap.nodes.find((candidate) => candidate.slotId === sourceTarget.slotId);
+    const targetNode = input.targetMap.nodes.find((candidate) => candidate.slotId === sourceTarget.slotId);
+    const decision = decisions.get(sourceTarget.slotId);
+    if (sourceNode === undefined || !sourceNode.contentBearing) {
+      throw new Error(`migration source selector slot '${sourceTarget.slotId}' is absent from the source Map`);
+    }
+    if (targetNode === undefined || !targetNode.contentBearing || decision?.action !== 'inherit_or_validate') continue;
+    const version = await resolveVerifiedMigrationBlob<SlotContentVersionV2>({
+      ref: decision.sourceVersionRef,
+      kind: 'content_version',
+      label: `migration target selector source version '${sourceTarget.slotId}'`,
+      resolve: input.resolve,
+    });
+    if (version.state !== 'set' || version.slotId !== sourceTarget.slotId
+      || !sameRef(version.blobRef, sourceRef)) continue;
+    targetCandidates.push({ ref: version.blobRef, slotId: version.slotId, typeId: targetNode.slotType });
+  }
+  return selectorExpansionDigestFor({ registrations: input.registrations, candidates: targetCandidates });
 }
 
 function deriveTargetContentCoverage(input: {
@@ -1561,6 +1697,7 @@ export function createProductionMigrationRuntime(input: ProductionMigrationRunti
   // source manifest/Map/producer batch hundreds of times. Missing refs are not
   // cached because a later command in this runtime may prepare that exact ref.
   const immutableResolutionCache = new Map<string, unknown>();
+  const targetSelectorExpansionCache = new Map<string, Promise<string>>();
   const resolveImmutable = async (taskId: string, ref: BlobRefV2): Promise<unknown> => {
     const key = `${taskId}:${ref.kind}:${ref.digest}`;
     if (immutableResolutionCache.has(key)) return immutableResolutionCache.get(key);
@@ -1577,6 +1714,7 @@ export function createProductionMigrationRuntime(input: ProductionMigrationRunti
     ...input,
     resolve: resolveImmutable,
     finalizerRegistrationSetDigest: registrationSetDigestOf(registrations.plan_finalize),
+    batchRegistrations: registrations.batch_commit,
     async readCurrentAuthority(taskId, workItemId) {
       const state = await input.readProjection(taskId);
       const wi = state.workItems[workItemId];
@@ -1606,6 +1744,7 @@ export function createProductionMigrationRuntime(input: ProductionMigrationRunti
         sourceManifestRef: plan.sourceManifestRef,
         sourceMapRef: (await resolveRequired<ContentMigrationIntentCoreV2>(taskId, plan.migrationIntentCoreRef, 'migration intent')).sourceMapRef,
         expectedRegistrationSetDigest: installedBatchRegistrationSetDigest,
+        selectorRegistrations: registrations.batch_commit,
         resolve: (ref) => resolveImmutable(taskId, ref),
       });
       const aggregate = resolved.aggregate;
@@ -1616,18 +1755,39 @@ export function createProductionMigrationRuntime(input: ProductionMigrationRunti
       const targetMap = await resolveRequired<MapSnapshotV2>(taskId, intent.targetMapRef, 'target Map');
       const sourceLocal = localMapDimensions(sourceMap, slotId);
       const targetLocal = localMapDimensions(targetMap, slotId);
+      const sourceSelectorExpansionDigest = resolved.selectorExpansionDigest;
+      const targetSelectorCacheKey = canonicalJsonSha256({
+        planDigest: plan.specDigest,
+        sourceInputDigest: aggregate.inputRef.digest,
+        sourceMapDigest: intent.sourceMapRef.digest,
+        targetMapDigest: intent.targetMapRef.digest,
+      });
+      let targetSelectorPromise = targetSelectorExpansionCache.get(targetSelectorCacheKey);
+      if (targetSelectorPromise === undefined) {
+        targetSelectorPromise = deriveTargetSelectorExpansionDigest({
+          sourceEnvelope: envelope,
+          sourceMap,
+          targetMap,
+          plan,
+          intent,
+          registrations: registrations.batch_commit,
+          resolve: (ref) => resolveImmutable(taskId, ref),
+        });
+        targetSelectorExpansionCache.set(targetSelectorCacheKey, targetSelectorPromise);
+      }
+      const targetSelectorExpansionDigest = await targetSelectorPromise;
       return {
         sourceBatchInputRef: aggregate.inputRef,
         source: {
           frozenRegistrationSetDigest: aggregate.registrationSetDigest,
-          selectorExpansionDigest: canonicalJsonSha256(envelope.selectedTargetRefs),
+          selectorExpansionDigest: sourceSelectorExpansionDigest,
           contentBytesDigest: canonicalJsonSha256(content),
           localMapSubgraphDigest: sourceLocal.subgraph,
           localRelationContextDigest: sourceLocal.relations,
         },
         target: {
           frozenRegistrationSetDigest: installedBatchRegistrationSetDigest,
-          selectorExpansionDigest: canonicalJsonSha256(envelope.selectedTargetRefs),
+          selectorExpansionDigest: targetSelectorExpansionDigest,
           contentBytesDigest: canonicalJsonSha256(content),
           localMapSubgraphDigest: targetLocal.subgraph,
           localRelationContextDigest: targetLocal.relations,
@@ -2112,6 +2272,7 @@ export class MigrationServiceV2 {
       plan,
       planSpecRef: input.planSpecRef,
       intent,
+      selectorRegistrations: this.deps.batchRegistrations,
       orderedResultRefs,
       resolve: (ref) => this.deps.resolve(input.taskId, ref),
     });

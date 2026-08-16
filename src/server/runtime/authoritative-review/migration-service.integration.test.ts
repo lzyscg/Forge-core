@@ -37,7 +37,7 @@ import { buildContentReviewCoverageCore } from './content-review-service';
 import { buildFindingStageRoot } from './finding-service';
 import { buildReviewObservationGrantSpec } from './review-coordinator';
 import { GrantService } from './grant-service';
-import { RepairService, registerRepairPublicationHandlers } from './repair-service';
+import { RepairService, buildRepairPlanSpec, registerRepairPublicationHandlers } from './repair-service';
 import { AuthoritativeReviewPrivateStore } from '../../storage/authoritative-review-private-store';
 import type { V2AttemptContext } from './attempt-coordinator';
 
@@ -141,19 +141,27 @@ async function prepareDurable10kFixture(
     validatableSlotCount?: number;
     withRelation?: boolean;
     sourceCorruption?: 'manifest_map' | 'version_map' | 'aggregate_map';
+    schemaResetLastSelected?: boolean;
+    sourceProducer?: 'generation' | 'repair';
+    repairPlanCorruption?: 'specDigest' | 'planRevisionId';
   } = {},
 ) {
   const slotCount = options.slotCount ?? 10_000;
   const validatableSlotCount = options.validatableSlotCount ?? 600;
   const slotIds = Array.from({ length: slotCount }, (_, index) => `slot-${String(index).padStart(5, '0')}`);
   const validatableSlotIds = slotIds.slice(0, validatableSlotCount);
+  const configuredSchemaResetSlotId = options.schemaResetLastSelected === true
+    ? validatableSlotIds[validatableSlotIds.length - 1] ?? null
+    : null;
   await env.facade.prepareBlob(taskId, 'profile_snapshot', buildAuthoritativeReviewTestProfileBody());
   const templateBlob = await env.blobStore.readJson('task-coordinator-support', env.templateSnapshotRef, env.templateSnapshotRef.kind);
   await env.facade.prepareBlob(taskId, env.templateSnapshotRef.kind, templateBlob);
   const nodes = slotIds.map((slotId, documentOrder) => {
     const body = {
       slotId,
-      slotType: documentOrder < validatableSlotCount ? 'doc' : 'optional-doc',
+      slotType: slotId === configuredSchemaResetSlotId
+        ? 'reset-doc'
+        : documentOrder < validatableSlotCount ? 'doc' : 'optional-doc',
       contentBearing: true,
       parentSlotId: documentOrder === 0 ? null : slotIds[0]!,
       documentOrder,
@@ -275,7 +283,11 @@ async function prepareDurable10kFixture(
   // bytes, so the production validator receives a correctly bound content value.
   const changedNodeIndex = Math.max(0, validatableSlotCount - 1);
   const sourceNodes = nodes.map((node, index) => index === changedNodeIndex
-    ? { ...node, nodeSpecDigest: H('durable-source-validator-node') }
+    ? {
+        ...node,
+        ...(node.slotId === configuredSchemaResetSlotId ? { slotType: 'doc' } : {}),
+        nodeSpecDigest: H('durable-source-validator-node'),
+      }
     : node);
   const sourceSnapshot = {
     ...targetSnapshot,
@@ -308,6 +320,35 @@ async function prepareDurable10kFixture(
     orderedBatchSlotIds: [validatableSlotIds],
   });
   const generationPlanRef = await env.facade.prepareBlob(taskId, 'generation_plan_spec', generationPlan);
+  const repairPlan = buildRepairPlanSpec({
+    repairPlanId: 'rp-durable-source',
+    revision: 1,
+    origin: {
+      kind: 'initial', settlementId: 'settlement-durable-source', settlementDigest: H('settlement-durable-source'),
+      creationOperationKey: 'create-rp-durable-source',
+    },
+    sourceReceiptRef: null,
+    repairBase: { kind: 'content', mapRef: sourceMapRef, contentRevisionManifestRef: baselineRef },
+    orderedBatchScopes: [{ kind: 'content', batchOrdinal: 1, findingIds: [], slotIds: validatableSlotIds }],
+    keyLineageRef: R('repair_key_ledger', 'rp-durable-source-ledger'),
+    importedStagingManifestRef: baselineRef,
+  });
+  const corruptedRepairPlan = options.repairPlanCorruption === undefined ? repairPlan : {
+    ...repairPlan,
+    ...(options.repairPlanCorruption === 'specDigest'
+      ? { specDigest: H('corrupt-repair-plan-spec-digest') }
+      : { planRevisionId: H('corrupt-repair-plan-revision-id') }),
+  };
+  const sourceProducerPlanRef = options.sourceProducer === 'repair'
+    ? options.repairPlanCorruption === undefined
+      ? await env.facade.prepareBlob(taskId, 'repair_plan_spec', repairPlan)
+      : refOfBlob('repair_plan_spec', corruptedRepairPlan)
+    : generationPlanRef;
+  const sourceProducerBatchOrdinal = options.sourceProducer === 'repair' ? 1 : 0;
+  const sourceResolverOverrides = new Map<string, unknown>();
+  if (options.sourceProducer === 'repair' && options.repairPlanCorruption !== undefined) {
+    sourceResolverOverrides.set(sourceProducerPlanRef.digest, corruptedRepairPlan);
+  }
   const sourceContentBySlot = new Map<string, { value: typeof content; ref: BlobRefV2 }>();
   const preparedSourceContents = await mapWithBoundedConcurrency(validatableSlotIds, async (slotId) => {
     const isSharedFixtureSlot = slotId === contentBody.slotId;
@@ -330,8 +371,8 @@ async function prepareDurable10kFixture(
   // share the same immutable core/input/aggregate/custody provenance.
   const sourceCommitCore = buildContentRevisionCommitCore({
     priorManifestRef: baselineRef,
-    producerPlanSpecRef: generationPlanRef,
-    batchOrdinal: 0,
+    producerPlanSpecRef: sourceProducerPlanRef,
+    batchOrdinal: sourceProducerBatchOrdinal,
     authorizedReplacementEntriesWithoutValidation: validatableSlotIds.map((slotId) => ({ slotId, expectedCurrentVersionRef: null })),
     expectedMapRef: options.sourceCorruption === 'aggregate_map' ? targetMapRef : sourceMapRef,
   });
@@ -378,7 +419,10 @@ async function prepareDurable10kFixture(
       trigger: 'content_commit' as const,
       inputRef: sourceInputRef,
       inputDigest: sourceInputRef.digest,
-      executionScope: { planRevisionId: generationPlan.generationPlanId, batchOrdinal: 0 },
+      executionScope: {
+        planRevisionId: options.sourceProducer === 'repair' ? repairPlan.planRevisionId : generationPlan.generationPlanId,
+        batchOrdinal: sourceProducerBatchOrdinal,
+      },
       validatorAggregateRef: sourceAggregateRef,
       warningRootRef: sourceWarningRef,
     }],
@@ -396,7 +440,9 @@ async function prepareDurable10kFixture(
       mapSemanticDigest: sourceSnapshot.mapSemanticDigest, contentSchemaDigest: contentBody.contentSchemaDigest,
       contentDigest: slotContentRef.digest, blobRef: slotContentRef,
       provenance: {
-        kind: 'generated', producer: { kind: 'generation_batch', planRevisionId: generationPlan.generationPlanId, batchOrdinal: 0, attemptId: 'att-durable' },
+        kind: 'generated', producer: options.sourceProducer === 'repair'
+          ? { kind: 'content_repair_batch', planRevisionId: repairPlan.planRevisionId, batchOrdinal: sourceProducerBatchOrdinal, attemptId: 'att-durable' }
+          : { kind: 'generation_batch', planRevisionId: generationPlan.generationPlanId, batchOrdinal: sourceProducerBatchOrdinal, attemptId: 'att-durable' },
         contentRevisionCommitCoreRef: sourceCommitCoreRef, contentCommitValidatorAggregateRef: sourceAggregateRef,
         contentCommitWarningRootRef: sourceCustodyRef, committedByAttemptId: 'att-durable',
       },
@@ -413,7 +459,7 @@ async function prepareDurable10kFixture(
     mapRef: options.sourceCorruption === 'manifest_map' ? targetMapRef : sourceMapRef,
     mapSemanticDigest: sourceSnapshot.mapSemanticDigest,
     taskContentRevision: 2, manifestPhase: 'finalized' as const,
-    entries, producerPlanSpecRef: generationPlanRef, priorManifestRef: baselineRef,
+    entries, producerPlanSpecRef: sourceProducerPlanRef, priorManifestRef: baselineRef,
     finalizerValidatorAggregateRefs: [sourceAggregateRef], finalizerWarningRootRefs: [sourceCustodyRef], contentRootDigest: H('durable-content-root'),
   };
   const manifest = { ...manifestBody, manifestDigest: canonicalJsonSha256(manifestBody) };
@@ -491,7 +537,9 @@ async function prepareDurable10kFixture(
     sourceMapRef, targetMapRef, impactClosureRef: impactRef, migrationPolicyVersion: '1',
   });
   const migrationSpecRef = await env.facade.prepareBlob(taskId, 'migration_spec', migrationSpec);
-  const inheritedDecisions = await mapWithBoundedConcurrency(validatableSlotIds, async (slotId) => {
+  const schemaResetSlotId = configuredSchemaResetSlotId;
+  const inheritedSlotIds = validatableSlotIds.filter((slotId) => slotId !== schemaResetSlotId);
+  const inheritedDecisions = await mapWithBoundedConcurrency(inheritedSlotIds, async (slotId) => {
     const source = versionsBySlot.get(slotId)!;
     const proofBody = {
       taskId, slotId, sourceVersionRef: source.ref, sourceMapRef, targetMapRef,
@@ -504,6 +552,12 @@ async function prepareDurable10kFixture(
   });
   const decisions = [
     ...inheritedDecisions,
+    ...(schemaResetSlotId === null ? [] : [{
+      action: 'new_or_schema_reset' as const,
+      slotId: schemaResetSlotId,
+      unsetReason: 'schema_reset' as const,
+      sourceVersionRef: versionsBySlot.get(schemaResetSlotId)!.ref,
+    }]),
     ...slotIds.slice(validatableSlotIds.length).map((slotId) => ({
       action: 'new_or_schema_reset' as const,
       slotId,
@@ -513,7 +567,7 @@ async function prepareDurable10kFixture(
   ];
   const intent = buildMigrationIntent({ taskId, migrationSpecRef, sourceManifestRef: manifestRef, sourceMapRef, targetMapRef, decisions, impactClosureRef: impactRef, migrationPolicyVersion: '1' });
   const intentRef = await env.facade.prepareBlob(taskId, 'migration_intent_core', intent);
-  const batches = Array.from({ length: Math.ceil(validatableSlotIds.length / 8) }, (_, ordinal) => validatableSlotIds.slice(ordinal * 8, (ordinal + 1) * 8));
+  const batches = Array.from({ length: Math.ceil(inheritedSlotIds.length / 8) }, (_, ordinal) => inheritedSlotIds.slice(ordinal * 8, (ordinal + 1) * 8));
   const plan = buildMigrationValidationPlanSpec({
     migrationValidationPlanId: 'mvp-durable-10k', migrationIntentCoreRef: intentRef, candidateRef,
     proposedMapCoreRef: proposedRef, sourceManifestRef: manifestRef, frozenRegistrationSetDigest: registrationSetDigestOf([batchReg]),
@@ -525,7 +579,8 @@ async function prepareDurable10kFixture(
     plan, planRef, intentRef, candidateRef, roundRef, batchReg, sourceMapRef, targetMapRef,
     bundleRef, coverageRef, settlementRef, manifestRef, baselineRef, mapBuildSpecRef, contributionRef,
     aggregateRef, inputRef, warningRef, custodyRef, sourceAggregateRef, sourceInputRef, sourceWarningRef, sourceCustodyRef,
-    generationPlanRef, seedReviewWorkItemId, seedReviewAttemptId, seedReviewAssignmentId, seedReviewLogicalAssignmentId,
+    generationPlanRef: sourceProducerPlanRef, sourceResolverOverrides,
+    seedReviewWorkItemId, seedReviewAttemptId, seedReviewAssignmentId, seedReviewLogicalAssignmentId,
     seedReviewAuthorityRef, seedReviewGrantRef, seedDispatchRef, seedLedgerRef,
     sourceMapBuildSpecRef, sourceCandidateRef,
   };
@@ -568,6 +623,7 @@ function createMigrationRepairHarness(env: WorkItemCoordinatorEnvironment, taskI
     slotTypes: [
       { id: 'doc', name: 'doc', description: 'doc', contentPresence: 'required', contentSchema: { type: 'string' } },
       { id: 'optional-doc', name: 'optional-doc', description: 'optional doc', contentPresence: 'optional', contentSchema: { type: 'string' } },
+      { id: 'reset-doc', name: 'reset-doc', description: 'schema-reset optional doc', contentPresence: 'optional', contentSchema: { type: 'string' } },
     ],
     defaultAutomaticRetries: async () => 3,
   });
@@ -657,7 +713,8 @@ function openDurableRuntime(
     facade: env.facade, tail: (id) => env.eventStore.tail(id), templateSnapshotRef: env.templateSnapshotRef,
     profileSnapshotRef: env.profileSnapshotRef, frozenRegistrationSetDigest: registrationSetDigestOf([fixture.batchReg]),
     migrationPolicyVersion: '1', equivalencePolicyVersion: '1', maxAutomaticRetries: 3, clock: () => env.now.value,
-    resolve: (id, blobRef) => env.blobStore.readJson(id, blobRef, blobRef.kind),
+    resolve: (id, blobRef) => fixture.sourceResolverOverrides.get(blobRef.digest)
+      ?? env.blobStore.readJson(id, blobRef, blobRef.kind),
     completedBatches: async (id, requestedPlanRef) => (await env.eventStore.read(id)).flatMap((entry) => entry.event.type === 'structured_migration_validation_batch_completed'
       && entry.event.planSpecRef.digest === requestedPlanRef.digest
       ? [{ batchOrdinal: entry.event.batchOrdinal, batchResultRootRef: entry.event.batchResultRootRef }]
@@ -794,6 +851,9 @@ async function runDurable10k(
     validatableSlotCount?: number;
     withRelation?: boolean;
     sourceCorruption?: 'manifest_map' | 'version_map' | 'aggregate_map';
+    schemaResetLastSelected?: boolean;
+    sourceProducer?: 'generation' | 'repair';
+    repairPlanCorruption?: 'specDigest' | 'planRevisionId';
     finalizerScenario?: FinalizerRouteScenario;
     requiredSlotIdsOverride?: readonly string[];
     repairCoordinator?: Parameters<typeof createProductionMigrationRuntime>[0]['repairCoordinator'];
@@ -1053,6 +1113,46 @@ describe('Task 20 production command integration', () => {
     120_000,
   );
 
+  it('fresh-validates A when its source batch selected A+B but target migration schema-resets B', async () => {
+    const result = await runDurable10k(null, {
+      slotCount: 2,
+      validatableSlotCount: 2,
+      schemaResetLastSelected: true,
+      finalizerScenario: 'clear',
+      requiredSlotIdsOverride: ['slot-00000'],
+    });
+    expect(result.equivalenceRefs).toHaveLength(0);
+    expect(result.revalidatedCount).toBe(1);
+  }, 120_000);
+
+  it('reuses unchanged validator custody produced by a real content repair plan', async () => {
+    const result = await runDurable10k(null, {
+      slotCount: 2,
+      validatableSlotCount: 2,
+      sourceProducer: 'repair',
+      finalizerScenario: 'clear',
+    });
+    expect(result.equivalenceRefs).toHaveLength(1);
+    expect(result.revalidatedCount).toBe(1);
+    expect(result.route).toBe('clear');
+  }, 120_000);
+
+  it.each(['specDigest', 'planRevisionId'] as const)(
+    'falls back to fresh target validation when a repair producer plan corrupts %s',
+    async (repairPlanCorruption) => {
+      const result = await runDurable10k(null, {
+        slotCount: 2,
+        validatableSlotCount: 2,
+        sourceProducer: 'repair',
+        repairPlanCorruption,
+        finalizerScenario: 'clear',
+      });
+      expect(result.equivalenceRefs).toHaveLength(0);
+      expect(result.revalidatedCount).toBe(2);
+    },
+    120_000,
+  );
+
   it('keeps finalizer infrastructure failure retryable and publishes no migration settlement/activation', async () => {
     const result = await runDurable10k(null, { slotCount: 2, validatableSlotCount: 1, finalizerScenario: 'infrastructure_failure' });
     expect(result.route).toBeNull();
@@ -1224,8 +1324,10 @@ describe('Task 20 production command integration', () => {
     const taskId = 'task-migration-durable-10k';
     const sourceManifest = await reopened.blobStore.readJson<{ entries: Array<{ slotId: string; versionRef: BlobRefV2 }> }>(taskId, first.manifestRef, 'content_revision_manifest');
     const inheritedEntry = sourceManifest.entries.find((entry) => entry.slotId === 'slot-00000');
-    if (inheritedEntry === undefined) throw new Error('first migration lost the equivalence-inherited slot');
+    const companionEntry = sourceManifest.entries.find((entry) => entry.slotId === 'slot-00001');
+    if (inheritedEntry === undefined || companionEntry === undefined) throw new Error('first migration lost a source batch slot');
     const inheritedVersion = await reopened.blobStore.readJson<SlotContentVersionV2>(taskId, inheritedEntry.versionRef, 'content_version');
+    const companionVersion = await reopened.blobStore.readJson<SlotContentVersionV2>(taskId, companionEntry.versionRef, 'content_version');
     expect(inheritedVersion.state === 'set' ? inheritedVersion.provenance : null).toMatchObject({
       kind: 'inherited_after_map_activation',
       migratedBatchValidatorAggregateRef: null,
@@ -1241,7 +1343,7 @@ describe('Task 20 production command integration', () => {
       mapId: 'map-durable-target-2',
       supersedesMapId: 'map-durable-target',
       mapRevision: 3,
-      nodes: [firstTargetMap.nodes[0]!],
+      nodes: [firstTargetMap.nodes[0]!, firstTargetMap.nodes[1]!],
       relations: [],
       activatedAt: '2026-08-16T00:00:00.000Z',
     };
@@ -1272,13 +1374,25 @@ describe('Task 20 production command integration', () => {
     };
     const compatibility = { ...compatibilityBody, proofDigest: canonicalJsonSha256(compatibilityBody) };
     const compatibilityRef = await reopened.facade.prepareBlob(taskId, 'content_compatibility_proof', compatibility);
+    const companionCompatibilityBody = {
+      ...compatibilityBody,
+      slotId: 'slot-00001',
+      sourceVersionRef: companionEntry.versionRef,
+      sourceContentSchemaDigest: companionVersion.contentSchemaDigest,
+      targetContentSchemaDigest: companionVersion.contentSchemaDigest,
+    };
+    const companionCompatibility = { ...companionCompatibilityBody, proofDigest: canonicalJsonSha256(companionCompatibilityBody) };
+    const companionCompatibilityRef = await reopened.facade.prepareBlob(taskId, 'content_compatibility_proof', companionCompatibility);
     const intent = buildMigrationIntent({
       taskId,
       migrationSpecRef,
       sourceManifestRef: first.manifestRef,
       sourceMapRef: first.fixture.targetMapRef,
       targetMapRef: secondMapRef,
-      decisions: [{ action: 'inherit_or_validate', slotId: 'slot-00000', sourceVersionRef: inheritedEntry.versionRef, compatibilityProofRef: compatibilityRef }],
+      decisions: [
+        { action: 'inherit_or_validate', slotId: 'slot-00000', sourceVersionRef: inheritedEntry.versionRef, compatibilityProofRef: compatibilityRef },
+        { action: 'inherit_or_validate', slotId: 'slot-00001', sourceVersionRef: companionEntry.versionRef, compatibilityProofRef: companionCompatibilityRef },
+      ],
       impactClosureRef: impactRef,
       migrationPolicyVersion: '1',
     });
@@ -1334,6 +1448,7 @@ describe('Task 20 production command integration', () => {
     expect(result.slotResults).toEqual([{ outcome: 'equivalent', slotId: 'slot-00000', localValidatorEquivalenceProofRef: expect.any(Object) }]);
     await expect(validateAndClassifyMigrationBatchResults({
       taskId, plan, planSpecRef: planRef, intent, orderedResultRefs: [secondA.batchResultRootRef],
+      selectorRegistrations: [first.fixture.batchReg],
       resolve: (ref) => reopened.blobStore.readJson(taskId, ref, ref.kind),
     })).resolves.toMatchObject({ batchRouteOutcome: 'clear' });
     expect(published).toHaveLength(2);

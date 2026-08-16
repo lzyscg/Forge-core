@@ -436,7 +436,7 @@ describe('Task 20 authoritative migration result classification', () => {
     const resultRef = refOfBlob('migration_validation_batch_result', result);
     objects.set(resultRef.digest, result);
     const resolve = async (blobRef: BlobRefV2) => objects.get(blobRef.digest) ?? null;
-    const closureInput = { taskId: 'task-closure', plan, planSpecRef: planRef, intent: closureIntent, resolve };
+    const closureInput = { taskId: 'task-closure', plan, planSpecRef: planRef, intent: closureIntent, selectorRegistrations: [] as ValidatorRegistrationV2[], resolve };
     await expect(validateAndClassifyMigrationBatchResults({ ...closureInput, orderedResultRefs: [resultRef] })).rejects.toThrow(/batch outcome.*content_repair/);
 
     const wrongRegistrationBody = { ...aggregateBody, registrationSetDigest: digest('wrong-registration') };
@@ -763,7 +763,7 @@ describe('Task 20 facade-only runtime orchestration', () => {
       async tail() { return { lastSequence: 0, lastCommitId: null }; },
       templateSnapshotRef: ref('profile_snapshot', 'template'),
       profileSnapshotRef: ref('profile_snapshot', 'profile'),
-      frozenRegistrationSetDigest: digest('registrations'), migrationPolicyVersion: '1', equivalencePolicyVersion: '1',
+      frozenRegistrationSetDigest: digest('registrations'), batchRegistrations: [], migrationPolicyVersion: '1', equivalencePolicyVersion: '1',
       maxAutomaticRetries: 3, clock: () => '2026-08-16T00:00:00.000Z',
       async resolve(_taskId, blobRef) { return prepared.get(blobRef.digest) ?? null; },
       async completedBatches() { return []; },
@@ -854,7 +854,7 @@ describe('Task 20 facade-only runtime orchestration', () => {
         return { lastSequence: published.length * 4, lastCommitId: published.length === 0 ? null : `commit-${published.length}` };
       },
       templateSnapshotRef: ref('profile_snapshot', 'post-template'), profileSnapshotRef: ref('profile_snapshot', 'post-profile'),
-      frozenRegistrationSetDigest: digest('post-registrations'), migrationPolicyVersion: '1', equivalencePolicyVersion: '1', maxAutomaticRetries: 3,
+      frozenRegistrationSetDigest: digest('post-registrations'), batchRegistrations: [], migrationPolicyVersion: '1', equivalencePolicyVersion: '1', maxAutomaticRetries: 3,
       clock: () => '2026-08-16T00:00:00.000Z',
       async resolve(_taskId: string, blobRef: BlobRefV2) { return objects.get(blobRef.digest) ?? null; },
       async completedBatches() { return []; },
@@ -1082,7 +1082,7 @@ describe('Task 20 facade-only runtime orchestration', () => {
       },
       async tail() { return { lastSequence: completed.length, lastCommitId: completed.length ? 'commit-batch' : null }; },
       templateSnapshotRef: ref('profile_snapshot', 'fresh-template'), profileSnapshotRef: ref('profile_snapshot', 'fresh-profile'),
-      frozenRegistrationSetDigest: digest('fresh-regs'), migrationPolicyVersion: '1', equivalencePolicyVersion: '1', maxAutomaticRetries: 3,
+      frozenRegistrationSetDigest: digest('fresh-regs'), batchRegistrations: [], migrationPolicyVersion: '1', equivalencePolicyVersion: '1', maxAutomaticRetries: 3,
       clock: () => '2026-08-16T00:00:00.000Z', async resolve(_taskId, blobRef) { return objects.get(blobRef.digest) ?? null; },
       async completedBatches() { return completed; },
       async localValidatorCustody() {
@@ -1154,7 +1154,7 @@ describe('Task 20 facade-only runtime orchestration', () => {
       },
       async tail() { return { lastSequence: 0, lastCommitId: null }; },
       templateSnapshotRef: ref('profile_snapshot', 'infra-template'), profileSnapshotRef: ref('profile_snapshot', 'infra-profile'),
-      frozenRegistrationSetDigest: digest('infra-regs'), migrationPolicyVersion: '1', equivalencePolicyVersion: '1',
+      frozenRegistrationSetDigest: digest('infra-regs'), batchRegistrations: [], migrationPolicyVersion: '1', equivalencePolicyVersion: '1',
       maxAutomaticRetries: 3, clock: () => '2026-08-16T00:00:00.000Z',
       async resolve(_taskId, blobRef) { return objects.get(blobRef.digest) ?? null; },
       async completedBatches() { return []; },

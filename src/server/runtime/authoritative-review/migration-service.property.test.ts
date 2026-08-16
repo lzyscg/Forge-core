@@ -133,7 +133,7 @@ function buildStressModelRun(seed?: Pick<StressModelRun, 'objects' | 'completed'
     },
     async tail() { return { lastSequence: eventRoots.length, lastCommitId: eventRoots.length === 0 ? null : `commit-${eventRoots.length}` }; },
     templateSnapshotRef: ref('profile_snapshot', '10k-template'), profileSnapshotRef: ref('profile_snapshot', '10k-profile'),
-    frozenRegistrationSetDigest: hash('10k-registry'), migrationPolicyVersion: '1', equivalencePolicyVersion: '1', maxAutomaticRetries: 3,
+    frozenRegistrationSetDigest: hash('10k-registry'), batchRegistrations: [], migrationPolicyVersion: '1', equivalencePolicyVersion: '1', maxAutomaticRetries: 3,
     clock: () => '2026-08-16T00:00:00.000Z', async resolve(_taskId, blobRef) { return objects.get(blobRef.digest) ?? null; },
     async completedBatches() { return [...completed]; },
     async readCurrentAuthority() {
