@@ -500,7 +500,16 @@ export class V2AttemptCoordinator {
       case 'completed':
         return this.completeWorkItem(taskId, workItemId, { commandId }, outcome.resultRefs);
       case 'retryable_failure':
-        return this.recordRetryable(taskId, workItemId, { commandId }, outcome.failureCode, null, outcome.failureDigest, outcome.retryNotBefore);
+        return this.recordRetryable(
+          taskId,
+          workItemId,
+          { commandId },
+          outcome.failureCode,
+          null,
+          outcome.failureDigest,
+          outcome.retryNotBefore,
+          outcome.validatorAggregateRef ?? null,
+        );
       case 'terminal_failure':
         return this.terminalFail(taskId, workItemId, { commandId }, outcome.failureCode, outcome.failureDigest, outcome.taskFailure);
     }
@@ -593,6 +602,7 @@ export class V2AttemptCoordinator {
     ctx: V2AttemptContext | null,
     failureDigestOverride?: string,
     retryNotBeforeOverride?: string,
+    validatorAggregateRef: BlobRefV2 | null = null,
   ): Promise<V2AttemptOutcome> {
     const attemptId = 'attemptId' in identity ? identity.attemptId : identity.commandId;
     const operationId = attemptContinuationOperationId(taskId, workItemId, attemptId, 'retryable');
@@ -609,6 +619,7 @@ export class V2AttemptCoordinator {
         failureDigest,
         attemptId: 'attemptId' in identity ? identity.attemptId : null,
         commandId: 'commandId' in identity ? identity.commandId : null,
+        validatorAggregateRef,
       };
       if (retryNotBeforeOverride !== undefined) {
         input.retryNotBefore = retryNotBeforeOverride;

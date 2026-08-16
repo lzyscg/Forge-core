@@ -1398,7 +1398,10 @@ export class MapReviewService {
     leaseEpoch: number;
     authorityBaseRef: BlobRefV2;
     payloadRef: BlobRefV2;
-  }): Promise<{ kind: 'completed'; resultRefs: readonly BlobRefV2[] } | { kind: 'retryable_failure'; failureCode: string; failureDigest: string }> {
+  }): Promise<
+    | { kind: 'completed'; resultRefs: readonly BlobRefV2[] }
+    | { kind: 'retryable_failure'; failureCode: string; failureDigest: string; validatorAggregateRef?: BlobRefV2 | null }
+  > {
     try {
       // Task 20's closed `post_migration` stage is distinguished by the
       // system-owned payload kind. Ordinary initial settlement payloads are
@@ -1989,7 +1992,12 @@ export function createMapReviewSettlementSystemCommandHandler(service: MapReview
       if (outcome.kind === 'completed') {
         return { kind: 'completed', resultRefs: outcome.resultRefs };
       }
-      return { kind: 'retryable_failure', failureCode: outcome.failureCode, failureDigest: outcome.failureDigest };
+      return {
+        kind: 'retryable_failure',
+        failureCode: outcome.failureCode,
+        failureDigest: outcome.failureDigest,
+        validatorAggregateRef: outcome.validatorAggregateRef ?? null,
+      };
     },
   };
 }

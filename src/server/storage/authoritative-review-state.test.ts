@@ -2394,4 +2394,50 @@ describe('projectAuthoritativeReviewState — review fix round 2', () => {
     expect(projectionDigestOf(asyncResult.state)).toBe(projectionDigestOf(syncResult.state));
     expect(asyncResult.state.availableOverride).toBeNull();
   });
+
+  it('allows a second migration only after the first plan settles and resets its ordinal lineage', () => {
+    const firstPlanRef = makeRef('migration_validation_plan_spec');
+    const secondPlanRef = makeRef('migration_validation_plan_spec');
+    const events = [
+      ev({
+        type: 'structured_migration_validation_plan_started',
+        migrationValidationPlanId: 'mvp-first',
+        intentCoreRef: makeRef('migration_intent_core'),
+        planSpecRef: firstPlanRef,
+      }),
+      ev({
+        type: 'structured_migration_validation_batch_completed',
+        planSpecRef: firstPlanRef,
+        batchOrdinal: 0,
+        batchResultRootRef: makeRef('migration_validation_batch_result'),
+        batchOutcome: 'clear',
+      }),
+      ev({
+        type: 'structured_migration_validation_settlement_completed',
+        settlementCoreRef: makeRef('migration_settlement_core'),
+        provisionalManifestRef: makeRef('content_revision_manifest'),
+        finalizerAggregateRef: makeRef('validator_aggregate'),
+        activationDecisionRef: makeRef('migration_activation_decision'),
+      }),
+      ev({
+        type: 'structured_migration_validation_plan_started',
+        migrationValidationPlanId: 'mvp-second',
+        intentCoreRef: makeRef('migration_intent_core'),
+        planSpecRef: secondPlanRef,
+      }),
+      ev({
+        type: 'structured_migration_validation_batch_completed',
+        planSpecRef: secondPlanRef,
+        batchOrdinal: 0,
+        batchResultRootRef: makeRef('migration_validation_batch_result'),
+        batchOutcome: 'clear',
+      }),
+    ];
+    const projected = projectAuthoritativeReviewStateSync(events);
+    expect(projected.ok).toBe(true);
+    if (!projected.ok) return;
+    expect(projected.state.migrationValidationPlan).toMatchObject({ migrationValidationPlanId: 'mvp-second' });
+    expect(projected.state.migrationBatchOrdinals).toEqual([0]);
+    expect(projected.state.migrationSettled).toBe(false);
+  });
 });

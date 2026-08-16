@@ -257,7 +257,7 @@ export interface AuthoritativeReviewProjectionV2 {
   mapBuilds: Record<string, ProjectedPlanLineageV2>;
   generationPlans: Record<string, ProjectedPlanLineageV2>;
   repairPlans: Record<string, ProjectedRepairLineageV2>;
-  migrationValidationPlan: { migrationValidationPlanId: string; startedAtSequence: number } | null;
+  migrationValidationPlan: { migrationValidationPlanId: string; planSpecRef: BlobRefV2; startedAtSequence: number } | null;
   migrationBatchOrdinals: number[];
   migrationSettled: boolean;
   currentCandidate: { candidateId: string; candidateRef: BlobRefV2; baseMapId: string | null; buildId: string } | null;
@@ -1399,12 +1399,21 @@ function applyEventTail(fold: Fold, event: AuthoritativeReviewEventV2, sequence:
       if (p.migrationValidationPlan !== null) {
         corrupt('migration_duplicate', event, sequence, `migrationValidationPlanId=${event.migrationValidationPlanId}`);
       }
-      p.migrationValidationPlan = { migrationValidationPlanId: event.migrationValidationPlanId, startedAtSequence: sequence };
+      p.migrationValidationPlan = {
+        migrationValidationPlanId: event.migrationValidationPlanId,
+        planSpecRef: event.planSpecRef,
+        startedAtSequence: sequence,
+      };
+      p.migrationBatchOrdinals = [];
+      p.migrationSettled = false;
       return;
     }
     case 'structured_migration_validation_batch_completed': {
       if (p.migrationValidationPlan === null) {
         corrupt('migration_batch_without_plan', event, sequence);
+      }
+      if (!sameRef(p.migrationValidationPlan.planSpecRef, event.planSpecRef)) {
+        corrupt('migration_batch_plan_mismatch', event, sequence);
       }
       const last = p.migrationBatchOrdinals[p.migrationBatchOrdinals.length - 1] ?? -1;
       if (event.batchOrdinal !== last + 1) {
@@ -1420,7 +1429,12 @@ function applyEventTail(fold: Fold, event: AuthoritativeReviewEventV2, sequence:
       if (p.migrationSettled) {
         corrupt('migration_settlement_duplicate', event, sequence);
       }
-      p.migrationSettled = true;
+      // Settlement closes the active lineage. A later approved replacement Map
+      // starts a fresh plan at ordinal zero; concurrent/duplicate starts remain
+      // rejected while this field is non-null.
+      p.migrationValidationPlan = null;
+      p.migrationBatchOrdinals = [];
+      p.migrationSettled = false;
       return;
     }
     case 'structured_map_repair_plan_started':

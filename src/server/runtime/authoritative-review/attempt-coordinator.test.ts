@@ -44,6 +44,7 @@ import {
 } from './system-command-registry';
 import { completionKindRequiresResult } from '../../authoritative-review/authority-types';
 import { resolvePublicationIntent } from '../../storage/authoritative-publication-intent-registry';
+import { refOfBlob } from '../../authoritative-review/object-registry';
 
 let seq = 0;
 
@@ -550,6 +551,62 @@ describe('V2AttemptCoordinator SystemCommand dispatch', () => {
     for (const kind of SYSTEM_COMMAND_KINDS) {
       expect(registry.resolve(kind)?.commandKind).toBe(kind);
     }
+  });
+
+  it('roots validator infrastructure evidence from a retryable SystemCommand outcome', async () => {
+    const env = await makeEnv();
+    const taskId = tid('cmd-validator-evidence');
+    const inputRef = synthRef('validator_input_envelope', 7101);
+    const warningBody = {
+      trigger: 'content_commit' as const,
+      executionPhase: 'batch_commit' as const,
+      inputRef,
+      inputDigest: inputRef.digest,
+      orderedAdvisoryReceiptRefs: [],
+      warningCount: 0,
+    };
+    const warning = { ...warningBody, rootDigest: canonicalJsonSha256(warningBody) };
+    const warningRef = await env.base.facade.prepareBlob(taskId, 'validation_warning_root', warning);
+    const aggregateBody = {
+      trigger: 'content_commit' as const,
+      executionPhase: 'batch_commit' as const,
+      inputRef,
+      inputDigest: inputRef.digest,
+      registrationSetDigest: canonicalJsonSha256([]),
+      validExecutionDigests: [],
+      blockingInvalidReceiptRefs: [],
+      advisoryReceiptRefs: [],
+      infrastructureFailureRefs: [synthRef('validator_failure', 7102)],
+      warningRootRef: warningRef,
+      outcome: 'infrastructure_failure' as const,
+    };
+    const aggregate = { ...aggregateBody, aggregateDigest: canonicalJsonSha256(aggregateBody) };
+    const aggregateRef = await env.base.facade.prepareBlob(taskId, 'validator_aggregate', aggregate);
+    env.systemCommands.replace({
+      commandKind: 'migration_validation_batch',
+      async execute() {
+        return {
+          kind: 'retryable_failure',
+          failureCode: 'VALIDATOR_INFRASTRUCTURE_FAILURE',
+          failureDigest: canonicalJsonSha256({ aggregateRef }),
+          validatorAggregateRef: aggregateRef,
+        };
+      },
+    });
+    const { workItemId } = await createWorkItem(env, taskId, {
+      kind: 'system_migration_validation_batch',
+      baseRefs: {
+        mapCandidateRef: synthRef('map_candidate', 7103),
+        planSpecRef: synthRef('migration_validation_plan_spec', 7104),
+        reviewRoundRef: synthRef('map_review_round', 7105),
+      },
+    });
+    const outcome = await env.attempts.runNext(taskId, 'worker-a');
+    expect(outcome).toMatchObject({ kind: 'retryable_failed', workItemId });
+    const events = await env.base.eventStore.read(taskId);
+    const failed = events.find((entry) => entry.event.type === 'structured_system_command_retryable_failed')?.event;
+    expect(failed).toMatchObject({ validatorAggregateRef: aggregateRef });
+    expect(refOfBlob('validator_aggregate', aggregate)).toEqual(aggregateRef);
   });
 
   it('fails closed with COMMAND_NOT_REGISTERED for an unknown commandKind', async () => {

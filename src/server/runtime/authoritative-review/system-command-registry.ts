@@ -58,6 +58,9 @@ export type SystemCommandOutcome =
       kind: 'retryable_failure';
       failureCode: string;
       failureDigest: string;
+      /** Validator infrastructure custody. The retry event roots the aggregate
+       * and its transitive receipts/failures so GC cannot orphan evidence. */
+      validatorAggregateRef?: BlobRefV2 | null;
       /** Server-computed retryNotBefore override (default clock()). */
       retryNotBefore?: string;
     }
@@ -65,6 +68,7 @@ export type SystemCommandOutcome =
       kind: 'terminal_failure';
       failureCode: string;
       failureDigest: string;
+      validatorAggregateRef?: BlobRefV2 | null;
       /** True emits `structured_task_failed_v2` with the same batch (§10.3). */
       taskFailure: boolean;
     };
