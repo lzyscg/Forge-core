@@ -280,6 +280,15 @@ export function createSystemSealAuthorityResolver(
     if (mapSnapshot.mapSemanticDigest !== activeMapSemanticDigest) {
       throw new SealAuthorityError('SEAL_AUTHORITY_STALE', 'active Map snapshot semantic digest does not match the projection');
     }
+    // N3: a Map may only reference relation types the frozen template declares.
+    // An undeclared typeId is corrupt authority (the orchestrator can only
+    // instantiate declared types); failing closed here prevents condition 5
+    // from silently skipping a relation whose enforcement is unknown.
+    for (const rel of mapSnapshot.relations) {
+      if (template.relationEnforcement.get(rel.typeId) === undefined) {
+        throw new SealAuthorityError('SEAL_AUTHORITY_STALE', `active Map relation '${rel.relationId}' uses undeclared relation type '${rel.typeId}'`);
+      }
+    }
 
     // ---- ReviewBundle closure (conditions 1/2/9) ----
     const reviewBundleRef = base.reviewBundleRef;

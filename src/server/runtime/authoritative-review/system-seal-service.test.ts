@@ -84,6 +84,8 @@ interface SealWorldConfig {
   violatedRelation?: boolean;
   /** active Map carries a blocking relation with NO committed fact at all. */
   blockingRelationNoFact?: boolean;
+  /** active Map carries a relation whose typeId the frozen template does NOT declare. */
+  undeclaredRelationType?: boolean;
   /** finalized manifest contains an optional-unset slot (absence fact unprovable). */
   optionalUnsetSlot?: boolean;
   /** a required-set slot covered ONLY by adoption (no committed fact). */
@@ -244,8 +246,8 @@ function buildSealWorld(cfg: SealWorldConfig = {}): SealWorld {
   refs.mapReviewBundleRef = mapReviewBundleRef;
 
   /* ---- active Map snapshot ---- */
-  const relations = (cfg.violatedRelation || cfg.blockingRelationNoFact)
-    ? [{ relationId: 'rel-1', typeId: 'cross_ref', fromSlotId: 'title', toSlotId: 'opening', attributes: {}, relationDigest: seedDigest('rel-1') }]
+  const relations = (cfg.violatedRelation || cfg.blockingRelationNoFact || cfg.undeclaredRelationType)
+    ? [{ relationId: 'rel-1', typeId: cfg.undeclaredRelationType ? 'ghost_type' : 'cross_ref', fromSlotId: 'title', toSlotId: 'opening', attributes: {}, relationDigest: seedDigest('rel-1') }]
     : [];
   const mapSnapshot = {
     scaffoldId: 'scaffold',
@@ -760,6 +762,16 @@ describe('system-derived Seal Gate (P1#2)', () => {
     const h3 = makeService(sealedWorld);
     const already = await h3.service.execute(sealedWorld.sealContext);
     expect(already).toMatchObject({ kind: 'retryable_failure', failureCode: 'SEAL_AUTHORITY:SEAL_ALREADY_PUBLISHED' });
+  });
+
+  it('fails closed when the active Map carries a relation type the frozen template does not declare', async () => {
+    // N3: an undeclared relation typeId must not slip past condition 5 (its
+    // enforcement is unknown) — the resolver rejects the authority instead.
+    const world = buildSealWorld({ undeclaredRelationType: true });
+    const h = makeService(world);
+    const outcome = await h.service.execute(world.sealContext);
+    expect(outcome).toMatchObject({ kind: 'retryable_failure', failureCode: 'SEAL_AUTHORITY:SEAL_AUTHORITY_STALE' });
+    expect(h.publisher.stage).not.toHaveBeenCalled();
   });
 
   it('content-root equality is never ref equality (same root, different manifest ref)', async () => {

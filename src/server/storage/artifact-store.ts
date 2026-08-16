@@ -1055,6 +1055,9 @@ export class ArtifactStore {
     checkText(bundle.sealWorkItemId, provenance.producerWorkItemId, 'seal validation bundle.sealWorkItemId');
     await this.resolveV2Blob(taskId, bundle.sealInputAggregateRef, 'seal input aggregate');
     await this.resolveV2Blob(taskId, bundle.sealOutputAggregateRef, 'seal output aggregate');
+    // N1: the seal warning custody root is part of the P2#8 advisory custody
+    // chain — deleting/mutating it after publication must fail closed too.
+    await this.resolveV2Blob(taskId, bundle.sealWarningCustodyRootRef, 'seal warning custody root');
 
     // 4. custodyRef → ArtifactCustodyV2, and custody.files must equal the disk
     //    production file set (name + SHA-256 + UTF-8 byte length).

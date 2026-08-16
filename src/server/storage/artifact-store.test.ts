@@ -377,6 +377,7 @@ describe('ArtifactStore v2 provenance closure validation (P1#4)', () => {
       bundleRef: BlobRefV2;
       deliveryRef: BlobRefV2;
       custodyRef: BlobRefV2;
+      sealWarningCustodyRootRef: BlobRefV2;
     };
     stageInput: StageSystemArtifactInputV2;
     event: {
@@ -482,13 +483,31 @@ describe('ArtifactStore v2 provenance closure validation (P1#4)', () => {
     };
     const sealInputAggregateRef = aggregate('seal_input');
     const sealOutputAggregateRef = aggregate('seal_output');
+    // The real closure's P2#8 advisory custody root: the bundle binds it and the
+    // ArtifactStore cross-check resolves it (deleting it must corrupt).
+    const warningInputRef = fabricatedRef('validator_input_envelope', 'envelope-seal-warning');
+    const sealWarningCustodyRootRef = put('validation_warning_custody_root', withSelfDigest({
+      scope: 'seal',
+      taskId,
+      baseRefs: [reviewBundleRef, sealInputAggregateRef].sort((a, b) => (a.digest < b.digest ? -1 : a.digest > b.digest ? 1 : 0)),
+      entries: [{
+        trigger: 'seal_input',
+        inputRef: warningInputRef,
+        inputDigest: warningInputRef.digest,
+        executionScope: { sealWorkItemId },
+        validatorAggregateRef: sealInputAggregateRef,
+        warningRootRef: fabricatedRef('validation_warning_root', 'warning-seal-warning'),
+      }],
+      supersessionPolicyVersion: 'seal-warning-v1',
+      rootDigest: '',
+    }, 'rootDigest'));
     const bundleRef = put('seal_validation_bundle', withSelfDigest({
       sealWorkItemId,
       reviewBundleRef,
       contentRevisionManifestRef: manifestRef,
       sealInputAggregateRef,
       sealOutputAggregateRef,
-      sealWarningCustodyRootRef: fabricatedRef('validation_warning_custody_root', 'seal-warning'),
+      sealWarningCustodyRootRef,
       assemblerDigest: digestOf('assembler'),
       artifactRef,
       artifactDigest: artifactRef.digest,
@@ -567,7 +586,7 @@ describe('ArtifactStore v2 provenance closure validation (P1#4)', () => {
       put,
       resolver,
       makeStore,
-      refs: { artifactRef, sealRecordRef, bundleRef, deliveryRef, custodyRef },
+      refs: { artifactRef, sealRecordRef, bundleRef, deliveryRef, custodyRef, sealWarningCustodyRootRef },
       stageInput,
       event,
     };
@@ -618,6 +637,7 @@ describe('ArtifactStore v2 provenance closure validation (P1#4)', () => {
     ['system artifact delivery', (w: ClosureWorld) => w.refs.deliveryRef],
     ['seal record', (w: ClosureWorld) => w.refs.sealRecordRef],
     ['seal validation bundle', (w: ClosureWorld) => w.refs.bundleRef],
+    ['seal warning custody root', (w: ClosureWorld) => w.refs.sealWarningCustodyRootRef],
     ['artifact custody', (w: ClosureWorld) => w.refs.custodyRef],
     ['artifact blob', (w: ClosureWorld) => w.refs.artifactRef],
   ])('fails closed when the %s blob is deleted after publish', async (_label, pick) => {
