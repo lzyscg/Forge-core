@@ -1094,6 +1094,53 @@ export class ArtifactStore {
     return manifest;
   }
 
+  /**
+   * Full byte-level idempotent match against the deterministic stage dir.
+   * `readSystemStage` already re-reads and re-hashes every staged file, so a
+   * match here means the on-disk bytes equal this input exactly.
+   */
+  private async matchSystemStage(
+    taskId: string,
+    stageIdentity: string,
+    input: StageSystemArtifactInputV2,
+    files: StagedSystemArtifactV2['files'],
+  ): Promise<StagedSystemArtifactV2> {
+    const existing = await this.readSystemStage(taskId, stageIdentity);
+    const same = existing.artifactId === input.artifactId
+      && existing.producerWorkItemId === input.producerWorkItemId
+      && sameBlobRef(existing.sealRecordRef, input.sealRecordRef)
+      && sameBlobRef(existing.artifactRef, input.artifactRef)
+      && sameBlobRef(existing.custodyRef, input.custodyRef)
+      && existing.templateSnapshotHash === input.templateSnapshotHash
+      && existing.files.length === files.length
+      && existing.files.every((file, index) => file.name === files[index]?.name && file.sha256 === files[index]?.sha256);
+    if (!same) throw integrityFailed('相同 Seal stage identity 对应不同 v2 artifact bytes。');
+    return existing;
+  }
+
+  /**
+   * Removes only orphaned per-writer temp dirs for one stage identity. The
+   * pattern (`system-<identity>.tmp-*`, i.e. the deterministic dir name plus
+   * the `.tmp-` prefix) can never match the deterministic stage dir itself, so
+   * cleanup is strictly scoped to crashed writers of THIS identity — never the
+   * committed stage and never another identity's stage or temp dir.
+   */
+  private async cleanSystemStageTmpFor(taskId: string, stageIdentity: string): Promise<void> {
+    const custodyRoot = this.paths.taskStructuredCustodyRoot(taskId);
+    let names: string[];
+    try {
+      names = await readdir(custodyRoot);
+    } catch {
+      return;
+    }
+    const prefix = `system-${stageIdentity}${TMP_PREFIX}`;
+    for (const name of names) {
+      if (name.startsWith(prefix)) {
+        await rm(join(custodyRoot, name), { recursive: true, force: true }).catch(() => undefined);
+      }
+    }
+  }
+
   private async stageSystemArtifactExclusive(
     taskId: string,
     input: StageSystemArtifactInputV2,
@@ -1117,28 +1164,33 @@ export class ArtifactStore {
     const stageIdentity = systemArtifactStageIdentity(input.sealWorkItemId, input.artifactRef);
     const stageDir = this.systemStageDir(taskId, stageIdentity);
     if (await this.isDirectory(stageDir)) {
-      const existing = await this.readSystemStage(taskId, stageIdentity);
-      const same = existing.artifactId === input.artifactId
-        && existing.producerWorkItemId === input.producerWorkItemId
-        && sameBlobRef(existing.sealRecordRef, input.sealRecordRef)
-        && sameBlobRef(existing.artifactRef, input.artifactRef)
-        && sameBlobRef(existing.custodyRef, input.custodyRef)
-        && existing.templateSnapshotHash === input.templateSnapshotHash
-        && existing.files.length === files.length
-        && existing.files.every((file, index) => file.name === files[index]?.name && file.sha256 === files[index]?.sha256);
-      if (!same) throw integrityFailed('相同 Seal stage identity 对应不同 v2 artifact bytes。');
-      return existing;
+      return this.matchSystemStage(taskId, stageIdentity, input, files);
     }
+    // Per-writer staging (Task 21 P1#7): this process writes every file into a
+    // uniquely-named temp dir and only the atomic rename onto the deterministic
+    // stageDir claims it. The deterministic stageDir is therefore created fully
+    // formed, never byte-by-byte by racing writers. A rename loser never
+    // touches the shared stageDir — it validates the winner's bytes instead —
+    // so a duplicate/response-loss writer can never delete a committed stage.
+    await this.cleanSystemStageTmpFor(taskId, stageIdentity);
+    const tmpDir = `${stageDir}${TMP_PREFIX}${randomUUID()}`;
     const createdAt = new Date().toISOString();
     const manifest: StagedSystemArtifactV2 = { ...input, stageIdentity, files, createdAt };
-    await mkdir(stageDir, { recursive: true });
+    const manifestBytes = { ...manifest, files: files.map(({ content: _content, ...file }) => file) };
+    await mkdir(tmpDir, { recursive: true });
     try {
-      const manifestBytes = { ...manifest, files: files.map(({ content: _content, ...file }) => file) };
-      await writeNewAtomic(join(stageDir, SYSTEM_STAGE_FILE), Buffer.from(`${JSON.stringify(manifestBytes, null, 2)}\n`, 'utf8'));
-      for (const file of files) await writeNewAtomic(join(stageDir, file.name), Buffer.from(file.content, 'utf8'));
+      await writeNewAtomic(join(tmpDir, SYSTEM_STAGE_FILE), Buffer.from(`${JSON.stringify(manifestBytes, null, 2)}\n`, 'utf8'));
+      for (const file of files) await writeNewAtomic(join(tmpDir, file.name), Buffer.from(file.content, 'utf8'));
+      await rename(tmpDir, stageDir);
     } catch (error) {
-      await rm(stageDir, { recursive: true, force: true }).catch(() => undefined);
+      // The only cleanup ever performed is this writer's own temp dir.
+      await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
       if (error instanceof StorageError) throw error;
+      const errno = (error as NodeJS.ErrnoException).code;
+      if ((errno === 'EEXIST' || errno === 'ENOTEMPTY' || errno === 'EPERM') && (await this.isDirectory(stageDir))) {
+        // Another process claimed the deterministic stageDir; never delete it.
+        return this.matchSystemStage(taskId, stageIdentity, input, files);
+      }
       throw integrityFailed('v2 system artifact 暂存失败。');
     }
     return manifest;

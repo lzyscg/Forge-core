@@ -26,6 +26,7 @@ import {
   type ArtifactProposal,
   type PrepareStructuredVersionInput,
   type PublishedArtifact,
+  type StageSystemArtifactInputV2,
 } from './artifact-store';
 import type { CommittedEvent } from './event-store';
 import type { BlobRefV2 } from '../../shared/authoritative-review-v2';
@@ -185,6 +186,132 @@ describe('ArtifactStore v2 system custody', () => {
     await reconstructed.read(taskId, 1);
     writeFileSync(join(paths.taskArtifactVersionRoot(taskId, 1), 'chapter.md'), 'tampered', 'utf8');
     await expect(reconstructed.read(taskId, 1)).rejects.toMatchObject({ code: 'TASK_CORRUPTED' });
+  });
+
+  it('two instances racing the same stage identity can never delete the winning stage', async () => {
+    const second = new ArtifactStore(paths, new EventStore(paths));
+    const content = '# chapter\n' + 'x'.repeat(1_000_000);
+    const makeInput = (): StageSystemArtifactInputV2 => ({
+      sealWorkItemId: 'seal-work-1', artifactId: 'system-artifact-1', title: 'Sealed chapter',
+      format: 'markdown', producerWorkItemId: 'seal-work-1', sealRecordRef, artifactRef,
+      custodyRef, templateSnapshotHash: 'template-snapshot', files: [{ name: 'chapter.md', content }],
+    });
+    const identity = systemArtifactStageIdentity('seal-work-1', artifactRef);
+    const stageDir = join(paths.taskStructuredCustodyRoot(taskId), `system-${identity}`);
+    for (let round = 0; round < 12; round += 1) {
+      rmSync(stageDir, { recursive: true, force: true });
+      const results = await Promise.allSettled([
+        store.stageSystemArtifact('system_seal', taskId, makeInput()),
+        second.stageSystemArtifact('system_seal', taskId, makeInput()),
+      ]);
+      for (const result of results) {
+        expect(result.status).toBe('fulfilled');
+      }
+      // The winning stage survived the loser's run: complete, byte-identical.
+      expect(readFileSync(join(stageDir, 'chapter.md'), 'utf8')).toBe(content);
+      const replayed = await new ArtifactStore(paths, new EventStore(paths)).stageSystemArtifact('system_seal', taskId, makeInput());
+      expect(replayed.files[0]).toMatchObject({ name: 'chapter.md', sha256: sha256(content) });
+    }
+  });
+
+  it('racing the same identity with different bytes fails integrity and keeps the winner stage', async () => {
+    const second = new ArtifactStore(paths, new EventStore(paths));
+    const a = 'A'.repeat(400_000);
+    const b = 'B'.repeat(400_000);
+    const makeInput = (content: string): StageSystemArtifactInputV2 => ({
+      sealWorkItemId: 'seal-work-1', artifactId: 'system-artifact-1', title: 'Sealed chapter',
+      format: 'markdown', producerWorkItemId: 'seal-work-1', sealRecordRef, artifactRef,
+      custodyRef, templateSnapshotHash: 'template-snapshot', files: [{ name: 'chapter.md', content }],
+    });
+    const identity = systemArtifactStageIdentity('seal-work-1', artifactRef);
+    const stageDir = join(paths.taskStructuredCustodyRoot(taskId), `system-${identity}`);
+    for (let round = 0; round < 6; round += 1) {
+      rmSync(stageDir, { recursive: true, force: true });
+      const results = await Promise.allSettled([
+        store.stageSystemArtifact('system_seal', taskId, makeInput(a)),
+        second.stageSystemArtifact('system_seal', taskId, makeInput(b)),
+      ]);
+      const fulfilled = results.filter((result) => result.status === 'fulfilled');
+      const rejected = results.filter((result) => result.status === 'rejected');
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0]?.status === 'rejected' ? rejected[0].reason : null)
+        .toMatchObject({ code: 'ARTIFACT_INTEGRITY_FAILED' });
+      // The winner stage is never deleted: the deterministic stage holds exactly one byte set.
+      const bytes = readFileSync(join(stageDir, 'chapter.md'), 'utf8');
+      expect(bytes === a || bytes === b).toBe(true);
+    }
+  });
+
+  it('response-loss reconstruction: a late re-stage after the winner published returns the same stage and promotes', async () => {
+    const winner = new ArtifactStore(paths, new EventStore(paths));
+    const loser = new ArtifactStore(paths, new EventStore(paths));
+    const input: StageSystemArtifactInputV2 = {
+      sealWorkItemId: 'seal-work-1', artifactId: 'system-artifact-1', title: 'Sealed chapter',
+      format: 'markdown', producerWorkItemId: 'seal-work-1', sealRecordRef, artifactRef,
+      custodyRef, templateSnapshotHash: 'template-snapshot', files: [{ name: 'chapter.md', content: '# chapter' }],
+    };
+    const staged = await winner.stageSystemArtifact('system_seal', taskId, input);
+    await appendSystemEvent(1); // the winner commits artifact_published_v2; the response is lost
+    const replayed = await loser.stageSystemArtifact('system_seal', taskId, input);
+    expect(replayed).toEqual(staged);
+    const promoted = await loser.promoteSystemArtifact('system_seal', taskId, {
+      sealWorkItemId: 'seal-work-1', artifactRef, artifactVersion: 1, deliveryRef,
+    });
+    expect(promoted.meta).toEqual(expect.objectContaining({
+      authorityKind: 'system_seal_v2', id: 'system-artifact-1', version: 1,
+      producerWorkItemId: 'seal-work-1', sealRecordRef, artifactRef, custodyRef,
+      templateSnapshotHash: 'template-snapshot', deliveryRef,
+    }));
+    expect(promoted.files[0].content).toBe('# chapter');
+  });
+
+  it('same stage identity with different bytes fails integrity and never deletes the winner stage', async () => {
+    await stageSystem('# winner chapter');
+    const stageDir = join(paths.taskStructuredCustodyRoot(taskId), `system-${systemArtifactStageIdentity('seal-work-1', artifactRef)}`);
+    await expect(stageSystem('# different chapter')).rejects.toMatchObject({ code: 'ARTIFACT_INTEGRITY_FAILED' });
+    expect(readFileSync(join(stageDir, 'chapter.md'), 'utf8')).toBe('# winner chapter');
+    expect(await stageSystem('# winner chapter')).toMatchObject({ files: [{ name: 'chapter.md', content: '# winner chapter' }] });
+  });
+
+  it('a failed write cleans only its own temp dir and never the deterministic stage', async () => {
+    await stageSystem('# winner chapter');
+    const custodyRoot = paths.taskStructuredCustodyRoot(taskId);
+    await expect(store.stageSystemArtifact('system_seal', taskId, {
+      sealWorkItemId: 'seal-work-2', artifactId: 'system-artifact-2', title: 'Sealed chapter',
+      format: 'markdown', producerWorkItemId: 'seal-work-2', sealRecordRef, artifactRef,
+      custodyRef, templateSnapshotHash: 'template-snapshot',
+      files: [
+        { name: 'written.md', content: 'lands first' },
+        { name: `${'b'.repeat(300)}.md`, content: 'blows up on open' },
+      ],
+    })).rejects.toMatchObject({ code: 'ARTIFACT_INTEGRITY_FAILED' });
+    // No per-writer temp residue anywhere in the custody root.
+    expect(readdirSync(custodyRoot).filter((name) => name.includes('.tmp-'))).toEqual([]);
+    // The pre-existing deterministic stage is untouched and still readable.
+    const stageDir = join(custodyRoot, `system-${systemArtifactStageIdentity('seal-work-1', artifactRef)}`);
+    expect(readFileSync(join(stageDir, 'chapter.md'), 'utf8')).toBe('# winner chapter');
+    expect(readFileSync(join(stageDir, 'system-stage.json'), 'utf8')).toContain('"createdAt"');
+    expect(await stageSystem('# winner chapter')).toMatchObject({ files: [{ name: 'chapter.md', content: '# winner chapter' }] });
+  });
+
+  it('a crashed writer leaves an orphan temp dir that a later stage cleans without touching the deterministic stage', async () => {
+    const identity = systemArtifactStageIdentity('seal-work-1', artifactRef);
+    const foreignIdentity = systemArtifactStageIdentity('seal-work-other', artifactRef);
+    const custodyRoot = paths.taskStructuredCustodyRoot(taskId);
+    const orphanName = `system-${identity}.tmp-${randomUUID()}`;
+    const foreignName = `system-${foreignIdentity}.tmp-${randomUUID()}`;
+    mkdirSync(join(custodyRoot, orphanName), { recursive: true });
+    writeFileSync(join(custodyRoot, orphanName, 'system-stage.json'), '{"partial":true}', 'utf8');
+    mkdirSync(join(custodyRoot, foreignName), { recursive: true });
+    writeFileSync(join(custodyRoot, foreignName, 'junk'), 'junk', 'utf8');
+
+    const staged = await stageSystem('# chapter');
+
+    expect(readdirSync(custodyRoot).sort()).toEqual([foreignName, `system-${identity}`].sort());
+    const stageDir = join(custodyRoot, `system-${identity}`);
+    expect(readFileSync(join(stageDir, 'chapter.md'), 'utf8')).toBe('# chapter');
+    expect(staged.files[0]).toMatchObject({ name: 'chapter.md', sha256: sha256('# chapter') });
   });
 });
 
