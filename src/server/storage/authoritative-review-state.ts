@@ -2256,7 +2256,11 @@ function applyManifestCommitted(
     if (event.manifestPhase === 'baseline_unset') {
       corrupt('manifest_phase', event, sequence, `phase=${event.manifestPhase}`);
     }
-    if (p.currentManifest.manifestPhase === 'finalized' && event.manifestPhase === 'provisional') {
+    const isMigrationReplacement =
+      event.manifestPhase === 'provisional'
+      && event.producerPlanSpecRef?.kind === 'migration_validation_plan_spec'
+      && p.currentCandidate !== null;
+    if (p.currentManifest.manifestPhase === 'finalized' && event.manifestPhase === 'provisional' && !isMigrationReplacement) {
       corrupt('manifest_phase', event, sequence, `phase=${event.manifestPhase}`);
     }
   }

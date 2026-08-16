@@ -91,6 +91,7 @@ import type {
   ContentValidationCoreV2,
   ContentValueV2,
   ContentReviewRoundPlanCarrierV2,
+  FindingV2,
   MapCandidateSnapshotV2,
   MapCandidateValidationCoreV2,
   MapPositionNodeV2,
@@ -972,6 +973,157 @@ export class RepairService {
 
   constructor(deps: RepairServiceDependencies) {
     this.deps = deps;
+  }
+
+  /**
+   * Prepares (but deliberately does not publish) the initial RepairPlan that a
+   * migration settlement must carry in its own atomic envelope. Migration
+   * validator Findings are opened by that same envelope, so this path consumes
+   * the exact classified Finding bytes directly instead of consulting the
+   * pre-publication projection.
+   */
+  async prepareMigrationRepairRoute(input: {
+    taskId: string;
+    track: 'map' | 'content';
+    settlementWorkItemId: string;
+    settlementOperationKey: string;
+    settlementDigest: string;
+    candidateRef: BlobRefV2;
+    targetMapRef: BlobRefV2;
+    migratedManifestRef: BlobRefV2;
+    classifiedFindings: readonly FindingV2[];
+  }): Promise<{ carriers: RepairPublishCarriersV2; preparedRefs: readonly BlobRefV2[] }> {
+    const { taskId, track } = input;
+    const findings = input.classifiedFindings.filter((finding) =>
+      finding.severity === 'blocking'
+      && (track === 'content' ? finding.defectClass === 'content' : finding.defectClass !== 'content'));
+    if (findings.length === 0) {
+      throw new RepairError('NO_REPAIR_ROUTE', `migration ${track} repair route has no exact blocking Findings`);
+    }
+
+    const targetMap = (await this.deps.resolver(taskId, input.targetMapRef)) as {
+      nodes?: readonly { slotId: string }[];
+      relations?: readonly { relationId: string }[];
+    } | null;
+    if (targetMap === null || typeof targetMap !== 'object') {
+      throw new RepairError('REPAIR_SCOPE_INVALID', 'migration target Map is unresolvable');
+    }
+    const migratedManifest = (await this.deps.resolver(taskId, input.migratedManifestRef)) as {
+      entries?: readonly { slotId: string }[];
+    } | null;
+    if (migratedManifest === null || typeof migratedManifest !== 'object') {
+      throw new RepairError('REPAIR_SCOPE_INVALID', 'migrated manifest is unresolvable');
+    }
+
+    const knownNodeIds = new Set((targetMap.nodes ?? []).map((node) => node.slotId));
+    const knownRelationIds = new Set((targetMap.relations ?? []).map((relation) => relation.relationId));
+    const knownSlotIds = new Set((migratedManifest.entries ?? []).map((entry) => entry.slotId));
+    const nodeIds = new Set<string>();
+    const relationIds = new Set<string>();
+    const slotIds = new Set<string>();
+    const findingIds = new Set<string>();
+    for (const finding of findings) {
+      findingIds.add(finding.findingId);
+      if (track === 'map') {
+        if (finding.primaryLocation.kind === 'map_node') nodeIds.add(finding.primaryLocation.id);
+        if (finding.primaryLocation.kind === 'relation') relationIds.add(finding.primaryLocation.id);
+      } else {
+        if (finding.primaryLocation.kind === 'slot') slotIds.add(finding.primaryLocation.id);
+        for (const slotId of finding.suggestedRepairSlotIds) slotIds.add(slotId);
+      }
+    }
+    for (const nodeId of nodeIds) {
+      if (!knownNodeIds.has(nodeId)) throw new RepairError('REPAIR_SCOPE_INVALID', `finding names unknown map node '${nodeId}'`);
+    }
+    for (const relationId of relationIds) {
+      if (!knownRelationIds.has(relationId)) throw new RepairError('REPAIR_SCOPE_INVALID', `finding names unknown map relation '${relationId}'`);
+    }
+    for (const slotId of slotIds) {
+      if (!knownSlotIds.has(slotId)) throw new RepairError('REPAIR_SCOPE_INVALID', `finding names unknown slot '${slotId}'`);
+    }
+    if (track === 'map' && nodeIds.size === 0 && relationIds.size === 0) {
+      throw new RepairError('REPAIR_SCOPE_INVALID', 'migration Map Finding has no resolvable Map target');
+    }
+    if (track === 'content' && slotIds.size === 0) {
+      throw new RepairError('REPAIR_SCOPE_INVALID', 'migration Content Finding has no resolvable slot target');
+    }
+
+    const repairPlanId = repairPlanIdOf(taskId, input.settlementOperationKey, track);
+    const targets = {
+      nodeIds: [...nodeIds].sort(),
+      relationIds: [...relationIds].sort(),
+      slotIds: [...slotIds].sort(),
+      findingIds: [...findingIds].sort(),
+    };
+    const scopes = buildRepairBatchScopes({
+      track,
+      repairPlanId,
+      ...targets,
+      reviewPolicy: this.deps.reviewPolicy,
+      profile: this.deps.profile,
+    });
+    const keyLedger = this.initialKeyLedgerOf(repairPlanId, targets, track, 1);
+    const keyLedgerRef = await this.deps.facade.prepareBlob(taskId, 'repair_key_ledger', keyLedger);
+    const repairBase: RepairPlanSpecV2['repairBase'] = track === 'map'
+      ? { kind: 'map_candidate', candidateRef: input.candidateRef }
+      : { kind: 'content', mapRef: input.targetMapRef, contentRevisionManifestRef: input.migratedManifestRef };
+    const importedStagingManifestRef = track === 'map' ? input.candidateRef : input.migratedManifestRef;
+    const plan = buildRepairPlanSpec({
+      repairPlanId,
+      revision: 1,
+      origin: {
+        kind: 'initial',
+        settlementId: input.settlementWorkItemId,
+        settlementDigest: input.settlementDigest,
+        creationOperationKey: input.settlementOperationKey,
+      },
+      sourceReceiptRef: null,
+      repairBase,
+      orderedBatchScopes: scopes,
+      keyLineageRef: keyLedgerRef,
+      importedStagingManifestRef,
+    });
+    const planRef = await this.deps.facade.prepareBlob(taskId, 'repair_plan_spec', plan);
+    const baseStagingRoot = this.baseStagingRootOf(plan, keyLedgerRef, taskId, track, targets);
+    const baseStagingRootRef = await this.deps.facade.prepareBlob(taskId, 'repair_staging_root', baseStagingRoot);
+    const firstWorkItemId = repairBatchWorkItemId(taskId, repairPlanId, 1, plan.planRevisionId);
+    const successor = await this.prepareRepairBatchSuccessor({
+      taskId,
+      plan,
+      planRef,
+      batchOrdinal: 0,
+      nextWorkItemId: firstWorkItemId,
+      isLast: false,
+      currentStagingRootRef: baseStagingRootRef,
+      keyLedgerRef,
+    });
+    const carryErrors = validateRepairSuccessorCarrier(successor.carrier, planRef);
+    if (carryErrors.length > 0) {
+      throw new RepairError('INVALID_INPUT', `migration repair successor carry invalid: ${carryErrors.join('; ')}`);
+    }
+    const preparedRefs = [
+      keyLedgerRef,
+      planRef,
+      baseStagingRootRef,
+      successor.authorityBaseRef,
+      ...(successor.grantSpecRef === null ? [] : [successor.grantSpecRef]),
+    ];
+    return {
+      carriers: repairCarrier({
+        track,
+        repairPlanId,
+        planRevisionId: plan.planRevisionId,
+        repairPlanSpecRef: planRef,
+        sourceValidationReceiptRef: null,
+        workItemId: firstWorkItemId,
+        batchOrdinal: 1,
+        grantSpecId: `gs-${firstWorkItemId}`,
+        grantKind: track === 'map' ? 'map_repair_batch' : 'content_repair_batch',
+        successor: successor.carrier,
+        terminal: null,
+      }),
+      preparedRefs,
+    };
   }
 
   /* ------------------------- initial plan creation ---------------- */

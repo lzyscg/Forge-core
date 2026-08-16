@@ -47,7 +47,7 @@ import { buildReviewAssignmentFreeze, validateVerificationSubmission, type Revie
 import { ReviewCoordinatorV2, reviewAssignmentIdOf, reviewBatchWorkItemId, reviewWholeAssignmentId, reviewWholeWorkItemId } from './review-coordinator';
 import { planMapReview } from './observation-planner';
 import { attemptContinuationOperationId } from './attempt-coordinator';
-import { completionKindRequiresResult, type AssignmentDispatchV2, type ContentRevisionManifestV2, type GenerationPlanSpecV2, type MapPositionNodeV2, type MapRelationV2, type ReviewFactV2 } from '../../authoritative-review/authority-types';
+import { completionKindRequiresResult, type AssignmentDispatchV2, type ContentRevisionManifestV2, type FindingV2, type GenerationPlanSpecV2, type MapPositionNodeV2, type MapRelationV2, type ReviewFactV2 } from '../../authoritative-review/authority-types';
 import {
   RepairService,
   RepairError,
@@ -1503,6 +1503,117 @@ async function driveToContentStack(b: RepairEnv, slotIds: string[]): Promise<{ m
 /* ------------------------------------------------------------------ */
 
 describe('repair plan identity (pure)', { timeout: 120_000 }, () => {
+  it('prepares migration content/map repair routes from exact classified Findings without publishing', async () => {
+    const b = await makeRepairEnv();
+    const stack = await driveToContentStack(b, ['s-1']);
+    const eventsBefore = await b.readEvents(b.taskId);
+    const candidateEvent = eventsBefore.find(
+      (event): event is Extract<AuthoritativeReviewEventV2, { type: 'structured_map_candidate_committed' }> =>
+        event.type === 'structured_map_candidate_committed',
+    );
+    if (candidateEvent === undefined) throw new Error('migration route test lacks candidate custody');
+    const contentSlotId = stack.nodeIds[0]!;
+
+    const finding = (input: {
+      findingId: string;
+      defectClass: 'content' | 'mixed';
+      primaryLocation: FindingV2['primaryLocation'];
+      suggestedRepairSlotIds: readonly string[];
+    }): FindingV2 => ({
+      findingId: input.findingId,
+      reviewContext: { kind: 'content', roundId: 'migration-post' },
+      primaryLocation: input.primaryLocation,
+      relatedSlotIds: input.suggestedRepairSlotIds,
+      relatedRelationIds: [],
+      defectClass: input.defectClass,
+      severity: 'blocking',
+      source: 'system_validator',
+      evidence: [],
+      suggestedRepairSlotIds: input.suggestedRepairSlotIds,
+      status: 'open',
+      repairProgress: {
+        map: input.defectClass === 'content' ? 'not_required' : 'pending',
+        content: 'pending',
+      },
+      openedBy: { kind: 'system_validator', validatorExecutionId: `validator-${input.findingId}` },
+    });
+
+    const contentPrepared = await b.service.prepareMigrationRepairRoute({
+      taskId: b.taskId,
+      track: 'content',
+      settlementWorkItemId: 'wi-migration-post-content',
+      settlementOperationKey: 'op-migration-post-content',
+      settlementDigest: '1'.repeat(64),
+      candidateRef: candidateEvent.candidateRef,
+      targetMapRef: stack.mapRef,
+      migratedManifestRef: stack.manifestRef,
+      classifiedFindings: [finding({
+        findingId: 'migration-content-1',
+        defectClass: 'content',
+        primaryLocation: { kind: 'slot', id: contentSlotId },
+        suggestedRepairSlotIds: [contentSlotId],
+      })],
+    });
+    expect(contentPrepared.carriers).toMatchObject({
+      track: 'content',
+      grantKind: 'content_repair_batch',
+      batchOrdinal: 1,
+      terminal: null,
+      successor: { kind: 'agent_assignment', sessionKind: 'content_repair' },
+    });
+    const contentPlan = await b.resolver(b.taskId, contentPrepared.carriers.repairPlanSpecRef!) as RepairPlanSpecV2;
+    expect(contentPlan.repairBase).toEqual({
+      kind: 'content',
+      mapRef: stack.mapRef,
+      contentRevisionManifestRef: stack.manifestRef,
+    });
+    expect(contentPlan.importedStagingManifestRef).toEqual(stack.manifestRef);
+    expect(contentPlan.orderedBatchScopes).toEqual([{
+      kind: 'content',
+      batchOrdinal: 1,
+      findingIds: ['migration-content-1'],
+      slotIds: [contentSlotId],
+    }]);
+
+    const mapTargetId = stack.nodeIds[0]!;
+    const mapPrepared = await b.service.prepareMigrationRepairRoute({
+      taskId: b.taskId,
+      track: 'map',
+      settlementWorkItemId: 'wi-migration-post-map',
+      settlementOperationKey: 'op-migration-post-map',
+      settlementDigest: '2'.repeat(64),
+      candidateRef: candidateEvent.candidateRef,
+      targetMapRef: stack.mapRef,
+      migratedManifestRef: stack.manifestRef,
+      classifiedFindings: [finding({
+        findingId: 'migration-mixed-1',
+        defectClass: 'mixed',
+        primaryLocation: { kind: 'map_node', id: mapTargetId },
+        suggestedRepairSlotIds: ['s-1'],
+      })],
+    });
+    expect(mapPrepared.carriers).toMatchObject({
+      track: 'map',
+      grantKind: 'map_repair_batch',
+      batchOrdinal: 1,
+      terminal: null,
+      successor: { kind: 'agent_assignment', sessionKind: 'map_repair' },
+    });
+    const mapPlan = await b.resolver(b.taskId, mapPrepared.carriers.repairPlanSpecRef!) as RepairPlanSpecV2;
+    expect(mapPlan.repairBase).toEqual({ kind: 'map_candidate', candidateRef: candidateEvent.candidateRef });
+    expect(mapPlan.importedStagingManifestRef).toEqual(candidateEvent.candidateRef);
+    expect(mapPlan.orderedBatchScopes[0]).toMatchObject({
+      kind: 'map',
+      batchOrdinal: 1,
+      findingIds: ['migration-mixed-1'],
+      scope: { nodeIds: [mapTargetId], relationIds: [] },
+    });
+    expect(await b.readEvents(b.taskId)).toHaveLength(eventsBefore.length);
+    for (const preparedRef of [...contentPrepared.preparedRefs, ...mapPrepared.preparedRefs]) {
+      await expect(b.resolver(b.taskId, preparedRef)).resolves.toBeTruthy();
+    }
+  });
+
   it('initial plan has NO fake predecessor and uses the settlement creation key', () => {
     const key = 'op-settlement-continuation';
     const plan = buildRepairPlanSpec({

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { canonicalJsonSha256 } from '../../structured-slots/canonical-json';
 import { refOfBlob } from '../../authoritative-review/object-registry';
 import type { BlobRefV2 } from '../../../shared/authoritative-review-v2';
-import type { SlotContentVersionV2 } from '../../authoritative-review/authority-types';
+import type { MapReviewRoundV2, SlotContentVersionV2 } from '../../authoritative-review/authority-types';
 import { validateMigrationSuccessorCarrier } from './work-item-coordinator';
 import { mapReviewCarrier } from './map-review-service';
 import {
@@ -27,6 +27,7 @@ import {
   createProductionMigrationRuntime,
 } from './migration-service';
 import { ValidatorRegistry } from './validator-registry';
+import { registrationSetDigestOf } from './validator-engine';
 import { SystemCommandRegistry, SYSTEM_COMMAND_NOT_IMPLEMENTED_CODE } from './system-command-registry';
 import {
   AUTHORITATIVE_REVIEW_BUILTIN_VALIDATOR_ENTRIES,
@@ -34,9 +35,29 @@ import {
 } from './builtin-validators';
 import { buildAuthoritativeReviewTestProfileBody } from '../../structured-slots/test-support/authoritative-review-test-registry';
 import type { ValidatorRegistrationV2 } from '../../template/structured-slot-contract-v2';
+import { PUBLICATION_INTENT_REGISTRY_V2 } from '../../storage/authoritative-publication-intent-registry';
 
 const digest = (label: string): string => canonicalJsonSha256({ label });
 const ref = (kind: Parameters<typeof refOfBlob>[0], label: string): BlobRefV2 => refOfBlob(kind, { label });
+
+function completedMapReviewRound(mapReviewRoundId: string): MapReviewRoundV2 {
+  return {
+    mapReviewRoundId,
+    candidateId: `candidate-${mapReviewRoundId}`,
+    candidateDigest: digest(`candidate-${mapReviewRoundId}`),
+    contentRevisionManifestRef: null,
+    contentRootDigest: null,
+    reviewPolicyDigest: digest(`policy-${mapReviewRoundId}`),
+    coverageNodeIds: [],
+    coverageRelationIds: [],
+    assignmentIds: [],
+    inheritedRecordRefs: [],
+    wholeMapObservationRefs: [],
+    verificationFindingStages: [],
+    state: 'completed',
+    settlementRef: null,
+  };
+}
 
 function builtinRegistration(handlerKey: string): ValidatorRegistrationV2 {
   const entry = AUTHORITATIVE_REVIEW_BUILTIN_VALIDATOR_ENTRIES.find((candidate) => candidate.handlerKey === handlerKey);
@@ -317,14 +338,79 @@ describe('Task 20 authoritative migration result classification', () => {
     sourceManifestRef: ref('content_revision_manifest', 'closure-manifest'), frozenRegistrationSetDigest: digest('closure-regs'),
     orderedBatchSlotIds: [['slot-a'], ['slot-b']], profileRef: ref('profile_snapshot', 'closure-profile'),
   });
+  const closureSourceValue = setVersion('slot-a').value;
+  const closureSource = { value: closureSourceValue, ref: refOfBlob('content_version', closureSourceValue) };
+  const closureTargetMapRef = ref('map_snapshot', 'closure-target-map');
+  const closureProofBody = {
+    taskId: 'task-closure', slotId: 'slot-a', sourceVersionRef: closureSource.ref,
+    sourceMapRef: ref('map_snapshot', 'source-map'), targetMapRef: closureTargetMapRef,
+    sourceContentSchemaDigest: closureSourceValue.contentSchemaDigest, targetContentSchemaDigest: closureSourceValue.contentSchemaDigest,
+    stableIdentityEvidenceRef: ref('finding_set', 'closure-identity'), proofPolicyVersion: '1',
+  };
+  const closureProof = { ...closureProofBody, proofDigest: canonicalJsonSha256(closureProofBody) };
+  const closureProofRef = refOfBlob('content_compatibility_proof', closureProof);
+  const closureIntent = buildMigrationIntent({
+    taskId: 'task-closure', migrationSpecRef: ref('migration_spec', 'closure-spec'),
+    sourceManifestRef: plan.sourceManifestRef, sourceMapRef: ref('map_snapshot', 'source-map'),
+    targetMapRef: closureTargetMapRef,
+    decisions: [{ action: 'inherit_or_validate', slotId: 'slot-a', sourceVersionRef: closureSource.ref, compatibilityProofRef: closureProofRef }],
+    impactClosureRef: ref('finding_set', 'closure-impact'), migrationPolicyVersion: '1',
+  });
 
   it('rejects swapped ordinals, omitted slots, and a caller-claimed clear rejection', async () => {
     const objects = new Map<string, unknown>();
+    const issue = {
+      validatorId: 'v-closure', implementationDigest: digest('closure-impl'), issueCode: 'CONTENT_INVALID',
+      location: { targetKind: 'slot', stableTargetId: 'slot-a', jsonPointer: null },
+      repairTargets: { mapNodeIds: [], relationIds: [], slotIds: ['slot-a'] }, evidenceDigest: digest('closure-evidence'),
+    };
+    const coreBody = {
+      priorManifestRef: plan.sourceManifestRef, producerPlanSpecRef: planRef, batchOrdinal: 0,
+      authorizedReplacementEntriesWithoutValidation: [{ slotId: 'slot-a', expectedCurrentVersionRef: closureSource.ref }],
+      expectedMapRef: closureIntent.targetMapRef,
+    };
+    const core = { ...coreBody, coreDigest: canonicalJsonSha256(coreBody) };
+    const coreRef = refOfBlob('content_revision_commit_core', core);
+    const envelope = {
+      trigger: 'content_commit' as const, executionPhase: 'batch_commit' as const, taskId: 'task-closure',
+      templateSnapshotHash: digest('closure-template'), contentValidationCoreRef: coreRef,
+      selectedTargetRefs: [closureSource.value.state === 'set' ? closureSource.value.blobRef : ref('content_value', 'impossible')],
+    };
+    const envelopeRef = refOfBlob('validator_input_envelope', envelope);
+    const intermediateAggregateBody = {
+      trigger: 'content_commit' as const, executionPhase: 'batch_commit' as const, inputRef: envelopeRef, inputDigest: envelopeRef.digest,
+      registrationSetDigest: plan.frozenRegistrationSetDigest, validExecutionDigests: [], blockingInvalidReceiptRefs: [], advisoryReceiptRefs: [],
+      infrastructureFailureRefs: [], warningRootRef: ref('validation_warning_root', 'closure-empty-warning'), outcome: 'clear' as const,
+    };
+    const intermediateAggregate = { ...intermediateAggregateBody, aggregateDigest: canonicalJsonSha256(intermediateAggregateBody) };
+    const intermediateAggregateRef = refOfBlob('validator_aggregate', intermediateAggregate);
+    const receiptBody = {
+      receiptKind: 'generation' as const, validatorAggregateRef: intermediateAggregateRef, blockerIssues: [issue],
+      lineageRefs: [
+        { label: 'core', ref: coreRef }, { label: 'envelope', ref: envelopeRef },
+        { label: 'target.000000', ref: envelope.selectedTargetRefs[0]! },
+      ],
+    };
+    const receipt = { ...receiptBody, receiptDigest: canonicalJsonSha256(receiptBody) };
+    const receiptRef = refOfBlob('validation_receipt', receipt);
+    const warningBody = {
+      trigger: 'content_commit' as const, executionPhase: 'batch_commit' as const, inputRef: envelopeRef, inputDigest: envelopeRef.digest,
+      orderedAdvisoryReceiptRefs: [] as BlobRefV2[], warningCount: 0,
+    };
+    const warning = { ...warningBody, rootDigest: canonicalJsonSha256(warningBody) };
+    const warningRef = refOfBlob('validation_warning_root', warning);
+    const aggregateBody = {
+      trigger: 'content_commit' as const, executionPhase: 'batch_commit' as const, inputRef: envelopeRef, inputDigest: envelopeRef.digest,
+      registrationSetDigest: plan.frozenRegistrationSetDigest, validExecutionDigests: [], blockingInvalidReceiptRefs: [receiptRef], advisoryReceiptRefs: [],
+      infrastructureFailureRefs: [], warningRootRef: warningRef, outcome: 'blocking_invalid' as const,
+    };
+    const aggregate = { ...aggregateBody, aggregateDigest: canonicalJsonSha256(aggregateBody) };
+    const rejectedAggregateRef = refOfBlob('validator_aggregate', aggregate);
     const finding = {
       findingId: 'finding-content', reviewContext: { kind: 'content' as const, roundId: 'migration-closure' },
       primaryLocation: { kind: 'slot' as const, id: 'slot-a' }, relatedSlotIds: ['slot-a'], relatedRelationIds: [],
       defectClass: 'content' as const, severity: 'blocking' as const, source: 'system_validator' as const,
-      evidence: [], suggestedRepairSlotIds: ['slot-a'], status: 'open' as const,
+      evidence: [{ evidenceDigest: issue.evidenceDigest, text: issue.issueCode, refs: [rejectedAggregateRef] }], suggestedRepairSlotIds: ['slot-a'], status: 'open' as const,
       repairProgress: { map: 'not_required' as const, content: 'pending' as const },
       openedBy: { kind: 'system_validator' as const, validatorExecutionId: 'validator-content' },
     };
@@ -332,31 +418,109 @@ describe('Task 20 authoritative migration result classification', () => {
     const setBody = { findingSetId: 'set-content', findingRefs: [findingRef] };
     const findingSet = { ...setBody, setDigest: canonicalJsonSha256(setBody) };
     const findingSetRef = refOfBlob('finding_set', findingSet);
-    const rejectedAggregateRef = ref('validator_aggregate', 'closure-rejected-aggregate');
+    objects.set(closureSource.ref.digest, closureSource.value);
+    objects.set(closureProofRef.digest, closureProof);
+    objects.set(coreRef.digest, core);
+    objects.set(envelopeRef.digest, envelope);
+    objects.set(intermediateAggregateRef.digest, intermediateAggregate);
+    objects.set(receiptRef.digest, receipt);
+    objects.set(warningRef.digest, warning);
     objects.set(findingRef.digest, finding);
     objects.set(findingSetRef.digest, findingSet);
-    objects.set(rejectedAggregateRef.digest, { outcome: 'blocking_invalid' });
+    objects.set(rejectedAggregateRef.digest, aggregate);
     const result = buildMigrationValidationBatchResult({
       migrationValidationPlanSpecRef: planRef, batchOrdinal: 0,
-      slotResults: [{ outcome: 'rejected', slotId: 'slot-a', validatorAggregateRef: rejectedAggregateRef, validationReceiptRef: ref('validation_receipt', 'closure-receipt'), findingSetRef }],
+      slotResults: [{ outcome: 'rejected', slotId: 'slot-a', validatorAggregateRef: rejectedAggregateRef, validationReceiptRef: receiptRef, findingSetRef }],
       batchOutcome: 'clear',
     });
     const resultRef = refOfBlob('migration_validation_batch_result', result);
     objects.set(resultRef.digest, result);
     const resolve = async (blobRef: BlobRefV2) => objects.get(blobRef.digest) ?? null;
-    await expect(validateAndClassifyMigrationBatchResults({ plan, planSpecRef: planRef, orderedResultRefs: [resultRef], resolve })).rejects.toThrow(/batch outcome.*content_repair/);
+    const closureInput = { taskId: 'task-closure', plan, planSpecRef: planRef, intent: closureIntent, resolve };
+    await expect(validateAndClassifyMigrationBatchResults({ ...closureInput, orderedResultRefs: [resultRef] })).rejects.toThrow(/batch outcome.*content_repair/);
+
+    const wrongRegistrationBody = { ...aggregateBody, registrationSetDigest: digest('wrong-registration') };
+    const wrongRegistration = { ...wrongRegistrationBody, aggregateDigest: canonicalJsonSha256(wrongRegistrationBody) };
+    const wrongRegistrationRef = refOfBlob('validator_aggregate', wrongRegistration);
+    objects.set(wrongRegistrationRef.digest, wrongRegistration);
+    const wrongRegistrationResult = buildMigrationValidationBatchResult({
+      migrationValidationPlanSpecRef: planRef, batchOrdinal: 0,
+      slotResults: [{ outcome: 'rejected', slotId: 'slot-a', validatorAggregateRef: wrongRegistrationRef, validationReceiptRef: receiptRef, findingSetRef }],
+      batchOutcome: 'content_repair',
+    });
+    const wrongRegistrationResultRef = refOfBlob('migration_validation_batch_result', wrongRegistrationResult);
+    objects.set(wrongRegistrationResultRef.digest, wrongRegistrationResult);
+    await expect(validateAndClassifyMigrationBatchResults({ ...closureInput, orderedResultRefs: [wrongRegistrationResultRef] })).rejects.toThrow(/wrong frozen registration set/);
+
+    const swappedReceipt = { ...receipt, receiptDigest: digest('swapped-receipt') };
+    const swappedReceiptRef = refOfBlob('validation_receipt', swappedReceipt);
+    objects.set(swappedReceiptRef.digest, swappedReceipt);
+    const swappedReceiptResult = buildMigrationValidationBatchResult({
+      migrationValidationPlanSpecRef: planRef, batchOrdinal: 0,
+      slotResults: [{ outcome: 'rejected', slotId: 'slot-a', validatorAggregateRef: rejectedAggregateRef, validationReceiptRef: swappedReceiptRef, findingSetRef }],
+      batchOutcome: 'content_repair',
+    });
+    const swappedReceiptResultRef = refOfBlob('migration_validation_batch_result', swappedReceiptResult);
+    objects.set(swappedReceiptResultRef.digest, swappedReceiptResult);
+    await expect(validateAndClassifyMigrationBatchResults({ ...closureInput, orderedResultRefs: [swappedReceiptResultRef] })).rejects.toThrow(/not a member/);
+
+    const unrelatedFinding = { ...finding, findingId: 'finding-unrelated', evidence: [{ evidenceDigest: digest('unrelated'), text: 'unrelated', refs: [rejectedAggregateRef] }] };
+    const unrelatedFindingRef = refOfBlob('finding', unrelatedFinding);
+    const unrelatedSetBody = { findingSetId: 'set-unrelated', findingRefs: [unrelatedFindingRef] };
+    const unrelatedSet = { ...unrelatedSetBody, setDigest: canonicalJsonSha256(unrelatedSetBody) };
+    const unrelatedSetRef = refOfBlob('finding_set', unrelatedSet);
+    objects.set(unrelatedFindingRef.digest, unrelatedFinding);
+    objects.set(unrelatedSetRef.digest, unrelatedSet);
+    const unrelatedResult = buildMigrationValidationBatchResult({
+      migrationValidationPlanSpecRef: planRef, batchOrdinal: 0,
+      slotResults: [{ outcome: 'rejected', slotId: 'slot-a', validatorAggregateRef: rejectedAggregateRef, validationReceiptRef: receiptRef, findingSetRef: unrelatedSetRef }],
+      batchOutcome: 'content_repair',
+    });
+    const unrelatedResultRef = refOfBlob('migration_validation_batch_result', unrelatedResult);
+    objects.set(unrelatedResultRef.digest, unrelatedResult);
+    await expect(validateAndClassifyMigrationBatchResults({ ...closureInput, orderedResultRefs: [unrelatedResultRef] })).rejects.toThrow(/unrelated to the blocking receipt/);
+
+    const clearAggregateBody = { ...aggregateBody, blockingInvalidReceiptRefs: [] as BlobRefV2[], outcome: 'clear' as const };
+    const clearAggregate = { ...clearAggregateBody, aggregateDigest: canonicalJsonSha256(clearAggregateBody) };
+    const clearAggregateRef = refOfBlob('validator_aggregate', clearAggregate);
+    objects.set(clearAggregateRef.digest, clearAggregate);
+    const wrongWarningResult = buildMigrationValidationBatchResult({
+      migrationValidationPlanSpecRef: planRef, batchOrdinal: 0,
+      slotResults: [{ outcome: 'revalidated', slotId: 'slot-a', validatorAggregateRef: clearAggregateRef, warningRootRef: ref('validation_warning_root', 'wrong-warning') }],
+      batchOutcome: 'clear',
+    });
+    const wrongWarningResultRef = refOfBlob('migration_validation_batch_result', wrongWarningResult);
+    objects.set(wrongWarningResultRef.digest, wrongWarningResult);
+    await expect(validateAndClassifyMigrationBatchResults({ ...closureInput, orderedResultRefs: [wrongWarningResultRef] })).rejects.toThrow(/warning ref is not the aggregate warning root/);
+
+    const proofBody = {
+      slotId: 'slot-a', sourceVersionRef: closureSource.ref, sourceMapRef: closureIntent.sourceMapRef,
+      targetMapRef: ref('map_snapshot', 'forged-target'), sourceBatchInputRef: envelopeRef,
+      frozenRegistrationSetDigest: plan.frozenRegistrationSetDigest, localMapSubgraphDigest: digest('local'),
+      localRelationContextDigest: digest('relations'), selectorExpansionDigest: digest('selector'), equivalencePolicyVersion: '1',
+    };
+    const forgedProof = { ...proofBody, proofDigest: canonicalJsonSha256(proofBody) };
+    const forgedProofRef = refOfBlob('local_validator_equivalence_proof', forgedProof);
+    objects.set(forgedProofRef.digest, forgedProof);
+    const forgedProofResult = buildMigrationValidationBatchResult({
+      migrationValidationPlanSpecRef: planRef, batchOrdinal: 0,
+      slotResults: [{ outcome: 'equivalent', slotId: 'slot-a', localValidatorEquivalenceProofRef: forgedProofRef }], batchOutcome: 'clear',
+    });
+    const forgedProofResultRef = refOfBlob('migration_validation_batch_result', forgedProofResult);
+    objects.set(forgedProofResultRef.digest, forgedProofResult);
+    await expect(validateAndClassifyMigrationBatchResults({ ...closureInput, orderedResultRefs: [forgedProofResultRef] })).rejects.toThrow(/does not bind the frozen plan/);
 
     const swapped = buildMigrationValidationBatchResult({
       migrationValidationPlanSpecRef: planRef, batchOrdinal: 1, slotResults: result.slotResults, batchOutcome: 'content_repair',
     });
     const swappedRef = refOfBlob('migration_validation_batch_result', swapped);
     objects.set(swappedRef.digest, swapped);
-    await expect(validateAndClassifyMigrationBatchResults({ plan, planSpecRef: planRef, orderedResultRefs: [swappedRef], resolve })).rejects.toThrow(/ordinal 0/);
+    await expect(validateAndClassifyMigrationBatchResults({ ...closureInput, orderedResultRefs: [swappedRef] })).rejects.toThrow(/ordinal 0/);
 
     const omitted = buildMigrationValidationBatchResult({ migrationValidationPlanSpecRef: planRef, batchOrdinal: 0, slotResults: [], batchOutcome: 'clear' });
     const omittedRef = refOfBlob('migration_validation_batch_result', omitted);
     objects.set(omittedRef.digest, omitted);
-    await expect(validateAndClassifyMigrationBatchResults({ plan, planSpecRef: planRef, orderedResultRefs: [omittedRef], resolve })).rejects.toThrow(/slot set/);
+    await expect(validateAndClassifyMigrationBatchResults({ ...closureInput, orderedResultRefs: [omittedRef] })).rejects.toThrow(/slot set/);
   });
 
   it('unions batch-content and finalizer-map Findings canonically and routes Map repair', async () => {
@@ -445,6 +609,42 @@ describe('Task 20 atomic migration progress envelopes', () => {
       'structured_system_command_completed', 'structured_work_item_completed',
     ]);
   });
+
+  it('opens migration validator Findings before the repair-plan event in the same settlement envelope', () => {
+    const finding = {
+      findingId: 'migration-system-finding', reviewContext: { kind: 'map' as const, roundId: 'migration-map-round' },
+      primaryLocation: { kind: 'slot' as const, id: 'slot-a' }, relatedSlotIds: ['slot-a'], relatedRelationIds: [],
+      defectClass: 'content' as const, severity: 'blocking' as const, source: 'system_validator' as const,
+      evidence: [], suggestedRepairSlotIds: ['slot-a'], status: 'open' as const,
+      repairProgress: { map: 'not_required' as const, content: 'pending' as const },
+      openedBy: { kind: 'system_validator' as const, validatorExecutionId: 'migration-validator' },
+    };
+    const findingRef = refOfBlob('finding', finding);
+    const carrier = mapReviewCarrier({
+      mapReviewRoundId: 'migration-map-round', settlementCoreRef: ref('map_review_settlement_core', 'migration-map-settlement'),
+      outcome: 'map_repair', migrationSettlementCoreRef: ref('migration_settlement_core', 'migration-settlement'),
+      migrationActivationDecisionRef: ref('migration_activation_decision', 'migration-decision'),
+      migrationProvisionalManifestRef: ref('content_revision_manifest', 'migration-provisional'),
+      migrationFinalizerAggregateRef: ref('validator_aggregate', 'migration-finalizer'),
+      migrationFindingOpenings: [{
+        findingId: finding.findingId, findingRef, reviewContext: finding.reviewContext, primaryLocation: finding.primaryLocation,
+        defectClass: finding.defectClass, severity: finding.severity, source: finding.source, openedBy: finding.openedBy,
+      }],
+      terminal: { workItemId: 'wi-post', commandId: 'cmd-post', commandKind: 'review_settlement', leaseEpoch: 1, authorityBaseRef },
+    });
+    const payload = {
+      family: 'domain_publish' as const, operationId: 'op-migration-findings', taskId: 'task-migration-findings',
+      publishKind: 'map_review_settlement' as const, blobRefs: [findingRef], expectedResultIdentity: digest('identity'),
+      mapBuild: null, contentPlan: null, contentReview: null, repair: null, mapReview: carrier,
+    };
+    const handler = PUBLICATION_INTENT_REGISTRY_V2.resolve('map_review_settlement', 1);
+    expect(handler).not.toBeNull();
+    const events = handler!.buildEvents(payload, '2026-08-16T00:00:00.000Z');
+    const types = events.map((event) => event.type);
+    expect(types.indexOf('structured_finding_opened')).toBeGreaterThanOrEqual(0);
+    expect(types.indexOf('structured_finding_opened')).toBeLessThan(types.indexOf('structured_map_review_round_settled'));
+    expect(events.find((event) => event.type === 'structured_finding_opened')).toMatchObject({ findingId: finding.findingId, findingRef });
+  });
 });
 
 describe('Task 20 facade-only runtime orchestration', () => {
@@ -459,6 +659,7 @@ describe('Task 20 facade-only runtime orchestration', () => {
     const contentValueRef = refOfBlob('content_value', contentValue);
     const sourceMapRef = ref('map_snapshot', 'factory-source-map');
     const targetMapRef = ref('map_snapshot', 'factory-target-map');
+    const reviewRoundRef = ref('map_review_round', 'factory-round');
     const inputRef = ref('validator_input_envelope', 'factory-source-input');
     const sourceAggregateRef = ref('validator_aggregate', 'factory-source-aggregate');
     const sourceVersion: SlotContentVersionV2 = {
@@ -481,6 +682,7 @@ describe('Task 20 facade-only runtime orchestration', () => {
     objects.set(sourceAggregateRef.digest, { inputRef, registrationSetDigest: digest('obsolete-registry'), outcome: 'clear' });
     objects.set(sourceMapRef.digest, { nodes: [sourceNode], relations: [] });
     objects.set(targetMapRef.digest, { nodes: [targetNode], relations: [] });
+    objects.set(reviewRoundRef.digest, completedMapReviewRound('round-factory'));
     const intent = buildMigrationIntent({
       taskId: 'task-factory', migrationSpecRef: ref('migration_spec', 'factory-spec'),
       sourceManifestRef: ref('content_revision_manifest', 'factory-manifest'), sourceMapRef, targetMapRef,
@@ -495,7 +697,7 @@ describe('Task 20 facade-only runtime orchestration', () => {
       migrationValidationPlanId: 'mvp-factory', migrationIntentCoreRef: intentRef,
       candidateRef: ref('map_candidate', 'factory-candidate'), proposedMapCoreRef: ref('proposed_map_core', 'factory-proposed'),
       sourceManifestRef: intent.sourceManifestRef,
-      frozenRegistrationSetDigest: digest('factory-regs'), orderedBatchSlotIds: [['slot-1']],
+      frozenRegistrationSetDigest: registrationSetDigestOf([batchRegistration]), orderedBatchSlotIds: [['slot-1']],
       profileRef: ref('profile_snapshot', 'factory-profile'),
     });
     objects.set(intentRef.digest, intent);
@@ -534,7 +736,7 @@ describe('Task 20 facade-only runtime orchestration', () => {
     const result = await runtime.service.executeNextBatch({
       taskId: 'task-factory', commandId: 'cmd-factory', workItemId: 'wi-factory', leaseEpoch: 1,
       authorityBaseRef: ref('authority_base_set', 'factory-base'), planSpecRef: planRef,
-      reviewCoverageCoreRef: ref('map_review_coverage_core', 'factory-coverage'), reviewRoundRef: ref('map_review_round', 'factory-round'),
+      reviewCoverageCoreRef: ref('map_review_coverage_core', 'factory-coverage'), reviewRoundRef,
     });
     expect(result).toMatchObject({ kind: 'completed', batchOrdinal: 0 });
     expect(published).toHaveLength(1);
@@ -634,9 +836,12 @@ describe('Task 20 facade-only runtime orchestration', () => {
       reviewCoverageCoreRef: coverageRef,
       reviewRoundRef,
     });
+    objects.set(reviewRoundRef.digest, completedMapReviewRound('round-post'));
     let activeManifestRef = sourceManifestRef;
     let reviewRoundState: 'completed' | 'settled' = 'completed';
     let finalizerOutcome: 'clear' | 'infrastructure_failure' = 'clear';
+    let finalizerWrongInput = false;
+    let mutateAuthorityOnTail = false;
     let currentPlanRef: BlobRefV2 | null = null;
     let postWorkItemId = '';
     const deps = {
@@ -644,7 +849,10 @@ describe('Task 20 facade-only runtime orchestration', () => {
         prepareBlob: prepare,
         async publishWithPin(input: unknown) { published.push(input as never); return {} as never; },
       },
-      async tail() { return { lastSequence: published.length * 4, lastCommitId: published.length === 0 ? null : `commit-${published.length}` }; },
+      async tail() {
+        if (mutateAuthorityOnTail) activeManifestRef = ref('content_revision_manifest', 'tail-race-manifest');
+        return { lastSequence: published.length * 4, lastCommitId: published.length === 0 ? null : `commit-${published.length}` };
+      },
       templateSnapshotRef: ref('profile_snapshot', 'post-template'), profileSnapshotRef: ref('profile_snapshot', 'post-profile'),
       frozenRegistrationSetDigest: digest('post-registrations'), migrationPolicyVersion: '1', equivalencePolicyVersion: '1', maxAutomaticRetries: 3,
       clock: () => '2026-08-16T00:00:00.000Z',
@@ -665,12 +873,35 @@ describe('Task 20 facade-only runtime orchestration', () => {
       },
       async localValidatorCustody() { throw new Error('no validation batches expected'); },
       async freshValidate() { throw new Error('no validation batches expected'); },
-      async runMigrationFinalizer() {
-        const finalizerAggregateRef = ref('validator_aggregate', `post-finalizer-${finalizerOutcome}`);
-        objects.set(finalizerAggregateRef.digest, { outcome: finalizerOutcome });
+      async runMigrationFinalizer(finalizeInput: { finalizeCoreRef: BlobRefV2 }) {
+        const envelope = {
+          trigger: 'content_commit' as const, executionPhase: 'plan_finalize' as const, taskId: 'task-post',
+          templateSnapshotHash: digest('post-template-hash'),
+          contentValidationCoreRef: finalizerWrongInput ? ref('content_plan_finalize_core', 'wrong-finalizer-input') : finalizeInput.finalizeCoreRef,
+          selectedTargetRefs: [] as BlobRefV2[],
+        };
+        const envelopeRef = refOfBlob('validator_input_envelope', envelope);
+        const warningBody = {
+          trigger: 'content_commit' as const, executionPhase: 'plan_finalize' as const,
+          inputRef: envelopeRef, inputDigest: envelopeRef.digest, orderedAdvisoryReceiptRefs: [] as BlobRefV2[], warningCount: 0,
+        };
+        const warning = { ...warningBody, rootDigest: canonicalJsonSha256(warningBody) };
+        const finalizerWarningRootRef = refOfBlob('validation_warning_root', warning);
+        const failureRefs = finalizerOutcome === 'infrastructure_failure' ? [ref('validator_failure', 'post-finalizer-failure')] : [];
+        const aggregateBody = {
+          trigger: 'content_commit' as const, executionPhase: 'plan_finalize' as const,
+          inputRef: envelopeRef, inputDigest: envelopeRef.digest, registrationSetDigest: digest('post-registrations'),
+          validExecutionDigests: [], blockingInvalidReceiptRefs: [], advisoryReceiptRefs: [], infrastructureFailureRefs: failureRefs,
+          warningRootRef: finalizerWarningRootRef, outcome: finalizerOutcome,
+        };
+        const aggregate = { ...aggregateBody, aggregateDigest: canonicalJsonSha256(aggregateBody) };
+        const finalizerAggregateRef = refOfBlob('validator_aggregate', aggregate);
+        objects.set(envelopeRef.digest, envelope);
+        objects.set(finalizerWarningRootRef.digest, warning);
+        objects.set(finalizerAggregateRef.digest, aggregate);
         return {
           finalizerAggregateRef,
-          finalizerWarningRootRef: ref('validation_warning_root', 'post-warning'),
+          finalizerWarningRootRef,
           routeOutcome: finalizerOutcome, classifiedFindingSetRef: null, preparedBlobs: [],
         };
       },
@@ -737,6 +968,23 @@ describe('Task 20 facade-only runtime orchestration', () => {
     })).rejects.toThrow(/stale migration authority/);
     expect(published).toHaveLength(1);
     activeManifestRef = sourceManifestRef;
+    mutateAuthorityOnTail = true;
+    await expect(service.executePostMigrationSettlement({
+      taskId: 'task-post', commandId: 'cmd-post-tail-race', workItemId: begin.successorWorkItemId, leaseEpoch: 1,
+      authorityBaseRef: postAuthorityBaseRef, planSpecRef: begin.migrationValidationPlanSpecRef,
+      reviewCoverageCoreRef: coverageRef, reviewRoundRef, settlementOperationId: 'op-post-tail-race',
+    })).rejects.toThrow(/stale migration authority/);
+    expect(published).toHaveLength(1);
+    mutateAuthorityOnTail = false;
+    activeManifestRef = sourceManifestRef;
+    finalizerWrongInput = true;
+    await expect(service.executePostMigrationSettlement({
+      taskId: 'task-post', commandId: 'cmd-post-wrong-finalizer', workItemId: begin.successorWorkItemId, leaseEpoch: 1,
+      authorityBaseRef: postAuthorityBaseRef, planSpecRef: begin.migrationValidationPlanSpecRef,
+      reviewCoverageCoreRef: coverageRef, reviewRoundRef, settlementOperationId: 'op-post-wrong-finalizer',
+    })).rejects.toThrow(/does not bind the task\/finalize core/);
+    expect(published).toHaveLength(1);
+    finalizerWrongInput = false;
     finalizerOutcome = 'infrastructure_failure';
     const infrastructure = await service.executePostMigrationSettlement({
       taskId: 'task-post', commandId: 'cmd-post-infrastructure', workItemId: begin.successorWorkItemId, leaseEpoch: 1,
@@ -762,6 +1010,38 @@ describe('Task 20 facade-only runtime orchestration', () => {
       migrationProvisionalManifestRef: { kind: 'content_revision_manifest' },
       migrationFinalizerAggregateRef: { kind: 'validator_aggregate' },
     });
+    const finalizedManifestRef = published[1].payload.mapReview.contentRevisionManifestRef!;
+    const finalizedManifest = objects.get(finalizedManifestRef.digest) as {
+      finalizerWarningRootRefs: readonly BlobRefV2[];
+    };
+    expect(finalizedManifest.finalizerWarningRootRefs).toHaveLength(1);
+    expect(finalizedManifest.finalizerWarningRootRefs[0]?.kind).toBe('validation_warning_custody_root');
+    const finalizerCustody = objects.get(finalizedManifest.finalizerWarningRootRefs[0]!.digest) as {
+      baseRefs: readonly BlobRefV2[];
+      entries: readonly {
+        inputRef: BlobRefV2;
+        inputDigest: string;
+        executionScope: { planRevisionId: string };
+        validatorAggregateRef: BlobRefV2;
+        warningRootRef: BlobRefV2;
+      }[];
+    };
+    expect(finalizerCustody.baseRefs).toEqual([finalizerCustody.entries[0]?.inputRef]);
+    expect(finalizerCustody.entries[0]).toMatchObject({
+      inputDigest: finalizerCustody.entries[0]?.inputRef.digest,
+      executionScope: { planRevisionId: (objects.get(begin.migrationValidationPlanSpecRef.digest) as { migrationValidationPlanId: string }).migrationValidationPlanId },
+      validatorAggregateRef: published[1].payload.mapReview.migrationFinalizerAggregateRef,
+      warningRootRef: { kind: 'validation_warning_root' },
+    });
+    const settlementHandler = PUBLICATION_INTENT_REGISTRY_V2.resolve('map_review_settlement', 1)!;
+    const settlementEvents = settlementHandler.buildEvents(
+      (published[1] as unknown as { payload: Parameters<typeof settlementHandler.buildEvents>[0] }).payload,
+      '2026-08-16T00:00:00.000Z',
+    );
+    const migrationManifestIndex = settlementEvents.findIndex((event) => event.type === 'structured_content_revision_committed');
+    const migrationActivationIndex = settlementEvents.findIndex((event) => event.type === 'structured_map_activated');
+    expect(migrationManifestIndex).toBeGreaterThanOrEqual(0);
+    expect(migrationActivationIndex).toBeGreaterThan(migrationManifestIndex);
   });
 
   it('runs fresh target-Map validation on custody mismatch and never replays a committed ordinal', async () => {
@@ -786,6 +1066,8 @@ describe('Task 20 facade-only runtime orchestration', () => {
     });
     objects.set(intentRef.digest, intent);
     objects.set(planRef.digest, plan);
+    const reviewRoundRef = ref('map_review_round', 'fresh-round');
+    objects.set(reviewRoundRef.digest, completedMapReviewRound('round-fresh'));
     const service = new MigrationServiceV2({
       facade: {
         async prepareBlob(_taskId, kind, value) { const blobRef = refOfBlob(kind, value); objects.set(blobRef.digest, value); return blobRef; },
@@ -819,14 +1101,14 @@ describe('Task 20 facade-only runtime orchestration', () => {
     const first = await service.executeNextBatch({
       taskId: 'task-fresh', commandId: 'cmd-batch', workItemId: 'wi-batch', leaseEpoch: 1,
       authorityBaseRef: ref('authority_base_set', 'fresh-base'), planSpecRef: planRef,
-      reviewCoverageCoreRef: ref('map_review_coverage_core', 'fresh-coverage'), reviewRoundRef: ref('map_review_round', 'fresh-round'),
+      reviewCoverageCoreRef: ref('map_review_coverage_core', 'fresh-coverage'), reviewRoundRef,
     });
     expect(first.batchOrdinal).toBe(0);
     expect(freshRuns).toBe(1);
     await expect(service.executeNextBatch({
       taskId: 'task-fresh', commandId: 'cmd-batch-replayed-wrongly', workItemId: 'wi-batch-other', leaseEpoch: 1,
       authorityBaseRef: ref('authority_base_set', 'fresh-base-2'), planSpecRef: planRef,
-      reviewCoverageCoreRef: ref('map_review_coverage_core', 'fresh-coverage'), reviewRoundRef: ref('map_review_round', 'fresh-round'),
+      reviewCoverageCoreRef: ref('map_review_coverage_core', 'fresh-coverage'), reviewRoundRef,
     })).rejects.toThrow(/already complete/);
     expect(freshRuns).toBe(1);
   });
@@ -862,6 +1144,8 @@ describe('Task 20 facade-only runtime orchestration', () => {
     });
     objects.set(intentRef.digest, intent);
     objects.set(planRef.digest, plan);
+    const reviewRoundRef = ref('map_review_round', 'infra-round');
+    objects.set(reviewRoundRef.digest, completedMapReviewRound('round-infra'));
     const aggregateRef = ref('validator_aggregate', 'infra-aggregate');
     const service = new MigrationServiceV2({
       facade: {
@@ -896,7 +1180,7 @@ describe('Task 20 facade-only runtime orchestration', () => {
     const input = {
       taskId: 'task-infra', commandId: 'cmd-infra', workItemId: 'wi-infra', leaseEpoch: 1,
       authorityBaseRef: ref('authority_base_set', 'infra-base'), planSpecRef: planRef,
-      reviewCoverageCoreRef: ref('map_review_coverage_core', 'infra-coverage'), reviewRoundRef: ref('map_review_round', 'infra-round'),
+      reviewCoverageCoreRef: ref('map_review_coverage_core', 'infra-coverage'), reviewRoundRef,
     };
     const first = await service.executeNextBatch(input);
     expect(first).toMatchObject({ kind: 'retryable_failure', validatorAggregateRef: aggregateRef, batchOrdinal: 0 });

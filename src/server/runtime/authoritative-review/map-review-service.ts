@@ -432,6 +432,7 @@ export function mapReviewCarrier(carriers: Partial<MapReviewPublishCarriersV2> =
     migrationActivationDecisionRef: null,
     migrationProvisionalManifestRef: null,
     migrationFinalizerAggregateRef: null,
+    migrationFindingOpenings: null,
     taskContentRevision: null,
     manifestPhase: null,
     producerPlanSpecRef: null,
@@ -598,6 +599,7 @@ function registerMapReviewSettlement(registry: PublicationIntentRegistry): void 
     expectedEventTypes: [
       'structured_map_review_round_settled',
       'structured_migration_validation_settlement_completed',
+      'structured_finding_opened',
       'structured_map_activated',
       'structured_content_revision_committed',
       'structured_review_round_planned',
@@ -638,6 +640,21 @@ function registerMapReviewSettlement(registry: PublicationIntentRegistry): void 
         type: 'structured_finding_verified_closed' as const,
         findingId,
       }));
+      for (const finding of mr.migrationFindingOpenings ?? []) {
+        envelopes.push({
+          protocolVersion: 2,
+          at,
+          type: 'structured_finding_opened' as const,
+          findingId: finding.findingId,
+          findingRef: finding.findingRef,
+          reviewContext: finding.reviewContext,
+          primaryLocation: finding.primaryLocation,
+          defectClass: finding.defectClass,
+          severity: finding.severity,
+          source: finding.source,
+          openedBy: finding.openedBy,
+        });
+      }
       if (mr.migrationSettlementCoreRef !== null || mr.migrationActivationDecisionRef !== null) {
         need(mr.migrationSettlementCoreRef, 'migrationSettlementCoreRef');
         need(mr.migrationActivationDecisionRef, 'migrationActivationDecisionRef');
@@ -671,10 +688,10 @@ function registerMapReviewSettlement(registry: PublicationIntentRegistry): void 
         need(mr.mapSemanticDigest, 'mapSemanticDigest');
         need(mr.contentRevisionManifestRef, 'contentRevisionManifestRef');
         need(mr.activationValidatorAggregateRef, 'activationValidatorAggregateRef');
-        envelopes.push({
+        const activationEvent = {
           protocolVersion: 2,
           at,
-          type: 'structured_map_activated',
+          type: 'structured_map_activated' as const,
           mapId: mr.mapId,
           mapRevision: mr.mapRevision,
           supersedesMapId: mr.supersedesMapId,
@@ -685,12 +702,13 @@ function registerMapReviewSettlement(registry: PublicationIntentRegistry): void 
           activationValidatorAggregateRef: mr.activationValidatorAggregateRef,
           migrationSettlementCoreRef: mr.migrationSettlementCoreRef,
           migrationActivationDecisionRef: mr.migrationActivationDecisionRef,
-        });
+        };
         // Task 19 repair-round activation: the manifest is UNCHANGED by a
         // Map repair (manifestPhase stays null -> NO content_revision_committed).
+        let manifestEvent: PublicationEventEnvelopeV2 | null = null;
         if (mr.manifestPhase !== null) {
           need(mr.taskContentRevision, 'taskContentRevision');
-          envelopes.push({
+          manifestEvent = {
             protocolVersion: 2,
             at,
             type: 'structured_content_revision_committed',
@@ -699,7 +717,19 @@ function registerMapReviewSettlement(registry: PublicationIntentRegistry): void 
             manifestPhase: mr.manifestPhase,
             producerPlanSpecRef: mr.producerPlanSpecRef,
             priorManifestRef: mr.priorManifestRef,
-          });
+          };
+        }
+        // Initial activation has no current manifest, so the Map event binds
+        // the following baseline commit. A migration replaces an existing
+        // manifest and therefore commits the new revision first; the
+        // immediately following activation can then prove exact manifest
+        // equality under the projector's activation gate. Both events remain
+        // in the same append-facade batch.
+        if (mr.migrationSettlementCoreRef !== null && manifestEvent !== null) {
+          envelopes.push(manifestEvent, activationEvent);
+        } else {
+          envelopes.push(activationEvent);
+          if (manifestEvent !== null) envelopes.push(manifestEvent);
         }
         const s = mr.successor;
         if (s !== null) {

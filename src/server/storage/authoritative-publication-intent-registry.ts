@@ -231,6 +231,7 @@ export function publicationPayloadChildRefs(payload: PublicationOperationPayload
         if (mr.migrationActivationDecisionRef !== null) refs.push(mr.migrationActivationDecisionRef);
         if (mr.migrationProvisionalManifestRef !== null) refs.push(mr.migrationProvisionalManifestRef);
         if (mr.migrationFinalizerAggregateRef !== null) refs.push(mr.migrationFinalizerAggregateRef);
+        if (mr.migrationFindingOpenings !== null) for (const fo of mr.migrationFindingOpenings) refs.push(fo.findingRef);
         if (mr.producerPlanSpecRef !== null) refs.push(mr.producerPlanSpecRef);
         if (mr.priorManifestRef !== null) refs.push(mr.priorManifestRef);
         if (mr.terminal !== null) refs.push(mr.terminal.authorityBaseRef);

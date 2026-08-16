@@ -1820,6 +1820,9 @@ export interface MapReviewPublishCarriersV2 {
   migrationActivationDecisionRef: BlobRefV2 | null;
   migrationProvisionalManifestRef: BlobRefV2 | null;
   migrationFinalizerAggregateRef: BlobRefV2 | null;
+  /** System-validator Findings opened by the post-migration settlement. The
+   * activation decision's combined FindingSet is their canonical closure. */
+  migrationFindingOpenings: readonly ContentReviewFindingOpeningCarrierV2[] | null;
   // --- content_revision_committed (baseline_unset) ---
   taskContentRevision: number | null;
   manifestPhase: 'baseline_unset' | 'provisional' | 'finalized' | null;

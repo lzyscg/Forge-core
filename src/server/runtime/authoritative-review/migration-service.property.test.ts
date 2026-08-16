@@ -2,14 +2,14 @@ import { describe, expect, it } from 'vitest';
 import { canonicalJsonSha256 } from '../../structured-slots/canonical-json';
 import { refOfBlob } from '../../authoritative-review/object-registry';
 import type { BlobRefV2 } from '../../../shared/authoritative-review-v2';
-import type { SlotContentVersionV2 } from '../../authoritative-review/authority-types';
+import type { MapReviewRoundV2, SlotContentVersionV2 } from '../../authoritative-review/authority-types';
 import { mapReviewCarrier } from './map-review-service';
 import { MigrationServiceV2, type MigrationTargetSlotV2 } from './migration-service';
 
 const hash = (label: string) => canonicalJsonSha256({ label });
 const ref = (kind: Parameters<typeof refOfBlob>[0], label: string): BlobRefV2 => refOfBlob(kind, { label });
 
-interface PersistentRun {
+interface StressModelRun {
   service: MigrationServiceV2;
   objects: Map<string, unknown>;
   completed: Array<{ batchOrdinal: number; batchResultRootRef: BlobRefV2 }>;
@@ -25,7 +25,7 @@ interface PersistentRun {
   };
 }
 
-function buildPersistentRun(seed?: Pick<PersistentRun, 'objects' | 'completed' | 'eventRoots' | 'targetSlots' | 'freshInvocations' | 'currentPlanRef' | 'postWorkItemId' | 'refs'>): PersistentRun {
+function buildStressModelRun(seed?: Pick<StressModelRun, 'objects' | 'completed' | 'eventRoots' | 'targetSlots' | 'freshInvocations' | 'currentPlanRef' | 'postWorkItemId' | 'refs'>): StressModelRun {
   const objects = seed?.objects ?? new Map<string, unknown>();
   const completed = seed?.completed ?? [];
   const eventRoots = seed?.eventRoots ?? [];
@@ -40,6 +40,16 @@ function buildPersistentRun(seed?: Pick<PersistentRun, 'objects' | 'completed' |
     mapSettlementRef: ref('map_review_settlement_core', '10k-map-settlement'),
   };
   const targetSchema = canonicalJsonSha256({ slotType: 'doc' });
+  if (!objects.has(refs.reviewRoundRef.digest)) {
+    const reviewRound: MapReviewRoundV2 = {
+      mapReviewRoundId: 'round-10k', candidateId: 'candidate-10k', candidateDigest: hash('candidate-10k'),
+      contentRevisionManifestRef: refs.sourceManifestRef, contentRootDigest: hash('10k-source-root'),
+      reviewPolicyDigest: hash('10k-review-policy'), coverageNodeIds: [], coverageRelationIds: [],
+      assignmentIds: [], inheritedRecordRefs: [], wholeMapObservationRefs: [], verificationFindingStages: [],
+      state: 'completed', settlementRef: refs.mapSettlementRef,
+    };
+    objects.set(refs.reviewRoundRef.digest, reviewRound);
+  }
   const targetSlots = seed?.targetSlots ?? [];
   if (targetSlots.length === 0) {
     const sourceEntries: Array<{ slotId: string; versionRef: BlobRefV2 }> = [];
@@ -142,25 +152,81 @@ function buildPersistentRun(seed?: Pick<PersistentRun, 'objects' | 'completed' |
         contentBytesDigest: hash(`bytes-${slotId}`), localMapSubgraphDigest: hash(`subgraph-${slotId}`),
         localRelationContextDigest: hash(`relations-${slotId}`),
       };
+      const sourceEnvelope = { source: '10k-equivalence', slotId };
+      const sourceBatchInputRef = refOfBlob('validator_input_envelope', sourceEnvelope);
+      objects.set(sourceBatchInputRef.digest, sourceEnvelope);
       return {
-        sourceBatchInputRef: ref('validator_input_envelope', `10k-input-${slotId}`), source,
+        sourceBatchInputRef, source,
         target: index % 97 === 0 ? { ...source, selectorExpansionDigest: hash(`changed-selector-${slotId}`) } : { ...source },
       };
     },
-    async freshValidate({ slotId }) {
+    async freshValidate({ taskId, slotId, decision, plan, planSpecRef, batchOrdinal }) {
       freshInvocations.value += 1;
-      const validatorAggregateRef = ref('validator_aggregate', `10k-fresh-aggregate-${slotId}`);
-      objects.set(validatorAggregateRef.digest, { outcome: 'clear' });
+      const sourceVersion = objects.get(decision.sourceVersionRef.digest) as SlotContentVersionV2;
+      if (sourceVersion.state !== 'set') throw new Error('10k fresh source is not set');
+      const intent = objects.get(plan.migrationIntentCoreRef.digest) as { targetMapRef: BlobRefV2 };
+      const coreBody = {
+        priorManifestRef: plan.sourceManifestRef, producerPlanSpecRef: planSpecRef, batchOrdinal,
+        authorizedReplacementEntriesWithoutValidation: [{ slotId, expectedCurrentVersionRef: decision.sourceVersionRef }],
+        expectedMapRef: intent.targetMapRef,
+      };
+      const core = { ...coreBody, coreDigest: canonicalJsonSha256(coreBody) };
+      const coreRef = refOfBlob('content_revision_commit_core', core);
+      const envelope = {
+        trigger: 'content_commit' as const, executionPhase: 'batch_commit' as const, taskId,
+        templateSnapshotHash: hash('10k-template-hash'), contentValidationCoreRef: coreRef,
+        selectedTargetRefs: [sourceVersion.blobRef],
+      };
+      const envelopeRef = refOfBlob('validator_input_envelope', envelope);
+      const warningBody = {
+        trigger: 'content_commit' as const, executionPhase: 'batch_commit' as const,
+        inputRef: envelopeRef, inputDigest: envelopeRef.digest, orderedAdvisoryReceiptRefs: [] as BlobRefV2[], warningCount: 0,
+      };
+      const warning = { ...warningBody, rootDigest: canonicalJsonSha256(warningBody) };
+      const warningRootRef = refOfBlob('validation_warning_root', warning);
+      const aggregateBody = {
+        trigger: 'content_commit' as const, executionPhase: 'batch_commit' as const,
+        inputRef: envelopeRef, inputDigest: envelopeRef.digest, registrationSetDigest: plan.frozenRegistrationSetDigest,
+        validExecutionDigests: [hash(`10k-valid-${slotId}`)], blockingInvalidReceiptRefs: [] as BlobRefV2[],
+        advisoryReceiptRefs: [] as BlobRefV2[], infrastructureFailureRefs: [] as BlobRefV2[], warningRootRef, outcome: 'clear' as const,
+      };
+      const aggregate = { ...aggregateBody, aggregateDigest: canonicalJsonSha256(aggregateBody) };
+      const validatorAggregateRef = refOfBlob('validator_aggregate', aggregate);
+      objects.set(coreRef.digest, core);
+      objects.set(envelopeRef.digest, envelope);
+      objects.set(warningRootRef.digest, warning);
+      objects.set(validatorAggregateRef.digest, aggregate);
       return {
-        slotResult: { outcome: 'revalidated' as const, slotId, validatorAggregateRef, warningRootRef: ref('validation_warning_root', `10k-fresh-warning-${slotId}`) },
+        slotResult: { outcome: 'revalidated' as const, slotId, validatorAggregateRef, warningRootRef },
         batchOutcome: 'clear' as const, preparedBlobs: [],
       };
     },
-    async runMigrationFinalizer() {
-      const finalizerAggregateRef = ref('validator_aggregate', '10k-finalizer');
-      objects.set(finalizerAggregateRef.digest, { outcome: 'clear' });
+    async runMigrationFinalizer({ taskId, finalizeCoreRef }) {
+      const envelope = {
+        trigger: 'content_commit' as const, executionPhase: 'plan_finalize' as const, taskId,
+        templateSnapshotHash: hash('10k-template-hash'), contentValidationCoreRef: finalizeCoreRef, selectedTargetRefs: [] as BlobRefV2[],
+      };
+      const envelopeRef = refOfBlob('validator_input_envelope', envelope);
+      const warningBody = {
+        trigger: 'content_commit' as const, executionPhase: 'plan_finalize' as const,
+        inputRef: envelopeRef, inputDigest: envelopeRef.digest, orderedAdvisoryReceiptRefs: [] as BlobRefV2[], warningCount: 0,
+      };
+      const warning = { ...warningBody, rootDigest: canonicalJsonSha256(warningBody) };
+      const finalizerWarningRootRef = refOfBlob('validation_warning_root', warning);
+      const aggregateBody = {
+        trigger: 'content_commit' as const, executionPhase: 'plan_finalize' as const,
+        inputRef: envelopeRef, inputDigest: envelopeRef.digest, registrationSetDigest: hash('10k-registry'),
+        validExecutionDigests: [hash('10k-finalizer-valid')], blockingInvalidReceiptRefs: [] as BlobRefV2[],
+        advisoryReceiptRefs: [] as BlobRefV2[], infrastructureFailureRefs: [] as BlobRefV2[], warningRootRef: finalizerWarningRootRef,
+        outcome: 'clear' as const,
+      };
+      const aggregate = { ...aggregateBody, aggregateDigest: canonicalJsonSha256(aggregateBody) };
+      const finalizerAggregateRef = refOfBlob('validator_aggregate', aggregate);
+      objects.set(envelopeRef.digest, envelope);
+      objects.set(finalizerWarningRootRef.digest, warning);
+      objects.set(finalizerAggregateRef.digest, aggregate);
       return {
-        finalizerAggregateRef, finalizerWarningRootRef: ref('validation_warning_root', '10k-finalizer-warning'),
+        finalizerAggregateRef, finalizerWarningRootRef,
         routeOutcome: 'clear' as const, classifiedFindingSetRef: null, preparedBlobs: [],
       };
     },
@@ -196,7 +262,7 @@ function buildPersistentRun(seed?: Pick<PersistentRun, 'objects' | 'completed' |
   return { service, objects, completed, eventRoots, targetSlots, freshInvocations, currentPlanRef, postWorkItemId, refs };
 }
 
-async function executePersistentMigration(run: PersistentRun, interruptAt: number | null) {
+async function executeStressModelMigration(run: StressModelRun, interruptAt: number | null) {
   const begin = await run.service.beginMigration({
     taskId: 'task-10k', commandId: 'cmd-initial-10k', workItemId: 'wi-initial-10k', leaseEpoch: 1,
     authorityBaseRef: ref('authority_base_set', '10k-initial-base'), mapReviewSettlementCoreRef: run.refs.mapSettlementRef,
@@ -219,7 +285,7 @@ async function executePersistentMigration(run: PersistentRun, interruptAt: numbe
   return { begin, batchCount: plan.orderedBatchSlotIds.length };
 }
 
-async function finishPersistentMigration(run: PersistentRun, planRef: BlobRefV2, startOrdinal: number, batchCount: number) {
+async function finishStressModelMigration(run: StressModelRun, planRef: BlobRefV2, startOrdinal: number, batchCount: number) {
   for (let ordinal = startOrdinal; ordinal < batchCount; ordinal += 1) {
     const result = await run.service.executeNextBatch({
       taskId: 'task-10k', commandId: `cmd-batch-${ordinal}`, workItemId: `wi-batch-${ordinal}`, leaseEpoch: 1,
@@ -235,23 +301,24 @@ async function finishPersistentMigration(run: PersistentRun, planRef: BlobRefV2,
   });
 }
 
-describe('Task 20 10,000-slot persistent migration', () => {
-  it('reconstructs from event/blob custody at ordinal 73 and equals uninterrupted refs, route, roots, and validator counts', async () => {
-    const uninterrupted = buildPersistentRun();
-    const direct = await executePersistentMigration(uninterrupted, null);
+describe('Task 20 10,000-slot deterministic stress model', () => {
+  it('resumes the in-memory model at ordinal 73 and preserves refs, route, roots, and validator counts', async () => {
+    const uninterrupted = buildStressModelRun();
+    const direct = await executeStressModelMigration(uninterrupted, null);
     expect(direct.batchCount).toBeGreaterThan(73);
-    const directPost = await finishPersistentMigration(uninterrupted, direct.begin.migrationValidationPlanSpecRef, direct.batchCount, direct.batchCount);
+    const directPost = await finishStressModelMigration(uninterrupted, direct.begin.migrationValidationPlanSpecRef, direct.batchCount, direct.batchCount);
 
-    const interrupted = buildPersistentRun();
-    const partial = await executePersistentMigration(interrupted, 73);
+    const interrupted = buildStressModelRun();
+    const partial = await executeStressModelMigration(interrupted, 73);
     expect(interrupted.completed).toHaveLength(73);
     expect(interrupted.completed.map((entry) => entry.batchOrdinal)).toEqual(Array.from({ length: 73 }, (_, index) => index));
-    // Reconstruct a fresh service from the durable event roots + blob custody;
-    // no in-memory batch cursor is carried across this boundary.
+    // This fast model reconstructs a fresh service from modeled roots. The
+    // production EventStore/projector/GC restart proof lives in the integration
+    // suite; this case is only the high-volume deterministic property check.
     const rebuiltCompleted = interrupted.eventRoots.slice(0, 73).map((batchResultRootRef, batchOrdinal) => ({ batchOrdinal, batchResultRootRef }));
     interrupted.completed.splice(0, interrupted.completed.length, ...rebuiltCompleted);
-    const resumed = buildPersistentRun(interrupted);
-    const resumedPost = await finishPersistentMigration(resumed, partial.begin.migrationValidationPlanSpecRef, 73, partial.batchCount);
+    const resumed = buildStressModelRun(interrupted);
+    const resumedPost = await finishStressModelMigration(resumed, partial.begin.migrationValidationPlanSpecRef, 73, partial.batchCount);
 
     expect(directPost.kind).toBe('completed');
     expect(resumedPost.kind).toBe('completed');

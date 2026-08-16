@@ -630,6 +630,7 @@ function parseMapReviewPublishCarriers(value: unknown): MapReviewPublishCarriers
   const extendedMapReviewKeys = [...mapReviewKeys];
   if (Object.prototype.hasOwnProperty.call(o, 'migrationProvisionalManifestRef')) extendedMapReviewKeys.push('migrationProvisionalManifestRef');
   if (Object.prototype.hasOwnProperty.call(o, 'migrationFinalizerAggregateRef')) extendedMapReviewKeys.push('migrationFinalizerAggregateRef');
+  if (Object.prototype.hasOwnProperty.call(o, 'migrationFindingOpenings')) extendedMapReviewKeys.push('migrationFindingOpenings');
   if (Object.prototype.hasOwnProperty.call(o, 'migrationProgress')) extendedMapReviewKeys.push('migrationProgress');
   ex(o, extendedMapReviewKeys, 'mapReview');
   const source = o.source === null ? null : str(o.source, 'mapReview.source');
@@ -672,6 +673,9 @@ function parseMapReviewPublishCarriers(value: unknown): MapReviewPublishCarriers
     migrationActivationDecisionRef: rfn(o.migrationActivationDecisionRef, 'mapReview.migrationActivationDecisionRef'),
     migrationProvisionalManifestRef: o.migrationProvisionalManifestRef === undefined ? null : rfn(o.migrationProvisionalManifestRef, 'mapReview.migrationProvisionalManifestRef'),
     migrationFinalizerAggregateRef: o.migrationFinalizerAggregateRef === undefined ? null : rfn(o.migrationFinalizerAggregateRef, 'mapReview.migrationFinalizerAggregateRef'),
+    migrationFindingOpenings: o.migrationFindingOpenings === undefined || o.migrationFindingOpenings === null
+      ? null
+      : (o.migrationFindingOpenings as unknown[]).map((v, i) => parseContentReviewFindingOpeningCarrier(v, `mapReview.migrationFindingOpenings[${i}]`)),
     taskContentRevision: o.taskContentRevision === null ? null : onn(o.taskContentRevision, 'mapReview.taskContentRevision'),
     manifestPhase,
     producerPlanSpecRef: rfn(o.producerPlanSpecRef, 'mapReview.producerPlanSpecRef'),

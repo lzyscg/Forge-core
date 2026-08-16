@@ -1,6 +1,6 @@
 # Task 20 Report — Migrate content across approved Map replacements
 
-**Status:** IMPLEMENTED; the six findings from the first independent adversarial review are closed locally and qualified. The orchestrator still owns the final independent re-review gate.
+**Status:** IMPLEMENTED; the four material findings from adversarial re-review 1 are closed locally and qualified. The orchestrator still owns the next independent re-review gate.
 
 ## Delivered behavior
 
@@ -19,7 +19,7 @@
 - Initial focused RED: importing `migration-service` failed because the module did not exist.
 - Route-contract RED: clear migration without a content review round unexpectedly succeeded; after the system gate was added, the focused test passed.
 - Focused migration suite: **2 files / 27 passed** (`migration-service.test.ts` 26, `migration-service.property.test.ts` 1).
-- The property test covers **10,000 slots / 157 batches**, interrupts after ordinal 73, resumes from the first missing ordinal, and proves restarted/uninterrupted settlement and execution digests are byte-equal.
+- The fast property model covers **10,000 slots / 157 batches**, interrupts after ordinal 73, resumes from the first missing ordinal, and proves deterministic restarted/uninterrupted settlement and execution digests are byte-equal. It is an in-memory stress model, not the durable recovery proof recorded below.
 - Full Map review integration: **1 file / 16 passed** under one Vitest worker.
 - Task 19 repair regression: **1 file / 35 passed** under one Vitest worker.
 - Parser/event/projector/content-domain regression: **5 files / 765 passed**.
@@ -34,7 +34,7 @@
 - **P1-3 — infrastructure retry/evidence custody:** an infrastructure batch no longer publishes a completed ordinal or successor, so the same ordinal runs again. Retryable system-command outcomes formally carry `validatorAggregateRef`; `V2AttemptCoordinator` roots it in the retryable-failure event. The finalizer path propagates the same aggregate root, making transitive validator evidence reachable for response-loss replay and GC.
 - **P1-4 — sequential replacement lineage:** migration projection lineage is reset/closed on settlement and initialized per new plan. Concurrent/duplicate plans still reject, while a second replacement after settlement replays and checkpoints successfully.
 - **P1-5 — authoritative result derivation:** settlement resolves every persisted batch result by exact ref, requires the exact plan ref, ordinal and slot set, validates aggregate/result consistency, rejects gaps/extras/swaps and persisted infrastructure outcomes, then derives batch/finalizer/combined routes from a canonical union FindingSet. Corruption tests and simultaneous content-batch plus Map-finalizer findings prove the system-derived mixed route.
-- **P2 — real persistent 10k proof:** the property test now executes `MigrationServiceV2` over 10,000 target slots with mixed actions. It interrupts after ordinal 73, reconstructs a new service exclusively from projected event roots and blob custody, resumes at the first missing ordinal, and compares settlement/manifest/decision/route/event roots and validator invocation counts with an uninterrupted run.
+- **P2 — preliminary 10k model (superseded below):** this round strengthened the in-memory `MigrationServiceV2` stress model, but adversarial re-review correctly found that it did not prove EventStore/projector/GC recovery. The real durable proof is the separate production integration in fix round 2 below.
 
 ### Fix-round qualification (2026-08-16)
 
@@ -44,6 +44,24 @@
 - `npm run build`: passed.
 - `git diff --check`: passed.
 - Runtime boundary: authoritative-review runtime has no `EventStore` import; schemaVersion remains `1`; v1/capability/profile sources are unchanged.
+
+## Adversarial re-review fix round 2
+
+- **P1-1 — check/tail race:** post-migration publication now captures the append tail first, performs the final fresh projector/authority check second, and publishes against the captured tail. A deterministic test mutates authority from `tail()` and proves zero publication: changes before the check fail the authority comparison, while changes after the captured tail fail the append CAS.
+- **P1-2 — exact settlement closure:** batch settlement resolves, kind-checks, and byte-hash-checks every result, equivalence proof, aggregate, input envelope, warning root, receipt, FindingSet, and Finding. It binds the batch trigger/phase, installed registration digest, plan/core/target Map/source version/slot/ordinal, aggregate warning root, blocking-receipt membership, and Finding lineage. Finalizer settlement applies the analogous checks for `content_commit/plan_finalize`, installed finalizer registrations, input-to-finalize-core binding, warning custody, and receipt/Finding lineage. Corruption tests cover wrong registration, swapped receipt, unrelated FindingSet, wrong warning, forged proof, and wrong finalizer input.
+- **P1-3 — authoritative migration Findings and real repair routes:** migration validator Findings are opened as `structured_finding_opened` events in the same atomic post-migration settlement envelope and are cross-bound to the combined FindingSet and RepairPlan scope. The production repair adapter prepares the initial Map/Content RepairPlan from those exact Finding bytes without pre-publish projection reads. Real `AttemptCoordinator -> SystemCommandRegistry -> production migration runtime -> append facade/EventStore -> projector` tests cover clear, content repair, mixed Map repair, and finalizer infrastructure failure. The content case then leases the projected repair WorkItem, commits a real repair batch, runs the real repair finalizer, and confirms the same projected system Finding is addressed.
+- **P2 — real durable 10k recovery:** the earlier restart-shaped property model is retained only as a fast deterministic stress model and is no longer cited as persistent proof. A separate production integration creates 10,000 target Map nodes and 600 validatable slots, publishes 75 real migration batches through the append facade/EventStore/projector, stops after ordinal 73, runs `AuthoritativeReviewGc`, discards and reconstructs the environment/runtime/coordinators from the durable paths, and resumes through `V2AttemptCoordinator`. It compares uninterrupted/restarted batch roots, 599 equivalence-proof refs plus one real fresh production-validator result, validator counts derived from persisted batch results, settlement/decision/manifest refs, route, and the complete event root.
+- **Additional invariant fixes exposed by the real routes:** migration batch/finalizer Findings bind to the existing completed Map review round rather than a synthetic unprojected round; finalizer validator universe includes the target Map nodes/relations; migration replacement commits the new manifest before activation; the projector permits finalized-to-provisional only for a migration-plan replacement while a candidate exists; and both migrated slot provenance and finalizer manifests retain canonical warning-custody roots rather than raw validator warning roots.
+
+### Re-review-1 fix qualification (2026-08-16)
+
+- Migration unit + deterministic stress model: **2 files / 32 passed**.
+- Real four-route AttemptCoordinator integration: **4 passed**; installed-registry batch integration: **1 passed**.
+- Real 10,000-node durable GC/reopen proof: **1 passed** in **590.45 s** (75 batches; restart after ordinal 73; 599 equivalence proofs + 1 persisted fresh-validation result).
+- Repair service/property: **2 files / 39 passed**; Map review: **1 file / 16 passed**.
+- Append facade/projector/attempt/registry/capability regression: **6 files / 132 passed**; projector state regression: **1 file / 40 passed**.
+- `npm run check`, `npm run build`, and `git diff --check`: passed.
+- Runtime boundary remains facade-only with zero `EventStore` imports; object schema versions remain `1`; v1/capability/profile sources remain unchanged.
 
 ## Scope and compatibility
 
