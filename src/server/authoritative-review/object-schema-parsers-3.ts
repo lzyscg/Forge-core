@@ -19,6 +19,7 @@ import {
 } from './object-schema-parsers-3-constants';
 import {
   SchemaError,
+  type ArtifactCustodyV2,
   type AssignmentLedgerBlobV2,
   type AuthorityBaseSetV2,
   type ContentPlanPublishCarriersV2,
@@ -1560,7 +1561,7 @@ export function parseRoundBudgetOverride(value: unknown): Record<string, unknown
   };
 }
 
-/* ---- seal record / validation bundle / delivery (§16.3) --------- */
+/* ---- seal record / validation bundle / delivery / custody (§16.3) */
 export function parseSealRecord(value: unknown): Record<string, unknown> {
   const o = rec(value, 'seal_record');
   ex(o, ['taskId', 'mapRef', 'mapSemanticDigest', 'mapReviewBundleRef', 'contentRevisionManifestRef', 'contentRootDigest', 'reviewBundleRef', 'sealValidationBundleRef', 'templateSnapshotHash', 'assemblerDigest', 'artifactRef', 'artifactDigest'], 'seal_record');
@@ -1628,6 +1629,42 @@ export function parseSystemArtifactDelivery(value: unknown): Record<string, unkn
     submitterAgentId: str(o.submitterAgentId, 'submitterAgentId'),
     templateSnapshotHash: str(o.templateSnapshotHash, 'templateSnapshotHash'),
   };
+}
+
+/**
+ * Task 21 P1#4 real artifact custody manifest (spec §13.5.1 / design §16.3).
+ * The exact staged artifact file set (name/hash/byteLength) is bound to the
+ * artifact + SealRecord refs, so the artifact version dir can be re-verified
+ * against its own custody blob. Exact-key + self-digest (`custodyDigest` over
+ * the canonical bytes minus that field).
+ */
+export function parseArtifactCustody(value: unknown): ArtifactCustodyV2 {
+  const o = rec(value, 'artifact_custody');
+  ex(o, ['taskId', 'sealWorkItemId', 'artifactRef', 'sealRecordRef', 'templateSnapshotHash', 'files', 'custodyDigest'], 'artifact_custody');
+  const artifactRef = rfKind(o.artifactRef, 'artifact', 'artifactRef');
+  const sealRecordRef = rfKind(o.sealRecordRef, 'seal_record', 'sealRecordRef');
+  const files = (o.files as unknown[]).map((entry, index) => {
+    const f = rec(entry, `files[${index}]`);
+    ex(f, ['name', 'hash', 'byteLength'], `files[${index}]`);
+    const name = str(f.name, `files[${index}].name`);
+    const hash = hx(f.hash, `files[${index}].hash`);
+    const byteLength = onn(f.byteLength, `files[${index}].byteLength`);
+    return { name, hash, byteLength };
+  });
+  if (files.length === 0) throw new SchemaError('artifact_custody.files must be non-empty');
+  const names = files.map((f) => f.name);
+  if (new Set(names).size !== names.length) throw new SchemaError('artifact_custody.files has duplicate name');
+  const out: ArtifactCustodyV2 = {
+    taskId: str(o.taskId, 'taskId'),
+    sealWorkItemId: str(o.sealWorkItemId, 'sealWorkItemId'),
+    artifactRef,
+    sealRecordRef,
+    templateSnapshotHash: str(o.templateSnapshotHash, 'templateSnapshotHash'),
+    files,
+    custodyDigest: '',
+  };
+  hs(out, o.custodyDigest, 'custodyDigest', 'artifact_custody');
+  return { ...out, custodyDigest: hx(o.custodyDigest, 'custodyDigest') };
 }
 
 /* ---- validator objects (§9) ------------------------------------- */

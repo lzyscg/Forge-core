@@ -68,6 +68,7 @@ export function structuredProtocolOf(source: StructuredProtocolSource): Structur
  */
 export const AUTHORITATIVE_BLOB_KINDS_V2 = [
   'artifact',
+  'artifact_custody',
   'assignment_dispatch',
   'authority_base_set',
   'content_compatibility_proof',

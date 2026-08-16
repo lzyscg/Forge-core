@@ -7,15 +7,17 @@
  * SealValidationBundle warning custody is built from seal_input advisory
  * custody (seal_output stays empty) and survives SealRecord -> bundle replay.
  */
+import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 
-import type { BlobRefV2, SealRecordV2 } from '../../../shared/authoritative-review-v2';
+import type { BlobRefV2, SealRecordV2, SystemArtifactDeliveryV2 } from '../../../shared/authoritative-review-v2';
 import { AssemblerRegistryV2, ZHIHU_CHAPTER_ASSEMBLER_REGISTRATION } from './assembler-registry';
 import { zhihuAssemblerFixture } from './builtin-assemblers/zhihu-chapter-v1.test';
 import { parseBlob } from '../../authoritative-review/object-registry';
 import { canonicalJsonSha256 } from '../../structured-slots/canonical-json';
 import { sealConditionCodes, evaluateSealGate, type SealGateInputV2 } from '../../authoritative-review/seal-gate';
 import type {
+  ArtifactCustodyV2,
   SealValidationBundleV2,
   ValidationWarningCustodyRootV2,
   ValidationWarningRootV2,
@@ -583,7 +585,7 @@ function makeResolver(world: SealWorld, cfg: SealWorldConfig = {}): SealAuthorit
 function makeService(world: SealWorld, cfg: SealWorldConfig = {}) {
   const resolver = makeResolver(world, cfg);
   const publisher = {
-    stage: vi.fn(async () => ({ artifactId: 'artifact-1', custodyRef: r('artifact', seedDigest('custody')) })),
+    stage: vi.fn(async (input: { custodyRef: BlobRefV2 }) => ({ artifactId: 'artifact-1', custodyRef: input.custodyRef })),
     publish: vi.fn(async (input: { deliveryRef: BlobRefV2 }) => ({ artifactVersion: 1, deliveryRef: input.deliveryRef })),
   };
   const routeInputBlocking = vi.fn(async () => ({ kind: 'completed' as const, resultRefs: [] as BlobRefV2[] }));
@@ -894,6 +896,41 @@ describe('SealWarningCustodyRoot (P2#8)', () => {
 });
 
 /* ------------------------------------------------------------------ */
+/* P1#4: real content-addressed artifact custody (never an alias)      */
+/* ------------------------------------------------------------------ */
+
+describe('P1#4: real content-addressed artifact custody', () => {
+  it('builds an artifact_custody blob before the lock and binds delivery.custodyRef to it', async () => {
+    const world = buildSealWorld();
+    const h = makeService(world);
+    const outcome = await h.service.execute(world.sealContext);
+    if (outcome.kind !== 'completed') throw new Error('seal did not complete');
+    const deliveryRef = h.publisher.publish.mock.calls[0]![0].deliveryRef;
+    const delivery = parsed<SystemArtifactDeliveryV2>(world, deliveryRef);
+    // custodyRef is a REAL content-addressed custody kind, never the artifact alias.
+    expect(delivery.custodyRef.kind).toBe('artifact_custody');
+    const custody = parsed<ArtifactCustodyV2>(world, delivery.custodyRef);
+    expect(custody.sealWorkItemId).toBe('seal-work');
+    expect(custody.artifactRef).toEqual(delivery.artifactRef);
+    expect(custody.sealRecordRef).toEqual(delivery.sealRecordRef);
+    expect(custody.templateSnapshotHash).toBe(TEMPLATE_HASH);
+    // The custody manifest matches the EXACT staged file set (hash/byteLength).
+    const stagedInput = h.publisher.stage.mock.calls[0]![0] as unknown as {
+      files: readonly { name: string; mediaType: string; content: string }[];
+    };
+    expect(custody.files.map((file) => file.name)).toEqual(stagedInput.files.map((file) => file.name));
+    for (let i = 0; i < stagedInput.files.length; i += 1) {
+      expect(custody.files[i]!.hash).toBe(
+        createHash('sha256').update(stagedInput.files[i]!.content, 'utf8').digest('hex'),
+      );
+      expect(custody.files[i]!.byteLength).toBe(Buffer.byteLength(stagedInput.files[i]!.content, 'utf8'));
+    }
+    // The service passed the SAME custody ref into stage (delivery + meta bind it).
+    expect(h.publisher.stage.mock.calls[0]![0].custodyRef).toEqual(delivery.custodyRef);
+  });
+});
+
+/* ------------------------------------------------------------------ */
 /* SystemCommand handler (P1#2: no caller-supplied gate/refs inbound) */
 /* ------------------------------------------------------------------ */
 
@@ -920,10 +957,10 @@ describe('createSystemSealCommandHandler', () => {
 /* ------------------------------------------------------------------ */
 
 describe('production ArtifactStore publisher adapter', () => {
-  it('uses only system_seal stage/promote around the facade-allocated event version', async () => {
-    const artifactStore = {
-      stageSystemArtifact: vi.fn(async () => ({})),
-      promoteSystemArtifact: vi.fn(async () => ({})),
+  it('drives the unforgeable seal capability around the facade-allocated event version — custodyRef is real, never an artifact alias', async () => {
+    const seal = {
+      stage: vi.fn(async () => ({})),
+      promote: vi.fn(async () => ({})),
     };
     const deliveryRef = r('system_artifact_delivery', seedDigest('delivery'));
     const facade = {
@@ -932,22 +969,26 @@ describe('production ArtifactStore publisher adapter', () => {
           protocolVersion: 2, id: 'publish', at: '2026-08-16T00:00:00.000Z', type: 'artifact_published_v2',
           artifactId: 'artifact-seal-work', artifactVersion: 7, deliveryRef,
           files: [{ name: 'chapter.md', hash: 'a'.repeat(64) }], mediaType: 'text/markdown',
-          provenance: { producerKind: 'system', producerWorkItemId: 'seal-work', sealRecordRef: r('seal_record', seedDigest('record')), artifactRef: r('artifact', seedDigest('artifact')), custodyRef: r('artifact', seedDigest('custody')) },
+          provenance: { producerKind: 'system', producerWorkItemId: 'seal-work', sealRecordRef: r('seal_record', seedDigest('record')), artifactRef: r('artifact', seedDigest('artifact')), custodyRef: r('artifact_custody', seedDigest('custody')) },
         } }], pinId: 'pin', generation: 1,
       })),
     };
     const publisher = createArtifactStoreSystemSealPublisher({
       facade: facade as never,
       readTail: async () => ({ lastSequence: 0, lastCommitId: null }),
-      artifactStore: artifactStore as never,
+      seal: seal as never,
     });
     const sealRecordRef = r('seal_record', seedDigest('record'));
     const artifactRef = r('artifact', seedDigest('artifact'));
+    const custodyRef = r('artifact_custody', seedDigest('custody'));
     const staged = await publisher.stage({
       taskId: TASK, sealWorkItemId: 'seal-work', sealRecordRef,
-      templateSnapshotHash: 'snapshot', artifactRef,
+      templateSnapshotHash: 'snapshot', artifactRef, custodyRef,
       files: [{ name: 'chapter.md', mediaType: 'text/markdown', content: '# chapter' }],
     });
+    // The adapter returns the REAL custody ref and stages it — never artifactRef.
+    expect(staged.custodyRef).toEqual(custodyRef);
+    expect(staged.custodyRef.kind).toBe('artifact_custody');
     await publisher.publish({
       taskId: TASK, operationId: sealPublishOperationId('seal-work', artifactRef.digest),
       sealWorkItemId: 'seal-work', sealCommandId: 'command', sealLeaseEpoch: 0,
@@ -964,8 +1005,11 @@ describe('production ArtifactStore publisher adapter', () => {
       mapRef: r('map_snapshot', seedDigest('map')), contentRevisionManifestRef: r('content_revision_manifest', seedDigest('manifest')),
       reviewBundleRef: r('review_bundle', seedDigest('bundle-review')), files: [{ name: 'chapter.md', mediaType: 'text/markdown', hash: 'a'.repeat(64) }],
     });
-    expect(artifactStore.stageSystemArtifact).toHaveBeenCalledWith('system_seal', TASK, expect.objectContaining({ artifactId: 'artifact-seal-work' }));
-    expect(artifactStore.promoteSystemArtifact).toHaveBeenCalledWith('system_seal', TASK, expect.objectContaining({ artifactVersion: 7, deliveryRef }));
+    expect(seal.stage).toHaveBeenCalledWith(TASK, expect.objectContaining({
+      artifactId: 'artifact-seal-work',
+      custodyRef,
+    }));
+    expect(seal.promote).toHaveBeenCalledWith(TASK, expect.objectContaining({ artifactVersion: 7, deliveryRef }));
     expect(facade.publishWithPin).toHaveBeenCalledWith(expect.objectContaining({
       preparedRefs: expect.arrayContaining([
         artifactRef, sealRecordRef, deliveryRef,

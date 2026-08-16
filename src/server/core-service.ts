@@ -444,7 +444,12 @@ export class CoreService {
       leaseOwner: 'task_owner',
     });
     this.tasks = new TaskStore(paths, this.templates, this.v2Index);
-    this.artifacts = new ArtifactStore(paths, this.events);
+    // P1#4: the artifact store resolves v2 provenance blobs through the SAME
+    // content-addressed blob store (never the v1 path); the closure cross-check
+    // only fires for system_seal_v2 meta. v2BlobStore is constructed above.
+    this.artifacts = new ArtifactStore(paths, this.events, (taskId, ref) =>
+      this.v2BlobStore.readJson(taskId, ref, ref.kind),
+    );
     // Phase E stores exist before the runtime/runner so every consumer shares
     // the same derivation (plan Task E3).
     this.workspaces = new WorkspaceStore(paths);

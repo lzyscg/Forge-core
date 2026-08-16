@@ -66,6 +66,7 @@ import {
   parseReviewBundle,
   parseReviewFact,
   parseRoundBudgetOverride,
+  parseArtifactCustody,
   parseSealRecord,
   parseSealValidationBundle,
   parseSystemArtifactDelivery,
@@ -144,6 +145,15 @@ function reg<T>(
  */
 export const registrations: Readonly<Record<AuthoritativeBlobKindV2, BlobSchemaRegistration<unknown>>> = {
   artifact: reg('artifact', parseArtifact, { mediaType: 'text/markdown' }),
+  /**
+   * artifact_custody caps against the artifact bucket: custody is a metadata
+   * manifest over the artifact file set (name/hash/byteLength — never the file
+   * bodies), so it is no larger than the artifact it covers; reusing the
+   * artifact cap keeps the profile surface closed.
+   */
+  artifact_custody: reg('artifact_custody', parseArtifactCustody, {
+    maxBytes: (profile) => profile.maxBytesByKind.artifact,
+  }),
   assignment_dispatch: reg('assignment_dispatch', parseAssignmentDispatch),
   authority_base_set: reg('authority_base_set', parseAuthorityBaseSet),
   content_compatibility_proof: reg('content_compatibility_proof', parseContentCompatibilityProof),

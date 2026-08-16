@@ -1466,6 +1466,26 @@ export interface SealValidationBundleV2 {
   bundleDigest: string;
 }
 
+/**
+ * Task 21 P1#4: the REAL content-addressed system artifact custody manifest
+ * (spec §7.1/§13.5.1; design §16.3). A custodyRef must never alias the
+ * artifactRef — custody is its own blob binding the exact staged file set
+ * (name/hash/byteLength) to the artifact and SealRecord refs, so a deleted or
+ * swapped delivery/SealRecord/bundle/artifact blob is detected by closure
+ * validation instead of silently passing a ref-shape check. `custodyDigest`
+ * covers the canonical bytes minus that field (self-digest rule).
+ */
+export interface ArtifactCustodyV2 {
+  taskId: string;
+  sealWorkItemId: string;
+  artifactRef: BlobRefV2;
+  sealRecordRef: BlobRefV2;
+  templateSnapshotHash: string;
+  /** The exact staged artifact file set: name + SHA-256 + UTF-8 byte length. */
+  files: readonly { name: string; hash: string; byteLength: number }[];
+  custodyDigest: string;
+}
+
 export type StructuredSessionKindV2 =
   | 'structure_chunk'
   | 'review_map_batch'

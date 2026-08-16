@@ -38,8 +38,15 @@ import { STORAGE_ERROR_CODES, StorageError, writeNewAtomic } from './atomic-file
 import type { EventStore, CommittedEvent } from './event-store';
 import type { TaskEvent } from './task-events';
 import type { AuthoritativeReviewEventV2 } from './authoritative-review-events';
-import type { BlobRefV2 } from '../../shared/authoritative-review-v2';
+import type {
+  AuthoritativeBlobKindV2,
+  BlobRefV2,
+  SealRecordV2,
+  SystemArtifactDeliveryV2,
+} from '../../shared/authoritative-review-v2';
 import type { SealRecord } from '../../shared/structured-slots';
+import type { ArtifactCustodyV2, SealValidationBundleV2 } from '../authoritative-review/authority-types';
+import { parseBlob } from '../authoritative-review/object-registry';
 
 const TMP_PREFIX = '.tmp-';
 const ANNOTATE_TMP_PREFIX = '.tmp-annotate-';
@@ -115,7 +122,27 @@ export interface PublishedArtifact {
   createdAt: string;
 }
 
-export type SystemArtifactStoreCallerV2 = 'system_seal';
+/**
+ * Resolver injected by the composition root for v2 provenance closure
+ * validation (Task 21 P1#4): `(taskId, ref) => the resolved blob object`.
+ * Only ever invoked for `system_seal_v2` meta — the v1 path never calls it.
+ * The resolver must fail closed (throw) when the ref cannot be resolved to
+ * exactly those bytes; the store re-validates the object against the ref via
+ * the object registry either way.
+ */
+export type V2BlobResolver = (taskId: string, ref: BlobRefV2) => Promise<unknown>;
+
+/**
+ * The single unforgeable System Seal capability surface (Task 21 P1#5). Only
+ * `ArtifactStore.createSystemSealPublisher()` hands one out; the privileged
+ * exclusive stage/promote implementations are `#`-private instance methods that
+ * no caller-supplied string can reach. There is no public caller-string
+ * `stageSystemArtifact`/`promoteSystemArtifact` path left.
+ */
+export interface SystemSealPublisherCapability {
+  stage(taskId: string, input: StageSystemArtifactInputV2): Promise<StagedSystemArtifactV2>;
+  promote(taskId: string, input: PromoteSystemArtifactInputV2): Promise<ArtifactEntry>;
+}
 
 export interface StageSystemArtifactInputV2 {
   sealWorkItemId: string;
@@ -477,12 +504,16 @@ export class ArtifactStore {
 
   private readonly events: EventStore;
 
+  /** v2 provenance closure resolver (Task 21 P1#4); undefined in v1-only stores. */
+  private readonly v2Resolver: V2BlobResolver | undefined;
+
   /** Per-task publish/annotate serialization within this single process. */
   private readonly queues = new Map<string, Promise<void>>();
 
-  constructor(paths: CorePaths, events: EventStore) {
+  constructor(paths: CorePaths, events: EventStore, v2Resolver?: V2BlobResolver) {
     this.paths = paths;
     this.events = events;
+    this.v2Resolver = v2Resolver;
   }
 
   /**
@@ -531,28 +562,23 @@ export class ArtifactStore {
     return this.enqueue(taskId, () => this.listExclusive(taskId));
   }
 
-  /** Only the system Seal capability may create v2 custody bytes. */
-  async stageSystemArtifact(
-    caller: SystemArtifactStoreCallerV2,
-    taskId: string,
-    input: StageSystemArtifactInputV2,
-  ): Promise<StagedSystemArtifactV2> {
-    if (caller !== 'system_seal') {
-      throw invalidInput('只有 system_seal 可以暂存 v2 system artifact。', '通过系统 Seal Gate 发布。');
-    }
-    return this.enqueue(taskId, () => this.stageSystemArtifactExclusive(taskId, input));
-  }
-
-  /** Promotes only after the authoritative v2 event allocated the version. */
-  async promoteSystemArtifact(
-    caller: SystemArtifactStoreCallerV2,
-    taskId: string,
-    input: PromoteSystemArtifactInputV2,
-  ): Promise<ArtifactEntry> {
-    if (caller !== 'system_seal') {
-      throw invalidInput('只有 system_seal 可以 promote v2 system artifact。', '通过系统 Seal Gate 发布。');
-    }
-    return this.enqueue(taskId, () => this.promoteSystemArtifactExclusive(taskId, input));
+  /**
+   * Hands out the SINGLE unforgeable System Seal capability (Task 21 P1#5).
+   * There is no caller-string-authenticated `stageSystemArtifact` /
+   * `promoteSystemArtifact` on the public class surface; the privileged
+   * implementations are `#`-private instance methods reachable ONLY through
+   * the closure bound here. An arbitrary holder of a raw `ArtifactStore` can
+   * never stage/promote a v2 system artifact — the exclusive methods are not
+   * prototype properties, so even `(store as any).stageSystemArtifactExclusive`
+   * is undefined at runtime.
+   */
+  createSystemSealPublisher(): SystemSealPublisherCapability {
+    return {
+      stage: (taskId, input) =>
+        this.enqueue(taskId, () => this.#stageSystemArtifactExclusive(taskId, input)),
+      promote: (taskId, input) =>
+        this.enqueue(taskId, () => this.#promoteSystemArtifactExclusive(taskId, input)),
+    };
   }
 
   /**
@@ -948,7 +974,159 @@ export class ArtifactStore {
         throw corrupt(`产物版本 ${version} 的 ${file.name} 与标注事件哈希不一致。`);
       }
     }
+    // P1#4: when a v2 blob resolver is wired in, resolve the FULL provenance
+    // closure — delivery → SealRecord → SealValidationBundle → custody →
+    // artifact — and fail closed on any missing/wrong-kind/inconsistent link.
+    // Without a resolver (v1-only or legacy stores) the disk↔event checks above
+    // remain the enforceable surface; production always injects the resolver.
+    if (published.kind === 'system_seal_v2' && this.v2Resolver !== undefined) {
+      await this.verifyV2Closure(taskId, entry, published, events);
+    }
     return entry;
+  }
+
+  /**
+   * P1#4 closure validation: resolve every provenance link of a v2 system
+   * artifact and verify cross-object ref/file consistency. Any missing link,
+   * wrong kind, unresolvable/parse-failing blob or inconsistent field is
+   * TASK_CORRUPTED — never silently downgraded to a v1 interpretation.
+   */
+  private async verifyV2Closure(
+    taskId: string,
+    entry: ArtifactEntry,
+    published: Extract<PublishedArtifactAuthority, { kind: 'system_seal_v2' }>,
+    events: readonly CommittedEvent[],
+  ): Promise<void> {
+    const meta = entry.meta as ArtifactMetaV2;
+    const { event, provenance } = published;
+    const version = meta.version;
+
+    const isRef = (value: unknown): value is BlobRefV2 => isPlainObject(value);
+    const checkRef = (actual: unknown, expected: BlobRefV2, what: string): void => {
+      if (!isRef(actual) || !sameBlobRef(actual, expected)) {
+        throw corrupt(`产物版本 ${version} 闭包 ${what} 与 meta/事件引用不一致。`);
+      }
+    };
+    const checkText = (actual: unknown, expected: string, what: string): void => {
+      if (actual !== expected) {
+        throw corrupt(`产物版本 ${version} 闭包 ${what} 与 meta/事件不一致。`);
+      }
+    };
+
+    // 1. deliveryRef → SystemArtifactDeliveryV2 (the event's own delivery ref).
+    const delivery = (await this.resolveV2Blob(taskId, meta.deliveryRef, 'system artifact delivery')) as SystemArtifactDeliveryV2;
+    checkRef(delivery.sealRecordRef, meta.sealRecordRef, 'delivery.sealRecordRef');
+    checkRef(delivery.sealRecordRef, provenance.sealRecordRef, 'delivery.sealRecordRef(事件)');
+    checkRef(delivery.artifactRef, meta.artifactRef, 'delivery.artifactRef');
+    checkRef(delivery.artifactRef, provenance.artifactRef, 'delivery.artifactRef(事件)');
+    checkRef(delivery.custodyRef, meta.custodyRef, 'delivery.custodyRef');
+    checkRef(delivery.custodyRef, provenance.custodyRef, 'delivery.custodyRef(事件)');
+    checkText(delivery.artifactId, event.artifactId, 'delivery.artifactId');
+    checkText(delivery.templateSnapshotHash, meta.templateSnapshotHash, 'delivery.templateSnapshotHash');
+    // submitterWorkItemId is not carried by the artifact event/meta; when the
+    // delivery-created event is present it must agree.
+    for (const committed of events) {
+      const link = committed.event;
+      if (
+        link.type === 'structured_system_artifact_delivery_created'
+        && isRef(link.deliveryRef)
+        && sameBlobRef(link.deliveryRef, meta.deliveryRef)
+      ) {
+        checkText(link.submitterWorkItemId, delivery.submitterWorkItemId, 'delivery.submitterWorkItemId');
+        checkText(link.artifactId, delivery.artifactId, 'delivery-created.artifactId');
+        checkRef(link.artifactRef, delivery.artifactRef, 'delivery-created.artifactRef');
+        checkRef(link.sealRecordRef, delivery.sealRecordRef, 'delivery-created.sealRecordRef');
+      }
+    }
+
+    // 2. sealRecordRef → SealRecordV2.
+    const sealRecord = (await this.resolveV2Blob(taskId, meta.sealRecordRef, 'seal record')) as SealRecordV2;
+    checkText(sealRecord.taskId, taskId, 'seal record.taskId');
+    checkRef(sealRecord.artifactRef, meta.artifactRef, 'seal record.artifactRef');
+    checkText(sealRecord.templateSnapshotHash, meta.templateSnapshotHash, 'seal record.templateSnapshotHash');
+    await this.resolveV2Blob(taskId, sealRecord.mapRef, 'map snapshot');
+    await this.resolveV2Blob(taskId, sealRecord.contentRevisionManifestRef, 'content revision manifest');
+    await this.resolveV2Blob(taskId, sealRecord.reviewBundleRef, 'review bundle');
+    const bundleRef = sealRecord.sealValidationBundleRef;
+
+    // 3. sealValidationBundleRef → SealValidationBundleV2.
+    const bundle = (await this.resolveV2Blob(taskId, bundleRef, 'seal validation bundle')) as SealValidationBundleV2;
+    checkRef(bundle.artifactRef, meta.artifactRef, 'seal validation bundle.artifactRef');
+    checkText(bundle.sealWorkItemId, provenance.producerWorkItemId, 'seal validation bundle.sealWorkItemId');
+    await this.resolveV2Blob(taskId, bundle.sealInputAggregateRef, 'seal input aggregate');
+    await this.resolveV2Blob(taskId, bundle.sealOutputAggregateRef, 'seal output aggregate');
+
+    // 4. custodyRef → ArtifactCustodyV2, and custody.files must equal the disk
+    //    production file set (name + SHA-256 + UTF-8 byte length).
+    const custody = (await this.resolveV2Blob(taskId, meta.custodyRef, 'artifact custody')) as ArtifactCustodyV2;
+    checkRef(custody.artifactRef, meta.artifactRef, 'artifact custody.artifactRef');
+    checkRef(custody.sealRecordRef, meta.sealRecordRef, 'artifact custody.sealRecordRef');
+    checkText(custody.templateSnapshotHash, meta.templateSnapshotHash, 'artifact custody.templateSnapshotHash');
+    checkText(custody.sealWorkItemId, provenance.producerWorkItemId, 'artifact custody.sealWorkItemId');
+    checkText(custody.taskId, taskId, 'artifact custody.taskId');
+    if (custody.files.length !== entry.files.length) {
+      throw corrupt(`产物版本 ${version} 闭包 custody 文件清单与磁盘不一致。`);
+    }
+    const diskByName = new Map(entry.files.map((file) => [file.name, file]));
+    for (const cust of custody.files) {
+      const disk = diskByName.get(cust.name);
+      if (disk === undefined) {
+        throw corrupt(`产物版本 ${version} 闭包 custody 声明文件 ${cust.name} 但磁盘缺失。`);
+      }
+      if (cust.hash !== sha256(disk.content) || cust.byteLength !== Buffer.byteLength(disk.content, 'utf8')) {
+        throw corrupt(`产物版本 ${version} 闭包 custody 文件 ${cust.name} 与磁盘哈希/字节长不一致。`);
+      }
+    }
+
+    // 5. artifactRef → artifact blob; its text must match the production disk
+    //    file the event declares with the same hash.
+    const artifact = (await this.resolveV2Blob(taskId, meta.artifactRef, 'artifact blob')) as {
+      artifactId: string;
+      mediaType: string;
+      text: string;
+    };
+    checkText(artifact.artifactId, event.artifactId, 'artifact.artifactId');
+    checkText(artifact.mediaType, event.mediaType, 'artifact.mediaType');
+    const artifactHash = sha256(artifact.text);
+    const declaredFile = event.files.find((file) => file.hash === artifactHash);
+    if (declaredFile === undefined) {
+      throw corrupt(`产物版本 ${version} 闭包 artifact blob 与发布事件文件哈希不一致。`);
+    }
+    const diskArtifact = diskByName.get(declaredFile.name);
+    if (diskArtifact === undefined || diskArtifact.content !== artifact.text) {
+      throw corrupt(`产物版本 ${version} 闭包 artifact blob 与磁盘产物文件不一致。`);
+    }
+  }
+
+  /**
+   * Resolves one closure blob through the injected v2 resolver and re-validates
+   * it against its ref via the object registry. Missing/unparseable/mismatched
+   * blobs are TASK_CORRUPTED (fail closed); a resolver that already threw
+   * TASK_CORRUPTED (e.g. the production blob store) propagates as-is.
+   */
+  private async resolveV2Blob(taskId: string, ref: BlobRefV2, what: string): Promise<unknown> {
+    const resolver = this.v2Resolver;
+    if (resolver === undefined) {
+      throw corrupt(`产物版本闭包无法解析 ${what}：缺少 v2 blob 解析器。`);
+    }
+    let raw: unknown;
+    try {
+      raw = await resolver(taskId, ref);
+    } catch (error) {
+      if (error instanceof StorageError && error.code === STORAGE_ERROR_CODES.TASK_CORRUPTED) {
+        throw error;
+      }
+      throw corrupt(`产物版本闭包 ${what} 解析失败。`);
+    }
+    if (raw === null || raw === undefined) {
+      throw corrupt(`产物版本闭包 ${what} 缺失。`);
+    }
+    try {
+      const { object } = parseBlob(ref.kind, raw, ref);
+      return object;
+    } catch {
+      throw corrupt(`产物版本闭包 ${what} 内容或引用不一致。`);
+    }
   }
 
   /**
@@ -964,7 +1142,7 @@ export class ArtifactStore {
       return null; // No event to claim against — not a recoverable window.
     }
     if (published.kind === 'system_seal_v2') {
-      return this.promoteSystemArtifactExclusive(taskId, {
+      return this.#promoteSystemArtifactExclusive(taskId, {
         sealWorkItemId: published.provenance.producerWorkItemId,
         artifactRef: published.provenance.artifactRef,
         artifactVersion: published.event.artifactVersion,
@@ -1141,7 +1319,7 @@ export class ArtifactStore {
     }
   }
 
-  private async stageSystemArtifactExclusive(
+  async #stageSystemArtifactExclusive(
     taskId: string,
     input: StageSystemArtifactInputV2,
   ): Promise<StagedSystemArtifactV2> {
@@ -1196,7 +1374,7 @@ export class ArtifactStore {
     return manifest;
   }
 
-  private async promoteSystemArtifactExclusive(
+  async #promoteSystemArtifactExclusive(
     taskId: string,
     input: PromoteSystemArtifactInputV2,
   ): Promise<ArtifactEntry> {

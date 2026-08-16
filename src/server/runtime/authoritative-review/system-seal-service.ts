@@ -20,7 +20,7 @@
 import { createHash } from 'node:crypto';
 
 import type { BlobRefV2, SealRecordV2, SystemArtifactDeliveryV2 } from '../../../shared/authoritative-review-v2';
-import type { SealValidationBundleV2, ValidatorAggregateOutcomeV2, ValidatorAggregateV2, ValidationWarningCustodyRootV2 } from '../../authoritative-review/authority-types';
+import type { ArtifactCustodyV2, SealValidationBundleV2, ValidatorAggregateOutcomeV2, ValidatorAggregateV2, ValidationWarningCustodyRootV2 } from '../../authoritative-review/authority-types';
 import { canonicalJsonSha256 } from '../../structured-slots/canonical-json';
 import { assertTemplateIdentityMatchesSeal, evaluateSealGate, sealConditionCodes } from '../../authoritative-review/seal-gate';
 import { sameRef } from './authority-base';
@@ -28,7 +28,7 @@ import type { SystemCommandHandler, SystemCommandOutcome } from './system-comman
 import { AssemblerRegistryV2 } from './assembler-registry';
 import { buildReviewObservationGrantSpec } from './review-coordinator';
 import type { AuthoritativeAppendFacadeV2 } from '../../storage/authoritative-append-facade';
-import type { ArtifactStore, PromoteSystemArtifactInputV2, StageSystemArtifactInputV2 } from '../../storage/artifact-store';
+import type { SystemSealPublisherCapability, StageSystemArtifactInputV2, PromoteSystemArtifactInputV2 } from '../../storage/artifact-store';
 import {
   SealAuthorityError,
   type ResolvedSealAuthorityV2,
@@ -44,7 +44,7 @@ export interface SealValidatorRunV2 {
 }
 
 export interface SystemSealBlobWriter {
-  prepare(kind: 'artifact' | 'seal_validation_bundle' | 'seal_record' | 'system_artifact_delivery' | 'write_grant_spec' | 'validation_warning_custody_root', value: unknown): Promise<BlobRefV2>;
+  prepare(kind: 'artifact' | 'artifact_custody' | 'seal_validation_bundle' | 'seal_record' | 'system_artifact_delivery' | 'write_grant_spec' | 'validation_warning_custody_root', value: unknown): Promise<BlobRefV2>;
 }
 
 export interface SystemSealPublisherV2 {
@@ -55,6 +55,8 @@ export interface SystemSealPublisherV2 {
     sealRecordRef: BlobRefV2;
     templateSnapshotHash: string;
     artifactRef: BlobRefV2;
+    /** P1#4: the REAL content-addressed custody ref, never an artifact alias. */
+    custodyRef: BlobRefV2;
     files: readonly { name: string; mediaType: string; content: string }[];
   }): Promise<{ artifactId: string; custodyRef: BlobRefV2 }>;
   /** Acquires the publication lock and commits the complete clear envelope. */
@@ -279,6 +281,27 @@ export class SystemSealServiceV2 {
       artifactDigest: artifactRef.digest,
     };
     const sealRecordRef = await this.deps.blobs.prepare('seal_record', record);
+    // P1#4: build the REAL content-addressed custody manifest BEFORE the lock,
+    // binding the exact staged file set (name/hash/byteLength) to the artifact
+    // and SealRecord refs. The custody ref must never alias the artifact ref;
+    // delivery.custodyRef and ArtifactMetaV2.custodyRef both point at it.
+    const custodyBody: Omit<ArtifactCustodyV2, 'custodyDigest'> = {
+      taskId: input.taskId,
+      sealWorkItemId: input.sealWorkItemId,
+      artifactRef,
+      sealRecordRef,
+      templateSnapshotHash: gate.templateSnapshotHash,
+      files: outputs.map((item) => ({
+        name: item.artifactFile,
+        hash: createHash('sha256').update(item.content, 'utf8').digest('hex'),
+        byteLength: Buffer.byteLength(item.content, 'utf8'),
+      })),
+    };
+    const custody: ArtifactCustodyV2 = {
+      ...custodyBody,
+      custodyDigest: canonicalJsonSha256(custodyBody),
+    };
+    const custodyRef = await this.deps.blobs.prepare('artifact_custody', custody);
     let staged: Awaited<ReturnType<SystemSealPublisherV2['stage']>>;
     try {
       staged = await this.deps.publisher.stage({
@@ -287,6 +310,7 @@ export class SystemSealServiceV2 {
         sealRecordRef,
         templateSnapshotHash: gate.templateSnapshotHash,
         artifactRef,
+        custodyRef,
         files: outputs.map((item) => ({ name: item.artifactFile, mediaType: item.mediaType, content: item.content })),
       });
     } catch {
@@ -416,11 +440,16 @@ export function createFacadeSystemSealPublisher(input: {
   };
 }
 
-/** Production custody adapter: stage before lock, promote/recover after event allocation. */
+/**
+ * Production custody adapter: stage before lock, promote/recover after event
+ * allocation. P1#5: it consumes the unforgeable `SystemSealPublisherCapability`
+ * (obtained from `ArtifactStore.createSystemSealPublisher()` by the composition
+ * root) — there is no caller-string `'system_seal'` path on the store any more.
+ */
 export function createArtifactStoreSystemSealPublisher(input: {
   facade: AuthoritativeAppendFacadeV2;
   readTail(taskId: string): Promise<{ lastSequence: number; lastCommitId: string | null }>;
-  artifactStore: Pick<ArtifactStore, 'stageSystemArtifact' | 'promoteSystemArtifact'>;
+  seal: SystemSealPublisherCapability;
 }): SystemSealPublisherV2 {
   return createFacadeSystemSealPublisher({
     facade: input.facade,
@@ -428,7 +457,7 @@ export function createArtifactStoreSystemSealPublisher(input: {
     stage: async (stage) => {
       const format = stage.files[0]?.mediaType === 'text/plain' ? 'text' : 'markdown';
       const artifactId = `artifact-${stage.sealWorkItemId}`;
-      const custodyRef = stage.artifactRef;
+      const custodyRef = stage.custodyRef;
       const payload: StageSystemArtifactInputV2 = {
         sealWorkItemId: stage.sealWorkItemId,
         artifactId,
@@ -441,7 +470,7 @@ export function createArtifactStoreSystemSealPublisher(input: {
         templateSnapshotHash: stage.templateSnapshotHash,
         files: stage.files.map((file) => ({ name: file.name, content: file.content })),
       };
-      await input.artifactStore.stageSystemArtifact('system_seal', stage.taskId, payload);
+      await input.seal.stage(stage.taskId, payload);
       return { artifactId, custodyRef };
     },
     promote: async (seal, published) => {
@@ -451,7 +480,7 @@ export function createArtifactStoreSystemSealPublisher(input: {
         artifactVersion: published.artifactVersion,
         deliveryRef: published.deliveryRef,
       };
-      await input.artifactStore.promoteSystemArtifact('system_seal', seal.taskId, payload);
+      await input.seal.promote(seal.taskId, payload);
     },
   });
 }
