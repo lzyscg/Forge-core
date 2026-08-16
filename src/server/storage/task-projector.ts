@@ -411,7 +411,8 @@ export function projectTask(
   const executedRoutes = [...state.routes].sort((a, b) => a.sequence - b.sequence);
   const inputVersions: ArtifactVersion[] = [...artifacts]
     .sort((a, b) => a.meta.version - b.meta.version)
-    .map((entry) => ({
+    .map((entry): ArtifactVersion => {
+      const common = {
       id: entry.meta.id,
       version: entry.meta.version,
       title: entry.meta.title,
@@ -423,12 +424,24 @@ export function projectTask(
         extract: extractForFile(task.frozenTemplate, file.name),
         content: file.content,
       })),
-      sourceNodeId: entry.meta.sourceNodeId,
       createdAt: entry.meta.createdAt,
       // Finality is decided exclusively by final_submission_accepted, never
       // by the publish payload (spec §6.4).
       final: state.finalArtifactId !== null && entry.meta.id === state.finalArtifactId,
-    }));
+      };
+      return entry.meta.authorityKind === 'system_seal_v2'
+        ? {
+            ...common,
+            protocolVersion: 2,
+            producerWorkItemId: entry.meta.producerWorkItemId,
+            sealRecordRef: entry.meta.sealRecordRef,
+            artifactRef: entry.meta.artifactRef,
+            custodyRef: entry.meta.custodyRef,
+            templateSnapshotHash: entry.meta.templateSnapshotHash,
+            deliveryRef: entry.meta.deliveryRef,
+          }
+        : { ...common, sourceNodeId: entry.meta.sourceNodeId };
+    });
 
   if (isV2) {
     // Contract v2 (spec §4.4): the workspace keeps the shared shell but the

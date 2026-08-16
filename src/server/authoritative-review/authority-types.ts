@@ -2420,6 +2420,31 @@ export type PublicationOperationPayloadV2 =
       sealRecordRef: BlobRefV2;
       deliveryRef: BlobRefV2;
       expectedArtifactVersion: number;
+    }
+  | {
+      /** Task 21 complete clear Seal envelope; version is NOT in these pinned bytes. */
+      family: 'seal_publish';
+      operationId: string;
+      taskId: string;
+      artifactRef: BlobRefV2;
+      artifactFile: string;
+      artifactFileHash: string;
+      sealRecordRef: BlobRefV2;
+      sealValidationBundleRef: BlobRefV2;
+      deliveryRef: BlobRefV2;
+      custodyRef: BlobRefV2;
+      mapRef: BlobRefV2;
+      contentRevisionManifestRef: BlobRefV2;
+      reviewBundleRef: BlobRefV2;
+      sealWorkItemId: string;
+      sealCommandId: string;
+      sealLeaseEpoch: number;
+      sealAuthorityBaseRef: BlobRefV2;
+      submitterWorkItemId: string;
+      submitterAuthorityBaseRef: BlobRefV2;
+      submitterGrantSpecRef: BlobRefV2;
+      submitterLogicalAssignmentId: string;
+      submitterMaxAutomaticRetries: number;
     };
 
 /* ------------------------------------------------------------------ */

@@ -874,6 +874,7 @@ export class TaskRunner {
       let handOffArtifact: CurrentInputArtifact | null = null;
       if (inputVersion !== null) {
         const handOff = await this.artifacts.read(taskId, inputVersion);
+        if (handOff.meta.authorityKind === 'system_seal_v2') throw new Error('v2 system delivery requires the generic submitter path');
         const contentFile =
           handOff.files.find((file) => file.name === 'content.md' || file.name === 'content.txt')
             ?.content ?? '';
@@ -1652,6 +1653,7 @@ ${checklist}`;
     let handOffArtifact: CurrentInputArtifact | null = null;
     if (inputVersion !== null) {
       const handOff = await this.artifacts.read(taskId, inputVersion);
+      if (handOff.meta.authorityKind === 'system_seal_v2') throw new Error('v2 system delivery requires the generic submitter path');
       const contentFile =
         handOff.files.find((file) => file.name === 'content.md' || file.name === 'content.txt')
           ?.content ?? '';

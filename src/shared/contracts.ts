@@ -10,6 +10,7 @@ import type {
   StructuredSlotTreeCursorV1,
   StructuredSlotsSummaryV1,
 } from './structured-slots';
+import type { BlobRefV2 } from './authoritative-review-v2';
 
 /** Re-exported so gateway consumers import the seal fact from one place. */
 export type { SealRecord } from './structured-slots';
@@ -310,7 +311,9 @@ export interface ArtifactFile {
   content: string;
 }
 
-export interface ArtifactVersion {
+export interface ArtifactVersionV1 {
+  /** Absent on legacy wire payloads; when present it is the authority tag. */
+  protocolVersion?: 1;
   id: string;
   version: number;
   title: string;
@@ -319,6 +322,27 @@ export interface ArtifactVersion {
   createdAt: string;
   final: boolean;
 }
+
+/** System-Seal-published artifact.  There is deliberately no sourceNodeId. */
+export interface ArtifactVersionV2 {
+  protocolVersion: 2;
+  id: string;
+  version: number;
+  title: string;
+  files: ArtifactFile[];
+  createdAt: string;
+  final: boolean;
+  producerWorkItemId: string;
+  sealRecordRef: BlobRefV2;
+  artifactRef: BlobRefV2;
+  custodyRef: BlobRefV2;
+  templateSnapshotHash: string;
+  deliveryRef: BlobRefV2;
+  sourceNodeId?: never;
+}
+
+/** Exact public authority union; v1 and v2 provenance cannot be fabricated. */
+export type ArtifactVersion = ArtifactVersionV1 | ArtifactVersionV2;
 
 /**
  * One in-flight tool call of the running Turn, shown in the live preview

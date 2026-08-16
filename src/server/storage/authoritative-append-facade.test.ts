@@ -768,6 +768,87 @@ describe('artifact version allocation (artifact_publish family)', () => {
       }),
     ).rejects.toMatchObject({ code: STORAGE_ERROR_CODES.ARTIFACT_VERSION_CONFLICT });
   });
+
+  it('pins delivery before lock, allocates only the seal event version, and response-loss/race replay has no gap', async () => {
+    const paths = await makePaths();
+    const env = await makeEnv(paths);
+    const taskId = randomUUID();
+    await env.eventStore.append(taskId, {
+      id: 'legacy-art-1', at: NOW, type: 'artifact_published',
+      artifact: { version: 1, title: 'legacy', sourceNodeId: 'n-1', format: 'markdown', files: [{ name: 'a.md', hash: H1 }], artifactType: null, artifactId: 'legacy-id' },
+    });
+    const set = await prepareArtifactSet(env, taskId);
+    const sealValidationBundleRef = dummyRef('seal_validation_bundle', H5);
+    const submitterAuthorityBaseRef = dummyRef('authority_base_set', H2);
+    const grantCore = {
+      grantSpecId: 'grant-wi-42', workItemId: 'wi-42', kind: 'review_observation' as const,
+      snapshotHash: H1, authorityBaseRef: submitterAuthorityBaseRef,
+      sessionKind: null, reviewAssignmentId: null, roundId: null, roundKind: null,
+      readScope: { maxContextBytes: 67_108_864 },
+    };
+    const submitterGrantSpecRef = await env.facade.prepareBlob(taskId, 'write_grant_spec', {
+      ...grantCore, specDigest: canonicalJsonSha256(grantCore),
+    });
+    const payload = {
+      family: 'seal_publish' as const,
+      operationId: 'op-system-seal', taskId,
+      artifactRef: set.artifact, artifactFile: 'chapter.md', artifactFileHash: H1,
+      sealRecordRef: set.sealRecord,
+      sealValidationBundleRef, deliveryRef: set.delivery, custodyRef: set.sealRecord,
+      mapRef: dummyRef('map_snapshot', H1),
+      contentRevisionManifestRef: dummyRef('content_revision_manifest', H3),
+      reviewBundleRef: dummyRef('review_bundle', H4),
+      sealWorkItemId: 'seal-work', sealCommandId: 'seal-command', sealLeaseEpoch: 1,
+      sealAuthorityBaseRef: dummyRef('authority_base_set', H1),
+      submitterWorkItemId: 'wi-42', submitterAuthorityBaseRef,
+      submitterGrantSpecRef,
+      submitterLogicalAssignmentId: 'submit-logical', submitterMaxAutomaticRetries: 2,
+    };
+    const tail = await env.eventStore.tail(taskId);
+    const prepared = await env.facade.preparePublication({
+      taskId, operationId: payload.operationId, payload,
+      intent: intent('system_seal_publish'),
+      preparedRefs: [set.artifact, set.sealRecord, set.delivery, payload.submitterGrantSpecRef],
+      expectedTailSequence: tail.lastSequence, expectedTailCommitId: tail.lastCommitId,
+    });
+    const delivery = await env.blobStore.readJson(taskId, set.delivery, 'system_artifact_delivery');
+    expect(delivery).not.toHaveProperty('artifactVersion');
+    expect(await env.publicationStore.readPin(prepared.pin.pinId)).not.toBeNull();
+
+    // Two live processes share one boot identity. A different bootId would
+    // deliberately authorize mutual dead-owner takeover and test reboot
+    // fencing rather than an ordinary cross-process commit race.
+    const env2 = await makeEnv(paths, {
+      storeOptions: storeOptions({ bootId: 'boot-1', ownerPid: process.pid + 1, processAlive: () => true }),
+    });
+    const [first, replay] = await Promise.all([
+      env.facade.commitPrepared(prepared.pin.pinId),
+      env2.facade.commitPrepared(prepared.pin.pinId),
+    ]);
+    const versions = [...first.events, ...replay.events].flatMap((entry) =>
+      entry.event.type === 'artifact_published_v2' ? [entry.event.artifactVersion] : [],
+    );
+    expect(versions).toEqual([2, 2]);
+    expect(first.events.map((entry) => entry.event.type)).toEqual([
+      'structured_scaffold_sealed_v2',
+      'artifact_published_v2',
+      'structured_system_artifact_delivery_created',
+      'structured_work_item_created',
+      'structured_system_command_completed',
+      'structured_work_item_completed',
+    ]);
+    const published = first.events.find((entry) => entry.event.type === 'artifact_published_v2')?.event;
+    expect(published?.type === 'artifact_published_v2' ? published.files : []).toEqual([
+      { name: 'chapter.md', hash: H1 },
+    ]);
+    const history = await env.eventStore.read(taskId);
+    expect(history.filter((entry) => entry.event.type === 'artifact_published_v2')).toHaveLength(1);
+    expect(history.flatMap((entry) => {
+      if (entry.event.type === 'artifact_published') return [entry.event.artifact.version];
+      if (entry.event.type === 'artifact_published_v2') return [entry.event.artifactVersion];
+      return [];
+    })).toEqual([1, 2]);
+  });
 });
 
 describe('Finding 5/6: non-rebuildable replay and creator-liveness', () => {

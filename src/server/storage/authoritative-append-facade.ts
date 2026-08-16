@@ -459,6 +459,12 @@ export class AuthoritativeAppendFacadeV2 {
     parsed: PublicationOperationPayloadV2,
   ): Promise<AuthoritativeReviewEventV2[]> {
     const refs = new Map<string, unknown>();
+    // Task 21: the SystemArtifactDelivery/pin are already immutable, but the
+    // combined-history version is allocated only while this fresh-tail lock is
+    // held. It never appears in the pinned payload/delivery bytes.
+    if (registration.payloadFamily === 'seal_publish') {
+      refs.set('allocatedArtifactVersion', (await this.currentMaxArtifactVersion(pin.taskId)) + 1);
+    }
     for (const resolved of registration.resolveRefs(parsed)) {
       const object = await this.blobStore.readJson(pin.taskId, resolved.ref, resolved.ref.kind);
       refs.set(resolved.key, object);
@@ -696,7 +702,7 @@ export class AuthoritativeAppendFacadeV2 {
       const { id: _id, at: _at, ...rest } = event;
       return rest;
     };
-    const rebuilt = await this.tryBuildEnvelopeStructure(pin);
+    const rebuilt = await this.tryBuildEnvelopeStructure(pin, committed);
     if (rebuilt === null) {
       throw new StorageError(
         STORAGE_ERROR_CODES.PIN_CONFLICT,
@@ -723,7 +729,10 @@ export class AuthoritativeAppendFacadeV2 {
   }
 
   /** Best-effort structural rebuild of a pin's event envelopes (null on any failure). */
-  private async tryBuildEnvelopeStructure(pin: PublicationPinV2): Promise<readonly Record<string, unknown>[] | null> {
+  private async tryBuildEnvelopeStructure(
+    pin: PublicationPinV2,
+    committed: readonly CommittedEvent[] = [],
+  ): Promise<readonly Record<string, unknown>[] | null> {
     try {
       const registration = this.registry.resolve(pin.intent.handlerKind, pin.intent.handlerVersion);
       if (registration === null) return null;
@@ -736,6 +745,11 @@ export class AuthoritativeAppendFacadeV2 {
       );
       if (parsed.family !== registration.payloadFamily) return null;
       const refs = new Map<string, unknown>();
+      if (registration.payloadFamily === 'seal_publish') {
+        const publication = committed.find((entry) => entry.event.type === 'artifact_published_v2')?.event;
+        if (publication === undefined || publication.type !== 'artifact_published_v2') return null;
+        refs.set('allocatedArtifactVersion', publication.artifactVersion);
+      }
       for (const resolved of registration.resolveRefs(parsed)) {
         refs.set(resolved.key, await this.blobStore.readJson(pin.taskId, resolved.ref, resolved.ref.kind));
       }

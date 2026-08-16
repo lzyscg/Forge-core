@@ -106,6 +106,7 @@ function ProductionWorkspace({ workspace }: { workspace: TaskWorkspace }) {
 
   const handleLocateArtifact = useCallback((artifact: ArtifactVersion) => {
     setSelectedVersion(artifact.version);
+    if (artifact.protocolVersion === 2) return;
     setHighlightedNodeId(artifact.sourceNodeId);
     const element = document.getElementById(`node-${artifact.sourceNodeId}`);
     if (element && typeof element.scrollIntoView === 'function') {

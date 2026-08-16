@@ -25,6 +25,7 @@ import {
   validTaskRequest,
 } from '../test-support';
 import { CoreService } from '../core-service';
+import type { ArtifactEntry, ArtifactMetaV2 } from './artifact-store';
 import type { CorePaths } from './core-paths';
 import { formatEventFileName } from './core-paths';
 import { deriveOwnerIssues, projectStructuredSlotsSummary, projectTask } from './task-projector';
@@ -114,6 +115,34 @@ describe('task-projector', () => {
     const legacy = projectTask({ record, frozenTemplate: frozen }, [], artifacts);
     const legacyV1 = legacy.artifacts.find((a) => a.version === 1);
     expect(legacyV1?.files.find((f) => f.name === 'content.md')?.extract).toBe('content');
+  });
+
+  it('projects exact System-Seal v2 authority without inventing a v1 source node', async () => {
+    const created = await service.createTask(validTaskRequest());
+    const record = await service.tasks.readTaskRecord(created.id);
+    const frozenTemplate = await service.tasks.readFrozenTemplate(created.id);
+    const ref = <K extends 'seal_record' | 'artifact' | 'system_artifact_delivery'>(kind: K, fill: string) => ({
+      kind, digest: fill.repeat(64), byteLength: 1,
+      mediaType: 'application/json' as const, schemaVersion: 1 as const,
+    });
+    const meta: ArtifactMetaV2 = {
+      authorityKind: 'system_seal_v2', id: 'sealed-artifact', version: 2,
+      title: 'System Seal', format: 'markdown', createdAt: '2026-08-16T00:00:00.000Z',
+      producerWorkItemId: 'seal-work', sealRecordRef: ref('seal_record', 'a'),
+      artifactRef: ref('artifact', 'b'), custodyRef: ref('seal_record', 'c'),
+      templateSnapshotHash: 'd'.repeat(64), deliveryRef: ref('system_artifact_delivery', 'e'),
+    };
+    const artifact: ArtifactEntry = {
+      meta,
+      files: [{ name: 'chapter.md', content: '# sealed' }],
+    };
+
+    const projected = projectTask({ record, frozenTemplate }, [], [artifact]).artifacts[0];
+    expect(projected).toMatchObject({
+      protocolVersion: 2, id: 'sealed-artifact', producerWorkItemId: 'seal-work',
+      sealRecordRef: meta.sealRecordRef, deliveryRef: meta.deliveryRef,
+    });
+    expect(projected).not.toHaveProperty('sourceNodeId');
   });
 
   it('folds nodes, executed routes and attempt counts from committed events', async () => {

@@ -566,7 +566,34 @@ export function parsePublicationOperationPayload(value: unknown): PublicationOpe
       expectedArtifactVersion: onn(o.expectedArtifactVersion, 'expectedArtifactVersion'),
     } as PublicationOperationPayloadV2;
   }
-  throw new SchemaError('publication_operation_payload.family must be domain_publish|lease_or_retry|lifecycle|question|recovery|delete|artifact_publish');
+  if (family === 'seal_publish') {
+    ex(o, ['family', 'operationId', 'taskId', 'artifactRef', 'artifactFile', 'artifactFileHash', 'sealRecordRef', 'sealValidationBundleRef', 'deliveryRef', 'custodyRef', 'mapRef', 'contentRevisionManifestRef', 'reviewBundleRef', 'sealWorkItemId', 'sealCommandId', 'sealLeaseEpoch', 'sealAuthorityBaseRef', 'submitterWorkItemId', 'submitterAuthorityBaseRef', 'submitterGrantSpecRef', 'submitterLogicalAssignmentId', 'submitterMaxAutomaticRetries'], 'publication_operation_payload');
+    return {
+      family,
+      operationId: str(o.operationId, 'operationId'),
+      taskId: str(o.taskId, 'taskId'),
+      artifactRef: rfKind(o.artifactRef, 'artifact', 'artifactRef'),
+      artifactFile: str(o.artifactFile, 'artifactFile'),
+      artifactFileHash: hx(o.artifactFileHash, 'artifactFileHash'),
+      sealRecordRef: rfKind(o.sealRecordRef, 'seal_record', 'sealRecordRef'),
+      sealValidationBundleRef: rfKind(o.sealValidationBundleRef, 'seal_validation_bundle', 'sealValidationBundleRef'),
+      deliveryRef: rfKind(o.deliveryRef, 'system_artifact_delivery', 'deliveryRef'),
+      custodyRef: rf(o.custodyRef, 'custodyRef'),
+      mapRef: rfKind(o.mapRef, 'map_snapshot', 'mapRef'),
+      contentRevisionManifestRef: rfKind(o.contentRevisionManifestRef, 'content_revision_manifest', 'contentRevisionManifestRef'),
+      reviewBundleRef: rfKind(o.reviewBundleRef, 'review_bundle', 'reviewBundleRef'),
+      sealWorkItemId: str(o.sealWorkItemId, 'sealWorkItemId'),
+      sealCommandId: str(o.sealCommandId, 'sealCommandId'),
+      sealLeaseEpoch: onn(o.sealLeaseEpoch, 'sealLeaseEpoch'),
+      sealAuthorityBaseRef: rfKind(o.sealAuthorityBaseRef, 'authority_base_set', 'sealAuthorityBaseRef'),
+      submitterWorkItemId: str(o.submitterWorkItemId, 'submitterWorkItemId'),
+      submitterAuthorityBaseRef: rfKind(o.submitterAuthorityBaseRef, 'authority_base_set', 'submitterAuthorityBaseRef'),
+      submitterGrantSpecRef: rfKind(o.submitterGrantSpecRef, 'write_grant_spec', 'submitterGrantSpecRef'),
+      submitterLogicalAssignmentId: str(o.submitterLogicalAssignmentId, 'submitterLogicalAssignmentId'),
+      submitterMaxAutomaticRetries: onn(o.submitterMaxAutomaticRetries, 'submitterMaxAutomaticRetries'),
+    } as PublicationOperationPayloadV2;
+  }
+  throw new SchemaError('publication_operation_payload.family must be domain_publish|lease_or_retry|lifecycle|question|recovery|delete|artifact_publish|seal_publish');
 }
 
 /* ---- Task 15 domain_publish carriers (map-build service) --------- */

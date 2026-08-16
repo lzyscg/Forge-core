@@ -5,9 +5,9 @@
  * Artifact versions live at `artifacts/vNNN/` (spec §3.1): one directory per
  * version carrying every file that version produced or accrued (the writer's
  * `content.md`/`revision.md`, the reviewer's `review.md`, …). The store
- * allocates versions itself from the authoritative event stream (the count of
- * committed `artifact_published` events plus one — spec §8) and never accepts
- * a caller-supplied version. Committed versions are never replaced; a
+ * allocates versions itself from the authoritative event stream (the maximum
+ * committed v1/v2 publication version plus one) and never accepts a
+ * caller-supplied version. Committed versions are never replaced; a
  * production file set is written atomically through a temporary sibling
  * renamed into place only when complete, and an annotate file is appended
  * atomically (staging → event → rename, spec §8).
@@ -37,12 +37,15 @@ import { CorePathError } from './core-paths';
 import { STORAGE_ERROR_CODES, StorageError, writeNewAtomic } from './atomic-file';
 import type { EventStore, CommittedEvent } from './event-store';
 import type { TaskEvent } from './task-events';
+import type { AuthoritativeReviewEventV2 } from './authoritative-review-events';
+import type { BlobRefV2 } from '../../shared/authoritative-review-v2';
 import type { SealRecord } from '../../shared/structured-slots';
 
 const TMP_PREFIX = '.tmp-';
 const ANNOTATE_TMP_PREFIX = '.tmp-annotate-';
 const CUSTODY_MANIFEST_FILE = 'manifest.json';
 const CUSTODY_SEAL_RECORD_FILE = 'seal-record.json';
+const SYSTEM_STAGE_FILE = 'system-stage.json';
 
 const VERSION_DIR = /^v(\d{3})$/;
 
@@ -61,7 +64,8 @@ export interface ArtifactProposal {
 }
 
 /** Committed metadata (`meta.json`) of one artifact version (no file hashes). */
-export interface ArtifactMeta {
+export interface ArtifactMetaV1 {
+  authorityKind?: 'agent_v1';
   id: string;
   version: number;
   title: string;
@@ -69,6 +73,24 @@ export interface ArtifactMeta {
   format: 'markdown' | 'text';
   createdAt: string;
 }
+
+export interface ArtifactMetaV2 {
+  authorityKind: 'system_seal_v2';
+  id: string;
+  version: number;
+  title: string;
+  format: 'markdown' | 'text';
+  createdAt: string;
+  producerWorkItemId: string;
+  sealRecordRef: BlobRefV2;
+  artifactRef: BlobRefV2;
+  custodyRef: BlobRefV2;
+  templateSnapshotHash: string;
+  deliveryRef: BlobRefV2;
+  sourceNodeId?: never;
+}
+
+export type ArtifactMeta = ArtifactMetaV1 | ArtifactMetaV2;
 
 /** One committed file: its name plus the full body text. */
 export interface ArtifactStoredFile {
@@ -91,6 +113,34 @@ export interface PublishedArtifact {
   sourceNodeId: string;
   format: 'markdown' | 'text';
   createdAt: string;
+}
+
+export type SystemArtifactStoreCallerV2 = 'system_seal';
+
+export interface StageSystemArtifactInputV2 {
+  sealWorkItemId: string;
+  artifactId: string;
+  title: string;
+  format: 'markdown' | 'text';
+  producerWorkItemId: string;
+  sealRecordRef: BlobRefV2;
+  artifactRef: BlobRefV2;
+  custodyRef: BlobRefV2;
+  templateSnapshotHash: string;
+  files: ArtifactFileInput[];
+}
+
+export interface StagedSystemArtifactV2 extends StageSystemArtifactInputV2 {
+  stageIdentity: string;
+  files: Array<ArtifactFileInput & { sha256: string; byteLength: number }>;
+  createdAt: string;
+}
+
+export interface PromoteSystemArtifactInputV2 {
+  sealWorkItemId: string;
+  artifactRef: BlobRefV2;
+  artifactVersion: number;
+  deliveryRef: BlobRefV2;
 }
 
 /** Caller-supplied annotate input. */
@@ -122,7 +172,7 @@ export interface PreparedStructuredFile {
 /**
  * Structured custody staging input (spec §12 / design §17.1 step 7). The
  * content identity (J06) keys the custody directory; the version is ALWAYS
- * allocated by the store from the committed event count. The `sealRecord` may
+ * allocated by the store from the combined committed publication history. The `sealRecord` may
  * carry a provisional `artifactVersionRef`; the store stamps the real
  * `{ artifactId, version }` and stages it as `seal-record.json`.
  */
@@ -227,6 +277,16 @@ function sha256(content: string): string {
   return createHash('sha256').update(content, 'utf8').digest('hex');
 }
 
+/** Stable response-loss/restart key; it deliberately excludes artifactVersion. */
+export function systemArtifactStageIdentity(sealWorkItemId: string, artifactRef: BlobRefV2): string {
+  return sha256(`${sealWorkItemId}\u0000${artifactRef.digest}`);
+}
+
+function sameBlobRef(a: BlobRefV2, b: BlobRefV2): boolean {
+  return a.kind === b.kind && a.digest === b.digest && a.byteLength === b.byteLength
+    && a.mediaType === b.mediaType && a.schemaVersion === b.schemaVersion;
+}
+
 /** A safe, single-segment file name (no traversal, no reserved names). */
 function assertFileName(name: unknown, where: string): string {
   if (typeof name !== 'string' || name.length === 0) {
@@ -308,8 +368,6 @@ function validateMeta(raw: string, expectedVersion: number): ArtifactMeta {
     value.id.length === 0 ||
     typeof value.title !== 'string' ||
     value.title.length === 0 ||
-    typeof value.sourceNodeId !== 'string' ||
-    value.sourceNodeId.length === 0 ||
     typeof value.createdAt !== 'string' ||
     Number.isNaN(Date.parse(value.createdAt))
   ) {
@@ -330,7 +388,34 @@ function validateMeta(raw: string, expectedVersion: number): ArtifactMeta {
   if (value.contentHash !== undefined || value.files !== undefined) {
     throw corrupt('产物元数据携带了不应有的字段。');
   }
+  if (value.authorityKind === 'system_seal_v2') {
+    const refs = ['sealRecordRef', 'artifactRef', 'custodyRef', 'deliveryRef'] as const;
+    if (
+      value.sourceNodeId !== undefined
+      || typeof value.producerWorkItemId !== 'string'
+      || typeof value.templateSnapshotHash !== 'string'
+      || refs.some((key) => !isPlainObject(value[key]))
+    ) throw corrupt('v2 产物元数据权威字段非法。');
+    return {
+      authorityKind: 'system_seal_v2',
+      id: value.id,
+      version: value.version,
+      title: value.title,
+      format,
+      createdAt: value.createdAt,
+      producerWorkItemId: value.producerWorkItemId,
+      sealRecordRef: value.sealRecordRef as unknown as BlobRefV2,
+      artifactRef: value.artifactRef as unknown as BlobRefV2,
+      custodyRef: value.custodyRef as unknown as BlobRefV2,
+      templateSnapshotHash: value.templateSnapshotHash,
+      deliveryRef: value.deliveryRef as unknown as BlobRefV2,
+    };
+  }
+  if (typeof value.sourceNodeId !== 'string' || (value.authorityKind !== undefined && value.authorityKind !== 'agent_v1')) {
+    throw corrupt('v1 产物元数据来源节点非法。');
+  }
   return {
+    ...(value.authorityKind === 'agent_v1' ? { authorityKind: 'agent_v1' as const } : {}),
     id: value.id,
     version: value.version,
     title: value.title,
@@ -340,15 +425,40 @@ function validateMeta(raw: string, expectedVersion: number): ArtifactMeta {
   };
 }
 
-/** Filters the committed events to the artifact_published members, in order. */
-function publishedEvents(events: readonly CommittedEvent[]): Extract<TaskEvent, { type: 'artifact_published' }>[] {
-  const result: Extract<TaskEvent, { type: 'artifact_published' }>[] = [];
+function demandV1SourceNodeId(meta: ArtifactMeta): string {
+  if (meta.authorityKind === 'system_seal_v2') {
+    throw corrupt('v2 system artifact cannot be consumed through the v1 source-node adapter.');
+  }
+  return meta.sourceNodeId;
+}
+
+export type PublishedArtifactAuthority =
+  | { kind: 'agent_v1'; event: Extract<TaskEvent, { type: 'artifact_published' }>; sourceNodeId: string }
+  | { kind: 'system_seal_v2'; event: Extract<AuthoritativeReviewEventV2, { type: 'artifact_published_v2' }>; provenance: Extract<AuthoritativeReviewEventV2, { type: 'artifact_published_v2' }>['provenance'] };
+
+/** Exact ordered v1/v2 publication authority adapter. */
+export function publishedArtifactAuthorities(events: readonly CommittedEvent[]): PublishedArtifactAuthority[] {
+  const result: PublishedArtifactAuthority[] = [];
   for (const entry of events) {
     if (entry.event.type === 'artifact_published') {
-      result.push(entry.event);
+      result.push({ kind: 'agent_v1', event: entry.event, sourceNodeId: entry.event.artifact.sourceNodeId });
+    } else if (entry.event.type === 'artifact_published_v2') {
+      result.push({ kind: 'system_seal_v2', event: entry.event, provenance: entry.event.provenance });
     }
   }
   return result;
+}
+
+function authorityVersion(authority: PublishedArtifactAuthority): number {
+  return authority.kind === 'agent_v1' ? authority.event.artifact.version : authority.event.artifactVersion;
+}
+
+function authorityArtifactId(authority: PublishedArtifactAuthority): string | null {
+  return authority.kind === 'agent_v1' ? authority.event.artifact.artifactId : authority.event.artifactId;
+}
+
+function authorityFiles(authority: PublishedArtifactAuthority): readonly { name: string; hash: string }[] {
+  return authority.kind === 'agent_v1' ? authority.event.artifact.files : authority.event.files;
 }
 
 /** Filters the committed events to the artifact_annotated members, in order. */
@@ -377,8 +487,8 @@ export class ArtifactStore {
 
   /**
    * Publishes one new artifact version. Invalid proposals are rejected before
-   * touching disk; the version is allocated from the authoritative event count
-   * (committed `artifact_published` events + 1) so the on-disk version number
+   * touching disk; the version is allocated from the authoritative combined
+   * v1/v2 publication maximum + 1 so the on-disk version number
    * can never drift from the event stream. An orphan directory left by a
    * publish that completed on disk but whose event crashed is reclaimed
    * (claim-by-hash) instead of colliding.
@@ -419,6 +529,30 @@ export class ArtifactStore {
   /** Lists committed versions ordered by version; unknown tasks list empty. */
   async list(taskId: string): Promise<ArtifactEntry[]> {
     return this.enqueue(taskId, () => this.listExclusive(taskId));
+  }
+
+  /** Only the system Seal capability may create v2 custody bytes. */
+  async stageSystemArtifact(
+    caller: SystemArtifactStoreCallerV2,
+    taskId: string,
+    input: StageSystemArtifactInputV2,
+  ): Promise<StagedSystemArtifactV2> {
+    if (caller !== 'system_seal') {
+      throw invalidInput('只有 system_seal 可以暂存 v2 system artifact。', '通过系统 Seal Gate 发布。');
+    }
+    return this.enqueue(taskId, () => this.stageSystemArtifactExclusive(taskId, input));
+  }
+
+  /** Promotes only after the authoritative v2 event allocated the version. */
+  async promoteSystemArtifact(
+    caller: SystemArtifactStoreCallerV2,
+    taskId: string,
+    input: PromoteSystemArtifactInputV2,
+  ): Promise<ArtifactEntry> {
+    if (caller !== 'system_seal') {
+      throw invalidInput('只有 system_seal 可以 promote v2 system artifact。', '通过系统 Seal Gate 发布。');
+    }
+    return this.enqueue(taskId, () => this.promoteSystemArtifactExclusive(taskId, input));
   }
 
   /**
@@ -485,8 +619,8 @@ export class ArtifactStore {
   ): Promise<PublishedArtifact> {
     await this.ensureTaskRoot(taskId);
     const events = await this.events.read(taskId);
-    const committed = publishedEvents(events);
-    const version = committed.length + 1;
+    const committed = publishedArtifactAuthorities(events);
+    const version = committed.reduce((max, entry) => Math.max(max, authorityVersion(entry)), 0) + 1;
     const versionDirName = `v${String(version).padStart(3, '0')}`;
     const destination = this.paths.taskArtifactVersionRoot(taskId, version);
     const fileHashes = proposal.files.map((file) => ({ name: file.name, hash: sha256(file.content) }));
@@ -514,7 +648,7 @@ export class ArtifactStore {
         version: claimed.meta.version,
         title: claimed.meta.title,
         files: claimed.files.map((file) => ({ name: file.name, hash: sha256(file.content) })),
-        sourceNodeId: claimed.meta.sourceNodeId,
+        sourceNodeId: demandV1SourceNodeId(claimed.meta),
         format: claimed.meta.format,
         createdAt: claimed.meta.createdAt,
       };
@@ -662,7 +796,7 @@ export class ArtifactStore {
     // Unreferenced final directories (structured custody promote before the
     // batch, spec §12) are invisible to read until the event references them.
     const events = await this.events.read(taskId);
-    if (!publishedEvents(events).some((event) => event.artifact.version === version)) {
+    if (!publishedArtifactAuthorities(events).some((event) => authorityVersion(event) === version)) {
       throw notFound(taskId);
     }
     const entry = await this.readVersionDir(taskId, version, versionRoot);
@@ -670,26 +804,12 @@ export class ArtifactStore {
   }
 
   private async listExclusive(taskId: string): Promise<ArtifactEntry[]> {
-    let names: string[];
-    try {
-      names = await readdir(this.paths.taskArtifactsRoot(taskId));
-    } catch {
-      return [];
-    }
-    const versions: number[] = [];
-    for (const name of names) {
-      if (name.startsWith(TMP_PREFIX) || name.startsWith(ANNOTATE_TMP_PREFIX)) {
-        continue;
-      }
-      const match = VERSION_DIR.exec(name);
-      if (match === null) {
-        continue;
-      }
-      versions.push(Number(match[1]));
-    }
-    versions.sort((a, b) => a - b);
     const events = await this.events.read(taskId);
-    const backed = new Set(publishedEvents(events).map((event) => event.artifact.version));
+    const backed = new Set(publishedArtifactAuthorities(events).map(authorityVersion));
+    // Event authority, not directory enumeration, defines the public list.
+    // This also lets a reconstructed store claim a v2 custody stage after the
+    // append succeeded but the caller lost the response before promote.
+    const versions = [...backed].sort((a, b) => a - b);
     const entries: ArtifactEntry[] = [];
     for (const version of versions) {
       // Only event-backed versions are committed (spec §3.1: the event stream
@@ -782,12 +902,27 @@ export class ArtifactStore {
     entry: ArtifactEntry,
   ): Promise<ArtifactEntry> {
     const events = await this.events.read(taskId);
-    const published = publishedEvents(events).find((event) => event.artifact.version === version);
+    const published = publishedArtifactAuthorities(events).find((event) => authorityVersion(event) === version);
     if (published === undefined) {
       throw corrupt(`产物版本 ${version} 没有对应的发布事件。`);
     }
+    if (published.kind === 'system_seal_v2') {
+      if (entry.meta.authorityKind !== 'system_seal_v2') {
+        throw corrupt(`产物版本 ${version} 的 v2 事件不能绑定 v1 meta。`);
+      }
+      if (
+        entry.meta.id !== published.event.artifactId
+        || entry.meta.producerWorkItemId !== published.provenance.producerWorkItemId
+        || !sameBlobRef(entry.meta.sealRecordRef, published.provenance.sealRecordRef)
+        || !sameBlobRef(entry.meta.artifactRef, published.provenance.artifactRef)
+        || !sameBlobRef(entry.meta.custodyRef, published.provenance.custodyRef)
+        || !sameBlobRef(entry.meta.deliveryRef, published.event.deliveryRef)
+      ) throw corrupt(`产物版本 ${version} 的 v2 provenance 与事件不一致。`);
+    } else if (entry.meta.authorityKind === 'system_seal_v2') {
+      throw corrupt(`产物版本 ${version} 的 v1 事件不能绑定 v2 meta。`);
+    }
     const diskByName = new Map(entry.files.map((file) => [file.name, file]));
-    for (const declared of published.artifact.files) {
+    for (const declared of authorityFiles(published)) {
       const disk = diskByName.get(declared.name);
       if (disk === undefined) {
         throw corrupt(`产物版本 ${version} 缺少文件 ${declared.name}。`);
@@ -798,9 +933,12 @@ export class ArtifactStore {
     }
     const annotatedForVersion = annotatedEvents(events).filter((event) => event.version === version);
     for (const file of entry.files) {
-      const isProduction = published.artifact.files.some((declared) => declared.name === file.name);
+      const isProduction = authorityFiles(published).some((declared) => declared.name === file.name);
       if (isProduction) {
         continue;
+      }
+      if (published.kind === 'system_seal_v2') {
+        throw corrupt(`v2 产物版本 ${version} 不允许 v1 annotation 文件 ${file.name}。`);
       }
       const match = annotatedForVersion.find((event) => event.file === file.name);
       if (match === undefined) {
@@ -821,9 +959,20 @@ export class ArtifactStore {
    */
   private async claimStagedVersion(taskId: string, version: number): Promise<ArtifactEntry | null> {
     const events = await this.events.read(taskId);
-    const published = publishedEvents(events).find((event) => event.artifact.version === version);
+    const published = publishedArtifactAuthorities(events).find((event) => authorityVersion(event) === version);
     if (published === undefined) {
       return null; // No event to claim against — not a recoverable window.
+    }
+    if (published.kind === 'system_seal_v2') {
+      return this.promoteSystemArtifactExclusive(taskId, {
+        sealWorkItemId: published.provenance.producerWorkItemId,
+        artifactRef: published.provenance.artifactRef,
+        artifactVersion: published.event.artifactVersion,
+        deliveryRef: published.event.deliveryRef,
+      }).catch((error: unknown) => {
+        if (error instanceof StorageError && error.code === STORAGE_ERROR_CODES.TASK_NOT_FOUND) return null;
+        throw error;
+      });
     }
     const artifactsRoot = this.paths.taskArtifactsRoot(taskId);
     let names: string[];
@@ -844,11 +993,12 @@ export class ArtifactStore {
       } catch {
         continue; // A damaged staging candidate is skipped, not fatal.
       }
-      if (entry.meta.id !== published.artifact.artifactId) {
-        const idMatch = published.artifact.artifactId !== null && entry.meta.id === published.artifact.artifactId;
+      if (entry.meta.id !== authorityArtifactId(published)) {
+        const artifactId = authorityArtifactId(published);
+        const idMatch = artifactId !== null && entry.meta.id === artifactId;
         if (!idMatch) {
           // Fall back to content-hash matching (spec §6 staging claim).
-          const hashMatch = published.artifact.files.every((declared) => {
+          const hashMatch = authorityFiles(published).every((declared) => {
             const disk = entry.files.find((file) => file.name === declared.name);
             return disk !== undefined && sha256(disk.content) === declared.hash;
           });
@@ -899,6 +1049,155 @@ export class ArtifactStore {
       }
       throw notFound(taskId);
     }
+  }
+
+  // --------------------------------------------------------------------------
+  // Authoritative v2 system custody: stage (no version) -> append -> promote.
+  // --------------------------------------------------------------------------
+
+  private systemStageDir(taskId: string, stageIdentity: string): string {
+    return join(this.paths.taskStructuredCustodyRoot(taskId), `system-${stageIdentity}`);
+  }
+
+  private async readSystemStage(taskId: string, stageIdentity: string): Promise<StagedSystemArtifactV2> {
+    const stageDir = this.systemStageDir(taskId, stageIdentity);
+    let value: unknown;
+    try {
+      value = JSON.parse(await readFile(join(stageDir, SYSTEM_STAGE_FILE), 'utf8'));
+    } catch {
+      throw integrityFailed('v2 system artifact stage manifest 不可读。');
+    }
+    if (!isPlainObject(value) || value.stageIdentity !== stageIdentity || 'version' in value || 'deliveryRef' in value) {
+      throw integrityFailed('v2 system artifact stage manifest 非法。');
+    }
+    const manifest = value as unknown as StagedSystemArtifactV2;
+    if (
+      typeof manifest.sealWorkItemId !== 'string'
+      || typeof manifest.artifactId !== 'string'
+      || typeof manifest.title !== 'string'
+      || (manifest.format !== 'markdown' && manifest.format !== 'text')
+      || typeof manifest.producerWorkItemId !== 'string'
+      || typeof manifest.templateSnapshotHash !== 'string'
+      || typeof manifest.createdAt !== 'string'
+      || !Array.isArray(manifest.files)
+    ) throw integrityFailed('v2 system artifact stage 字段非法。');
+    for (const file of manifest.files) {
+      assertFileName(file.name, 'v2 system artifact stage 文件名');
+      const body = await readFile(join(stageDir, file.name), 'utf8').catch(() => {
+        throw integrityFailed(`v2 system artifact stage 文件 ${file.name} 缺失。`);
+      });
+      if (sha256(body) !== file.sha256 || Buffer.byteLength(body, 'utf8') !== file.byteLength) {
+        throw integrityFailed(`v2 system artifact stage 文件 ${file.name} 与清单不一致。`);
+      }
+      file.content = body;
+    }
+    return manifest;
+  }
+
+  private async stageSystemArtifactExclusive(
+    taskId: string,
+    input: StageSystemArtifactInputV2,
+  ): Promise<StagedSystemArtifactV2> {
+    await this.ensureTaskRoot(taskId);
+    if (input.sealWorkItemId.length === 0 || input.artifactId.length === 0 || input.producerWorkItemId !== input.sealWorkItemId) {
+      throw invalidInput('v2 system artifact 的 Seal WorkItem 身份非法。', '重新运行 system Seal。');
+    }
+    if (input.title.length === 0 || input.templateSnapshotHash.length === 0 || !Array.isArray(input.files) || input.files.length === 0) {
+      throw invalidInput('v2 system artifact 暂存输入缺失。', '重新运行 system Seal。');
+    }
+    const seen = new Set<string>();
+    const files = input.files.map((file, index) => {
+      const name = assertFileName(file.name, `v2 system artifact 文件[${index}].name`);
+      if (seen.has(name) || typeof file.content !== 'string' || file.content.length === 0) {
+        throw invalidInput('v2 system artifact 文件重复或为空。', '重新运行 assembler。');
+      }
+      seen.add(name);
+      return { name, content: file.content, sha256: sha256(file.content), byteLength: Buffer.byteLength(file.content, 'utf8') };
+    });
+    const stageIdentity = systemArtifactStageIdentity(input.sealWorkItemId, input.artifactRef);
+    const stageDir = this.systemStageDir(taskId, stageIdentity);
+    if (await this.isDirectory(stageDir)) {
+      const existing = await this.readSystemStage(taskId, stageIdentity);
+      const same = existing.artifactId === input.artifactId
+        && existing.producerWorkItemId === input.producerWorkItemId
+        && sameBlobRef(existing.sealRecordRef, input.sealRecordRef)
+        && sameBlobRef(existing.artifactRef, input.artifactRef)
+        && sameBlobRef(existing.custodyRef, input.custodyRef)
+        && existing.templateSnapshotHash === input.templateSnapshotHash
+        && existing.files.length === files.length
+        && existing.files.every((file, index) => file.name === files[index]?.name && file.sha256 === files[index]?.sha256);
+      if (!same) throw integrityFailed('相同 Seal stage identity 对应不同 v2 artifact bytes。');
+      return existing;
+    }
+    const createdAt = new Date().toISOString();
+    const manifest: StagedSystemArtifactV2 = { ...input, stageIdentity, files, createdAt };
+    await mkdir(stageDir, { recursive: true });
+    try {
+      const manifestBytes = { ...manifest, files: files.map(({ content: _content, ...file }) => file) };
+      await writeNewAtomic(join(stageDir, SYSTEM_STAGE_FILE), Buffer.from(`${JSON.stringify(manifestBytes, null, 2)}\n`, 'utf8'));
+      for (const file of files) await writeNewAtomic(join(stageDir, file.name), Buffer.from(file.content, 'utf8'));
+    } catch (error) {
+      await rm(stageDir, { recursive: true, force: true }).catch(() => undefined);
+      if (error instanceof StorageError) throw error;
+      throw integrityFailed('v2 system artifact 暂存失败。');
+    }
+    return manifest;
+  }
+
+  private async promoteSystemArtifactExclusive(
+    taskId: string,
+    input: PromoteSystemArtifactInputV2,
+  ): Promise<ArtifactEntry> {
+    await this.ensureTaskRoot(taskId);
+    const events = await this.events.read(taskId);
+    const authority = publishedArtifactAuthorities(events).find((entry) =>
+      entry.kind === 'system_seal_v2' && entry.event.artifactVersion === input.artifactVersion,
+    );
+    if (authority === undefined || authority.kind !== 'system_seal_v2') throw notFound(taskId);
+    if (
+      authority.provenance.producerWorkItemId !== input.sealWorkItemId
+      || !sameBlobRef(authority.provenance.artifactRef, input.artifactRef)
+      || !sameBlobRef(authority.event.deliveryRef, input.deliveryRef)
+    ) throw integrityFailed('v2 system artifact promote authority 与事件不一致。');
+    const identity = systemArtifactStageIdentity(input.sealWorkItemId, input.artifactRef);
+    const staged = await this.readSystemStage(taskId, identity);
+    if (
+      staged.artifactId !== authority.event.artifactId
+      || staged.producerWorkItemId !== authority.provenance.producerWorkItemId
+      || !sameBlobRef(staged.sealRecordRef, authority.provenance.sealRecordRef)
+      || !sameBlobRef(staged.artifactRef, authority.provenance.artifactRef)
+      || !sameBlobRef(staged.custodyRef, authority.provenance.custodyRef)
+      || authority.event.files.length !== staged.files.length
+      || !authority.event.files.every((file) => staged.files.some((disk) => disk.name === file.name && disk.sha256 === file.hash))
+    ) throw integrityFailed('v2 system artifact stage 与已提交事件不一致。');
+
+    const destination = this.paths.taskArtifactVersionRoot(taskId, input.artifactVersion);
+    if (await this.isDirectory(destination)) {
+      return this.crossCheck(taskId, input.artifactVersion, await this.readVersionDir(taskId, input.artifactVersion, destination));
+    }
+    const meta: ArtifactMetaV2 = {
+      authorityKind: 'system_seal_v2', id: staged.artifactId, version: input.artifactVersion,
+      title: staged.title, format: staged.format, createdAt: staged.createdAt,
+      producerWorkItemId: staged.producerWorkItemId, sealRecordRef: staged.sealRecordRef,
+      artifactRef: staged.artifactRef, custodyRef: staged.custodyRef,
+      templateSnapshotHash: staged.templateSnapshotHash, deliveryRef: input.deliveryRef,
+    };
+    const stageDir = join(this.paths.taskArtifactsRoot(taskId), `${TMP_PREFIX}v${String(input.artifactVersion).padStart(3, '0')}-system-${identity}`);
+    await rm(stageDir, { recursive: true, force: true }).catch(() => undefined);
+    await mkdir(stageDir, { recursive: true });
+    try {
+      await writeNewAtomic(join(stageDir, META_FILE), Buffer.from(`${JSON.stringify(meta, null, 2)}\n`, 'utf8'));
+      for (const file of staged.files) await writeNewAtomic(join(stageDir, file.name), Buffer.from(file.content, 'utf8'));
+      await rename(stageDir, destination);
+    } catch (error) {
+      await rm(stageDir, { recursive: true, force: true }).catch(() => undefined);
+      if (error instanceof StorageError) throw error;
+      if (await this.isDirectory(destination)) {
+        return this.crossCheck(taskId, input.artifactVersion, await this.readVersionDir(taskId, input.artifactVersion, destination));
+      }
+      throw integrityFailed('v2 system artifact promote 失败。');
+    }
+    return this.crossCheck(taskId, input.artifactVersion, await this.readVersionDir(taskId, input.artifactVersion, destination));
   }
 
   // --------------------------------------------------------------------------
@@ -1105,7 +1404,7 @@ export class ArtifactStore {
       artifactId: manifest.artifactId,
       version,
       title: meta.title,
-      sourceNodeId: meta.sourceNodeId,
+      sourceNodeId: demandV1SourceNodeId(meta),
       format: meta.format,
       files: manifest.files,
       sealRecord,
@@ -1145,14 +1444,15 @@ export class ArtifactStore {
     }
 
     const events = await this.events.read(taskId);
-    const version = publishedEvents(events).length + 1;
+    const version = publishedArtifactAuthorities(events)
+      .reduce((max, entry) => Math.max(max, authorityVersion(entry)), 0) + 1;
     if (input.version !== undefined && input.version !== version) {
       throw invalidInput('结构化产物版本必须由事件流分配。', '重试以分配一致的版本。');
     }
 
     // A future prepare may replace a DIFFERENT orphan only after proving no
-    // event references it (spec §12). The allocated version is always
-    // count + 1, so no event can reference this directory.
+    // event references it (spec §12). The allocated version is always above
+    // the combined committed v1/v2 maximum, so no event can reference it.
     const destination = this.paths.taskArtifactVersionRoot(taskId, version);
     if (await this.isDirectory(destination)) {
       await rm(destination, { recursive: true, force: true }).catch(() => undefined);
@@ -1242,11 +1542,11 @@ export class ArtifactStore {
     await this.ensureTaskRoot(taskId);
     this.assertContentIdentity(input.contentIdentity);
     const events = await this.events.read(taskId);
-    const committed = publishedEvents(events);
+    const committed = publishedArtifactAuthorities(events);
     const referenced = committed.find(
       (event) =>
-        (event.artifact.artifactId !== null && event.artifact.artifactId === input.expectedArtifactId) ||
-        event.artifact.version === input.expectedVersion,
+        (authorityArtifactId(event) !== null && authorityArtifactId(event) === input.expectedArtifactId) ||
+        authorityVersion(event) === input.expectedVersion,
     );
 
     const custodyDir = join(this.paths.taskStructuredCustodyRoot(taskId), input.contentIdentity);
@@ -1281,7 +1581,7 @@ export class ArtifactStore {
         artifactId: entry.meta.id,
         version: entry.meta.version,
         title: entry.meta.title,
-        sourceNodeId: entry.meta.sourceNodeId,
+        sourceNodeId: demandV1SourceNodeId(entry.meta),
         format: entry.meta.format,
         files: entry.files.map((file) => ({
           name: file.name,

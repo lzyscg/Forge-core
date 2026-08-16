@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "profileIdentity": "forge-authoritative-review/v1",
-  "profileVersion": 2,
+  "profileVersion": 3,
   "qualificationState": "provisional",
-  "profileDigest": "49f3b4c18748d1105d0fa1406f320a359e57007dca4679db0a779b0f8291e549",
+  "profileDigest": "19dd1ec9c0bd9309fdc1a6265761b3bc5d8b7becb5127873f2b80d133dc81cd1",
   "abi": {
     "validatorAbi": "forge-validator/v2",
     "assemblerAbi": "forge-assembler/v2",
@@ -190,10 +190,10 @@
       }
     ],
     "assembler": {
-      "handlerKey": "authoritative.seal.render",
-      "implementationDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-      "moduleId": "@forge/authoritative-review",
-      "exportName": "renderSeal"
+      "handlerKey": "builtin.zhihu_chapter_markdown.v1",
+      "implementationDigest": "3bd953501644e53f952c83acdfb30c3c4fd3b4a7e0b1e044449871fcc4646157",
+      "moduleId": "src/server/runtime/authoritative-review/builtin-assemblers/zhihu-chapter-v1",
+      "exportName": "assembleZhihuChapterV1"
     }
   },
   "budgetProfiles": {

@@ -20,11 +20,15 @@ import {
 import type { CorePaths } from './core-paths';
 import {
   ArtifactStore,
+  publishedArtifactAuthorities,
+  systemArtifactStageIdentity,
   type AnnotateProposal,
   type ArtifactProposal,
   type PrepareStructuredVersionInput,
   type PublishedArtifact,
 } from './artifact-store';
+import type { CommittedEvent } from './event-store';
+import type { BlobRefV2 } from '../../shared/authoritative-review-v2';
 import type { SealRecord } from '../../shared/structured-slots';
 import { EventStore } from './event-store';
 import { TaskStore } from './task-store';
@@ -34,6 +38,155 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 function sha256(content: string): string {
   return createHash('sha256').update(content, 'utf8').digest('hex');
 }
+
+const blobRef = (kind: BlobRefV2['kind'], digit: string): BlobRefV2 => ({
+  kind,
+  digest: digit.repeat(64),
+  byteLength: 1,
+  mediaType: 'application/json',
+  schemaVersion: 1,
+});
+
+describe('ArtifactStore v1/v2 authority adapter', () => {
+  it('preserves the exact discriminated authority and combined 1/2/3 ordering', () => {
+    const v1 = (version: number, id: string): CommittedEvent => ({
+      sequence: version,
+      fileName: `${version}.json`,
+      size: 1,
+      event: {
+        id,
+        at: '2026-08-16T00:00:00.000Z',
+        type: 'artifact_published',
+        artifact: { version, title: id, sourceNodeId: `node-${id}`, format: 'markdown', files: [{ name: 'x.md', hash: 'a'.repeat(64) }], artifactType: null, artifactId: id },
+      },
+    });
+    const v2: CommittedEvent = {
+      sequence: 2,
+      fileName: '2.json',
+      size: 1,
+      event: {
+        protocolVersion: 2,
+        id: 'v2',
+        at: '2026-08-16T00:00:00.000Z',
+        type: 'artifact_published_v2',
+        artifactId: 'system-artifact',
+        artifactVersion: 2,
+        deliveryRef: blobRef('system_artifact_delivery', 'd'),
+        files: [{ name: 'chapter.md', hash: 'b'.repeat(64) }],
+        mediaType: 'text/markdown',
+        provenance: {
+          producerKind: 'system',
+          producerWorkItemId: 'seal-work',
+          sealRecordRef: blobRef('seal_record', 's'),
+          artifactRef: blobRef('artifact', 'a'),
+          custodyRef: blobRef('artifact', 'c'),
+        },
+      },
+    };
+    const result = publishedArtifactAuthorities([v1(1, 'v1-a'), v2, v1(3, 'v1-b')]);
+    expect(result.map((entry) => entry.kind)).toEqual(['agent_v1', 'system_seal_v2', 'agent_v1']);
+    expect(result[0]).toMatchObject({ sourceNodeId: 'node-v1-a' });
+    expect(result[1]).toMatchObject({ provenance: { producerWorkItemId: 'seal-work' } });
+    expect(result[2]).toMatchObject({ event: { artifact: { version: 3 } } });
+  });
+});
+
+describe('ArtifactStore v2 system custody', () => {
+  const artifactRef = blobRef('artifact', 'a');
+  const sealRecordRef = blobRef('seal_record', 'e');
+  const custodyRef = blobRef('artifact', 'c');
+  const deliveryRef = blobRef('system_artifact_delivery', 'd');
+
+  async function stageSystem(content = '# chapter') {
+    return store.stageSystemArtifact('system_seal', taskId, {
+      sealWorkItemId: 'seal-work-1',
+      artifactId: 'system-artifact-1',
+      title: 'Sealed chapter',
+      format: 'markdown',
+      producerWorkItemId: 'seal-work-1',
+      sealRecordRef,
+      artifactRef,
+      custodyRef,
+      templateSnapshotHash: 'template-snapshot',
+      files: [{ name: 'chapter.md', content }],
+    });
+  }
+
+  async function appendSystemEvent(version: number, content = '# chapter') {
+    const acquisitionNonce = randomUUID();
+    writeFileSync(paths.storeFenceRecordFile(), JSON.stringify({
+      ownerPid: process.pid, processStartToken: 'artifact-store-test', processStartTime: null,
+      bootId: 'artifact-store-test', leaseEpoch: 1, acquisitionNonce, durableGeneration: 0,
+      acquiredAt: '2026-08-16T00:00:00.000Z',
+    }), 'utf8');
+    const tail = await events.tail(taskId);
+    await events.appendBatch(taskId, `system-publish-${version}`, [{
+      protocolVersion: 2, id: `system-publish-${version}`, at: '2026-08-16T00:00:00.000Z',
+      type: 'artifact_published_v2', artifactId: 'system-artifact-1', artifactVersion: version,
+      deliveryRef, files: [{ name: 'chapter.md', hash: sha256(content) }], mediaType: 'text/markdown',
+      provenance: { producerKind: 'system', producerWorkItemId: 'seal-work-1', sealRecordRef, artifactRef, custodyRef },
+    }], { expectedLastSequence: tail.lastSequence, fenceProof: {
+      ownerPid: process.pid, processStartToken: 'artifact-store-test', leaseEpoch: 1,
+      acquisitionNonce, durableGeneration: 0,
+    } });
+  }
+
+  it('rejects agent, v1 seal, and arbitrary system callers while v1 publish remains available', async () => {
+    const input = {
+      sealWorkItemId: 'seal-work-1', artifactId: 'system-artifact-1', title: 'Sealed chapter',
+      format: 'markdown' as const, producerWorkItemId: 'seal-work-1', sealRecordRef, artifactRef,
+      custodyRef, templateSnapshotHash: 'template-snapshot', files: [{ name: 'chapter.md', content: '# chapter' }],
+    };
+    for (const caller of ['agent', 'v1_seal', 'arbitrary_system']) {
+      await expect(store.stageSystemArtifact(caller as never, taskId, input)).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    }
+    expect((await store.publish(taskId, proposal('legacy'))).version).toBe(1);
+  });
+
+  it('keeps version and delivery out of staging, then recovers list/read after response loss and reconstruction', async () => {
+    const staged = await stageSystem();
+    const replayedStage = await stageSystem();
+    expect(replayedStage).toEqual(staged);
+    expect(staged).not.toHaveProperty('version');
+    expect(staged.stageIdentity).toBe(systemArtifactStageIdentity('seal-work-1', artifactRef));
+    const stageManifest = JSON.parse(readFileSync(join(
+      paths.taskStructuredCustodyRoot(taskId), `system-${staged.stageIdentity}`, 'system-stage.json',
+    ), 'utf8'));
+    expect(stageManifest).not.toHaveProperty('version');
+    expect(stageManifest).not.toHaveProperty('deliveryRef');
+
+    await appendSystemEvent(1); // response lost before promote
+    const reconstructed = new ArtifactStore(paths, new EventStore(paths));
+    const listed = await reconstructed.list(taskId); // claims the staged directory
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.meta).toEqual(expect.objectContaining({
+      authorityKind: 'system_seal_v2', id: 'system-artifact-1', version: 1,
+      producerWorkItemId: 'seal-work-1', sealRecordRef, artifactRef, custodyRef,
+      templateSnapshotHash: 'template-snapshot', deliveryRef,
+    }));
+    expect(listed[0]?.meta).not.toHaveProperty('sourceNodeId');
+    expect(await reconstructed.readFile(taskId, 1, 'chapter.md')).toBe('# chapter');
+  });
+
+  it('allocates legacy v1 after v2 from combined history with no collision or gap', async () => {
+    const first = await publishWithEvent('legacy-first');
+    expect(first.version).toBe(1);
+    await stageSystem();
+    await appendSystemEvent(2);
+    expect((await new ArtifactStore(paths, new EventStore(paths)).read(taskId, 2)).meta.version).toBe(2);
+    const third = await store.publish(taskId, proposal('legacy-third'));
+    expect(third.version).toBe(3);
+  });
+
+  it('fails corrupt when disk provenance or file bytes no longer match the v2 event', async () => {
+    await stageSystem();
+    await appendSystemEvent(1);
+    const reconstructed = new ArtifactStore(paths, new EventStore(paths));
+    await reconstructed.read(taskId, 1);
+    writeFileSync(join(paths.taskArtifactVersionRoot(taskId, 1), 'chapter.md'), 'tampered', 'utf8');
+    await expect(reconstructed.read(taskId, 1)).rejects.toMatchObject({ code: 'TASK_CORRUPTED' });
+  });
+});
 
 function proposal(content: string, name = 'content.md'): ArtifactProposal {
   return {

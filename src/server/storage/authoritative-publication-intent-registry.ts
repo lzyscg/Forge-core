@@ -91,7 +91,8 @@ export type PublicationPayloadFamilyV2 =
   | 'question'
   | 'recovery'
   | 'delete'
-  | 'artifact_publish';
+  | 'artifact_publish'
+  | 'seal_publish';
 
 /**
  * The pin-persisted publication intent (design §19.1 exact shape). Startup
@@ -375,6 +376,20 @@ export function publicationPayloadChildRefs(payload: PublicationOperationPayload
       return [];
     case 'artifact_publish':
       return [parsed.artifactRef, parsed.sealRecordRef, parsed.deliveryRef];
+    case 'seal_publish':
+      return [
+        parsed.artifactRef,
+        parsed.sealRecordRef,
+        parsed.sealValidationBundleRef,
+        parsed.deliveryRef,
+        parsed.custodyRef,
+        parsed.mapRef,
+        parsed.contentRevisionManifestRef,
+        parsed.reviewBundleRef,
+        parsed.sealAuthorityBaseRef,
+        parsed.submitterAuthorityBaseRef,
+        parsed.submitterGrantSpecRef,
+      ];
   }
 }
 
@@ -397,6 +412,7 @@ export class PublicationIntentRegistry {
     this.seedRecovery();
     this.seedDelete();
     this.seedArtifactPublish();
+    this.seedSealPublish();
   }
 
   /** Explicit registration API: duplicate handler kind/version is a program error. */
@@ -1961,6 +1977,117 @@ export class PublicationIntentRegistry {
               artifactRef: p.artifactRef,
               custodyRef: delivery.custodyRef,
             },
+          },
+        ];
+      },
+      expectedResultIdentity: (_payload, events) => sha256OfEvents(events),
+    });
+  }
+
+  private seedSealPublish(): void {
+    const family: PublicationPayloadFamilyV2 = 'seal_publish';
+    this.register({
+      handlerKind: 'system_seal_publish',
+      handlerVersion: 1,
+      payloadFamily: family,
+      expectedEventTypes: [
+        'structured_scaffold_sealed_v2',
+        'artifact_published_v2',
+        'structured_system_artifact_delivery_created',
+        'structured_work_item_created',
+        'structured_system_command_completed',
+        'structured_work_item_completed',
+      ],
+      rebuildable: true,
+      missingInputs: [],
+      parsePayload: parsePublicationOperationPayload,
+      childRefsOf: (p) => childRefsOfChecked(p, family, (parsed) => parsed.family === 'seal_publish' ? [
+        parsed.artifactRef, parsed.sealRecordRef, parsed.sealValidationBundleRef,
+        parsed.deliveryRef, parsed.custodyRef, parsed.mapRef,
+        parsed.contentRevisionManifestRef, parsed.reviewBundleRef,
+        parsed.sealAuthorityBaseRef, parsed.submitterAuthorityBaseRef,
+        parsed.submitterGrantSpecRef,
+      ] : []),
+      resolveRefs: (p) => p.family === 'seal_publish' ? [
+        { key: 'delivery', ref: p.deliveryRef },
+        { key: 'artifact', ref: p.artifactRef },
+      ] : [],
+      buildEvents: (payload, at, refs) => {
+        const p = payload as Extract<PublicationOperationPayloadV2, { family: 'seal_publish' }>;
+        const delivery = refs?.get('delivery') as { deliveryId: string; artifactId: string; submitterAgentId: string } | undefined;
+        const artifact = refs?.get('artifact') as { artifactId: string; mediaType: 'text/markdown' | 'text/plain'; text: string } | undefined;
+        const artifactVersion = refs?.get('allocatedArtifactVersion');
+        if (delivery === undefined || artifact === undefined || typeof artifactVersion !== 'number') {
+          throw new NotRebuildableError('system_seal_publish', ['delivery/artifact/allocatedArtifactVersion']);
+        }
+        if (delivery.artifactId !== artifact.artifactId || delivery.artifactId.length === 0) {
+          throw new NotRebuildableError('system_seal_publish', ['delivery artifact identity mismatch']);
+        }
+        return [
+          {
+            protocolVersion: 2, at, type: 'structured_scaffold_sealed_v2',
+            sealWorkItemId: p.sealWorkItemId,
+            sealRecordRef: p.sealRecordRef,
+            sealValidationBundleRef: p.sealValidationBundleRef,
+            mapRef: p.mapRef,
+            contentRevisionManifestRef: p.contentRevisionManifestRef,
+            reviewBundleRef: p.reviewBundleRef,
+            artifactRef: p.artifactRef,
+          },
+          {
+            protocolVersion: 2, at, type: 'artifact_published_v2',
+            artifactId: artifact.artifactId,
+            artifactVersion,
+            deliveryRef: p.deliveryRef,
+            files: [{ name: p.artifactFile, hash: p.artifactFileHash }],
+            mediaType: artifact.mediaType,
+            provenance: {
+              producerKind: 'system',
+              producerWorkItemId: p.sealWorkItemId,
+              sealRecordRef: p.sealRecordRef,
+              artifactRef: p.artifactRef,
+              custodyRef: p.custodyRef,
+            },
+          },
+          {
+            protocolVersion: 2, at, type: 'structured_system_artifact_delivery_created',
+            deliveryId: delivery.deliveryId,
+            deliveryRef: p.deliveryRef,
+            artifactId: artifact.artifactId,
+            artifactRef: p.artifactRef,
+            sealRecordRef: p.sealRecordRef,
+            submitterWorkItemId: p.submitterWorkItemId,
+          },
+          {
+            protocolVersion: 2, at, type: 'structured_work_item_created',
+            workItemId: p.submitterWorkItemId,
+            kind: 'agent_assignment',
+            roleBinding: delivery.submitterAgentId,
+            agentExecutionKind: 'generic_turn',
+            sessionKind: null,
+            roundId: null,
+            logicalAssignmentId: p.submitterLogicalAssignmentId,
+            reviewAssignmentId: null,
+            grantSpecRef: p.submitterGrantSpecRef,
+            inputArtifactDeliveryId: delivery.deliveryId,
+            authorityBaseRef: p.submitterAuthorityBaseRef,
+            payloadRef: p.deliveryRef,
+            initialLeaseEpoch: 1,
+            maxAutomaticRetries: p.submitterMaxAutomaticRetries,
+          },
+          {
+            protocolVersion: 2, at, type: 'structured_system_command_completed',
+            commandId: p.sealCommandId,
+            workItemId: p.sealWorkItemId,
+            commandKind: 'seal',
+            leaseEpoch: p.sealLeaseEpoch,
+            authorityBaseRef: p.sealAuthorityBaseRef,
+          },
+          {
+            protocolVersion: 2, at, type: 'structured_work_item_completed',
+            workItemId: p.sealWorkItemId,
+            leaseEpoch: p.sealLeaseEpoch,
+            authorityBaseRef: p.sealAuthorityBaseRef,
           },
         ];
       },

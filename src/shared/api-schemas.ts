@@ -224,22 +224,6 @@ const workspaceRouteSchema = Type.Object({
   label: Type.String(),
 });
 
-export const artifactVersionSchema = Type.Object({
-  id: Type.String(),
-  version: Type.Integer({ minimum: 1 }),
-  title: Type.String(),
-  files: Type.Array(
-    Type.Object({
-      name: Type.String(),
-      extract: Type.String(),
-      content: Type.String(),
-    }),
-  ),
-  sourceNodeId: Type.String(),
-  createdAt: Type.String(),
-  final: Type.Boolean(),
-});
-
 /**
  * Memory-only live preview of the running Turn (plan C realtime
  * streaming). Optional AND nullable on the wire: workspaces without a Turn
@@ -312,6 +296,41 @@ export const blobRefV2Schema = Type.Object(
   },
   { additionalProperties: false },
 );
+
+const artifactFileSchema = Type.Object(
+  { name: Type.String(), extract: Type.String(), content: Type.String() },
+  { additionalProperties: false },
+);
+
+const artifactVersionCommon = {
+  id: Type.String(),
+  version: Type.Integer({ minimum: 1 }),
+  title: Type.String(),
+  files: Type.Array(artifactFileSchema),
+  createdAt: Type.String(),
+  final: Type.Boolean(),
+};
+
+/** Exact public authority union: legacy v1 bytes or System-Seal v2 refs. */
+export const artifactVersionSchema = Type.Union([
+  Type.Object(
+    { ...artifactVersionCommon, protocolVersion: Type.Optional(Type.Literal(1)), sourceNodeId: Type.String() },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      ...artifactVersionCommon,
+      protocolVersion: Type.Literal(2),
+      producerWorkItemId: Type.String({ minLength: 1 }),
+      sealRecordRef: blobRefV2Schema,
+      artifactRef: blobRefV2Schema,
+      custodyRef: blobRefV2Schema,
+      templateSnapshotHash: sha256HexSchema,
+      deliveryRef: blobRefV2Schema,
+    },
+    { additionalProperties: false },
+  ),
+]);
 
 /** Discriminated artifact provenance (spec §13.5.1). */
 export const artifactProvenanceV2Schema = Type.Union([

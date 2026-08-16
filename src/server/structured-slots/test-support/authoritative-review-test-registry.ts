@@ -42,6 +42,12 @@ import {
   AUTHORITATIVE_REVIEW_BUILTIN_VALIDATOR_IDENTITIES,
   AUTHORITATIVE_REVIEW_BUILTIN_BUDGET_PROFILE_ID,
 } from '../../runtime/authoritative-review/builtin-validators';
+import {
+  ZHIHU_CHAPTER_ASSEMBLER_EXPORT_NAME,
+  ZHIHU_CHAPTER_ASSEMBLER_HANDLER_KEY,
+  ZHIHU_CHAPTER_ASSEMBLER_IMPLEMENTATION_DIGEST,
+  ZHIHU_CHAPTER_ASSEMBLER_MODULE_ID,
+} from '../../runtime/authoritative-review/assembler-registry';
 
 /** The single checked-in test-only validator budget profile (design §9). */
 export const AUTHORITATIVE_REVIEW_TEST_VALIDATOR_DEFAULT_BUDGET: ValidatorBudgetProfileV1 = {
@@ -127,10 +133,7 @@ export const AUTHORITATIVE_REVIEW_TEST_HANDLER_IDENTITIES: InstalledHandlerIdent
 
 /**
  * The installed PROVISIONAL handler identities (Task 14 rotation): the real
- * platform builtin validator identities + the still-test assembler identity.
- * The assembler is not part of this rotation (no assembler builtin exists yet);
- * its identity stays the test `renderSeal` entry so the fixture assembler
- * registration keeps resolving.
+ * platform builtin validator identities + the production Task 21 assembler.
  */
 export const AUTHORITATIVE_REVIEW_BUILTIN_HANDLER_IDENTITIES: InstalledHandlerIdentitiesV1 = {
   validators: [...AUTHORITATIVE_REVIEW_BUILTIN_VALIDATOR_IDENTITIES].sort((a, b) => {
@@ -138,7 +141,12 @@ export const AUTHORITATIVE_REVIEW_BUILTIN_HANDLER_IDENTITIES: InstalledHandlerId
     const keyB = `${b.handlerKey}:${b.implementationDigest}:${b.trigger}:${String(b.executionPhase)}`;
     return keyA < keyB ? -1 : keyA > keyB ? 1 : 0;
   }) as typeof AUTHORITATIVE_REVIEW_BUILTIN_VALIDATOR_IDENTITIES,
-  assembler: AUTHORITATIVE_REVIEW_TEST_ASSEMBLER_IDENTITY,
+  assembler: {
+    handlerKey: ZHIHU_CHAPTER_ASSEMBLER_HANDLER_KEY,
+    implementationDigest: ZHIHU_CHAPTER_ASSEMBLER_IMPLEMENTATION_DIGEST,
+    moduleId: ZHIHU_CHAPTER_ASSEMBLER_MODULE_ID,
+    exportName: ZHIHU_CHAPTER_ASSEMBLER_EXPORT_NAME,
+  },
 };
 
 /**
@@ -208,7 +216,7 @@ function buildAuthoritativeReviewProfileBody(options: {
 }
 
 /**
- * The CURRENT canonical enabled profile body (Task 14 rotation):
+ * The CURRENT canonical enabled profile body (Task 21 rotation):
  * `qualificationState: provisional` with the REAL installed platform builtin
  * validator identities. The checked-in `authoritative-review-profile-v1.json`
  * is a byte-identical copy of this body — nothing may diverge without failing
@@ -217,7 +225,7 @@ function buildAuthoritativeReviewProfileBody(options: {
 export function buildAuthoritativeReviewTestProfileBody(): AuthoritativeReviewProfileSnapshotV1Body {
   return buildAuthoritativeReviewProfileBody({
     qualificationState: 'provisional',
-    profileVersion: 2,
+    profileVersion: 3,
     installedHandlers: AUTHORITATIVE_REVIEW_BUILTIN_HANDLER_IDENTITIES,
   });
 }

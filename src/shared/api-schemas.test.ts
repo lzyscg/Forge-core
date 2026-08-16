@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest';
 import { Value } from 'typebox/value';
 import {
   answerBodyV2Schema,
+  artifactVersionSchema,
   authoritativeBlobKindV2Schema,
   authoritativeReviewWorkspaceV2Schema,
   structuredIssuePageSchema,
@@ -23,6 +24,24 @@ import {
   traceEntrySchema,
   turnTraceSchema,
 } from './api-schemas';
+
+describe('artifactVersionSchema authority union', () => {
+  const ref = (kind: string) => ({
+    kind, digest: 'a'.repeat(64), byteLength: 1, mediaType: 'application/json', schemaVersion: 1,
+  });
+  const common = { id: 'artifact', version: 1, title: 'title', files: [], createdAt: '2026-08-16T00:00:00.000Z', final: false };
+
+  it('keeps legacy v1 bytes and accepts exact system v2 without sourceNodeId', () => {
+    expect(Value.Check(artifactVersionSchema, { ...common, sourceNodeId: 'node' })).toBe(true);
+    const v2 = {
+      ...common, protocolVersion: 2, producerWorkItemId: 'seal-work', sealRecordRef: ref('seal_record'),
+      artifactRef: ref('artifact'), custodyRef: ref('artifact'), templateSnapshotHash: 'b'.repeat(64),
+      deliveryRef: ref('system_artifact_delivery'),
+    };
+    expect(Value.Check(artifactVersionSchema, v2)).toBe(true);
+    expect(Value.Check(artifactVersionSchema, { ...v2, sourceNodeId: 'forbidden' })).toBe(false);
+  });
+});
 
 describe('turnTraceSchema phase compatibility (spec §7.5)', () => {
   it('accepts a trace without phase (backward compatible)', () => {

@@ -186,23 +186,20 @@ validators:
     budgetProfileId: authoritative-validator-default
 assembler:
   abi: forge-assembler/v2
-  handlerKey: authoritative.seal.render
-  implementationDigest: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+  handlerKey: builtin.zhihu_chapter_markdown.v1
+  implementationDigest: 3bd953501644e53f952c83acdfb30c3c4fd3b4a7e0b1e044449871fcc4646157
   implementationRef:
     kind: builtin
-    moduleId: "@forge/authoritative-review"
-    exportName: renderSeal
+    moduleId: src/server/runtime/authoritative-review/builtin-assemblers/zhihu-chapter-v1
+    exportName: assembleZhihuChapterV1
   budget:
-    timeoutMs: 30000
+    timeoutMs: 5000
     maxInputBytes: 67108864
-    maxOutputBytes: 33554432
+    maxOutputBytes: 8388608
   routes:
-    - id: chapter
+    - id: chapter-markdown
       artifactFile: chapter.md
       mediaType: text/markdown
-    - id: chapter-json
-      artifactFile: chapter.json
-      mediaType: application/json
 limits:
   schema:
     maxSchemaDepth: 4

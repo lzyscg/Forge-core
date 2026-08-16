@@ -281,17 +281,16 @@ const EXPECTED_CANONICAL_CONTRACT: Record<string, unknown> = {
   ],
   assembler: {
     abi: 'forge-assembler/v2',
-    handlerKey: 'authoritative.seal.render',
-    implementationDigest: 'd'.repeat(64),
+    handlerKey: 'builtin.zhihu_chapter_markdown.v1',
+    implementationDigest: '3bd953501644e53f952c83acdfb30c3c4fd3b4a7e0b1e044449871fcc4646157',
     implementationRef: {
       kind: 'builtin',
-      moduleId: '@forge/authoritative-review',
-      exportName: 'renderSeal',
+      moduleId: 'src/server/runtime/authoritative-review/builtin-assemblers/zhihu-chapter-v1',
+      exportName: 'assembleZhihuChapterV1',
     },
-    budget: { timeoutMs: 30000, maxInputBytes: 67108864, maxOutputBytes: 33554432 },
+    budget: { timeoutMs: 5000, maxInputBytes: 67108864, maxOutputBytes: 8388608 },
     routes: [
-      { id: 'chapter', artifactFile: 'chapter.md', mediaType: 'text/markdown' },
-      { id: 'chapter-json', artifactFile: 'chapter.json', mediaType: 'application/json' },
+      { id: 'chapter-markdown', artifactFile: 'chapter.md', mediaType: 'text/markdown' },
     ],
   },
   limits: {
@@ -341,10 +340,10 @@ const EXPECTED_CANONICAL_CONTRACT: Record<string, unknown> = {
 const EXPECTED_IDENTITY_CLOSURE: ImplementationIdentityClosureEntryV2[] = [
   {
     kind: 'assembler',
-    handlerKey: 'authoritative.seal.render',
-    implementationDigest: 'd'.repeat(64),
-    moduleId: '@forge/authoritative-review',
-    exportName: 'renderSeal',
+    handlerKey: 'builtin.zhihu_chapter_markdown.v1',
+    implementationDigest: '3bd953501644e53f952c83acdfb30c3c4fd3b4a7e0b1e044449871fcc4646157',
+    moduleId: 'src/server/runtime/authoritative-review/builtin-assemblers/zhihu-chapter-v1',
+    exportName: 'assembleZhihuChapterV1',
   },
   {
     kind: 'validator',
@@ -482,13 +481,12 @@ describe('compileStructuredSlotContractV2 — valid fixture (spec §6.1/§6.2/§
     const frozen = await compileAt(VALID_FIXTURE);
     expect(frozen.assembler).toEqual({
       abi: 'forge-assembler/v2',
-      handlerKey: 'authoritative.seal.render',
-      implementationDigest: 'd'.repeat(64),
-      implementationRef: { kind: 'builtin', moduleId: '@forge/authoritative-review', exportName: 'renderSeal' },
-      budget: { timeoutMs: 30000, maxInputBytes: 67108864, maxOutputBytes: 33554432 },
+      handlerKey: 'builtin.zhihu_chapter_markdown.v1',
+      implementationDigest: '3bd953501644e53f952c83acdfb30c3c4fd3b4a7e0b1e044449871fcc4646157',
+      implementationRef: { kind: 'builtin', moduleId: 'src/server/runtime/authoritative-review/builtin-assemblers/zhihu-chapter-v1', exportName: 'assembleZhihuChapterV1' },
+      budget: { timeoutMs: 5000, maxInputBytes: 67108864, maxOutputBytes: 8388608 },
       routes: [
-        { id: 'chapter', artifactFile: 'chapter.md', mediaType: 'text/markdown' },
-        { id: 'chapter-json', artifactFile: 'chapter.json', mediaType: 'application/json' },
+        { id: 'chapter-markdown', artifactFile: 'chapter.md', mediaType: 'text/markdown' },
       ],
     });
   });
@@ -840,7 +838,7 @@ describe('assembler — exact forge-assembler/v2 registration shape', () => {
     }, 'SLOTS_CONTRACT_INVALID');
     await expectInvalid((doc) => {
       ((doc['assembler'] as Record<string, unknown>)['routes'] as Array<Record<string, unknown>>)[1] = {
-        id: 'chapter',
+        id: 'chapter-markdown',
         artifactFile: 'chapter.json',
         mediaType: 'application/json',
       };

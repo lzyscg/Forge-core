@@ -84,6 +84,7 @@ const SUBMIT_CURRENT = { type: 'submit_final_artifact' } as const;
 
 /** The `CurrentInputArtifact` the reviewer received via a committed route. */
 function receivedFrom(published: Awaited<ReturnType<ArtifactStore['read']>>): CurrentInputArtifact {
+  if (published.meta.authorityKind === 'system_seal_v2') throw new Error('test fixture expected a v1 artifact');
   return {
     artifactId: published.meta.id,
     version: published.meta.version,
