@@ -777,41 +777,36 @@ describe('artifact version allocation (artifact_publish family)', () => {
       id: 'legacy-art-1', at: NOW, type: 'artifact_published',
       artifact: { version: 1, title: 'legacy', sourceNodeId: 'n-1', format: 'markdown', files: [{ name: 'a.md', hash: H1 }], artifactType: null, artifactId: 'legacy-id' },
     });
-    const set = await prepareArtifactSet(env, taskId);
-    const sealValidationBundleRef = dummyRef('seal_validation_bundle', H5);
-    const submitterAuthorityBaseRef = dummyRef('authority_base_set', H2);
-    const grantCore = {
-      grantSpecId: 'grant-wi-42', workItemId: 'wi-42', kind: 'review_observation' as const,
-      snapshotHash: H1, authorityBaseRef: submitterAuthorityBaseRef,
-      sessionKind: null, reviewAssignmentId: null, roundId: null, roundKind: null,
-      readScope: { maxContextBytes: 67_108_864 },
-    };
-    const submitterGrantSpecRef = await env.facade.prepareBlob(taskId, 'write_grant_spec', {
-      ...grantCore, specDigest: canonicalJsonSha256(grantCore),
-    });
+    const closure = await prepareSealPublishClosure(env, taskId);
     const payload = {
       family: 'seal_publish' as const,
       operationId: 'op-system-seal', taskId,
-      artifactRef: set.artifact, artifactFile: 'chapter.md', artifactFileHash: H1,
-      sealRecordRef: set.sealRecord,
-      sealValidationBundleRef, deliveryRef: set.delivery, custodyRef: set.sealRecord,
-      mapRef: dummyRef('map_snapshot', H1),
-      contentRevisionManifestRef: dummyRef('content_revision_manifest', H3),
-      reviewBundleRef: dummyRef('review_bundle', H4),
+      artifactRef: closure.artifact, artifactFile: 'chapter.md', artifactFileHash: H1,
+      sealRecordRef: closure.sealRecord,
+      sealValidationBundleRef: closure.sealValidationBundle,
+      deliveryRef: closure.delivery, custodyRef: closure.custody,
+      mapRef: closure.map,
+      contentRevisionManifestRef: closure.contentRevisionManifest,
+      reviewBundleRef: closure.reviewBundle,
       sealWorkItemId: 'seal-work', sealCommandId: 'seal-command', sealLeaseEpoch: 1,
-      sealAuthorityBaseRef: dummyRef('authority_base_set', H1),
-      submitterWorkItemId: 'wi-42', submitterAuthorityBaseRef,
-      submitterGrantSpecRef,
+      sealAuthorityBaseRef: closure.authorityBase,
+      submitterWorkItemId: 'wi-42', submitterAuthorityBaseRef: closure.authorityBase,
+      submitterGrantSpecRef: closure.submitterGrantSpec,
       submitterLogicalAssignmentId: 'submit-logical', submitterMaxAutomaticRetries: 2,
     };
     const tail = await env.eventStore.tail(taskId);
     const prepared = await env.facade.preparePublication({
       taskId, operationId: payload.operationId, payload,
       intent: intent('system_seal_publish'),
-      preparedRefs: [set.artifact, set.sealRecord, set.delivery, payload.submitterGrantSpecRef],
+      preparedRefs: [
+        closure.artifact, closure.sealRecord, closure.sealValidationBundle,
+        closure.delivery, closure.custody, closure.map,
+        closure.contentRevisionManifest, closure.reviewBundle,
+        closure.authorityBase, closure.submitterGrantSpec,
+      ],
       expectedTailSequence: tail.lastSequence, expectedTailCommitId: tail.lastCommitId,
     });
-    const delivery = await env.blobStore.readJson(taskId, set.delivery, 'system_artifact_delivery');
+    const delivery = await env.blobStore.readJson(taskId, closure.delivery, 'system_artifact_delivery');
     expect(delivery).not.toHaveProperty('artifactVersion');
     expect(await env.publicationStore.readPin(prepared.pin.pinId)).not.toBeNull();
 
@@ -848,6 +843,78 @@ describe('artifact version allocation (artifact_publish family)', () => {
       if (entry.event.type === 'artifact_published_v2') return [entry.event.artifactVersion];
       return [];
     })).toEqual([1, 2]);
+  });
+
+  it('fails closed at commit when the delivery blob disagrees with the pinned sealRecordRef (P1#3)', async () => {
+    const paths = await makePaths();
+    const env = await makeEnv(paths);
+    const taskId = randomUUID();
+    const closure = await prepareSealPublishClosure(env, taskId);
+    // A schema-legal but mutually INCONSISTENT delivery: its sealRecordRef
+    // points at a different seal record than the pin's payload pins.
+    const rogueSealRecord = await env.facade.prepareBlob(taskId, 'seal_record', {
+      taskId,
+      mapRef: closure.map,
+      mapSemanticDigest: H1,
+      mapReviewBundleRef: dummyRef('map_review_bundle', H5),
+      contentRevisionManifestRef: closure.contentRevisionManifest,
+      contentRootDigest: H2,
+      reviewBundleRef: closure.reviewBundle,
+      sealValidationBundleRef: closure.sealValidationBundle,
+      templateSnapshotHash: H4, // differs from the consistent closure
+      assemblerDigest: H4,
+      artifactRef: closure.artifact,
+      artifactDigest: closure.artifact.digest,
+    });
+    const rogueDelivery = await env.facade.prepareBlob(taskId, 'system_artifact_delivery', {
+      deliveryId: 'del-rogue',
+      producer: 'system:structured_seal',
+      sealRecordRef: rogueSealRecord,
+      sealRecordDigest: rogueSealRecord.digest,
+      artifactId: 'art-42',
+      artifactRef: closure.artifact,
+      artifactDigest: closure.artifact.digest,
+      custodyRef: closure.custody,
+      custodyDigest: closure.custody.digest,
+      submitterWorkItemId: 'wi-42',
+      submitterAgentId: 'agent-1',
+      templateSnapshotHash: H3,
+    });
+    const payload = {
+      family: 'seal_publish' as const,
+      operationId: 'op-system-seal-rogue', taskId,
+      artifactRef: closure.artifact, artifactFile: 'chapter.md', artifactFileHash: H1,
+      sealRecordRef: closure.sealRecord,
+      sealValidationBundleRef: closure.sealValidationBundle,
+      deliveryRef: rogueDelivery, custodyRef: closure.custody,
+      mapRef: closure.map,
+      contentRevisionManifestRef: closure.contentRevisionManifest,
+      reviewBundleRef: closure.reviewBundle,
+      sealWorkItemId: 'seal-work', sealCommandId: 'seal-command', sealLeaseEpoch: 1,
+      sealAuthorityBaseRef: closure.authorityBase,
+      submitterWorkItemId: 'wi-42', submitterAuthorityBaseRef: closure.authorityBase,
+      submitterGrantSpecRef: closure.submitterGrantSpec,
+      submitterLogicalAssignmentId: 'submit-logical', submitterMaxAutomaticRetries: 2,
+    };
+    const tail = await env.eventStore.tail(taskId);
+    const prepared = await env.facade.preparePublication({
+      taskId, operationId: payload.operationId, payload,
+      intent: intent('system_seal_publish'),
+      preparedRefs: [
+        closure.artifact, closure.sealRecord, closure.sealValidationBundle,
+        rogueDelivery, closure.custody, closure.map,
+        closure.contentRevisionManifest, closure.reviewBundle,
+        closure.authorityBase, closure.submitterGrantSpec,
+      ],
+      expectedTailSequence: tail.lastSequence, expectedTailCommitId: tail.lastCommitId,
+    });
+    await expect(env.facade.commitPrepared(prepared.pin.pinId)).rejects.toMatchObject({
+      code: STORAGE_ERROR_CODES.EVENT_INVALID,
+    });
+    // No envelope is ever rebuilt/committed from the inconsistent closure.
+    const history = await env.eventStore.read(taskId);
+    expect(history.filter((entry) => entry.event.type === 'artifact_published_v2')).toHaveLength(0);
+    expect(history.filter((entry) => entry.event.type === 'structured_scaffold_sealed_v2')).toHaveLength(0);
   });
 });
 
@@ -1216,6 +1283,173 @@ describe('dependency boundary', () => {
 
 function dummyRef(kind: AuthoritativeBlobKindV2, digest: string): BlobRefV2 {
   return { kind, digest, byteLength: 10, mediaType: 'application/json', schemaVersion: 1 };
+}
+
+/**
+ * Builds the FULL schema-valid seal closure (design §16.3): artifact, map,
+ * content manifest, review bundle, seal validation bundle, seal record,
+ * custody, delivery, the (shared) authority base and the submitter grant spec.
+ * Every cross-object ref points at the SAME blob, so the system_seal_publish
+ * closure validation in the registry passes end-to-end through the facade
+ * (Task 21 P1#3). Self-digest fields follow the schema-common `hs` rule
+ * (canonical bytes minus that field).
+ */
+async function prepareSealPublishClosure(env: Env, taskId: string) {
+  const artifact = await env.facade.prepareBlob(taskId, 'artifact', {
+    artifactId: 'art-42',
+    mediaType: 'text/markdown',
+    text: '# result',
+  });
+  const sealWorkItemId = 'seal-work';
+  const submitterWorkItemId = 'wi-42';
+  const submitterAgentId = 'agent-1';
+  const templateSnapshotHash = H3;
+  const mapSemanticDigest = H1;
+  const contentRootDigest = H2;
+  const assemblerDigest = H4;
+  const mapReviewBundleRef = dummyRef('map_review_bundle', H5);
+
+  const map = await env.facade.prepareBlob(taskId, 'map_snapshot', {
+    scaffoldId: 'sc-1',
+    mapId: 'map-1',
+    supersedesMapId: null,
+    sourceCandidateId: 'c-1',
+    proposedMapCoreRef: dummyRef('proposed_map_core', H1),
+    mapReviewBundleRef,
+    mapRevision: 1,
+    mapSemanticDigest,
+    positionGraphDigest: H2,
+    relationGraphDigest: H3,
+    templateSnapshotHash,
+    nodes: [{
+      slotId: 'root', slotType: 'document', contentBearing: false,
+      parentSlotId: null, documentOrder: 0, siblingOrder: 0, nodeSpecDigest: 'root-spec',
+    }],
+    relations: [],
+    activatedAt: NOW,
+  });
+
+  const manifestCore = {
+    taskId, mapRef: map, mapSemanticDigest, taskContentRevision: 1,
+    manifestPhase: 'finalized' as const, entries: [],
+    producerPlanSpecRef: null, priorManifestRef: null,
+    finalizerValidatorAggregateRefs: [dummyRef('validator_aggregate', H4)],
+    finalizerWarningRootRefs: [], contentRootDigest,
+  };
+  const contentRevisionManifest = await env.facade.prepareBlob(taskId, 'content_revision_manifest', {
+    ...manifestCore, manifestDigest: canonicalJsonSha256(manifestCore),
+  });
+
+  const reviewBundleCore = {
+    settlementCoreRef: dummyRef('content_review_settlement_core', H2),
+    mapRef: map,
+    contentRevisionManifestRef: contentRevisionManifest,
+    reviewWarningCustodyRootRef: dummyRef('validation_warning_custody_root', H3),
+  };
+  const reviewBundle = await env.facade.prepareBlob(taskId, 'review_bundle', {
+    ...reviewBundleCore, bundleDigest: canonicalJsonSha256(reviewBundleCore),
+  });
+
+  const sealValidationBundleCore = {
+    sealWorkItemId,
+    reviewBundleRef: reviewBundle,
+    contentRevisionManifestRef: contentRevisionManifest,
+    sealInputAggregateRef: dummyRef('validator_aggregate', H1),
+    sealOutputAggregateRef: dummyRef('validator_aggregate', H2),
+    sealWarningCustodyRootRef: dummyRef('validation_warning_custody_root', H3),
+    assemblerDigest,
+    artifactRef: artifact,
+    artifactDigest: artifact.digest,
+  };
+  const sealValidationBundle = await env.facade.prepareBlob(taskId, 'seal_validation_bundle', {
+    ...sealValidationBundleCore, bundleDigest: canonicalJsonSha256(sealValidationBundleCore),
+  });
+
+  const sealRecord = await env.facade.prepareBlob(taskId, 'seal_record', {
+    taskId,
+    mapRef: map,
+    mapSemanticDigest,
+    mapReviewBundleRef,
+    contentRevisionManifestRef: contentRevisionManifest,
+    contentRootDigest,
+    reviewBundleRef: reviewBundle,
+    sealValidationBundleRef: sealValidationBundle,
+    templateSnapshotHash,
+    assemblerDigest,
+    artifactRef: artifact,
+    artifactDigest: artifact.digest,
+  });
+
+  const custodyCore = {
+    taskId,
+    sealWorkItemId,
+    artifactRef: artifact,
+    sealRecordRef: sealRecord,
+    templateSnapshotHash,
+    files: [{ name: 'chapter.md', hash: H1, byteLength: 7 }],
+  };
+  const custody = await env.facade.prepareBlob(taskId, 'artifact_custody', {
+    ...custodyCore, custodyDigest: canonicalJsonSha256(custodyCore),
+  });
+
+  const delivery = await env.facade.prepareBlob(taskId, 'system_artifact_delivery', {
+    deliveryId: 'del-42',
+    producer: 'system:structured_seal',
+    sealRecordRef: sealRecord,
+    sealRecordDigest: sealRecord.digest,
+    artifactId: 'art-42',
+    artifactRef: artifact,
+    artifactDigest: artifact.digest,
+    custodyRef: custody,
+    custodyDigest: custody.digest,
+    submitterWorkItemId,
+    submitterAgentId,
+    templateSnapshotHash,
+  });
+
+  const authorityBaseCore = {
+    taskId,
+    templateSnapshotRef: dummyRef('profile_snapshot', H1),
+    profileSnapshotRef: dummyRef('profile_snapshot', H2),
+    mapRef: map,
+    mapCandidateRef: null,
+    mapReviewBundleRef,
+    contentRevisionManifestRef: contentRevisionManifest,
+    planSpecRef: null,
+    stagingManifestRef: null,
+    reviewCoverageCoreRef: null,
+    reviewRoundRef: null,
+    reviewBundleRef: reviewBundle,
+    sealRecordRef: sealRecord,
+    artifactRef: artifact,
+    findingSetRef: null,
+    artifactDeliveryRef: delivery,
+    displayDigests: {},
+  };
+  const authorityBase = await env.facade.prepareBlob(taskId, 'authority_base_set', {
+    ...authorityBaseCore, baseSetDigest: canonicalJsonSha256(authorityBaseCore),
+  });
+
+  const grantCore = {
+    grantSpecId: 'grant-wi-42',
+    workItemId: submitterWorkItemId,
+    kind: 'review_observation' as const,
+    snapshotHash: templateSnapshotHash,
+    authorityBaseRef: authorityBase,
+    sessionKind: null,
+    reviewAssignmentId: null,
+    roundId: null,
+    roundKind: null,
+    readScope: { maxContextBytes: 67_108_864 },
+  };
+  const submitterGrantSpec = await env.facade.prepareBlob(taskId, 'write_grant_spec', {
+    ...grantCore, specDigest: canonicalJsonSha256(grantCore),
+  });
+
+  return {
+    artifact, map, contentRevisionManifest, reviewBundle, sealValidationBundle,
+    sealRecord, custody, delivery, authorityBase, submitterGrantSpec,
+  };
 }
 
 /**

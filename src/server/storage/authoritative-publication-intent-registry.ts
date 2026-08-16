@@ -36,11 +36,22 @@ import type {
   PublicationOperationPayloadV2,
   WorkItemReclaimReasonV2,
   WorkItemSuspensionReasonV2,
+  SealValidationBundleV2,
+  ArtifactCustodyV2,
+  MapSnapshotV2,
+  ContentRevisionManifestV2,
+  ReviewBundleV2,
+  WriteGrantSpecV2,
+  AuthorityBaseSetV2,
 } from '../authoritative-review/authority-types';
-import type { WorkItemKindV2 } from '../../shared/authoritative-review-v2';
+import type {
+  WorkItemKindV2,
+  SealRecordV2,
+  SystemArtifactDeliveryV2,
+  BlobRefV2,
+} from '../../shared/authoritative-review-v2';
 import type { AuthoritativeReviewEventV2 } from './authoritative-review-events';
 import type { TaskEvent } from './task-events';
-import type { BlobRefV2 } from '../../shared/authoritative-review-v2';
 
 /**
  * Standard legacy display-node helper: the shared EventNode body every legacy
@@ -188,6 +199,212 @@ export function deterministicEventId(operationId: string, handlerKind: string, i
 
 function sha256OfEvents(events: readonly (AuthoritativeReviewEventV2 | TaskEvent)[]): string {
   return createHash('sha256').update(canonicalJson(events), 'utf8').digest('hex');
+}
+
+/**
+ * Ref identity: the full frozen ref bytes (content address + schema) must
+ * match. A bare-digest comparison would pass a ref whose kind/media/schema
+ * disagree, which is exactly the "schema-legal but inconsistent" case the
+ * closure validation exists to reject.
+ */
+function sameRef(a: BlobRefV2 | null | undefined, b: BlobRefV2 | null | undefined): boolean {
+  if (a === null || a === undefined || b === null || b === undefined) return false;
+  return (
+    a.kind === b.kind &&
+    a.digest === b.digest &&
+    a.byteLength === b.byteLength &&
+    a.mediaType === b.mediaType &&
+    a.schemaVersion === b.schemaVersion
+  );
+}
+
+/** True when `v` is a well-formed BlobRefV2 (used for ref-kind-only checks). */
+function isBlobRef(v: unknown): v is BlobRefV2 {
+  return (
+    typeof v === 'object' &&
+    v !== null &&
+    typeof (v as BlobRefV2).kind === 'string' &&
+    typeof (v as BlobRefV2).digest === 'string' &&
+    typeof (v as BlobRefV2).byteLength === 'number' &&
+    typeof (v as BlobRefV2).mediaType === 'string' &&
+    typeof (v as BlobRefV2).schemaVersion === 'number'
+  );
+}
+
+/**
+ * Task 21 P1#3: the sealed publication's frozen closure. `system_seal_publish`
+ * pins eleven refs; every one must resolve before the six-event envelope can
+ * be rebuilt. Missing keys (or a non-numeric allocated version) -> the builder
+ * fails closed with NotRebuildableError, so a crash-pin replay can never emit
+ * an envelope from a partially-resolved object graph.
+ */
+function sealPublishMissingInputs(refs: ReadonlyMap<string, unknown> | undefined): readonly string[] {
+  const missing: string[] = [];
+  const need = (key: string): void => {
+    const value = refs?.get(key);
+    if (value === null || value === undefined) missing.push(key);
+  };
+  need('delivery');
+  need('artifact');
+  need('sealRecord');
+  need('sealValidationBundle');
+  need('custody');
+  need('map');
+  need('contentRevisionManifest');
+  need('reviewBundle');
+  need('submitterGrantSpec');
+  need('submitterAuthorityBase');
+  need('sealAuthorityBase');
+  if (typeof refs?.get('allocatedArtifactVersion') !== 'number') missing.push('allocatedArtifactVersion');
+  return missing;
+}
+
+/**
+ * Task 21 P1#3: cross-object Seal/Delivery/Submitter closure validation
+ * (design §16.3 / spec §13.5). Every resolved blob must agree with the pinned
+ * payload refs and with each other, so a replay can never rebuild the six
+ * events from an object graph that is individually schema-legal but mutually
+ * inconsistent. Returns the failing check names (empty = closure is
+ * consistent). All checks are pure functions of the pinned payload + resolved
+ * blobs — no time, no randomness, so the rebuilt envelope stays byte-identical
+ * to the original commit.
+ */
+function sealPublishClosureErrors(
+  p: Extract<PublicationOperationPayloadV2, { family: 'seal_publish' }>,
+  refs: ReadonlyMap<string, unknown>,
+): readonly string[] {
+  const bad: string[] = [];
+  const check = (ok: boolean, name: string): void => {
+    if (!ok) bad.push(name);
+  };
+  const delivery = refs.get('delivery') as SystemArtifactDeliveryV2;
+  const artifact = refs.get('artifact') as { artifactId: string; mediaType: 'text/markdown' | 'text/plain' } | undefined;
+  const sealRecord = refs.get('sealRecord') as SealRecordV2 | undefined;
+  const bundle = refs.get('sealValidationBundle') as SealValidationBundleV2 | undefined;
+  const custody = refs.get('custody') as ArtifactCustodyV2 | undefined;
+  const map = refs.get('map') as MapSnapshotV2 | undefined;
+  const manifest = refs.get('contentRevisionManifest') as ContentRevisionManifestV2 | undefined;
+  const submitterGrantSpec = refs.get('submitterGrantSpec') as WriteGrantSpecV2 | undefined;
+  const submitterAuthorityBase = refs.get('submitterAuthorityBase') as AuthorityBaseSetV2 | undefined;
+  const sealAuthorityBase = refs.get('sealAuthorityBase') as AuthorityBaseSetV2 | undefined;
+
+  // delivery ↔ pinned payload refs/identities (events 2/3/4).
+  check(sameRef(delivery?.sealRecordRef, p.sealRecordRef), 'delivery.sealRecordRef');
+  check(sameRef(delivery?.artifactRef, p.artifactRef), 'delivery.artifactRef');
+  check(sameRef(delivery?.custodyRef, p.custodyRef), 'delivery.custodyRef');
+  check(delivery?.sealRecordDigest === p.sealRecordRef.digest, 'delivery.sealRecordDigest');
+  check(delivery?.artifactDigest === p.artifactRef.digest, 'delivery.artifactDigest');
+  check(delivery?.custodyDigest === p.custodyRef.digest, 'delivery.custodyDigest');
+  check(delivery?.submitterWorkItemId === p.submitterWorkItemId, 'delivery.submitterWorkItemId');
+  check(
+    delivery?.artifactId === artifact?.artifactId && typeof delivery?.artifactId === 'string' && delivery.artifactId.length > 0,
+    'delivery.artifactId',
+  );
+  check(typeof delivery?.deliveryId === 'string' && delivery.deliveryId.length > 0, 'delivery.deliveryId');
+  check(typeof delivery?.submitterAgentId === 'string' && delivery.submitterAgentId.length > 0, 'delivery.submitterAgentId');
+  check(
+    typeof delivery?.templateSnapshotHash === 'string' &&
+      typeof sealRecord?.templateSnapshotHash === 'string' &&
+      delivery.templateSnapshotHash === sealRecord.templateSnapshotHash,
+    'delivery.templateSnapshotHash',
+  );
+
+  // sealRecord ↔ pinned payload refs/identities (event 1) + resolved map/manifest.
+  check(sameRef(sealRecord?.sealValidationBundleRef, p.sealValidationBundleRef), 'sealRecord.sealValidationBundleRef');
+  check(sameRef(sealRecord?.artifactRef, p.artifactRef), 'sealRecord.artifactRef');
+  check(sameRef(sealRecord?.mapRef, p.mapRef), 'sealRecord.mapRef');
+  check(sameRef(sealRecord?.contentRevisionManifestRef, p.contentRevisionManifestRef), 'sealRecord.contentRevisionManifestRef');
+  check(sameRef(sealRecord?.reviewBundleRef, p.reviewBundleRef), 'sealRecord.reviewBundleRef');
+  check(sealRecord?.artifactDigest === p.artifactRef.digest, 'sealRecord.artifactDigest');
+  check(
+    typeof sealRecord?.templateSnapshotHash === 'string' && sealRecord.templateSnapshotHash.length > 0,
+    'sealRecord.templateSnapshotHash',
+  );
+  check(
+    typeof sealRecord?.mapSemanticDigest === 'string' &&
+      typeof map?.mapSemanticDigest === 'string' &&
+      sealRecord.mapSemanticDigest === map.mapSemanticDigest,
+    'sealRecord.mapSemanticDigest',
+  );
+  check(
+    typeof sealRecord?.contentRootDigest === 'string' &&
+      typeof manifest?.contentRootDigest === 'string' &&
+      sealRecord.contentRootDigest === manifest.contentRootDigest,
+    'sealRecord.contentRootDigest',
+  );
+
+  // sealValidationBundle ↔ pinned payload + aggregate/warning ref-kind
+  // (design §16.3). The aggregate/warning blobs are NOT payload refs, so the
+  // builder can only verify their declared ref-kind here (their bodies are
+  // resolved by the generic blob closure elsewhere).
+  check(sameRef(bundle?.artifactRef, p.artifactRef), 'bundle.artifactRef');
+  check(bundle?.artifactDigest === p.artifactRef.digest, 'bundle.artifactDigest');
+  check(bundle?.sealWorkItemId === p.sealWorkItemId, 'bundle.sealWorkItemId');
+  check(
+    isBlobRef(bundle?.sealInputAggregateRef) && bundle.sealInputAggregateRef.kind === 'validator_aggregate',
+    'bundle.sealInputAggregateRef',
+  );
+  check(
+    isBlobRef(bundle?.sealOutputAggregateRef) && bundle.sealOutputAggregateRef.kind === 'validator_aggregate',
+    'bundle.sealOutputAggregateRef',
+  );
+  check(
+    isBlobRef(bundle?.sealWarningCustodyRootRef) && bundle.sealWarningCustodyRootRef.kind === 'validation_warning_custody_root',
+    'bundle.sealWarningCustodyRootRef',
+  );
+  check(
+    typeof bundle?.assemblerDigest === 'string' && bundle.assemblerDigest.length > 0,
+    'bundle.assemblerDigest',
+  );
+  check(
+    typeof sealRecord?.assemblerDigest === 'string' && sealRecord.assemblerDigest === bundle?.assemblerDigest,
+    'sealRecord.assemblerDigest',
+  );
+
+  // custody ↔ pinned payload (event 2 provenance + custody blob bindings).
+  check(sameRef(custody?.artifactRef, p.artifactRef), 'custody.artifactRef');
+  check(sameRef(custody?.sealRecordRef, p.sealRecordRef), 'custody.sealRecordRef');
+  check(custody?.sealWorkItemId === p.sealWorkItemId, 'custody.sealWorkItemId');
+  check(
+    typeof custody?.templateSnapshotHash === 'string' &&
+      typeof sealRecord?.templateSnapshotHash === 'string' &&
+      custody.templateSnapshotHash === sealRecord.templateSnapshotHash,
+    'custody.templateSnapshotHash',
+  );
+  check(
+    Array.isArray(custody?.files) &&
+      custody.files.some((entry) => entry !== null && typeof entry === 'object' && entry.name === p.artifactFile && entry.hash === p.artifactFileHash),
+    'custody.files',
+  );
+
+  // artifact shape (event 2 artifactId/mediaType).
+  check(
+    typeof artifact?.artifactId === 'string' &&
+      artifact.artifactId.length > 0 &&
+      (artifact.mediaType === 'text/markdown' || artifact.mediaType === 'text/plain'),
+    'artifact',
+  );
+
+  // submitter grant + authority bases (event 4 work-item bindings).
+  check(submitterGrantSpec?.workItemId === p.submitterWorkItemId, 'submitterGrantSpec.workItemId');
+  check(sameRef(submitterGrantSpec?.authorityBaseRef, p.submitterAuthorityBaseRef), 'submitterGrantSpec.authorityBaseRef');
+  check(
+    typeof submitterGrantSpec?.kind === 'string' &&
+      submitterGrantSpec.kind.length > 0 &&
+      typeof submitterGrantSpec?.specDigest === 'string' &&
+      submitterGrantSpec.specDigest.length > 0,
+    'submitterGrantSpec',
+  );
+  check(
+    typeof submitterAuthorityBase?.baseSetDigest === 'string' && isBlobRef(submitterAuthorityBase?.templateSnapshotRef),
+    'submitterAuthorityBase',
+  );
+  check(
+    typeof sealAuthorityBase?.baseSetDigest === 'string' && isBlobRef(sealAuthorityBase?.templateSnapshotRef),
+    'sealAuthorityBase',
+  );
+
+  return bad;
 }
 
 /** Strict child-ref extraction of a publication payload (all 7 families). */
@@ -2011,18 +2228,35 @@ export class PublicationIntentRegistry {
       resolveRefs: (p) => p.family === 'seal_publish' ? [
         { key: 'delivery', ref: p.deliveryRef },
         { key: 'artifact', ref: p.artifactRef },
+        { key: 'sealRecord', ref: p.sealRecordRef },
+        { key: 'sealValidationBundle', ref: p.sealValidationBundleRef },
+        { key: 'custody', ref: p.custodyRef },
+        { key: 'map', ref: p.mapRef },
+        { key: 'contentRevisionManifest', ref: p.contentRevisionManifestRef },
+        { key: 'reviewBundle', ref: p.reviewBundleRef },
+        { key: 'submitterGrantSpec', ref: p.submitterGrantSpecRef },
+        { key: 'submitterAuthorityBase', ref: p.submitterAuthorityBaseRef },
+        { key: 'sealAuthorityBase', ref: p.sealAuthorityBaseRef },
       ] : [],
       buildEvents: (payload, at, refs) => {
         const p = payload as Extract<PublicationOperationPayloadV2, { family: 'seal_publish' }>;
-        const delivery = refs?.get('delivery') as { deliveryId: string; artifactId: string; submitterAgentId: string } | undefined;
-        const artifact = refs?.get('artifact') as { artifactId: string; mediaType: 'text/markdown' | 'text/plain'; text: string } | undefined;
+        // Task 21 P1#3: the full frozen closure must resolve BEFORE the event
+        // envelope is rebuilt — a missing object can never be re-derived.
+        const missing = sealPublishMissingInputs(refs);
+        if (missing.length > 0) {
+          throw new NotRebuildableError('system_seal_publish', missing);
+        }
+        // Cross-object Seal/Delivery/Submitter consistency: every resolved blob
+        // must agree with the pinned payload refs and each other, otherwise the
+        // crash-pin replay would rebuild a schema-legal but mutually inconsistent
+        // six-event envelope.
+        const closureErrors = sealPublishClosureErrors(p, refs as ReadonlyMap<string, unknown>);
+        if (closureErrors.length > 0) {
+          throw new NotRebuildableError('system_seal_publish', closureErrors);
+        }
+        const delivery = refs?.get('delivery') as SystemArtifactDeliveryV2;
+        const artifact = refs?.get('artifact') as { artifactId: string; mediaType: 'text/markdown' | 'text/plain'; text: string };
         const artifactVersion = refs?.get('allocatedArtifactVersion');
-        if (delivery === undefined || artifact === undefined || typeof artifactVersion !== 'number') {
-          throw new NotRebuildableError('system_seal_publish', ['delivery/artifact/allocatedArtifactVersion']);
-        }
-        if (delivery.artifactId !== artifact.artifactId || delivery.artifactId.length === 0) {
-          throw new NotRebuildableError('system_seal_publish', ['delivery artifact identity mismatch']);
-        }
         return [
           {
             protocolVersion: 2, at, type: 'structured_scaffold_sealed_v2',

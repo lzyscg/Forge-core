@@ -538,3 +538,299 @@ describe('PublicationIntentRegistry isolation', () => {
     expect(a).toMatch(/^evt-[0-9a-f]{32}$/);
   });
 });
+
+/* ==================================================================== */
+/* Task 21 P1#3: system_seal_publish cross-object closure validation    */
+/* (design §16.3 / spec §13.5)                                          */
+/* ==================================================================== */
+
+/** Distinct 64-hex content-address stand-in (unique per index). */
+const DX = (index: number): string => index.toString(16).padStart(2, '0').repeat(32);
+
+interface SealPublishFixture {
+  payload: Extract<PublicationOperationPayloadV2, { family: 'seal_publish' }>;
+  refs: Map<string, unknown>;
+}
+
+const SEAL_AT = '2026-08-14T10:00:00.000Z';
+
+/** A fully consistent §16.3/§13.5 Seal/Delivery closure (every cross-object ref agrees). */
+function sealPublishFixture(): SealPublishFixture {
+  const artifactRef = { ...H_REF('artifact', DX(1)), mediaType: 'text/markdown' as const };
+  const sealRecordRef = H_REF('seal_record', DX(2));
+  const bundleRef = H_REF('seal_validation_bundle', DX(3));
+  const custodyRef = H_REF('artifact_custody', DX(4));
+  const deliveryRef = H_REF('system_artifact_delivery', DX(5));
+  const mapRef = H_REF('map_snapshot', DX(6));
+  const manifestRef = H_REF('content_revision_manifest', DX(7));
+  const reviewBundleRef = H_REF('review_bundle', DX(8));
+  const sealAuthorityBaseRef = H_REF('authority_base_set', DX(9));
+  const submitterAuthorityBaseRef = H_REF('authority_base_set', DX(10));
+  const submitterGrantSpecRef = H_REF('write_grant_spec', DX(11));
+
+  const mapSemanticDigest = DX(12);
+  const contentRootDigest = DX(13);
+  const assemblerDigest = DX(14);
+  const templateSnapshotHash = DX(15);
+  const artifactFile = 'chapter.md';
+  const artifactFileHash = DX(16);
+  const sealWorkItemId = 'wi-seal';
+  const submitterWorkItemId = 'wi-submitter';
+  const submitterAgentId = 'agent-submitter';
+
+  const payload: Extract<PublicationOperationPayloadV2, { family: 'seal_publish' }> = {
+    family: 'seal_publish',
+    operationId: 'op-seal-closure',
+    taskId: 'task-1',
+    artifactRef,
+    artifactFile,
+    artifactFileHash,
+    sealRecordRef,
+    sealValidationBundleRef: bundleRef,
+    deliveryRef,
+    custodyRef,
+    mapRef,
+    contentRevisionManifestRef: manifestRef,
+    reviewBundleRef,
+    sealWorkItemId,
+    sealCommandId: 'cmd-seal',
+    sealLeaseEpoch: 1,
+    sealAuthorityBaseRef,
+    submitterWorkItemId,
+    submitterAuthorityBaseRef,
+    submitterGrantSpecRef,
+    submitterLogicalAssignmentId: 'la-submitter',
+    submitterMaxAutomaticRetries: 2,
+  };
+
+  const refs = new Map<string, unknown>();
+  refs.set('allocatedArtifactVersion', 5);
+  refs.set('artifact', { artifactId: 'art-closure', mediaType: 'text/markdown', text: 'hello' });
+  refs.set('delivery', {
+    deliveryId: 'del-closure',
+    producer: 'system:structured_seal',
+    sealRecordRef,
+    sealRecordDigest: DX(2),
+    artifactId: 'art-closure',
+    artifactRef,
+    artifactDigest: DX(1),
+    custodyRef,
+    custodyDigest: DX(4),
+    submitterWorkItemId,
+    submitterAgentId,
+    templateSnapshotHash,
+  });
+  refs.set('sealRecord', {
+    taskId: 'task-1',
+    mapRef,
+    mapSemanticDigest,
+    mapReviewBundleRef: H_REF('map_review_bundle', DX(17)),
+    contentRevisionManifestRef: manifestRef,
+    contentRootDigest,
+    reviewBundleRef,
+    sealValidationBundleRef: bundleRef,
+    templateSnapshotHash,
+    assemblerDigest,
+    artifactRef,
+    artifactDigest: DX(1),
+  });
+  refs.set('sealValidationBundle', {
+    sealWorkItemId,
+    reviewBundleRef,
+    contentRevisionManifestRef: manifestRef,
+    sealInputAggregateRef: H_REF('validator_aggregate', DX(18)),
+    sealOutputAggregateRef: H_REF('validator_aggregate', DX(19)),
+    sealWarningCustodyRootRef: H_REF('validation_warning_custody_root', DX(20)),
+    assemblerDigest,
+    artifactRef,
+    artifactDigest: DX(1),
+    bundleDigest: DX(21),
+  });
+  refs.set('custody', {
+    taskId: 'task-1',
+    sealWorkItemId,
+    artifactRef,
+    sealRecordRef,
+    templateSnapshotHash,
+    files: [{ name: artifactFile, hash: artifactFileHash, byteLength: 7 }],
+    custodyDigest: DX(22),
+  });
+  refs.set('map', {
+    scaffoldId: 'sc-1',
+    mapId: 'map-1',
+    supersedesMapId: null,
+    sourceCandidateId: 'c-1',
+    proposedMapCoreRef: H_REF('proposed_map_core', DX(23)),
+    mapReviewBundleRef: H_REF('map_review_bundle', DX(17)),
+    mapRevision: 1,
+    mapSemanticDigest,
+    positionGraphDigest: DX(24),
+    relationGraphDigest: DX(25),
+    templateSnapshotHash,
+    nodes: [],
+    relations: [],
+    activatedAt: SEAL_AT,
+  });
+  refs.set('contentRevisionManifest', {
+    taskId: 'task-1',
+    mapRef,
+    mapSemanticDigest,
+    taskContentRevision: 1,
+    manifestPhase: 'finalized',
+    entries: [],
+    producerPlanSpecRef: null,
+    priorManifestRef: null,
+    finalizerValidatorAggregateRefs: [H_REF('validator_aggregate', DX(26))],
+    finalizerWarningRootRefs: [],
+    contentRootDigest,
+    manifestDigest: DX(27),
+  });
+  refs.set('reviewBundle', {
+    settlementCoreRef: H_REF('content_review_settlement_core', DX(28)),
+    mapRef,
+    contentRevisionManifestRef: manifestRef,
+    reviewWarningCustodyRootRef: H_REF('validation_warning_custody_root', DX(29)),
+    bundleDigest: DX(30),
+  });
+  refs.set('submitterGrantSpec', {
+    grantSpecId: 'grant-closure',
+    workItemId: submitterWorkItemId,
+    kind: 'review_observation',
+    snapshotHash: templateSnapshotHash,
+    authorityBaseRef: submitterAuthorityBaseRef,
+    sessionKind: null,
+    reviewAssignmentId: null,
+    roundId: null,
+    roundKind: null,
+    readScope: { maxContextBytes: 1024 },
+    specDigest: DX(31),
+  });
+  const authorityBase = (baseSetDigest: string): Record<string, unknown> => ({
+    taskId: 'task-1',
+    templateSnapshotRef: H_REF('profile_snapshot', DX(32)),
+    profileSnapshotRef: H_REF('profile_snapshot', DX(33)),
+    mapRef: null,
+    mapCandidateRef: null,
+    mapReviewBundleRef: null,
+    contentRevisionManifestRef: null,
+    planSpecRef: null,
+    stagingManifestRef: null,
+    reviewCoverageCoreRef: null,
+    reviewRoundRef: null,
+    reviewBundleRef: null,
+    sealRecordRef: null,
+    artifactRef: null,
+    findingSetRef: null,
+    artifactDeliveryRef: null,
+    displayDigests: {},
+    baseSetDigest,
+  });
+  refs.set('submitterAuthorityBase', authorityBase(DX(34)));
+  refs.set('sealAuthorityBase', authorityBase(DX(35)));
+
+  return { payload, refs };
+}
+
+describe('system_seal_publish closure validation (Task 21 P1#3)', () => {
+  const registration = resolvePublicationIntent('system_seal_publish', 1) as PublicationIntentRegistrationV2;
+
+  it('resolves the full frozen Seal/Delivery closure from the pin payload refs', () => {
+    const { payload } = sealPublishFixture();
+    const resolved = registration.resolveRefs(payload);
+    expect(resolved).toHaveLength(11);
+    const byKey = new Map(resolved.map((r) => [r.key, r.ref]));
+    expect(byKey.get('delivery')).toBe(payload.deliveryRef);
+    expect(byKey.get('artifact')).toBe(payload.artifactRef);
+    expect(byKey.get('sealRecord')).toBe(payload.sealRecordRef);
+    expect(byKey.get('sealValidationBundle')).toBe(payload.sealValidationBundleRef);
+    expect(byKey.get('custody')).toBe(payload.custodyRef);
+    expect(byKey.get('map')).toBe(payload.mapRef);
+    expect(byKey.get('contentRevisionManifest')).toBe(payload.contentRevisionManifestRef);
+    expect(byKey.get('reviewBundle')).toBe(payload.reviewBundleRef);
+    expect(byKey.get('submitterGrantSpec')).toBe(payload.submitterGrantSpecRef);
+    expect(byKey.get('submitterAuthorityBase')).toBe(payload.submitterAuthorityBaseRef);
+    expect(byKey.get('sealAuthorityBase')).toBe(payload.sealAuthorityBaseRef);
+  });
+
+  it('rebuilds the six seal events byte-identically from a consistent closure', () => {
+    const { payload, refs } = sealPublishFixture();
+    const first = registration.buildEvents(payload, SEAL_AT, refs);
+    const second = registration.buildEvents(payload, SEAL_AT, refs);
+    expect(second).toEqual(first);
+    expect(first.map((e) => e.type)).toEqual([
+      'structured_scaffold_sealed_v2',
+      'artifact_published_v2',
+      'structured_system_artifact_delivery_created',
+      'structured_work_item_created',
+      'structured_system_command_completed',
+      'structured_work_item_completed',
+    ]);
+    const published = first[1] as Extract<AuthoritativeReviewEventV2, { type: 'artifact_published_v2' }>;
+    expect(published.artifactId).toBe('art-closure');
+    expect(published.artifactVersion).toBe(5);
+    expect(published.deliveryRef).toBe(payload.deliveryRef);
+    expect(published.files).toEqual([{ name: 'chapter.md', hash: DX(16) }]);
+    const submitter = first[3] as Extract<AuthoritativeReviewEventV2, { type: 'structured_work_item_created' }>;
+    expect(submitter.workItemId).toBe('wi-submitter');
+    expect(submitter.roleBinding).toBe('agent-submitter'); // delivery.submitterAgentId
+    expect(submitter.inputArtifactDeliveryId).toBe('del-closure'); // delivery.deliveryId
+    // Determinism: stamped ids are identical across independent rebuilds.
+    const stamped = stampIds(registration, payload, first);
+    expect(stampIds(registration, payload, registration.buildEvents(payload, SEAL_AT, refs))).toEqual(stamped);
+  });
+
+  /** Fails closed with NotRebuildableError when a single ref/identity disagrees. */
+  const closureRejects = (name: string, mutate: (f: SealPublishFixture) => void): void => {
+    it(`fails closed (NotRebuildableError) when ${name}`, () => {
+      const f = sealPublishFixture();
+      mutate(f);
+      expect(() => registration.buildEvents(f.payload, SEAL_AT, f.refs)).toThrowError(NotRebuildableError);
+    });
+  };
+
+  closureRejects('the delivery.sealRecordRef disagrees with the payload sealRecordRef', (f) => {
+    f.refs.set('delivery', { ...(f.refs.get('delivery') as Record<string, unknown>), sealRecordRef: H_REF('seal_record', DX(90)) });
+  });
+  closureRejects('the delivery.artifactRef disagrees with the payload artifactRef', (f) => {
+    f.refs.set('delivery', { ...(f.refs.get('delivery') as Record<string, unknown>), artifactRef: H_REF('artifact', DX(90)) });
+  });
+  closureRejects('the delivery.custodyRef disagrees with the payload custodyRef', (f) => {
+    f.refs.set('delivery', { ...(f.refs.get('delivery') as Record<string, unknown>), custodyRef: H_REF('artifact_custody', DX(90)) });
+  });
+  closureRejects('the delivery.submitterWorkItemId disagrees with the payload submitterWorkItemId', (f) => {
+    f.refs.set('delivery', { ...(f.refs.get('delivery') as Record<string, unknown>), submitterWorkItemId: 'wi-other' });
+  });
+  closureRejects('the delivery.templateSnapshotHash disagrees with the sealRecord templateSnapshotHash', (f) => {
+    f.refs.set('delivery', { ...(f.refs.get('delivery') as Record<string, unknown>), templateSnapshotHash: DX(91) });
+  });
+  closureRejects('the sealRecord.sealValidationBundleRef disagrees with the payload sealValidationBundleRef', (f) => {
+    f.refs.set('sealRecord', { ...(f.refs.get('sealRecord') as Record<string, unknown>), sealValidationBundleRef: H_REF('seal_validation_bundle', DX(90)) });
+  });
+  closureRejects('the sealRecord.mapSemanticDigest disagrees with the resolved map mapSemanticDigest', (f) => {
+    f.refs.set('sealRecord', { ...(f.refs.get('sealRecord') as Record<string, unknown>), mapSemanticDigest: DX(92) });
+  });
+  closureRejects('the sealValidationBundle.artifactRef disagrees with the payload artifactRef', (f) => {
+    f.refs.set('sealValidationBundle', { ...(f.refs.get('sealValidationBundle') as Record<string, unknown>), artifactRef: H_REF('artifact', DX(90)) });
+  });
+  closureRejects('the sealValidationBundle carries a non-validator sealInputAggregateRef', (f) => {
+    f.refs.set('sealValidationBundle', { ...(f.refs.get('sealValidationBundle') as Record<string, unknown>), sealInputAggregateRef: H_REF('map_snapshot', DX(90)) });
+  });
+  closureRejects('the custody.files do not correspond to the payload artifactFile/artifactFileHash', (f) => {
+    f.refs.set('custody', { ...(f.refs.get('custody') as Record<string, unknown>), files: [{ name: 'chapter.md', hash: DX(93), byteLength: 7 }] });
+  });
+  closureRejects('the artifact.artifactId disagrees with the delivery.artifactId / event artifactId', (f) => {
+    f.refs.set('delivery', { ...(f.refs.get('delivery') as Record<string, unknown>), artifactId: 'art-other' });
+  });
+  closureRejects('a referenced closure blob is missing entirely', (f) => {
+    f.refs.delete('sealValidationBundle');
+  });
+  closureRejects('the submitterAuthorityBase resolves to an object of the wrong kind', (f) => {
+    f.refs.set('submitterAuthorityBase', { artifactId: 'art-x', mediaType: 'text/markdown', text: 'x' });
+  });
+  closureRejects('the submitterGrantSpec.workItemId disagrees with the payload submitterWorkItemId', (f) => {
+    f.refs.set('submitterGrantSpec', { ...(f.refs.get('submitterGrantSpec') as Record<string, unknown>), workItemId: 'wi-other' });
+  });
+  closureRejects('the submitterGrantSpec.authorityBaseRef disagrees with the payload submitterAuthorityBaseRef', (f) => {
+    f.refs.set('submitterGrantSpec', { ...(f.refs.get('submitterGrantSpec') as Record<string, unknown>), authorityBaseRef: H_REF('authority_base_set', DX(90)) });
+  });
+});
