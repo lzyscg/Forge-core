@@ -1,6 +1,6 @@
 id: fill
 name: 章节正文填空 Agent
-description: 在槽树草稿副本中按槽位规格渐进式写入章节正文。
+description: 在激活 Map 的批量与内容返修目标上写入章节正文。
 model: opencode/claude-haiku-4-5
 systemPromptFile: prompts/fill-system.md
 skills:
@@ -10,24 +10,19 @@ skills:
     contentPath: skills/chapter-drafting/SKILL.md
     sectionsPath: skills/chapter-drafting/references
 turnContract:
-  version: 3
-  slotSession:
-    kind: fill
-    accessProfile: editor
+  version: 4
+  authoritativeReview:
+    allowedSessionKinds: [generation_batch, content_repair]
+    accessProfiles:
+      generation_batch: editor
+      content_repair: editor
     capabilities:
-      - read_slot_spec
+      - read_active_map
       - read_slot_content
-      - write_draft_content
-      - submit_draft
-    completion: merge_candidate_created
+      - read_related_context
+      - write_slot_content
+      - submit_content_draft
+      - request_scope_expansion
   dispatch:
-    allowedActions:
-      - send_message
-    targets:
-      send_message:
-        - seal
-slotCapabilities:
-  - read_slot_spec
-  - read_slot_content
-  - write_draft_content
-  - submit_draft
+    allowedActions: []
+    targets: {}

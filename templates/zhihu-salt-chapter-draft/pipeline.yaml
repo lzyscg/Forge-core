@@ -1,31 +1,31 @@
+# Authoritative v2 pipeline (plan 2026-08-14 Task 25, spec §18 / design §23.3).
+# Four role bindings (orchestrator=structure, generator=fill, reviewer=review,
+# submitter=submitter); the Seal phase is a SYSTEM action — no seal Agent, no
+# Routes, and the chapter.md artifact producer is the explicit system branch
+# {system: structured_seal}. The v1 `seal` Agent / Routes / `producer: seal`
+# scalar were removed; the v2 assembler (forge-assembler/v2 builtin) and the
+# system Seal pipeline own chapter.md publication.
 productionMode: structured_slots
 agents:
   - structure
   - fill
-  - seal
+  - review
   - submitter
-routes:
-  - from: structure
-    to: fill
-    kind: message
-    label: 槽树已建立，开始填充
-  - from: fill
-    to: seal
-    kind: message
-    label: 草稿已提交，开始校验
-  - from: seal
-    to: fill
-    kind: message
-    label: 校验发现问题，定向返工
-  - from: seal
-    to: submitter
-    kind: artifact
-    label: 校验通过，交付 Markdown
+structuredReviewLifecycle:
+  protocol: authoritative_review_v1
+  roleBindings:
+    orchestrator: structure
+    generator: fill
+    reviewer: review
+    submitter: submitter
+  systemArtifactProducer: system:structured_seal
+routes: []
 artifactSchema:
   files:
     - name: chapter.md
       required: true
-      producer: seal
+      producer:
+        system: structured_seal
       extract: content
       phase: create
 finalOutput:

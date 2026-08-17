@@ -1,4 +1,4 @@
-version: 1
+version: 2
 slotTypes:
   - id: chapter
     name: 章节
@@ -127,43 +127,162 @@ layoutGrammar:
         kind: empty
 accessProfiles:
   - id: editor
-    read:
-      - targets:
-          kind: all
-        targetLevel: content
-        context:
-          level: content
-          ancestors: 1
-          descendants: 1
-          directSiblings: false
-    writeContent:
-      - targets:
-          kind: all
-    continuity:
-      precedingFilled: true
-validators:
-  - id: chapter-structure-check
-    scope: scaffold
-    trigger: seal
+    capabilities:
+      - read_structure_contract
+      - read_map_build_frontier
+      - append_map_candidate_chunk
+      - finish_map_build
+      - read_active_map
+      - read_slot_content
+      - read_related_context
+      - write_slot_content
+      - submit_content_draft
+      - read_map_repair_staging
+      - submit_map_patch
+      - write_map_patch
+      - request_scope_expansion
+  - id: reviewer
+    capabilities:
+      - read_map_candidate
+      - read_active_map
+      - read_slot_content
+      - read_relation_context
+      - submit_map_node_review
+      - submit_map_relation_review
+      - submit_slot_review
+      - submit_relation_review
+      - submit_map_whole_finding
+      - submit_whole_tree_finding
+      - submit_finding_verification
+      - complete_review_assignment
+relationTypes:
+  - id: sequence
+    direction: directed
+    fromSlotTypes: [scene_block]
+    toSlotTypes: [scene_block]
+    attributesSchema: {}
+    semanticCriterion: 较晚的场景必须在情节次序上自然承接较早的场景；倒叙需要正文明确标注。
     enforcement: blocking
+    invalidation:
+      direction: downstream
+      maxHops: 2
+  - id: state_inheritance
+    direction: directed
+    fromSlotTypes: [scene_block]
+    toSlotTypes: [scene_block, opening]
+    attributesSchema: {}
+    semanticCriterion: 人物或情绪状态必须在后续场景中保持一致，除非正文明确写出变化。
+    enforcement: blocking
+    invalidation:
+      direction: downstream
+      maxHops: 3
+  - id: information_dependency
+    direction: directed
+    fromSlotTypes: [scene_block]
+    toSlotTypes: [scene_block, emotional_closure, chapter_end]
+    attributesSchema: {}
+    semanticCriterion: 后段所引用的事实、线索或承诺必须在前段已经铺垫；不得临时引入未铺垫的信息。
+    enforcement: advisory
+    invalidation:
+      direction: downstream
+      maxHops: 2
+relationshipPolicy:
+  mode: optional
+reviewPolicy:
+  mapReview: required
+  contentSelector: content_bearing
+  mapBatchTargetSlots: 24
+  contentBatchTargetSlots: 24
+  assignmentSoftLimit: 64
+  wholeMapObservation: required
+  wholeContentTreeObservation: required
+  reviewAdvisoryRelations: true
+  maxRounds: 8
+validators:
+  - validatorId: structural-completeness
+    handlerKey: authoritative.review.completeness
+    implementationDigest: fcc008b5609f90af4af77450451f2a74e77f33efa5082cc7dd7a8eeace46041a
+    implementationRef:
+      kind: builtin
+      moduleId: '@forge/authoritative-review'
+      exportName: completeness
+    trigger: map_candidate_commit
+    executionPhase: null
     selector:
-      kind: root
-    implementation:
-      abi: forge-validator/v1
-      path: slots/validators/validate.cjs
-    budget: { cpuMs: 50, timeoutMs: 200, memoryMiB: 64 }
+      kind: all
+    enforcement: blocking
+    deterministic: true
+    inputContractVersion: 2
+    outputContractVersion: 2
+    budgetProfileId: authoritative-validator-default
+  - validatorId: content-batch-schema
+    handlerKey: authoritative.review.slotSchema
+    implementationDigest: 6882bd50c5c33d0f0e3c6f442d8a4066aa7ffa601dc68f812059b356915e0046
+    implementationRef:
+      kind: builtin
+      moduleId: '@forge/authoritative-review'
+      exportName: slotSchema
+    trigger: content_commit
+    executionPhase: batch_commit
+    selector:
+      kind: types
+      typeIds: [title, opening, scene_block, emotional_closure, chapter_end]
+    enforcement: blocking
+    deterministic: true
+    inputContractVersion: 2
+    outputContractVersion: 2
+    budgetProfileId: authoritative-validator-default
+  - validatorId: content-plan-coverage
+    handlerKey: authoritative.review.coverage
+    implementationDigest: 378849932fbd97ac19b5624d38d6bd725bbe073c64b9397910291438d17a4854
+    implementationRef:
+      kind: builtin
+      moduleId: '@forge/authoritative-review'
+      exportName: coverage
+    trigger: content_commit
+    executionPhase: plan_finalize
+    selector:
+      kind: all
+    enforcement: advisory
+    deterministic: true
+    inputContractVersion: 2
+    outputContractVersion: 2
+    budgetProfileId: authoritative-validator-default
+  - validatorId: seal-output-artifact-path
+    handlerKey: authoritative.review.artifactPath
+    implementationDigest: 64d0dc74a15fef8f930c28c1cc071b444aa1db47f3656b6db326d5374fe7d7b2
+    implementationRef:
+      kind: builtin
+      moduleId: '@forge/authoritative-review'
+      exportName: artifactPath
+    trigger: seal_output
+    executionPhase: null
+    selector:
+      kind: all
+    enforcement: blocking
+    deterministic: true
+    inputContractVersion: 2
+    outputContractVersion: 2
+    budgetProfileId: authoritative-validator-default
 assembler:
-  id: chapter-markdown
-  implementation:
-    abi: forge-assembler/v1
-    path: slots/assembler/render.cjs
-  budget: { cpuMs: 100, timeoutMs: 500, memoryMiB: 128 }
+  abi: forge-assembler/v2
+  handlerKey: builtin.zhihu_chapter_markdown.v1
+  implementationDigest: 3bd953501644e53f952c83acdfb30c3c4fd3b4a7e0b1e044449871fcc4646157
+  implementationRef:
+    kind: builtin
+    moduleId: src/server/runtime/authoritative-review/builtin-assemblers/zhihu-chapter-v1
+    exportName: assembleZhihuChapterV1
+  budget:
+    timeoutMs: 5000
+    maxInputBytes: 67108864
+    maxOutputBytes: 8388608
   routes:
-    - id: chapter-md
+    - id: chapter-markdown
       artifactFile: chapter.md
+      mediaType: text/markdown
 limits:
   schema: { maxSchemaDepth: 4, maxSchemaNodes: 1024, maxEnumItems: 64, maxPatternLength: 128 }
-  structure: { maxSlots: 2500, maxTreeDepth: 8, maxChildrenPerSlot: 250 }
+  structure: { maxSlots: 10000, maxTreeDepth: 8, maxChildrenPerSlot: 250 }
   payload: { maxSpecBytesPerSlot: 16384, maxContentBytesPerSlot: 262144, maxScaffoldPayloadBytes: 16777216 }
   draft: { maxChangedSlots: 500, maxDraftBytes: 4194304 }
   attempt:
@@ -182,3 +301,19 @@ limits:
     maxValidatorOutputBytesPerGate: 1048576
     maxIssuesPerRun: 125
   output: { maxArtifactFiles: 16, maxArtifactBytesPerFile: 4194304, maxTotalArtifactBytes: 16777216 }
+  relations:
+    maxRelationsPerMap: 2000
+    maxRelationsPerSlot: 32
+    maxRelationImpactHops: 3
+    maxRelationClosureNodes: 256
+  authoritative:
+    maxAssignmentsPerRound: 1000
+    maxPlannedWorkItemsPerRound: 4000
+    maxConsecutiveAttemptsWithoutProgress: 8
+    maxFindingsPerSlot: 16
+    maxFindingsPerRelation: 8
+    maxFindingsPerRound: 1000
+    maxEvidenceBytesPerItem: 4096
+    maxEvidenceBytesTotal: 1048576
+    maxWriteSlotsPerRepairGrant: 64
+    maxScopeExpansionsPerRound: 8

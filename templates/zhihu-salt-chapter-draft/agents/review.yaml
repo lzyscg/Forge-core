@@ -1,0 +1,36 @@
+id: review
+name: 章节审核 Agent
+description: 独立审核员，决定 Map 节点/关系与内容槽位的 verdict；不写 Map 也不写正文。
+model: opencode/claude-haiku-4-5
+systemPromptFile: prompts/review-system.md
+skills:
+  - id: chapter-drafting
+    name: 知乎盐选单章写作 Skill
+    description: 章节级的因果、人物、信息连续性和压缩复核。
+    contentPath: skills/chapter-drafting/SKILL.md
+    sectionsPath: skills/chapter-drafting/references
+turnContract:
+  version: 4
+  authoritativeReview:
+    allowedSessionKinds: [review_map_batch, review_map_whole, review_content_batch, review_content_whole]
+    accessProfiles:
+      review_map_batch: reviewer
+      review_map_whole: reviewer
+      review_content_batch: reviewer
+      review_content_whole: reviewer
+    capabilities:
+      - read_map_candidate
+      - read_active_map
+      - read_slot_content
+      - read_relation_context
+      - submit_map_node_review
+      - submit_map_relation_review
+      - submit_slot_review
+      - submit_relation_review
+      - submit_map_whole_finding
+      - submit_whole_tree_finding
+      - submit_finding_verification
+      - complete_review_assignment
+  dispatch:
+    allowedActions: []
+    targets: {}

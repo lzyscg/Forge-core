@@ -12,9 +12,13 @@ import type { StructuredSlotRuntimeContext } from '../runtime/pi-agent-runtime';
 import { CoreService } from '../core-service';
 import { makeTempCorePaths, disposeAllTestRoots } from '../test-support';
 import type { TaskEvent } from '../storage/task-events';
+import { V1_PACKAGE_FIXTURE } from './v1-compatibility-support';
 
 const repoRoot = fileURLToPath(new URL('../../..', import.meta.url));
-const templateSource = join(repoRoot, 'templates', 'zhihu-salt-chapter-draft');
+// The v1 acceptance test loads the FROZEN Task 1 archive (Task 25 migrated the
+// production source to contract v2; the historical v1 fixture remains a stable
+// regression baseline).
+const templateSource = V1_PACKAGE_FIXTURE;
 const templateId = 'zhihu-salt-chapter-draft';
 
 interface ToolStep {

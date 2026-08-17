@@ -1,6 +1,6 @@
 id: structure
 name: 章节结构编排 Agent
-description: 根据章节执行包建立合法的 chapter 槽树和每个槽的写作规格。
+description: 通过 MapBuild 块构建章节候选 Map 并在返修范围下提交 Map 补丁。
 model: opencode/claude-haiku-4-5
 systemPromptFile: prompts/structure-system.md
 skills:
@@ -10,22 +10,23 @@ skills:
     contentPath: skills/chapter-drafting/SKILL.md
     sectionsPath: skills/chapter-drafting/references
 turnContract:
-  version: 3
-  slotSession:
-    kind: structure
-    accessProfile: null
+  version: 4
+  authoritativeReview:
+    allowedSessionKinds: [structure_chunk, map_repair]
+    accessProfiles:
+      structure_chunk: editor
+      map_repair: editor
     capabilities:
       - read_structure_contract
-      - write_structure_proposal
-      - submit_structure_proposal
-    completion: structure_commit_candidate_created
+      - read_map_build_frontier
+      - append_map_candidate_chunk
+      - finish_map_build
+      - read_active_map
+      - read_slot_content
+      - read_map_repair_staging
+      - write_map_patch
+      - submit_map_patch
+      - request_scope_expansion
   dispatch:
-    allowedActions:
-      - send_message
-    targets:
-      send_message:
-        - fill
-slotCapabilities:
-  - read_structure_contract
-  - write_structure_proposal
-  - submit_structure_proposal
+    allowedActions: []
+    targets: {}
