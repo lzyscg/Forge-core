@@ -1,6 +1,7 @@
-# Forge Core 架构（当前 main，v7 + structured slots v1）
+# Forge Core 架构（当前 main，v7 + 结构槽 v1/v2）
 
-> 状态：对齐当前磁盘代码、v7 产物版本目录制和结构槽引擎 v1（`docs/2026-08-10-structured-slot-engine-spec.md`）。当前 `main` 已包含结构槽生产模板；qualification evidence 与 capability manifest 始终必须和当前源码摘要一致。
+> 状态：对齐当前磁盘代码、v7 产物版本目录制、结构槽 v1（`docs/2026-08-10-structured-slot-engine-spec.md`）与结构槽 v2 / 权威审核生命周期（`docs/superpowers/specs/2026-08-13-authoritative-per-slot-review-lifecycle-design.md` + `…-spec.md` + `…-plans/…-lifecycle.md`）。
+> **v2 已交付并 enabled**：Plan 全部 29 个任务完成（Task 21 审查后修复 → Task 22-29 实施），`authoritative_review_v1` capability `status: enabled`，profile digest 冻结。详见 [`docs/CLOSURE-AUTHORITATIVE-REVIEW-V2.md`](CLOSURE-AUTHORITATIVE-REVIEW-V2.md)。
 > 历史设计文档保留在 `docs/2026-08-0*.md`，不代表当前行为。
 
 ## 产品定位
@@ -9,9 +10,9 @@ Forge Core 是一个本地、单进程的多 Agent 内容生产平台：模板�
 
 ## 核心不变量
 
-1. **单进程单槽**：全进程同时只跑一个 Agent Turn；stop/abort 有界等待、stale 结果不提交。
-2. **v2-only runnable**：唯一可执行回合契约是 `TurnContract.version === 2`；历史 v1 快照只读、gate 为 `incompatible`（`SCHEMA_V2_REQUIRED` / `TURN_CONTRACT_REQUIRED`），可 clone 到当前模板。
-3. **append-only events**：事件只追加不覆盖，ID 由平台派生（确定性重放/恢复）。
+1. **单进程单槽**：全进程同时只跑一个 Agent Turn；stop/abort 有界等待、stale 结果不提交。v2 由 attempt-coordinator + runV2SchedulingTick 调度 lease+execute。
+2. **v2-only runnable**：唯一可执行回合契约是 `TurnContract.version === 2`；历史 v1 快照只读、gate 为 `incompatible`（`SCHEMA_V2_REQUIRED` / `TURN_CONTRACT_REQUIRED`），可 clone 到当前模板。结构槽 v2 用独立 `AuthoritativeStructuredTurnContractV4`（spec §6.4）。
+3. **append-only events**：事件只追加不覆盖，ID 由平台派生（确定性重放/恢复）。v2 事件严格遵守 `AuthoritativeReviewEventV2` 闭包 union + `task-events.ts` 不变量（`task-events.ts:normalizeLegacyEvent` 隔离 v1）。
 4. **版本单调递增**：`artifact_published` 是唯一 bump 版本的事件；annotate/forward/submit 零复制、不 bump。
 5. **final 只由系统 gate**：`final_submission_accepted` 是任务完成的唯一来源；自然语言与普通 publish 不完成。
 6. **9 动作封闭注册表**：`load_skill / finish_production(多文件) / annotate_artifact / read_artifact_version / publish_artifact / forward_input_version / submit_final_artifact / send_message / request_human_input`；模板只能做集合减法，不能注册新工具。
