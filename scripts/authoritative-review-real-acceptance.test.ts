@@ -27,6 +27,7 @@ import {
   AUTHORITATIVE_REVIEW_REAL_ACCEPTANCE_REPORT_SCHEMA,
   AUTHORITATIVE_REVIEW_REAL_ACCEPTANCE_TEMPLATE_ID,
   buildRealAcceptanceReport,
+  defaultWriteHermeticOnlyEvidence,
   parseRealAcceptanceArgs,
   runRealAcceptanceCli,
   type RealAcceptanceFacts,
@@ -36,6 +37,11 @@ import {
   AUTHORITATIVE_REVIEW_REQUIRED_ABI_IDENTITY,
   AUTHORITATIVE_REVIEW_RUNNER_IDENTITY,
 } from './authoritative-review-evidence-schema';
+import {
+  AUTHORITATIVE_REVIEW_REAL_CASE_CRITICAL_SEQUENCE,
+  AUTHORITATIVE_REVIEW_REAL_CASE_SCHEMA_VERSION,
+  validateAuthoritativeReviewRealCaseEvidence,
+} from './authoritative-review-real-case-evidence';
 
 const tempDirs: string[] = [];
 
@@ -62,6 +68,9 @@ describe('parseRealAcceptanceArgs', () => {
       dataRoot: null,
       report: null,
       verifyExisting: null,
+      fresh: false,
+      caseV1: false,
+      allowHermeticOnly: false,
     });
   });
 
@@ -75,6 +84,9 @@ describe('parseRealAcceptanceArgs', () => {
       dataRoot: null,
       report: null,
       verifyExisting: null,
+      fresh: false,
+      caseV1: false,
+      allowHermeticOnly: false,
     });
   });
 
@@ -96,6 +108,24 @@ describe('parseRealAcceptanceArgs', () => {
     expect(args?.provider).toBe('p1');
     expect(args?.writerModel).toBe('m1');
     expect(args?.reviewerModel).toBe('m2');
+  });
+
+  it('accepts --fresh, --case-v1, --allow-hermetic-only boolean flags', () => {
+    const args = parseRealAcceptanceArgs([
+      '--mode', 'real',
+      '--provider', 'p1',
+      '--writer-model', 'm1',
+      '--reviewer-model', 'm2',
+      '--input', 'input.json',
+      '--data-root', 'data',
+      '--report', 'report.json',
+      '--fresh',
+      '--case-v1',
+      '--allow-hermetic-only',
+    ]);
+    expect(args?.fresh).toBe(true);
+    expect(args?.caseV1).toBe(true);
+    expect(args?.allowHermeticOnly).toBe(true);
   });
 
   it('rejects when any flag value is empty', () => {
@@ -172,7 +202,44 @@ describe('runRealAcceptanceCli (fake / disabled / verify-existing)', () => {
     );
     expect(result.exitCode).toBe(2);
     expect(result.startedServer).toBe(false);
-    expect(result.reason).toBe('real-mode-not-implemented');
+    expect(result.reason).toBe('REAL_PROVIDER_UNAVAILABLE');
+  });
+
+  it('accepts a real mode invocation with --allow-hermetic-only when the preflight sees no provider (writes hermetic-only evidence)', async () => {
+    const root = freshRoot();
+    const reportPath = join(root, 'real-case-v1.json');
+    const result = await runRealAcceptanceCli(
+      [
+        '--mode', 'real',
+        '--provider', 'p1',
+        '--writer-model', 'm1',
+        '--reviewer-model', 'm2',
+        '--input', 'input.json',
+        '--data-root', 'data',
+        '--report', reportPath,
+        '--allow-hermetic-only',
+        '--fresh',
+        '--case-v1',
+      ],
+      {
+        repoRoot: root,
+        readCapability: () => ({
+          status: 'enabled',
+          profileDigest: 'f'.repeat(64),
+          evidenceDigest: 'e'.repeat(64),
+        }),
+        // Provide an injectable production preflight that reports no provider.
+        productionPreflight: async () => ({ passed: false, reason: 'REAL_PROVIDER_UNAVAILABLE' }),
+        // Stub the hermetic-only evidence writer so no fs walk is needed.
+        writeHermeticOnlyEvidence: async () => ({
+          exitCode: 0,
+          startedServer: false,
+          reportPath,
+        }),
+      },
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.reportPath).toBe(reportPath);
   });
 
   it('verifies an existing fake-mode report', async () => {
@@ -182,6 +249,77 @@ describe('runRealAcceptanceCli (fake / disabled / verify-existing)', () => {
     const result = await runRealAcceptanceCli(['--verify-existing', reportPath], { repoRoot: root });
     expect(result.exitCode).toBe(0);
     expect(result.reportPath).toBe(reportPath);
+  });
+
+  it('verifies a real-case evidence report (Task 29 schema)', async () => {
+    const root = freshRoot();
+    const reportPath = join(root, 'real-case.json');
+    await defaultWriteHermeticOnlyEvidence(
+      {
+        mode: 'real',
+        provider: 'p1',
+        writerModel: 'm1',
+        reviewerModel: 'm2',
+        input: 'input.json',
+        dataRoot: 'data',
+        report: reportPath,
+        verifyExisting: null,
+        fresh: true,
+        caseV1: true,
+        allowHermeticOnly: true,
+      },
+      {
+        computeSourceTreeDigest: () => 'b'.repeat(64),
+        computePackageLockDigest: () => 'c'.repeat(64),
+        computeTemplateSnapshotHash: () => 'd'.repeat(64),
+        readCapability: () => ({
+          status: 'enabled',
+          profileIdentity: 'forge-authoritative-review/v1',
+          profileDigest: 'e'.repeat(64),
+          evidenceDigest: 'f'.repeat(64),
+        }),
+      },
+    );
+    const result = await runRealAcceptanceCli(['--verify-existing', reportPath], { repoRoot: root });
+    expect(result.exitCode).toBe(0);
+    expect(result.reportPath).toBe(reportPath);
+  });
+
+  it('rejects --verify-existing against a real-case report that drifted from the schema', async () => {
+    const root = freshRoot();
+    const reportPath = join(root, 'real-case.json');
+    await defaultWriteHermeticOnlyEvidence(
+      {
+        mode: 'real',
+        provider: 'p1',
+        writerModel: 'm1',
+        reviewerModel: 'm2',
+        input: 'input.json',
+        dataRoot: 'data',
+        report: reportPath,
+        verifyExisting: null,
+        fresh: true,
+        caseV1: true,
+        allowHermeticOnly: true,
+      },
+      {
+        computeSourceTreeDigest: () => 'b'.repeat(64),
+        computePackageLockDigest: () => 'c'.repeat(64),
+        computeTemplateSnapshotHash: () => 'd'.repeat(64),
+        readCapability: () => ({
+          status: 'enabled',
+          profileIdentity: 'forge-authoritative-review/v1',
+          profileDigest: 'e'.repeat(64),
+          evidenceDigest: 'f'.repeat(64),
+        }),
+      },
+    );
+    const raw = JSON.parse(require('node:fs').readFileSync(reportPath, 'utf8')) as Record<string, unknown>;
+    raw['hermeticReason'] = null; // breaks the hermetic-only contract
+    writeFileSync(reportPath, `${JSON.stringify(raw, null, 2)}\n`, 'utf8');
+    const result = await runRealAcceptanceCli(['--verify-existing', reportPath], { repoRoot: root });
+    expect(result.exitCode).toBe(2);
+    expect(result.reason).toBe('REAL_CASE_SCHEMA_INVALID');
   });
 
   it('rejects --verify-existing against a tampered report (field drift)', async () => {
@@ -248,5 +386,105 @@ describe('capability digest fidelity', () => {
 describe('template identity is the v2 acceptance template', () => {
   it('uses the v2 acceptance template id', () => {
     expect(AUTHORITATIVE_REVIEW_REAL_ACCEPTANCE_TEMPLATE_ID).toBe('zhihu-salt-chapter-draft');
+  });
+});
+
+describe('defaultWriteHermeticOnlyEvidence', () => {
+  it('writes a hermetic-only report and self-validates the schema', async () => {
+    const reportPath = join(freshRoot(), 'real-case.json');
+    const args: import('./authoritative-review-real-acceptance').RealAcceptanceArgs = {
+      mode: 'real',
+      provider: 'p1',
+      writerModel: 'm1',
+      reviewerModel: 'm2',
+      input: 'input.json',
+      dataRoot: 'data',
+      report: reportPath,
+      verifyExisting: null,
+      fresh: true,
+      caseV1: true,
+      allowHermeticOnly: true,
+    };
+    const result = await defaultWriteHermeticOnlyEvidence(args, {
+      computeSourceTreeDigest: () => 'b'.repeat(64),
+      computePackageLockDigest: () => 'c'.repeat(64),
+      computeTemplateSnapshotHash: () => 'd'.repeat(64),
+      readCapability: () => ({
+        status: 'enabled',
+        profileIdentity: 'forge-authoritative-review/v1',
+        profileDigest: 'e'.repeat(64),
+        evidenceDigest: 'f'.repeat(64),
+      }),
+      resolvePorts: () => ({ api: 4101, ui: 5174 }),
+    });
+    expect(result.exitCode).toBe(0);
+    const report = JSON.parse(require('node:fs').readFileSync(reportPath, 'utf8')) as Record<string, unknown>;
+    expect(report['providerMode']).toBe('hermetic-only');
+    expect(report['schemaVersion']).toBe(AUTHORITATIVE_REVIEW_REAL_CASE_SCHEMA_VERSION);
+    expect(() => validateAuthoritativeReviewRealCaseEvidence(report)).not.toThrow();
+    expect(report['criticalSequence']).toEqual([...AUTHORITATIVE_REVIEW_REAL_CASE_CRITICAL_SEQUENCE]);
+  });
+
+  it('fails closed when source-tree digest cannot be computed', async () => {
+    const args: import('./authoritative-review-real-acceptance').RealAcceptanceArgs = {
+      mode: 'real',
+      provider: 'p1',
+      writerModel: 'm1',
+      reviewerModel: 'm2',
+      input: 'input.json',
+      dataRoot: 'data',
+      report: join(freshRoot(), 'real-case.json'),
+      verifyExisting: null,
+      fresh: true,
+      caseV1: true,
+      allowHermeticOnly: true,
+    };
+    const result = await defaultWriteHermeticOnlyEvidence(args, {
+      computeSourceTreeDigest: () => {
+        throw new Error('boom');
+      },
+      computePackageLockDigest: () => 'c'.repeat(64),
+      computeTemplateSnapshotHash: () => 'd'.repeat(64),
+      readCapability: () => ({
+        status: 'enabled',
+        profileIdentity: 'forge-authoritative-review/v1',
+        profileDigest: 'e'.repeat(64),
+        evidenceDigest: 'f'.repeat(64),
+      }),
+    });
+    expect(result.exitCode).toBe(2);
+    expect(result.reason).toBe('SOURCE_TREE_DIGEST_FAILED');
+  });
+
+  it('rejects a disabled capability without a non-null checkpoint digest', async () => {
+    const args: import('./authoritative-review-real-acceptance').RealAcceptanceArgs = {
+      mode: 'real',
+      provider: 'p1',
+      writerModel: 'm1',
+      reviewerModel: 'm2',
+      input: 'input.json',
+      dataRoot: 'data',
+      report: join(freshRoot(), 'real-case.json'),
+      verifyExisting: null,
+      fresh: true,
+      caseV1: true,
+      allowHermeticOnly: true,
+    };
+    const result = await defaultWriteHermeticOnlyEvidence(args, {
+      computeSourceTreeDigest: () => 'b'.repeat(64),
+      computePackageLockDigest: () => 'c'.repeat(64),
+      computeTemplateSnapshotHash: () => 'd'.repeat(64),
+      readCapability: () => ({
+        status: 'disabled',
+        profileIdentity: null,
+        profileDigest: null,
+        evidenceDigest: null,
+      }),
+    });
+    expect(result.exitCode).toBe(0);
+    const report = JSON.parse(
+      require('node:fs').readFileSync(result.reportPath!, 'utf8'),
+    ) as Record<string, unknown>;
+    expect(report['capabilityCheckpointDigest']).toBeNull();
   });
 });
