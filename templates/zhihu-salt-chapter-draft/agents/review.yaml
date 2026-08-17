@@ -1,7 +1,7 @@
 id: review
 name: 章节审核 Agent
 description: 独立审核员，决定 Map 节点/关系与内容槽位的 verdict；不写 Map 也不写正文。
-model: opencode/claude-haiku-4-5
+model: deepseek/deepseek-v4-flash
 systemPromptFile: prompts/review-system.md
 skills:
   - id: chapter-drafting

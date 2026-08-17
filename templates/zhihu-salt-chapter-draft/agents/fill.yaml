@@ -1,7 +1,7 @@
 id: fill
 name: 章节正文填空 Agent
 description: 在激活 Map 的批量与内容返修目标上写入章节正文。
-model: opencode/claude-haiku-4-5
+model: deepseek/deepseek-v4-flash
 systemPromptFile: prompts/fill-system.md
 skills:
   - id: chapter-drafting
