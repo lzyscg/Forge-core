@@ -14,12 +14,15 @@
  */
 import { test, expect } from '@playwright/test';
 import { resolve, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { dirname } from 'node:path';
 import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
 const REAL_MODE_ENABLED = process.env.FORGE_AUTHORITATIVE_REVIEW_REAL_MODE === '1';
 
-const WORKSPACE_ROOT = resolve(__dirname, '..');
+const HERE = dirname(fileURLToPath(import.meta.url));
+const WORKSPACE_ROOT = resolve(HERE, '..');
 
 test.describe('authoritative review v2 real acceptance (skeleton)', () => {
   test.skip(!REAL_MODE_ENABLED, 'Task 27 ships the fake-mode harness; real provider is Task 29');
