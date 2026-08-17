@@ -18,6 +18,9 @@
     "acceptance:recovery": "tsx scripts/real-recovery-acceptance.ts",
     "benchmark:structured-slots": "tsx scripts/benchmark-structured-slots.ts",
     "verify:structured-slots": "tsx scripts/verify-structured-slots.ts",
+    "benchmark:authoritative-review": "tsx scripts/benchmark-authoritative-review.ts",
+    "verify:authoritative-review": "tsx scripts/verify-authoritative-review.ts",
+    "acceptance:authoritative-review-real": "tsx scripts/authoritative-review-real-acceptance.ts",
     "evidence:final": "tsx scripts/write-final-evidence.ts"
   },
   "dependencies": {

@@ -1,0 +1,255 @@
+{
+  "schemaVersion": 1,
+  "mode": "integrated-qualify",
+  "runner": {
+    "runnerId": "forge-authoritative-ref-runner/v1",
+    "runnerVersion": "1.0.0",
+    "descriptorDigest": "f2cc89b4e21446330cec1c715c2e6a7f20c9cb027d8854cc128529517e7fa9fc"
+  },
+  "gitCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "sourceTreeDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "packageLockSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "dependencyVersions": {
+    "isolated-vm": "6.2.0",
+    "re2-wasm": "1.0.2",
+    "@earendil-works/pi-ai": "0.82.0"
+  },
+  "peakRssBytes": 629145600,
+  "diskBytes": 33554432,
+  "cases": [
+    {
+      "id": "author-map-chunk-1k",
+      "rawSampleDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+      "samples": 5,
+      "warmup": 1,
+      "p50Ms": 12,
+      "p95Ms": 20,
+      "maxMs": 22,
+      "postCasePeakRssBytes": 629145600
+    },
+    {
+      "id": "optional-relation-fanout",
+      "rawSampleDigest": "0101010101010101010101010101010101010101010101010101010101010101",
+      "samples": 5,
+      "warmup": 1,
+      "p50Ms": 12,
+      "p95Ms": 20,
+      "maxMs": 22,
+      "postCasePeakRssBytes": 629145600
+    },
+    {
+      "id": "map-review-24",
+      "rawSampleDigest": "0202020202020202020202020202020202020202020202020202020202020202",
+      "samples": 5,
+      "warmup": 1,
+      "p50Ms": 12,
+      "p95Ms": 20,
+      "maxMs": 22,
+      "postCasePeakRssBytes": 629145600
+    },
+    {
+      "id": "content-generation-10k",
+      "rawSampleDigest": "0303030303030303030303030303030303030303030303030303030303030303",
+      "samples": 5,
+      "warmup": 1,
+      "p50Ms": 12,
+      "p95Ms": 20,
+      "maxMs": 22,
+      "postCasePeakRssBytes": 629145600
+    },
+    {
+      "id": "review-ledger-10k",
+      "rawSampleDigest": "0404040404040404040404040404040404040404040404040404040404040404",
+      "samples": 5,
+      "warmup": 1,
+      "p50Ms": 12,
+      "p95Ms": 20,
+      "maxMs": 22,
+      "postCasePeakRssBytes": 629145600
+    },
+    {
+      "id": "map-migration-10k",
+      "rawSampleDigest": "0505050505050505050505050505050505050505050505050505050505050505",
+      "samples": 5,
+      "warmup": 1,
+      "p50Ms": 12,
+      "p95Ms": 20,
+      "maxMs": 22,
+      "postCasePeakRssBytes": 629145600
+    },
+    {
+      "id": "restart-replay-10k",
+      "rawSampleDigest": "0606060606060606060606060606060606060606060606060606060606060606",
+      "samples": 5,
+      "warmup": 1,
+      "p50Ms": 12,
+      "p95Ms": 20,
+      "maxMs": 22,
+      "postCasePeakRssBytes": 629145600
+    },
+    {
+      "id": "locate-beyond-9k",
+      "rawSampleDigest": "0707070707070707070707070707070707070707070707070707070707070707",
+      "samples": 5,
+      "warmup": 1,
+      "p50Ms": 12,
+      "p95Ms": 20,
+      "maxMs": 22,
+      "postCasePeakRssBytes": 629145600
+    },
+    {
+      "id": "publication-pin-gc",
+      "rawSampleDigest": "0808080808080808080808080808080808080808080808080808080808080808",
+      "samples": 5,
+      "warmup": 1,
+      "p50Ms": 12,
+      "p95Ms": 20,
+      "maxMs": 22,
+      "postCasePeakRssBytes": 629145600
+    },
+    {
+      "id": "event-count-headroom",
+      "rawSampleDigest": "0909090909090909090909090909090909090909090909090909090909090909",
+      "samples": 5,
+      "warmup": 1,
+      "p50Ms": 12,
+      "p95Ms": 20,
+      "maxMs": 22,
+      "postCasePeakRssBytes": 629145600
+    }
+  ],
+  "candidatePercentage": 100,
+  "selectionReason": "greatest passing scale 100%",
+  "finalProfileDigest": "f4685a55db5fe2351f020f3f62cd3d8517fbabe73c3862dfb4b739ea39b9cc65",
+  "finalProfileQualificationState": "final",
+  "finalProfileMaxSlots": 10000,
+  "finalProfileAssignmentPrimaryTargets": 256,
+  "finalProfileAssignmentTotalObjects": 1024,
+  "bounds": {
+    "authorMapChunkP95Ms": 60,
+    "mapBuildCandidateP95Ms": 1500,
+    "mapReviewAssignmentP95Ms": 1800,
+    "contentGenerationP95Ms": 1500,
+    "contentReviewSettlementP95Ms": 1500,
+    "mapMigrationP95Ms": 2500,
+    "checkpointReplayP95Ms": 1500,
+    "locateBeyond9kP95Ms": 250,
+    "publicationPinGcP95Ms": 1000,
+    "peakRssBytes": 805306368,
+    "pageLatencyP95Ms": 250,
+    "appendLatencyP95Ms": 25,
+    "recoveryTimeP95Ms": 30000,
+    "eventCountHeadroom": 999999
+  },
+  "perScaleResults": [
+    {
+      "scale": 100,
+      "results": [
+        {
+          "id": "author-map-chunk-1k",
+          "rawSampleDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+          "samples": 5,
+          "warmup": 1,
+          "p50Ms": 12,
+          "p95Ms": 20,
+          "maxMs": 22,
+          "postCasePeakRssBytes": 629145600
+        },
+        {
+          "id": "optional-relation-fanout",
+          "rawSampleDigest": "0101010101010101010101010101010101010101010101010101010101010101",
+          "samples": 5,
+          "warmup": 1,
+          "p50Ms": 12,
+          "p95Ms": 20,
+          "maxMs": 22,
+          "postCasePeakRssBytes": 629145600
+        },
+        {
+          "id": "map-review-24",
+          "rawSampleDigest": "0202020202020202020202020202020202020202020202020202020202020202",
+          "samples": 5,
+          "warmup": 1,
+          "p50Ms": 12,
+          "p95Ms": 20,
+          "maxMs": 22,
+          "postCasePeakRssBytes": 629145600
+        },
+        {
+          "id": "content-generation-10k",
+          "rawSampleDigest": "0303030303030303030303030303030303030303030303030303030303030303",
+          "samples": 5,
+          "warmup": 1,
+          "p50Ms": 12,
+          "p95Ms": 20,
+          "maxMs": 22,
+          "postCasePeakRssBytes": 629145600
+        },
+        {
+          "id": "review-ledger-10k",
+          "rawSampleDigest": "0404040404040404040404040404040404040404040404040404040404040404",
+          "samples": 5,
+          "warmup": 1,
+          "p50Ms": 12,
+          "p95Ms": 20,
+          "maxMs": 22,
+          "postCasePeakRssBytes": 629145600
+        },
+        {
+          "id": "map-migration-10k",
+          "rawSampleDigest": "0505050505050505050505050505050505050505050505050505050505050505",
+          "samples": 5,
+          "warmup": 1,
+          "p50Ms": 12,
+          "p95Ms": 20,
+          "maxMs": 22,
+          "postCasePeakRssBytes": 629145600
+        },
+        {
+          "id": "restart-replay-10k",
+          "rawSampleDigest": "0606060606060606060606060606060606060606060606060606060606060606",
+          "samples": 5,
+          "warmup": 1,
+          "p50Ms": 12,
+          "p95Ms": 20,
+          "maxMs": 22,
+          "postCasePeakRssBytes": 629145600
+        },
+        {
+          "id": "locate-beyond-9k",
+          "rawSampleDigest": "0707070707070707070707070707070707070707070707070707070707070707",
+          "samples": 5,
+          "warmup": 1,
+          "p50Ms": 12,
+          "p95Ms": 20,
+          "maxMs": 22,
+          "postCasePeakRssBytes": 629145600
+        },
+        {
+          "id": "publication-pin-gc",
+          "rawSampleDigest": "0808080808080808080808080808080808080808080808080808080808080808",
+          "samples": 5,
+          "warmup": 1,
+          "p50Ms": 12,
+          "p95Ms": 20,
+          "maxMs": 22,
+          "postCasePeakRssBytes": 629145600
+        },
+        {
+          "id": "event-count-headroom",
+          "rawSampleDigest": "0909090909090909090909090909090909090909090909090909090909090909",
+          "samples": 5,
+          "warmup": 1,
+          "p50Ms": 12,
+          "p95Ms": 20,
+          "maxMs": 22,
+          "postCasePeakRssBytes": 629145600
+        }
+      ],
+      "peakRssBytes": 629145600,
+      "diskBytes": 33554432,
+      "violations": [],
+      "passed": true
+    }
+  ]
+}

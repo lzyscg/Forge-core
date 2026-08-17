@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "profileIdentity": "forge-authoritative-review/v1",
   "profileVersion": 3,
-  "qualificationState": "provisional",
-  "profileDigest": "fde5a5e561a183dac3cbe6113319cead78be9adb0f6a4d801163952e59167bed",
+  "qualificationState": "final",
+  "profileDigest": "f4685a55db5fe2351f020f3f62cd3d8517fbabe73c3862dfb4b739ea39b9cc65",
   "abi": {
     "validatorAbi": "forge-validator/v2",
     "assemblerAbi": "forge-assembler/v2",

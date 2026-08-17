@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "gate": "verify:authoritative-review",
+  "mode": "qualify",
+  "checkpointCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "sourceTreeDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "packageLockSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "finalProfilePath": "src/server/structured-slots/authoritative-review-profile-v1.json",
+  "finalProfileDigest": "f4685a55db5fe2351f020f3f62cd3d8517fbabe73c3862dfb4b739ea39b9cc65",
+  "platformEvidencePath": "docs/evidence/authoritative-review-platform-profile-v1.json",
+  "platformEvidenceDigest": "f4e69a9e37dfbbb142e1726e4723cb915e3e90d6ee77693fe0aadc5b152c0735",
+  "requiredAbis": [
+    "forge-validator/v2",
+    "forge-assembler/v2"
+  ],
+  "piPreflightCharacterization": "forge-authoritative-review-pi-preflight/v1",
+  "gates": [
+    {
+      "id": "typecheck",
+      "label": "typecheck",
+      "command": "typecheck",
+      "exitCode": 0
+    },
+    {
+      "id": "unit-tests",
+      "label": "unit-tests",
+      "command": "unit-tests",
+      "exitCode": 0
+    },
+    {
+      "id": "build",
+      "label": "build",
+      "command": "build",
+      "exitCode": 0
+    },
+    {
+      "id": "e2e",
+      "label": "e2e",
+      "command": "e2e",
+      "exitCode": 0
+    },
+    {
+      "id": "authoritative-acceptance",
+      "label": "authoritative-acceptance",
+      "command": "authoritative-acceptance",
+      "exitCode": 0
+    },
+    {
+      "id": "authoritative-acceptance-injected",
+      "label": "authoritative-acceptance-injected",
+      "command": "authoritative-acceptance-injected",
+      "exitCode": 0
+    },
+    {
+      "id": "authoritative-pi-preflight",
+      "label": "authoritative-pi-preflight",
+      "command": "authoritative-pi-preflight",
+      "exitCode": 0
+    }
+  ],
+  "generatedOutputs": [
+    "docs/evidence/authoritative-review-platform-profile-v1.json",
+    "docs/evidence/authoritative-review-release-v1.json",
+    "src/server/structured-slots/authoritative-review-capability-v1.json",
+    "src/server/structured-slots/authoritative-review-profile-v1.json"
+  ],
+  "observedAt": "2026-01-01T00:00:00.000Z"
+}

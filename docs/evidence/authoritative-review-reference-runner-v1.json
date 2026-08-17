@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "runnerId": "forge-authoritative-ref-runner/v1",
+  "runnerVersion": "1.0.0",
+  "descriptor": {
+    "node": "v22.22.3",
+    "v8": "12.4.254.21-node.56",
+    "platform": "darwin",
+    "arch": "arm64",
+    "cpuModel": "Apple M4",
+    "logicalCores": 10,
+    "totalMemoryMiB": 16384
+  },
+  "descriptorDigest": "f2cc89b4e21446330cec1c715c2e6a7f20c9cb027d8854cc128529517e7fa9fc"
+}
