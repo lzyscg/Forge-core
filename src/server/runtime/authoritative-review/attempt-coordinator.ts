@@ -57,6 +57,7 @@ import type { V2SessionOutcome } from './assignment-runner';
 import type { V2AssignmentRunner } from './assignment-runner';
 import { SystemCommandRegistry, type SystemCommandOutcome } from './system-command-registry';
 import { RuntimeAbortedError } from '../agent-runtime';
+import type { FinalSubmissionSeamV2 } from './system-artifact-delivery';
 
 /** Stable coordinator error codes re-exported for the attempt surface. */
 export type AttemptErrorCodeV2 =
@@ -225,6 +226,15 @@ export interface V2AttemptCoordinatorDependencies {
   attemptTimeoutMs?: number;
   /** Terminal-failure envelope seam (defaults to the lifecycle's terminalFailWorkItem). */
   terminalFail?(taskId: string, input: TerminalFailInputV2): Promise<void>;
+  /**
+   * Task 22 final-submission seam (spec §13.5, design §16.3): the delivery-bound
+   * validator that proves a generic Submitter's committed turn is the exact
+   * current SystemArtifactDelivery BEFORE the atomic final batch. Wired by the
+   * production composition; ABSENT, a generic committed outcome is a
+   * configuration error and FAILS LOUD (never a bare completion without a
+   * reachability proof).
+   */
+  finalSubmission?: FinalSubmissionSeamV2;
   log?(line: string): void;
 }
 
@@ -527,7 +537,12 @@ export class V2AttemptCoordinator {
     let committed: V2AttemptOutcome;
     switch (outcome.kind) {
       case 'committed':
-        committed = await this.completeWorkItem(taskId, workItemId, { attemptId }, outcome.resultRefs);
+        // Task 22: a generic Submitter's committed turn routes through the
+        // delivery-bound final-submission path (reachability first, then the
+        // atomic final batch). Structured sessions keep the §9.2 completion.
+        committed = ctx.executionKind === 'generic'
+          ? await this.finalizeGenericSubmission(taskId, workItemId, attemptId, outcome, ctx)
+          : await this.completeWorkItem(taskId, workItemId, { attemptId }, outcome.resultRefs);
         break;
       case 'retryable_failure':
         committed = await this.recordRetryable(taskId, workItemId, { attemptId }, outcome.failureCode, ctx);
@@ -548,9 +563,65 @@ export class V2AttemptCoordinator {
     // result, concurrent reclaim) propagates as a throw before this line, so
     // the trace channel honors the same all-or-nothing rule as the events.
     if (committed.kind !== 'aborted') {
-      await this.recordPublicTrace(taskId, workItemId, attemptId, outcome);
+      // A COMMITTED outcome that was then REJECTED at the delivery reachability
+      // gate must not surface as a committed trace — record a failed turn
+      // instead. Runner-returned failures keep their own outcome message.
+      const traceOutcome: V2SessionOutcome =
+        committed.kind === 'terminal_failed' && outcome.kind === 'committed'
+          ? { kind: 'terminal_failure', failureCode: committed.failureCode, message: `v2 提交被拒绝（${committed.failureCode}）。` }
+          : outcome;
+      await this.recordPublicTrace(taskId, workItemId, attemptId, traceOutcome);
     }
     return committed;
+  }
+
+  /* ---------------- generic final submission (Task 22) ---------------- */
+
+  /**
+   * The generic Submitter's FINAL submission (spec §13.5 / §9.2 atomic
+   * boundary "final submission plus generic attempt and WorkItem completion"):
+   * FIRST prove the delivery-bound reachability of the exact current
+   * SystemArtifactDelivery (seal WorkItem completed, SealRecord/artifact/
+   * custody/template closure, submitter identity), THEN commit the ONE atomic
+   * batch [delivery-bound generic attempt completed, work_item_completed].
+   * An unreachable submission is REJECTED as a terminal failure with a stable
+   * `FINAL_SUBMIT_UNREACHABLE:<reason>` code and NO partial write — the final
+   * commit never lands. There is no human-authorization bypass (the validator
+   * has none) and no v1 Agent Route walk.
+   */
+  private async finalizeGenericSubmission(
+    taskId: string,
+    workItemId: string,
+    attemptId: string,
+    outcome: V2SessionOutcome & { kind: 'committed' },
+    ctx: V2AttemptContext,
+  ): Promise<V2AttemptOutcome> {
+    if (this.deps.finalSubmission === undefined) {
+      // Fail-closed configuration invariant: no reachability proof installed
+      // means a generic committed outcome can never be proven delivery-bound.
+      throw new AttemptError(
+        'INVALID_INPUT',
+        `generic submission of '${workItemId}' requires the delivery validator seam (Task 22)`,
+      );
+    }
+    const reachability = await this.deps.finalSubmission.validateFinalSubmission({
+      taskId,
+      deliveryId: ctx.inputArtifactDeliveryId,
+      workItemId,
+      agentId: ctx.agentId,
+    });
+    if (!reachability.reachable) {
+      const failureCode = `FINAL_SUBMIT_UNREACHABLE:${reachability.reason}`;
+      return this.terminalFail(
+        taskId,
+        workItemId,
+        { attemptId },
+        failureCode,
+        attemptFailureDigest(workItemId, attemptId, failureCode, ctx.leaseEpoch),
+        false,
+      );
+    }
+    return this.completeWorkItem(taskId, workItemId, { attemptId }, outcome.resultRefs);
   }
 
   /* ---------------- terminal commits ---------------- */

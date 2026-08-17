@@ -1,4 +1,4 @@
-import type { ArtifactFile, ArtifactVersion, TaskWorkspace } from '../../shared/contracts';
+import type { ArtifactFile, ArtifactVersion, ArtifactVersionV2, BlobRefV2, TaskWorkspace } from '../../shared/contracts';
 
 export interface ArtifactDrawerProps {
   workspace: TaskWorkspace;
@@ -20,6 +20,61 @@ function extractLabel(extract: string): string {
   if (extract === 'review') return '审核意见';
   if (extract === 'revision') return '修订说明';
   return extract;
+}
+
+/** True only for a System-Seal-published artifact (spec §13.5.1). */
+function isSystemArtifact(artifact: ArtifactVersion): artifact is ArtifactVersionV2 {
+  return artifact.protocolVersion === 2;
+}
+
+/** Compact display alias of a content-addressed ref (display-only). */
+function refLabel(ref: BlobRefV2): string {
+  return `${ref.kind}@${ref.digest.slice(0, 12)}…`;
+}
+
+/**
+ * System provenance of a v2 system artifact (design §16.3): the producing
+ * System Seal WorkItem, SealRecord, artifact/custody refs, template snapshot
+ * and delivery. There is deliberately NO source-node link — the system Seal has
+ * no source node, and the UI never infers a `sourceNodeId` for a v2 artifact.
+ */
+function SystemArtifactProvenance({ artifact }: { artifact: ArtifactVersionV2 }) {
+  return (
+    <section
+      className="fc-artifact-system-provenance"
+      data-testid="system-artifact-provenance"
+      aria-label="系统产物来源"
+    >
+      <h4 className="fc-artifact-system-provenance__title">系统产物来源</h4>
+      <dl className="fc-artifact-system-provenance__rows">
+        <div className="fc-artifact-system-provenance__row">
+          <dt>生产者 WorkItem</dt>
+          <dd>{artifact.producerWorkItemId}</dd>
+        </div>
+        <div className="fc-artifact-system-provenance__row">
+          <dt>SealRecord</dt>
+          <dd>{refLabel(artifact.sealRecordRef)}</dd>
+        </div>
+        <div className="fc-artifact-system-provenance__row">
+          <dt>产物 ref</dt>
+          <dd>{refLabel(artifact.artifactRef)}</dd>
+        </div>
+        <div className="fc-artifact-system-provenance__row">
+          <dt>custody ref</dt>
+          <dd>{refLabel(artifact.custodyRef)}</dd>
+        </div>
+        <div className="fc-artifact-system-provenance__row">
+          <dt>templateSnapshotHash</dt>
+          <dd>{artifact.templateSnapshotHash.slice(0, 12)}…</dd>
+        </div>
+        <div className="fc-artifact-system-provenance__row">
+          <dt>deliveryRef</dt>
+          <dd>{refLabel(artifact.deliveryRef)}</dd>
+        </div>
+      </dl>
+      <p className="fc-artifact-system-provenance__note">系统 Seal 产物：无源节点定位。</p>
+    </section>
+  );
 }
 
 /**
@@ -102,6 +157,7 @@ export function ArtifactDrawer({
           <ol className="fc-version-chain">
             {artifacts.map((artifact) => {
               const isCurrent = selected !== null && selected.id === artifact.id;
+              const isSystem = isSystemArtifact(artifact);
               return (
                 <li
                   key={artifact.id}
@@ -111,14 +167,26 @@ export function ArtifactDrawer({
                   }
                   aria-current={isCurrent ? 'true' : undefined}
                 >
-                  <button
-                    type="button"
-                    className="fc-version-item__button"
-                    onClick={() => onLocateArtifact(artifact)}
-                  >
-                    V{artifact.version}
-                  </button>
+                  {isSystem ? (
+                    // System-Seal artifacts have no source node: render an inert
+                    // label, never a locate button and never a fake node link.
+                    <span
+                      className="fc-version-item__button fc-version-item__button--system"
+                      aria-label={`V${artifact.version} 系统产物`}
+                    >
+                      V{artifact.version}
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="fc-version-item__button"
+                      onClick={() => onLocateArtifact(artifact)}
+                    >
+                      V{artifact.version}
+                    </button>
+                  )}
                   {artifact.final ? <span className="fc-version-item__final">终稿</span> : null}
+                  {isSystem ? <span className="fc-version-item__system">系统</span> : null}
                 </li>
               );
             })}
@@ -126,6 +194,7 @@ export function ArtifactDrawer({
           {selected !== null ? (
             <div className="fc-artifact-preview-wrap">
               <h3 className="fc-artifact-title">{selected.title}</h3>
+              {isSystemArtifact(selected) ? <SystemArtifactProvenance artifact={selected} /> : null}
               {selected.files.map((file) => (
                 <FileSlot key={file.name} file={file} />
               ))}

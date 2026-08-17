@@ -92,6 +92,7 @@ import { createMigrationValidationBatchSystemCommandHandler, createMigrationRevi
 import { createContentReviewSettlementSystemCommandHandler } from './content-review-service';
 import { createMapReviewSettlementSystemCommandHandler } from './map-review-service';
 import { attemptContinuationOperationId } from './attempt-coordinator';
+import { SystemArtifactDeliveryValidatorV2 } from './system-artifact-delivery';
 
 /** The stable rejection code the seal output blocking path returns. */
 export const SEAL_OUTPUT_BLOCKING_FAILURE_CODE = 'ARTIFACT_VALIDATION_FAILED';
@@ -661,6 +662,14 @@ export function installAuthoritativeReviewRuntime(
     wakeups: input.wakeups,
     traces: input.traces,
     terminalFail: input.terminalFail,
+    // Task 22: the production final-submission validator. The FROZEN profile's
+    // snapshotHash is the template-snapshot identity (spec §4.1 — never the
+    // catalog); the resolver fails closed on any unresolvable blob.
+    finalSubmission: new SystemArtifactDeliveryValidatorV2({
+      readProjection: input.readProjection,
+      resolveBlob: input.resolver,
+      frozenTemplateHash: async (taskId) => (await input.frozenProfile(taskId)).snapshotHash,
+    }),
     clock: input.clock,
   });
 

@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import type { ComponentProps } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { workspaceWithReturnLoop } from '../test-support';
+import type { ArtifactVersionV2, BlobRefV2, TaskWorkspace } from '../../shared/contracts';
 import { ArtifactDrawer } from './artifact-drawer';
 
 function renderDrawer(props: Partial<ComponentProps<typeof ArtifactDrawer>> = {}) {
@@ -15,6 +16,36 @@ function renderDrawer(props: Partial<ComponentProps<typeof ArtifactDrawer>> = {}
       {...props}
     />,
   );
+}
+
+function ref(seed: string): BlobRefV2 {
+  return {
+    kind: 'seal_record',
+    digest: seed.repeat(8).slice(0, 64),
+    byteLength: 12,
+    mediaType: 'application/json',
+    schemaVersion: 1,
+  };
+}
+
+/** A v2 system artifact with full provenance refs and NO sourceNodeId. */
+function systemArtifact(overrides: Partial<ArtifactVersionV2> = {}): ArtifactVersionV2 {
+  return {
+    protocolVersion: 2,
+    id: 'sys-artifact-1',
+    version: 3,
+    title: '系统密封产物',
+    files: [{ name: 'chapter.md', extract: 'content', content: '第一章 系统密封正文' }],
+    createdAt: '2026-08-14T10:00:00.000Z',
+    final: true,
+    producerWorkItemId: 'wi-seal-1',
+    sealRecordRef: ref('a'),
+    artifactRef: ref('b'),
+    custodyRef: ref('c'),
+    templateSnapshotHash: 'f'.repeat(64),
+    deliveryRef: ref('d'),
+    ...overrides,
+  };
 }
 
 describe('ArtifactDrawer', () => {
@@ -174,5 +205,62 @@ describe('ArtifactDrawer', () => {
     renderDrawer({ onClose });
     await userEvent.click(screen.getByRole('button', { name: '关闭产物抽屉' }));
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders system provenance for a v2 system artifact with NO fake node link', () => {
+    const ws = workspaceWithReturnLoop();
+    const system = systemArtifact();
+    renderDrawer({
+      selectedVersion: 3,
+      workspace: { ...ws, artifacts: [system] },
+    });
+
+    // The system provenance block is rendered with the producer WorkItem,
+    // SealRecord, artifact/custody refs, template snapshot and delivery ref.
+    const provenance = screen.getByTestId('system-artifact-provenance');
+    expect(provenance.textContent).toContain('系统产物来源');
+    expect(provenance.textContent).toContain('wi-seal-1');
+    expect(provenance.textContent).toContain('seal_record@');
+    expect(provenance.textContent).toContain('templateSnapshotHash');
+    expect(provenance.textContent).toContain('deliveryRef');
+    // No fake source-node "定位节点" affordance and no sourceNodeId inference.
+    expect(screen.queryByRole('button', { name: /定位/ })).toBeNull();
+    expect(provenance.textContent).not.toContain('sourceNodeId');
+    expect(provenance.textContent).toContain('无源节点');
+  });
+
+  it('does NOT locate a v2 system artifact (no interactable version button)', async () => {
+    const onLocateArtifact = vi.fn();
+    const ws = workspaceWithReturnLoop();
+    const system = systemArtifact();
+    renderDrawer({
+      selectedVersion: 3,
+      onLocateArtifact,
+      workspace: { ...ws, artifacts: [system] },
+    });
+
+    // The system version renders as a non-interactive label, not a button.
+    const versionLabel = screen.getByText('V3');
+    expect(versionLabel.tagName).toBe('SPAN');
+    expect(screen.queryByRole('button', { name: 'V3' })).toBeNull();
+    await userEvent.click(versionLabel);
+    expect(onLocateArtifact).not.toHaveBeenCalled();
+  });
+
+  it('keeps the v1 locate-on-click behavior for agent artifacts when a system artifact is present', async () => {
+    const onLocateArtifact = vi.fn();
+    const ws = workspaceWithReturnLoop();
+    const v1 = ws.artifacts[0]!;
+    renderDrawer({
+      selectedVersion: 3,
+      onLocateArtifact,
+      workspace: { ...ws, artifacts: [v1, systemArtifact()] },
+    });
+
+    // V1 is still a button that locates; the system version is inert.
+    await userEvent.click(screen.getByRole('button', { name: 'V1' }));
+    expect(onLocateArtifact).toHaveBeenCalledTimes(1);
+    expect(onLocateArtifact.mock.calls[0]?.[0]).toMatchObject({ id: v1.id });
+    expect(screen.queryByRole('button', { name: 'V3' })).toBeNull();
   });
 });
