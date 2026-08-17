@@ -27,6 +27,8 @@
  */
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import { loadTemplateDirectory } from './template-loader';
 import { createTestRuntimeEnvironment } from '../structured-slots/runtime-capability';
@@ -473,11 +475,35 @@ describe('zhihu-salt-chapter-draft v2 hermetic lifecycle acceptance (Task 25)', 
     const { createProductionAuthoritativeReviewEnvironment } = await import(
       '../structured-slots/authoritative-review-capability'
     );
+    const tempDir = (prefix: string): string => mkdtempSync(join(tmpdir(), prefix));
+    const writeJson = (path: string, value: unknown): void => {
+      writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+    };
+    const tempCapability = join(tempDir('forge-ar-cap-disabled-'), 'capability-v1.json');
+    writeJson(tempCapability, {
+      version: 1,
+      status: 'disabled',
+      profileIdentity: null,
+      profileDigest: null,
+      evidenceDigest: null,
+      requiredAbis: ['forge-validator/v2', 'forge-assembler/v2'],
+    });
     await expect(
       loadTemplateDirectory(templateRoot, {
         runtimeEnvironment: createTestRuntimeEnvironment(),
-        authoritativeReviewEnvironment: createProductionAuthoritativeReviewEnvironment(),
+        authoritativeReviewEnvironment: createProductionAuthoritativeReviewEnvironment(tempCapability),
       }),
     ).rejects.toMatchObject({ code: 'TEMPLATE_RUNTIME_UNAVAILABLE' });
+  });
+
+  it('the production capability loads the v2 contract after Task 28 promotion', async () => {
+    const { createProductionAuthoritativeReviewEnvironment } = await import(
+      '../structured-slots/authoritative-review-capability'
+    );
+    const loaded = await loadTemplateDirectory(templateRoot, {
+      runtimeEnvironment: createTestRuntimeEnvironment(),
+      authoritativeReviewEnvironment: createProductionAuthoritativeReviewEnvironment(),
+    });
+    expect(loaded.structuredSlots?.version).toBe(2);
   });
 });

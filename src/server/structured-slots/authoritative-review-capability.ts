@@ -424,7 +424,7 @@ export function createProductionAuthoritativeReviewEnvironment(
   if (capability.profileDigest !== profileCanonicalDigest(profile)) {
     invalid('capability.profileDigest does not match the checked-in profile file');
   }
-  const evidenceFile = files.evidenceFile ?? authoritativeReviewEvidencePath('authoritative-review-v1.json');
+  const evidenceFile = files.evidenceFile ?? authoritativeReviewEvidencePath('authoritative-review-release-v1.json');
   let evidence: unknown;
   try {
     evidence = JSON.parse(readFileSync(evidenceFile, 'utf8')) as unknown;

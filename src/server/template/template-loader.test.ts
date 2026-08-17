@@ -1192,10 +1192,23 @@ describe('authoritative (v2) template loading (Task 5)', () => {
   it('refuses a v2 source while the authoritative capability is disabled (production env)', async () => {
     const root = makeTempDir('forge-core-v2disabled-');
     copyFixture(V2_FIXTURE, 'authoritative-valid', root);
+    const disabledCapabilityPath = join(root, 'disabled-capability-v1.json');
+    writeFileSync(
+      disabledCapabilityPath,
+      `${JSON.stringify({
+        version: 1,
+        status: 'disabled',
+        profileIdentity: null,
+        profileDigest: null,
+        evidenceDigest: null,
+        requiredAbis: ['forge-validator/v2', 'forge-assembler/v2'],
+      }, null, 2)}\n`,
+      'utf8',
+    );
     await expect(
       loadTemplateDirectory(join(root, 'authoritative-valid'), {
         runtimeEnvironment: createTestRuntimeEnvironment(),
-        authoritativeReviewEnvironment: createProductionAuthoritativeReviewEnvironment(),
+        authoritativeReviewEnvironment: createProductionAuthoritativeReviewEnvironment(disabledCapabilityPath),
       }),
     ).rejects.toMatchObject({ code: 'TEMPLATE_RUNTIME_UNAVAILABLE' });
   });
@@ -1406,10 +1419,23 @@ describe('authoritative (v2) template loading (Task 5)', () => {
   it('the disabled production capability still prevents v2 use after the rotation', async () => {
     const root = makeTempDir('forge-core-v2disabledpost-');
     copyFixture(V2_FIXTURE, 'authoritative-valid', root);
+    const disabledCapabilityPath = join(root, 'disabled-capability-v1.json');
+    writeFileSync(
+      disabledCapabilityPath,
+      `${JSON.stringify({
+        version: 1,
+        status: 'disabled',
+        profileIdentity: null,
+        profileDigest: null,
+        evidenceDigest: null,
+        requiredAbis: ['forge-validator/v2', 'forge-assembler/v2'],
+      }, null, 2)}\n`,
+      'utf8',
+    );
     await expect(
       loadTemplateDirectory(join(root, 'authoritative-valid'), {
         runtimeEnvironment: createTestRuntimeEnvironment(),
-        authoritativeReviewEnvironment: createProductionAuthoritativeReviewEnvironment(),
+        authoritativeReviewEnvironment: createProductionAuthoritativeReviewEnvironment(disabledCapabilityPath),
       }),
     ).rejects.toMatchObject({ code: 'TEMPLATE_RUNTIME_UNAVAILABLE' });
   });
@@ -1466,9 +1492,22 @@ describe('authoritative (v2) template loading (Task 5)', () => {
     // the catalog version is the 12-char display prefix of the full hash
     expect(detail?.version).toBe(cachedHash?.slice(0, 12));
     // Disabled production env: source load gates, prior cache pointer survives.
+    const disabledCapabilityPath = join(paths.dataRoot, 'disabled-capability-v1.json');
+    writeFileSync(
+      disabledCapabilityPath,
+      `${JSON.stringify({
+        version: 1,
+        status: 'disabled',
+        profileIdentity: null,
+        profileDigest: null,
+        evidenceDigest: null,
+        requiredAbis: ['forge-validator/v2', 'forge-assembler/v2'],
+      }, null, 2)}\n`,
+      'utf8',
+    );
     const disabledCatalog = new TemplateCatalog(paths, {
       runtimeEnvironment: createTestRuntimeEnvironment(),
-      authoritativeReviewEnvironment: createProductionAuthoritativeReviewEnvironment(),
+      authoritativeReviewEnvironment: createProductionAuthoritativeReviewEnvironment(disabledCapabilityPath),
     });
     await disabledCatalog.initialize();
     expect(disabledCatalog.get('authoritative-valid')).toBeUndefined();

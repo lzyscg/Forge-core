@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { cpSync, mkdtempSync } from 'node:fs';
+import { cpSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -72,14 +72,34 @@ describe('ForgeCoreServer', () => {
     await expect(fetch(`${baseUrl}/api/health`)).rejects.toThrow();
   });
 
-  it('boots with the disabled authoritative production capability and gates v2 templates (Task 5)', async () => {
+  it('boots with an explicitly disabled authoritative production capability and gates v2 templates (Task 5 regression)', async () => {
     const { paths, templateRoot } = makeTempCorePaths('forge-core-http-auth-');
     cpSync(
       fileURLToPath(new URL('template/__fixtures__/authoritative-valid', import.meta.url)),
       join(templateRoot, 'authoritative-valid'),
       { recursive: true },
     );
-    const coreService = new CoreService(paths);
+    // Write a synthetic disabled capability file so the production loader
+    // rejects the v2 source (the checked-in capability is enabled after
+    // Task 28 promotion).
+    const disabledCapabilityPath = join(paths.dataRoot, 'disabled-capability-v1.json');
+    writeFileSync(
+      disabledCapabilityPath,
+      `${JSON.stringify({
+        version: 1,
+        status: 'disabled',
+        profileIdentity: null,
+        profileDigest: null,
+        evidenceDigest: null,
+        requiredAbis: ['forge-validator/v2', 'forge-assembler/v2'],
+      }, null, 2)}\n`,
+      'utf8',
+    );
+    const { createProductionAuthoritativeReviewEnvironment } = await import(
+      './structured-slots/authoritative-review-capability'
+    );
+    const disabledEnv = createProductionAuthoritativeReviewEnvironment(disabledCapabilityPath);
+    const coreService = new CoreService(paths, { authoritativeReviewEnvironment: disabledEnv });
     await coreService.initialize();
     const server = await createForgeCoreServer({
       mode: 'test',
@@ -89,8 +109,6 @@ describe('ForgeCoreServer', () => {
     });
     const baseUrl = await server.listen(0);
     try {
-      // The production authoritative env loads (disabled) and the server is
-      // healthy; the contract-v2 source is never exposed while disabled.
       expect(await (await fetch(`${baseUrl}/api/health`)).json()).toEqual({
         ok: true,
         service: 'forge-core',

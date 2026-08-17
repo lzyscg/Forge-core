@@ -139,16 +139,10 @@ describe('runtime environment construction (fail closed)', () => {
 });
 
 describe('production manifest loading (spec §17)', () => {
-  it('loads the checked-in DISABLED manifest into a null-profile environment', () => {
-    const env = createProductionAuthoritativeReviewEnvironment();
-    expect(env.capability.status).toBe('disabled');
-    expect(env.profile).toBeNull();
-    expect(isAuthoritativeReviewRunnable(env)).toBe(false);
-  });
-
-  it('the checked-in manifest file matches the brief JSON exactly', () => {
-    const raw = JSON.parse(readFileSync(authoritativeReviewCapabilityManifestPath(), 'utf8')) as Record<string, unknown>;
-    expect(raw).toEqual({
+  it('loads a DISABLED manifest (written into a temp file) into a null-profile environment', () => {
+    const dir = tempDir('forge-core-auth-manifest-disabled-');
+    const disabledCapabilityPath = join(dir, 'disabled-capability-v1.json');
+    writeJson(disabledCapabilityPath, {
       version: 1,
       status: 'disabled',
       profileIdentity: null,
@@ -156,12 +150,33 @@ describe('production manifest loading (spec §17)', () => {
       evidenceDigest: null,
       requiredAbis: ['forge-validator/v2', 'forge-assembler/v2'],
     });
+    const env = createProductionAuthoritativeReviewEnvironment(disabledCapabilityPath);
+    expect(env.capability.status).toBe('disabled');
+    expect(env.profile).toBeNull();
+    expect(isAuthoritativeReviewRunnable(env)).toBe(false);
+  });
+
+  it('the checked-in capability file name matches the production manifest file name', () => {
     expect(AUTHORITATIVE_REVIEW_CAPABILITY_FILE_NAME).toBe('authoritative-review-capability-v1.json');
+  });
+
+  it('loads the ENABLED checked-in manifest after Task 28 promotion', () => {
+    const env = createProductionAuthoritativeReviewEnvironment();
+    expect(env.capability.status).toBe('enabled');
+    expect(env.profile?.qualificationState).toBe('final');
+    expect(isAuthoritativeReviewRunnable(env)).toBe(true);
   });
 
   it('rejects an enabled manifest whose profile is only test_only (missing final evidence)', () => {
     const dir = tempDir('forge-core-auth-manifest-');
-    const files: ProductionAuthoritativeReviewFiles = { manifestFile: join(dir, 'manifest.json') };
+    const profile = createAuthoritativeReviewTestEnvironment()
+      .profile as AuthoritativeReviewProfileSnapshotV1Body;
+    const testOnlyProfileFile = join(dir, 'profile.json');
+    writeJson(testOnlyProfileFile, profile);
+    const files: ProductionAuthoritativeReviewFiles = {
+      manifestFile: join(dir, 'manifest.json'),
+      profileFile: testOnlyProfileFile,
+    };
     writeJson(files.manifestFile as string, testEnabledManifest());
     expect(() => createProductionAuthoritativeReviewEnvironment(files)).toThrow('final');
   });
@@ -262,10 +277,20 @@ describe('production manifest loading (spec §17)', () => {
   it('never reads an environment variable to bypass production loading', () => {
     process.env.FORGE_CORE_AUTHORITATIVE_REVIEW_MANIFEST = '/definitely/not/read.json';
     try {
-      const env = createProductionAuthoritativeReviewEnvironment();
+      const dir = tempDir('forge-core-auth-manifest-disabled-');
+      const disabledCapabilityPath = join(dir, 'disabled-capability-v1.json');
+      writeJson(disabledCapabilityPath, {
+        version: 1,
+        status: 'disabled',
+        profileIdentity: null,
+        profileDigest: null,
+        evidenceDigest: null,
+        requiredAbis: ['forge-validator/v2', 'forge-assembler/v2'],
+      });
+      const env = createProductionAuthoritativeReviewEnvironment(disabledCapabilityPath);
       expect(env.capability.status).toBe('disabled');
       delete process.env.FORGE_CORE_AUTHORITATIVE_REVIEW_MANIFEST;
-      expect(createProductionAuthoritativeReviewEnvironment().capability.status).toBe('disabled');
+      expect(createProductionAuthoritativeReviewEnvironment(disabledCapabilityPath).capability.status).toBe('disabled');
     } finally {
       delete process.env.FORGE_CORE_AUTHORITATIVE_REVIEW_MANIFEST;
     }

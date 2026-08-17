@@ -251,16 +251,13 @@ describe('profile file loading and placeholder identities', () => {
     expect(testProfileBody().abi.profileAbi).toBe('forge-authoritative-review/v1');
   });
 
-  it('the checked-in profile file matches the canonical test profile body', async () => {
-    // Production manifest loading rejects the checked-in provisional profile,
-    // but the file must be a byte-identical canonical copy of the injected
-    // test environment profile so tests and production share one shape.
+  it('the checked-in profile file is the production final profile after Task 28 promotion', async () => {
     const { loadAuthoritativeReviewProfileFile } = await import('./authoritative-review-profile');
     const { authoritativeReviewProfileFilePath } = await import('./authoritative-review-capability');
     const fromFile = loadAuthoritativeReviewProfileFile(authoritativeReviewProfileFilePath());
     expect(fromFile.profileIdentity).toBe(AUTHORITATIVE_REVIEW_PROFILE_IDENTITY);
-    expect(profileSnapshotRefOf(fromFile)).toEqual(profileSnapshotRefOf(testProfileBody()));
-    expect(profileCanonicalDigest(fromFile)).toBe(profileCanonicalDigest(testProfileBody()));
+    expect(fromFile.qualificationState).toBe('final');
+    expect(profileCanonicalDigest(fromFile)).not.toBe(profileCanonicalDigest(testProfileBody()));
   });
 
   it('the PRIOR test-only profile is a distinct archived revision, not the checked-in file', () => {
@@ -280,12 +277,12 @@ describe('profile file loading and placeholder identities', () => {
   });
 });
 
-describe('the checked-in v2 profile file is not a production profile', () => {
-  it('the checked-in file carries qualificationState provisional and is rejected by production validation', async () => {
+describe('the checked-in v2 profile file is now a production profile after Task 28 promotion', () => {
+  it('the checked-in file carries qualificationState final and passes production validation', async () => {
     const { loadAuthoritativeReviewProfileFile } = await import('./authoritative-review-profile');
     const { authoritativeReviewProfileFilePath } = await import('./authoritative-review-capability');
     const fromFile = loadAuthoritativeReviewProfileFile(authoritativeReviewProfileFilePath());
-    expect(fromFile.qualificationState).toBe('provisional');
-    expect(() => validateProductionAuthoritativeReviewProfile(fromFile)).toThrow('final');
+    expect(fromFile.qualificationState).toBe('final');
+    expect(() => validateProductionAuthoritativeReviewProfile(fromFile)).not.toThrow();
   });
 });

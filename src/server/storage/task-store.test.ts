@@ -878,8 +878,25 @@ describe('TaskStore archived-profile binding (constraint B): A → B → disable
     });
     expect(eligibility).toMatchObject({ state: 'blocked', reason: 'profile_digest_mismatch' });
 
-    // Reopen under the DISABLED production environment: reads stay available.
-    const disabledEnv = createProductionAuthoritativeReviewEnvironment();
+    // Reopen under a DISABLED production environment: reads stay available.
+    const disabledCapabilityPath = join(paths.dataRoot, 'disabled-capability-v1.json');
+    writeFileSync(
+      disabledCapabilityPath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          status: 'disabled',
+          profileIdentity: null,
+          profileDigest: null,
+          evidenceDigest: null,
+          requiredAbis: ['forge-validator/v2', 'forge-assembler/v2'],
+        },
+        null,
+        2,
+      )}\n`,
+      'utf8',
+    );
+    const disabledEnv = createProductionAuthoritativeReviewEnvironment(disabledCapabilityPath);
     const reopenedDisabled = await v2Installation({ shared: { paths }, authoritativeReviewEnvironment: disabledEnv });
     const frozenDisabled = await reopenedDisabled.taskStore.readFrozenTemplate(created.id);
     expect(frozenDisabled.versionHash).toBe(record.templateVersion);
