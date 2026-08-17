@@ -2,13 +2,13 @@
   "schemaVersion": 1,
   "gate": "verify:authoritative-review",
   "mode": "qualify",
-  "checkpointCommit": "723b4efa9ed43cde399e616b7148de8342f4838d",
-  "sourceTreeDigest": "78d77c385f40f7039986896e788d21bec395db523bcdb60c080dd640ea121a8f",
+  "checkpointCommit": "f8c49ce69ef5961f1a5fd3d20e89590254ad3b50",
+  "sourceTreeDigest": "1cbd28928b9a0fe685823ce79554caed554d88220255dfab3af753a6aa13586b",
   "packageLockSha256": "4b3e0b43052fffaa169e2dc624e87f970d9f8d91d8b0061951f4e2208f3d8914",
   "finalProfilePath": "src/server/structured-slots/authoritative-review-profile-v1.json",
   "finalProfileDigest": "f4685a55db5fe2351f020f3f62cd3d8517fbabe73c3862dfb4b739ea39b9cc65",
   "platformEvidencePath": "docs/evidence/authoritative-review-platform-profile-v1.json",
-  "platformEvidenceDigest": "a5d62bb7f8b8570cb82ab464bf448b5ee31e044a980b75edbf97856116b0bbb6",
+  "platformEvidenceDigest": "6f82d4b09f5e1ece1e0aeb8d9a08801bb4e91f82f47ab85d2954e4dec48304b5",
   "requiredAbis": [
     "forge-validator/v2",
     "forge-assembler/v2"
@@ -64,5 +64,5 @@
     "src/server/structured-slots/authoritative-review-capability-v1.json",
     "src/server/structured-slots/authoritative-review-profile-v1.json"
   ],
-  "observedAt": "2026-08-17T10:11:44.027Z"
+  "observedAt": "2026-08-17T11:46:25.785Z"
 }

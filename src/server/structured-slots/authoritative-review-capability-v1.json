@@ -3,7 +3,7 @@
   "status": "enabled",
   "profileIdentity": "forge-authoritative-review/v1",
   "profileDigest": "f4685a55db5fe2351f020f3f62cd3d8517fbabe73c3862dfb4b739ea39b9cc65",
-  "evidenceDigest": "c31f952016f1c600e73cf2d4cd489340fd3fe22921ee772bbda1cedaaaee4fbe",
+  "evidenceDigest": "4f29935217a9dc38902e9a35a3cf4438bc0cbfcc5c18b7f1f89624fc2d81c36d",
   "requiredAbis": [
     "forge-validator/v2",
     "forge-assembler/v2"
