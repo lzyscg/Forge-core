@@ -16,6 +16,7 @@ import type { PublicCoreError } from '../../shared/errors';
 import type { CoreService } from '../core-service';
 import { CorePathError } from '../storage/core-paths';
 import { artifactRoutes } from './artifact-routes';
+import { authoritativeReviewRoutes } from './authoritative-review-routes';
 import { structuredSlotRoutes } from './structured-slot-routes';
 import { taskRoutes } from './task-routes';
 import { templateRoutes } from './template-routes';
@@ -95,6 +96,8 @@ export const STATUS_BY_CODE: Readonly<Record<string, number>> = {
   INTERNAL_ERROR: 500,
   /* Task 11 v2 lifecycle codes (spec §10.3.1/§10.5/§10.6/§14.3). */
   AUTHORITATIVE_REVIEW_UNAVAILABLE: 503,
+  /* Task 23 v2 read codes (spec §14.2): cursor issues map to a stable 409. */
+  CURSOR_STALE: 409,
   USE_RESUME: 409,
   AUTHORITY_BASE_STALE: 409,
   HUMAN_QUESTION_STALE: 409,
@@ -308,7 +311,16 @@ export function createApiRouter(service: CoreService): ApiRouter {
     HEALTH_ROUTE,
     ...templateRoutes(),
     ...taskRoutes(),
+    ...templateRoutes(),
+    ...taskRoutes(),
     ...artifactRoutes(),
+    // v2 authoritative review routes registered BEFORE the v1 structured-slot
+    // routes: the `/structured-slots/tree` path is shared, and the v2 tree
+    // handler dispatches by frozen task protocol (v2 -> v2 parent pages,
+    // v1/basic -> delegates to the v1 outline). Registering first lets it own
+    // that shared path; every other v2 path (map, review/*, locate) has no v1
+    // meaning and rejects non-v2 tasks with AUTHORITATIVE_REVIEW_UNAVAILABLE.
+    ...authoritativeReviewRoutes(),
     ...structuredSlotRoutes(),
   ];
 

@@ -593,6 +593,80 @@ export function createMockGateway(
       throw structuredNotActive(location);
     },
 
+    /* ---------- authoritative per-slot review v2 read API (mock is basic-only) ---------- */
+
+    async getAuthoritativeMap(taskId: string): Promise<never> {
+      const location = 'MockGateway.getAuthoritativeMap';
+      requireRecord(taskId, location);
+      throw structuredNotActive(location);
+    },
+
+    async getAuthoritativeCandidate(taskId: string): Promise<never> {
+      const location = 'MockGateway.getAuthoritativeCandidate';
+      requireRecord(taskId, location);
+      throw structuredNotActive(location);
+    },
+
+    async listAuthoritativeTree(taskId: string): Promise<never> {
+      const location = 'MockGateway.listAuthoritativeTree';
+      requireRecord(taskId, location);
+      throw structuredNotActive(location);
+    },
+
+    async locateAuthoritativeSlot(taskId: string): Promise<never> {
+      const location = 'MockGateway.locateAuthoritativeSlot';
+      requireRecord(taskId, location);
+      throw structuredNotActive(location);
+    },
+
+    async listAuthoritativeMapRounds(taskId: string): Promise<never> {
+      const location = 'MockGateway.listAuthoritativeMapRounds';
+      requireRecord(taskId, location);
+      throw structuredNotActive(location);
+    },
+
+    async getAuthoritativeReviewSummary(taskId: string): Promise<never> {
+      const location = 'MockGateway.getAuthoritativeReviewSummary';
+      requireRecord(taskId, location);
+      throw structuredNotActive(location);
+    },
+
+    async listAuthoritativeRounds(taskId: string): Promise<never> {
+      const location = 'MockGateway.listAuthoritativeRounds';
+      requireRecord(taskId, location);
+      throw structuredNotActive(location);
+    },
+
+    async getAuthoritativeSlotReview(taskId: string): Promise<never> {
+      const location = 'MockGateway.getAuthoritativeSlotReview';
+      requireRecord(taskId, location);
+      throw structuredNotActive(location);
+    },
+
+    async getAuthoritativeRelationReview(taskId: string): Promise<never> {
+      const location = 'MockGateway.getAuthoritativeRelationReview';
+      requireRecord(taskId, location);
+      throw structuredNotActive(location);
+    },
+
+    async listAuthoritativeFindings(taskId: string): Promise<never> {
+      const location = 'MockGateway.listAuthoritativeFindings';
+      requireRecord(taskId, location);
+      throw structuredNotActive(location);
+    },
+
+    async getAuthoritativeSealReadiness(taskId: string): Promise<never> {
+      const location = 'MockGateway.getAuthoritativeSealReadiness';
+      requireRecord(taskId, location);
+      throw structuredNotActive(location);
+    },
+
+    async listAuthoritativeIssues(taskId: string): Promise<never> {
+      const location = 'MockGateway.listAuthoritativeIssues';
+      requireRecord(taskId, location);
+      throw structuredNotActive(location);
+    },
+
     /* ------------------------- DevelopmentGateway ------------------------ */
 
     async getCapabilities(): Promise<CapabilityEvidence[]> {

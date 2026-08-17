@@ -741,6 +741,147 @@ export const authoritativeSealReadinessSummaryV2Schema = Type.Object(
   { additionalProperties: false },
 );
 
+/* ------------------- §14.1 tree/locate/map/candidate/slot/relation/seal detail schemas ------------------- */
+
+const slotReviewStateV2Schema = Type.Object(
+  {
+    mapPreReview: Type.Union([Type.Literal('pending'), Type.Literal('pass'), Type.Literal('reject')]),
+    content: Type.Union([Type.Literal('pending'), Type.Literal('pass'), Type.Literal('reject'), Type.Literal('stale')]),
+  },
+  { additionalProperties: false },
+);
+
+/** One child row of a non-recursive tree parent page (spec §14.2). */
+export const authoritativeTreeEntryV2Schema = Type.Object(
+  {
+    slotId: Type.String({ minLength: 1 }),
+    slotType: Type.String({ minLength: 1 }),
+    documentOrder: Type.Integer({ minimum: 0 }),
+    siblingOrder: Type.Integer({ minimum: 0 }),
+    contentBearing: Type.Boolean(),
+    childCount: Type.Integer({ minimum: 0 }),
+    review: slotReviewStateV2Schema,
+  },
+  { additionalProperties: false },
+);
+
+export const authoritativeTreePageV2Schema = Type.Object(
+  {
+    parentId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
+    hasMoreChildren: Type.Boolean(),
+    items: Type.Array(authoritativeTreeEntryV2Schema),
+    nextCursor: Type.Union([snapshotCursorV2Schema, Type.Null()]),
+  },
+  { additionalProperties: false },
+);
+
+export const authoritativeLocateAncestorV2Schema = Type.Object(
+  {
+    slotId: Type.String({ minLength: 1 }),
+    seekCursor: snapshotCursorV2Schema,
+  },
+  { additionalProperties: false },
+);
+
+export const authoritativeLocateResultV2Schema = Type.Object(
+  {
+    target: authoritativeTreeEntryV2Schema,
+    ancestors: Type.Array(authoritativeLocateAncestorV2Schema),
+  },
+  { additionalProperties: false },
+);
+
+export const authoritativeMapDetailV2Schema = Type.Object(
+  {
+    // Empty id/revision/digest represent the no-active-Map state; refs are null.
+    mapId: Type.String(),
+    mapRevision: Type.Integer({ minimum: 0 }),
+    mapSemanticDigest: sha256HexSchema,
+    supersedesMapId: Type.Union([Type.String(), Type.Null()]),
+    mapSnapshotRef: Type.Union([blobRefV2Schema, Type.Null()]),
+    mapReviewBundleRef: Type.Union([blobRefV2Schema, Type.Null()]),
+    candidateRef: Type.Union([blobRefV2Schema, Type.Null()]),
+    rootSlotId: Type.Union([Type.String(), Type.Null()]),
+    nodeCount: Type.Integer({ minimum: 0 }),
+    relationCount: Type.Integer({ minimum: 0 }),
+    relation: authoritativeRelationSummaryV2Schema,
+  },
+  { additionalProperties: false },
+);
+
+export const authoritativeCandidateDetailV2Schema = Type.Object(
+  {
+    candidateId: Type.Union([Type.String(), Type.Null()]),
+    candidateRef: Type.Union([blobRefV2Schema, Type.Null()]),
+    baseMapId: Type.Union([Type.String(), Type.Null()]),
+    buildId: Type.Union([Type.String(), Type.Null()]),
+    nodeCount: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()]),
+    relationCount: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()]),
+  },
+  { additionalProperties: false },
+);
+
+export const authoritativeSlotReviewDetailV2Schema = Type.Object(
+  {
+    slotId: Type.String({ minLength: 1 }),
+    slotType: Type.String({ minLength: 1 }),
+    parentSlotId: Type.Union([Type.String(), Type.Null()]),
+    documentOrder: Type.Integer({ minimum: 0 }),
+    siblingOrder: Type.Integer({ minimum: 0 }),
+    contentBearing: Type.Boolean(),
+    review: slotReviewStateV2Schema,
+    openBlockingFindingIds: Type.Array(Type.String({ minLength: 1 })),
+  },
+  { additionalProperties: false },
+);
+
+export const authoritativeRelationReviewDetailV2Schema = Type.Object(
+  {
+    relationId: Type.String({ minLength: 1 }),
+    typeId: Type.String({ minLength: 1 }),
+    fromSlotId: Type.String({ minLength: 1 }),
+    toSlotId: Type.String({ minLength: 1 }),
+    review: Type.Union([
+      Type.Literal('pending'),
+      Type.Literal('satisfied'),
+      Type.Literal('violated'),
+      Type.Literal('stale'),
+    ]),
+    openBlockingFindingIds: Type.Array(Type.String({ minLength: 1 })),
+  },
+  { additionalProperties: false },
+);
+
+export const authoritativeSealReadinessConditionV2Schema = Type.Object(
+  {
+    code: Type.String({ minLength: 1 }),
+    detail: Type.String({ minLength: 1 }),
+    satisfied: Type.Boolean(),
+  },
+  { additionalProperties: false },
+);
+
+export const authoritativeSealReadinessDetailV2Schema = Type.Object(
+  {
+    readiness: Type.Union([Type.Literal('ready'), Type.Literal('not_ready')]),
+    unmetConditionCount: Type.Integer({ minimum: 0 }),
+    sealed: Type.Boolean(),
+    sealRecordRef: Type.Union([blobRefV2Schema, Type.Null()]),
+    conditions: Type.Array(authoritativeSealReadinessConditionV2Schema),
+  },
+  { additionalProperties: false },
+);
+
+/** Map review rounds collection page (review/map-rounds). */
+export const authoritativeMapRoundCollectionPageV2Schema = collectionPageV2Schema(
+  authoritativeReviewRoundSummaryV2Schema,
+);
+
+/** All review rounds collection page (review/rounds). */
+export const authoritativeReviewRoundCollectionPageV2Schema = collectionPageV2Schema(
+  authoritativeReviewRoundSummaryV2Schema,
+);
+
 /** Immutable v2 SealRecord identity (design §16.3). */
 export const sealRecordV2Schema = Type.Object(
   {

@@ -35,9 +35,35 @@ import type {
   TurnTrace,
 } from '../../shared/contracts';
 import type { StructuredSlotTreeCursorV1 } from '../../shared/structured-slots';
-import type { DeleteTaskBodyV2, ReopenFailedRequestV2 } from '../../shared/authoritative-review-v2';
+import type {
+  AuthoritativeCandidateDetailV2,
+  AuthoritativeFindingSummaryV2,
+  AuthoritativeLocateResultV2,
+  AuthoritativeMapDetailV2,
+  AuthoritativeRelationReviewDetailV2,
+  AuthoritativeReviewRoundSummaryV2,
+  AuthoritativeReviewSummaryV2,
+  AuthoritativeSealReadinessDetailV2,
+  AuthoritativeSlotReviewDetailV2,
+  AuthoritativeTreePageV2,
+  CollectionPageV2,
+  DeleteTaskBodyV2,
+  ReopenFailedRequestV2,
+  SnapshotCursorV2,
+} from '../../shared/authoritative-review-v2';
 import type { PublicCoreError } from '../../shared/errors';
 import {
+  authoritativeCandidateDetailV2Schema,
+  authoritativeFindingCollectionPageV2Schema,
+  authoritativeLocateResultV2Schema,
+  authoritativeMapDetailV2Schema,
+  authoritativeMapRoundCollectionPageV2Schema,
+  authoritativeRelationReviewDetailV2Schema,
+  authoritativeReviewRoundCollectionPageV2Schema,
+  authoritativeReviewSummaryV2Schema,
+  authoritativeSealReadinessDetailV2Schema,
+  authoritativeSlotReviewDetailV2Schema,
+  authoritativeTreePageV2Schema,
   errorBodySchema,
   skillContentSchema,
   structuredIssuePageSchema,
@@ -431,7 +457,104 @@ export function createHttpGateway(options: HttpGatewayOptions = {}): ForgeCoreGa
         `/api/tasks/${encodeURIComponent(taskId)}/structured-slots/seal`,
       );
     },
+
+    /* -------- authoritative per-slot review v2 read API (spec §14.1) -------- */
+
+    async getAuthoritativeMap(taskId: string): Promise<AuthoritativeMapDetailV2> {
+      return getDecoded<AuthoritativeMapDetailV2>(authoritativeMapDetailV2Schema, `/api/tasks/${encodeURIComponent(taskId)}/structured-slots/map`);
+    },
+
+    async getAuthoritativeCandidate(taskId: string): Promise<AuthoritativeCandidateDetailV2> {
+      return getDecoded<AuthoritativeCandidateDetailV2>(authoritativeCandidateDetailV2Schema, `/api/tasks/${encodeURIComponent(taskId)}/structured-slots/map/candidate`);
+    },
+
+    async listAuthoritativeTree(taskId: string, parentId: string | null, limit: number, after: SnapshotCursorV2 | null): Promise<AuthoritativeTreePageV2> {
+      return getDecoded<AuthoritativeTreePageV2>(
+        authoritativeTreePageV2Schema,
+        v2PageUrl(taskId, 'tree', limit, after, parentId),
+      );
+    },
+
+    async locateAuthoritativeSlot(taskId: string, slotId: string, snapshotCursor?: SnapshotCursorV2 | null): Promise<AuthoritativeLocateResultV2> {
+      return getDecoded<AuthoritativeLocateResultV2>(
+        authoritativeLocateResultV2Schema,
+        v2DetailCursorUrl(taskId, `tree/locate/${encodeURIComponent(slotId)}`, snapshotCursor),
+      );
+    },
+
+    async listAuthoritativeMapRounds(taskId: string, limit: number, after: SnapshotCursorV2 | null): Promise<CollectionPageV2<AuthoritativeReviewRoundSummaryV2>> {
+      return getDecoded<CollectionPageV2<AuthoritativeReviewRoundSummaryV2>>(
+        authoritativeMapRoundCollectionPageV2Schema,
+        v2PageUrl(taskId, 'review/map-rounds', limit, after, null),
+      );
+    },
+
+    async getAuthoritativeReviewSummary(taskId: string): Promise<AuthoritativeReviewSummaryV2> {
+      return getDecoded<AuthoritativeReviewSummaryV2>(authoritativeReviewSummaryV2Schema, `/api/tasks/${encodeURIComponent(taskId)}/structured-slots/review/summary`);
+    },
+
+    async listAuthoritativeRounds(taskId: string, limit: number, after: SnapshotCursorV2 | null): Promise<CollectionPageV2<AuthoritativeReviewRoundSummaryV2>> {
+      return getDecoded<CollectionPageV2<AuthoritativeReviewRoundSummaryV2>>(
+        authoritativeReviewRoundCollectionPageV2Schema,
+        v2PageUrl(taskId, 'review/rounds', limit, after, null),
+      );
+    },
+
+    async getAuthoritativeSlotReview(taskId: string, slotId: string, snapshotCursor?: SnapshotCursorV2 | null): Promise<AuthoritativeSlotReviewDetailV2> {
+      return getDecoded<AuthoritativeSlotReviewDetailV2>(
+        authoritativeSlotReviewDetailV2Schema,
+        v2DetailCursorUrl(taskId, `review/slots/${encodeURIComponent(slotId)}`, snapshotCursor),
+      );
+    },
+
+    async getAuthoritativeRelationReview(taskId: string, relationId: string, snapshotCursor?: SnapshotCursorV2 | null): Promise<AuthoritativeRelationReviewDetailV2> {
+      return getDecoded<AuthoritativeRelationReviewDetailV2>(
+        authoritativeRelationReviewDetailV2Schema,
+        v2DetailCursorUrl(taskId, `review/relations/${encodeURIComponent(relationId)}`, snapshotCursor),
+      );
+    },
+
+    async listAuthoritativeFindings(taskId: string, limit: number, after: SnapshotCursorV2 | null): Promise<CollectionPageV2<AuthoritativeFindingSummaryV2>> {
+      return getDecoded<CollectionPageV2<AuthoritativeFindingSummaryV2>>(
+        authoritativeFindingCollectionPageV2Schema,
+        v2PageUrl(taskId, 'review/findings', limit, after, null),
+      );
+    },
+
+    async getAuthoritativeSealReadiness(taskId: string): Promise<AuthoritativeSealReadinessDetailV2> {
+      return getDecoded<AuthoritativeSealReadinessDetailV2>(authoritativeSealReadinessDetailV2Schema, `/api/tasks/${encodeURIComponent(taskId)}/structured-slots/review/seal-readiness`);
+    },
+
+    async listAuthoritativeIssues(taskId: string): Promise<import('../../shared/structured-slots').StructuredIssueV1[]> {
+      const payload = (await request(`/api/tasks/${encodeURIComponent(taskId)}/structured-slots/issues`, 'GET')) as { issues?: unknown };
+      if (Value.Check(structuredIssuePageSchema, { issues: payload.issues, nextCursor: null })) {
+        return (payload.issues as import('../../shared/structured-slots').StructuredIssueV1[]);
+      }
+      throw new HttpCoreError('INTERNAL_ERROR', '本地后端返回的数据不符合契约。', null, '稍后重试。');
+    },
   };
+}
+
+/** Builds a cursor-paginated v2 read URL (spec §14.2 `limit=&after=`). */
+function v2PageUrl(
+  taskId: string,
+  resource: string,
+  limit: number,
+  after: SnapshotCursorV2 | null,
+  parentId: string | null,
+): string {
+  const params = new URLSearchParams();
+  params.set('limit', String(limit));
+  if (parentId !== null) params.set('parentId', parentId);
+  if (after !== null) params.set('after', JSON.stringify(after));
+  return `/api/tasks/${encodeURIComponent(taskId)}/structured-slots/${resource}?${params.toString()}`;
+}
+
+/** Builds a v2 detail URL carrying an optional snapshotCursor on later reads. */
+function v2DetailCursorUrl(taskId: string, resource: string, snapshotCursor: SnapshotCursorV2 | null | undefined): string {
+  const base = `/api/tasks/${encodeURIComponent(taskId)}/structured-slots/${resource}`;
+  if (snapshotCursor == null) return base;
+  return `${base}?snapshotCursor=${encodeURIComponent(JSON.stringify(snapshotCursor))}`;
 }
 
 /** Builds the paged structured URL: `/.../tree|issues?cursor=&limit=`. */

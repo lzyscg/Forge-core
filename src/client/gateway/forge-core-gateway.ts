@@ -12,8 +12,23 @@ import type {
   TemplateSummary,
   TurnTrace,
 } from '../../shared/contracts';
-import type { StructuredSlotTreeCursorV1 } from '../../shared/structured-slots';
-import type { DeleteTaskBodyV2, ReopenFailedRequestV2 } from '../../shared/authoritative-review-v2';
+import type { StructuredSlotTreeCursorV1, StructuredIssueV1 } from '../../shared/structured-slots';
+import type {
+  AuthoritativeCandidateDetailV2,
+  AuthoritativeFindingSummaryV2,
+  AuthoritativeLocateResultV2,
+  AuthoritativeMapDetailV2,
+  AuthoritativeRelationReviewDetailV2,
+  AuthoritativeReviewRoundSummaryV2,
+  AuthoritativeReviewSummaryV2,
+  AuthoritativeSealReadinessDetailV2,
+  AuthoritativeSlotReviewDetailV2,
+  AuthoritativeTreePageV2,
+  CollectionPageV2,
+  DeleteTaskBodyV2,
+  ReopenFailedRequestV2,
+  SnapshotCursorV2,
+} from '../../shared/authoritative-review-v2';
 
 /**
  * 正式页面唯一的生产数据接口。页面不得直接访问 localStorage、
@@ -108,4 +123,31 @@ export interface ForgeCoreGateway {
   ): Promise<StructuredIssuePageV1>;
   /** The immutable SealRecord of the sealed scaffold (design §17.2). */
   getStructuredSeal(taskId: string): Promise<SealRecord>;
+
+  /* -------- authoritative per-slot review v2 read API (spec §14.1) -------- */
+
+  /** V2 public Map detail (spec §14.1 map). */
+  getAuthoritativeMap(taskId: string): Promise<AuthoritativeMapDetailV2>;
+  /** V2 Map candidate detail (spec §14.1 map/candidate). */
+  getAuthoritativeCandidate(taskId: string): Promise<AuthoritativeCandidateDetailV2>;
+  /** V2 non-recursive tree parent page (spec §14.2). */
+  listAuthoritativeTree(taskId: string, parentId: string | null, limit: number, after: SnapshotCursorV2 | null): Promise<AuthoritativeTreePageV2>;
+  /** V2 locate: ancestor path + per-level seek cursors (spec §14.2). */
+  locateAuthoritativeSlot(taskId: string, slotId: string, snapshotCursor?: SnapshotCursorV2 | null): Promise<AuthoritativeLocateResultV2>;
+  /** V2 Map pre-review rounds (spec §14.1 review/map-rounds). */
+  listAuthoritativeMapRounds(taskId: string, limit: number, after: SnapshotCursorV2 | null): Promise<CollectionPageV2<AuthoritativeReviewRoundSummaryV2>>;
+  /** V2 derived review summary (spec §14.1 review/summary). */
+  getAuthoritativeReviewSummary(taskId: string): Promise<AuthoritativeReviewSummaryV2>;
+  /** V2 all review rounds (spec §14.1 review/rounds). */
+  listAuthoritativeRounds(taskId: string, limit: number, after: SnapshotCursorV2 | null): Promise<CollectionPageV2<AuthoritativeReviewRoundSummaryV2>>;
+  /** V2 one slot review detail (spec §14.1 review/slots/:id). */
+  getAuthoritativeSlotReview(taskId: string, slotId: string, snapshotCursor?: SnapshotCursorV2 | null): Promise<AuthoritativeSlotReviewDetailV2>;
+  /** V2 one relation review detail (spec §14.1 review/relations/:id). */
+  getAuthoritativeRelationReview(taskId: string, relationId: string, snapshotCursor?: SnapshotCursorV2 | null): Promise<AuthoritativeRelationReviewDetailV2>;
+  /** V2 findings collection page (spec §14.1 review/findings). */
+  listAuthoritativeFindings(taskId: string, limit: number, after: SnapshotCursorV2 | null): Promise<CollectionPageV2<AuthoritativeFindingSummaryV2>>;
+  /** V2 Seal readiness (spec §14.1 review/seal-readiness). */
+  getAuthoritativeSealReadiness(taskId: string): Promise<AuthoritativeSealReadinessDetailV2>;
+  /** Legacy-compatible v2 issues projection (spec §14.1). */
+  listAuthoritativeIssues(taskId: string): Promise<StructuredIssueV1[]>;
 }

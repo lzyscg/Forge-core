@@ -373,6 +373,18 @@ describe('createMockGateway deleteTask (task list delete)', () => {
       () => gateway.getStructuredSlot(task.id, 'root'),
       () => gateway.listStructuredIssues(task.id, null, 5),
       () => gateway.getStructuredSeal(task.id),
+      () => gateway.getAuthoritativeMap(task.id),
+      () => gateway.getAuthoritativeCandidate(task.id),
+      () => gateway.listAuthoritativeTree(task.id, null, 5, null),
+      () => gateway.locateAuthoritativeSlot(task.id, 'root'),
+      () => gateway.listAuthoritativeMapRounds(task.id, 5, null),
+      () => gateway.getAuthoritativeReviewSummary(task.id),
+      () => gateway.listAuthoritativeRounds(task.id, 5, null),
+      () => gateway.getAuthoritativeSlotReview(task.id, 'root'),
+      () => gateway.getAuthoritativeRelationReview(task.id, 'rel'),
+      () => gateway.listAuthoritativeFindings(task.id, 5, null),
+      () => gateway.getAuthoritativeSealReadiness(task.id),
+      () => gateway.listAuthoritativeIssues(task.id),
     ];
     for (const call of calls) {
       await expect(call()).rejects.toMatchObject({ code: 'STRUCTURED_NOT_ACTIVE' });

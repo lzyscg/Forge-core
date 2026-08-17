@@ -164,6 +164,32 @@ describe('createHttpGateway', () => {
     });
   });
 
+  it('surfaces a v2 read error envelope (AUTHORITATIVE_REVIEW_UNAVAILABLE) as a public error', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse(503, {
+          error: {
+            code: 'AUTHORITATIVE_REVIEW_UNAVAILABLE',
+            message: '该任务未启用权威评审协议。',
+            location: null,
+            action: null,
+          },
+        }),
+      ),
+    );
+    const gateway = createHttpGateway();
+    await expect(gateway.getAuthoritativeMap('task-x')).rejects.toMatchObject({
+      code: 'AUTHORITATIVE_REVIEW_UNAVAILABLE',
+    });
+    await expect(gateway.listAuthoritativeTree('task-x', null, 50, null)).rejects.toMatchObject({
+      code: 'AUTHORITATIVE_REVIEW_UNAVAILABLE',
+    });
+    await expect(gateway.getAuthoritativeSealReadiness('task-x')).rejects.toMatchObject({
+      code: 'AUTHORITATIVE_REVIEW_UNAVAILABLE',
+    });
+  });
+
   it('surfaces network failures as public errors without raw causes', async () => {
     vi.stubGlobal(
       'fetch',

@@ -432,6 +432,128 @@ export interface CollectionPageV2<T> {
   nextCursor: SnapshotCursorV2 | null;
 }
 
+/* ----------------------------- §14.1 tree/locate/map/candidate/slot/relation/seal DTOs ----------------------------- */
+
+/** Map pre-review state of one position node (design §10.4/§11.2). */
+export type AuthoritativeMapPreReviewStateV2 = 'pending' | 'pass' | 'reject';
+
+/**
+ * Content review state of one slot (design §11.6 derived states): `pending`
+ * has no current effective review; `pass` has a current pass; `reject` has a
+ * current blocking finding; `stale` has a historical conclusion whose bound
+ * baseline (manifest phase) has moved since the last settled review.
+ */
+export type AuthoritativeContentReviewStateV2 = 'pending' | 'pass' | 'reject' | 'stale';
+
+/** Per-slot review summary of one tree row (design §20 view 2). */
+export interface AuthoritativeSlotReviewStateV2 {
+  mapPreReview: AuthoritativeMapPreReviewStateV2;
+  content: AuthoritativeContentReviewStateV2;
+}
+
+/** One child row of a non-recursive tree parent page (spec §14.2). */
+export interface AuthoritativeTreeEntryV2 {
+  slotId: string;
+  slotType: string;
+  documentOrder: number;
+  siblingOrder: number;
+  contentBearing: boolean;
+  /** Number of children of THIS node (the parent page does not recurse). */
+  childCount: number;
+  review: AuthoritativeSlotReviewStateV2;
+}
+
+/** Tree parent page (spec §14.2): children of one parent, sorted by parent/sibling/slotId. */
+export interface AuthoritativeTreePageV2 {
+  parentId: string | null;
+  /** This parent has more children beyond the current page (never silent truncation). */
+  hasMoreChildren: boolean;
+  items: AuthoritativeTreeEntryV2[];
+  nextCursor: SnapshotCursorV2 | null;
+}
+
+/** One ancestor level of a locate result with its seek cursor (spec §14.2). */
+export interface AuthoritativeLocateAncestorV2 {
+  slotId: string;
+  /**
+   * A tree cursor for THIS ancestor's parent page positioned just before the
+   * ancestor, so `tree?parentId=&after=` returns it as the first row.
+   */
+  seekCursor: SnapshotCursorV2;
+}
+
+/** locate result: ancestor path + per-level seek cursors + target summary. */
+export interface AuthoritativeLocateResultV2 {
+  target: AuthoritativeTreeEntryV2;
+  ancestors: AuthoritativeLocateAncestorV2[];
+}
+
+/** Public Map detail (design §10.1/§19.2): identity + bounded counts + refs. */
+export interface AuthoritativeMapDetailV2 {
+  mapId: string;
+  mapRevision: number;
+  mapSemanticDigest: string;
+  supersedesMapId: string | null;
+  mapSnapshotRef: BlobRefV2 | null;
+  mapReviewBundleRef: BlobRefV2 | null;
+  candidateRef: BlobRefV2 | null;
+  rootSlotId: string | null;
+  nodeCount: number;
+  relationCount: number;
+  relation: AuthoritativeRelationSummaryV2;
+}
+
+/** Public candidate detail (spec §14.1 map/candidate). */
+export interface AuthoritativeCandidateDetailV2 {
+  candidateId: string | null;
+  candidateRef: BlobRefV2 | null;
+  baseMapId: string | null;
+  buildId: string | null;
+  nodeCount: number | null;
+  relationCount: number | null;
+}
+
+/** One slot's review detail (spec §14.1 review/slots/:id). */
+export interface AuthoritativeSlotReviewDetailV2 {
+  slotId: string;
+  slotType: string;
+  parentSlotId: string | null;
+  documentOrder: number;
+  siblingOrder: number;
+  contentBearing: boolean;
+  review: AuthoritativeSlotReviewStateV2;
+  openBlockingFindingIds: string[];
+}
+
+export type AuthoritativeRelationReviewStateV2 = 'pending' | 'satisfied' | 'violated' | 'stale';
+
+/** One relation's review detail (spec §14.1 review/relations/:id). */
+export interface AuthoritativeRelationReviewDetailV2 {
+  relationId: string;
+  typeId: string;
+  fromSlotId: string;
+  toSlotId: string;
+  review: AuthoritativeRelationReviewStateV2;
+  openBlockingFindingIds: string[];
+}
+
+/** One system-derived Seal condition row (design §16.2; stable codes only). */
+export interface AuthoritativeSealReadinessConditionV2 {
+  code: string;
+  /** stable public reason text; never paths/validator internals/provider output. */
+  detail: string;
+  satisfied: boolean;
+}
+
+/** Seal readiness detail (spec §14.1 review/seal-readiness): summary + conditions. */
+export interface AuthoritativeSealReadinessDetailV2 {
+  readiness: 'ready' | 'not_ready';
+  unmetConditionCount: number;
+  sealed: boolean;
+  sealRecordRef: BlobRefV2 | null;
+  conditions: AuthoritativeSealReadinessConditionV2[];
+}
+
 /* ----------------------------- public Map/review/Finding/Seal DTOs ----------------------------- */
 
 /**

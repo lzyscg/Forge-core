@@ -130,9 +130,29 @@ import type { BlobRefV2, AuthoritativeReviewExecutionEligibilityV1 } from '../sh
 import { STORAGE_ERROR_CODES, StorageError } from './storage/atomic-file';
 import type { PublicationOperationPayloadV2 } from './authoritative-review/authority-types';
 import type { AuthoritativeReviewProjectionV2 } from './storage/authoritative-review-state';
-import type { DeleteTaskBodyV2, DeleteTaskResultV2, ReopenFailedRequestV2 } from '../shared/authoritative-review-v2';
+import type {
+  AuthoritativeCandidateDetailV2,
+  AuthoritativeFindingSummaryV2,
+  AuthoritativeLocateResultV2,
+  AuthoritativeMapDetailV2,
+  AuthoritativeRelationReviewDetailV2,
+  AuthoritativeReviewRoundSummaryV2,
+  AuthoritativeReviewSummaryV2,
+  AuthoritativeSealReadinessDetailV2,
+  AuthoritativeSlotReviewDetailV2,
+  AuthoritativeTreePageV2,
+  CollectionPageV2,
+  DeleteTaskBodyV2,
+  DeleteTaskResultV2,
+  ReopenFailedRequestV2,
+  SnapshotCursorV2,
+} from '../shared/authoritative-review-v2';
 import { defaultMaxBytesByKind } from './authoritative-review/object-schemas';
 import type { AuthoritativeReviewProfile } from './authoritative-review/authority-types';
+import {
+  AuthoritativeReviewProjectionService,
+  AuthoritativeReviewReadError,
+} from './runtime/authoritative-review/projection-service';
 
 export interface CoreServiceOptions {
   /** Injected runtime (tests use the deterministic fake); defaults to Pi. */
@@ -1183,6 +1203,121 @@ export class CoreService {
     await this.v2Lifecycle.reopenFailed(taskId, request as unknown as ReopenRequestV2);
     await this.runV2SchedulingTick();
     return (await this.getWorkspace(taskId)).task;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* §14.1 v2 read-only projection API (Task 23)                         */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * The owner v2 read projection service (spec §14.1/§14.2). Read routes work
+   * on ANY v2 task — with the authoritative capability disabled they still
+   * return the readable historical projection (spec §4.3: historical reads
+   * use the task-frozen profile) — so no capability check is done here; the
+   * projection/checkpoint/blob reads fail closed on corruption. Basic/v1
+   * tasks are NOT v2 and reject with AUTHORITATIVE_REVIEW_UNAVAILABLE.
+   */
+  private authoritativeReadService(): AuthoritativeReviewProjectionService {
+    return new AuthoritativeReviewProjectionService({
+      readSnapshot: async (taskId, throughSequence) => {
+        try {
+          const resolver = (ref: BlobRefV2): Promise<unknown> => this.v2BlobStore.readJson(taskId, ref, ref.kind);
+          const result = throughSequence === undefined
+            ? await this.v2CheckpointStore.readState(taskId, resolver)
+            : await this.v2CheckpointStore.rebuild(taskId, resolver, throughSequence);
+          return { throughSequence: result.throughSequence, projection: result.projection };
+        } catch (error) {
+          if (error instanceof ProjectionCorruptionError) {
+            throw new AuthoritativeReviewReadError('TASK_CORRUPTED', '任务权威历史损坏。', 'CoreService.authoritativeRead', '联系平台检查任务事件账本。');
+          }
+          throw error;
+        }
+      },
+      resolveBlob: async (taskId, ref, kind) => this.v2BlobStore.readJson(taskId, ref, kind),
+      keyring: this.cursorKeyring,
+    });
+  }
+
+  /** Guards that the task is a v2 task (frozen snapshot), else AUTHORITATIVE_REVIEW_UNAVAILABLE. */
+  private async requireAuthoritativeReviewTask(taskId: string): Promise<void> {
+    try {
+      const frozen = await this.tasks.readFrozenTemplate(taskId);
+      if (structuredProtocolOf(frozen) !== 'v2') {
+        throw new AuthoritativeReviewReadError('AUTHORITATIVE_REVIEW_UNAVAILABLE', '该任务未启用权威评审协议。', 'CoreService.authoritativeRead', '查看任务画布。');
+      }
+    } catch (error) {
+      if (error instanceof AuthoritativeReviewReadError) throw error;
+      if (error instanceof StorageError) {
+        // TASK_NOT_FOUND / TASK_CORRUPTED propagate their stable public codes.
+        throw error;
+      }
+      throw new AuthoritativeReviewReadError('AUTHORITATIVE_REVIEW_UNAVAILABLE', '该任务未启用权威评审协议。', 'CoreService.authoritativeRead', '查看任务画布。');
+    }
+  }
+
+  async authoritativeMap(taskId: string): Promise<AuthoritativeMapDetailV2> {
+    await this.requireAuthoritativeReviewTask(taskId);
+    return this.authoritativeReadService().map(taskId);
+  }
+
+  async authoritativeCandidate(taskId: string): Promise<AuthoritativeCandidateDetailV2> {
+    await this.requireAuthoritativeReviewTask(taskId);
+    return this.authoritativeReadService().candidate(taskId);
+  }
+
+  async authoritativeTree(taskId: string, parentId: string | null, limit: number, after: SnapshotCursorV2 | null): Promise<AuthoritativeTreePageV2> {
+    await this.requireAuthoritativeReviewTask(taskId);
+    return this.authoritativeReadService().tree(taskId, parentId, limit, after);
+  }
+
+  async authoritativeLocate(taskId: string, slotId: string, snapshotCursor: SnapshotCursorV2 | null): Promise<AuthoritativeLocateResultV2> {
+    await this.requireAuthoritativeReviewTask(taskId);
+    return this.authoritativeReadService().locate(taskId, slotId, snapshotCursor);
+  }
+
+  async authoritativeMapRounds(taskId: string, limit: number, after: SnapshotCursorV2 | null): Promise<CollectionPageV2<AuthoritativeReviewRoundSummaryV2>> {
+    await this.requireAuthoritativeReviewTask(taskId);
+    return this.authoritativeReadService().mapRounds(taskId, limit, after);
+  }
+
+  async authoritativeReviewSummary(taskId: string): Promise<AuthoritativeReviewSummaryV2> {
+    await this.requireAuthoritativeReviewTask(taskId);
+    return this.authoritativeReadService().summary(taskId);
+  }
+
+  async authoritativeRounds(taskId: string, limit: number, after: SnapshotCursorV2 | null): Promise<CollectionPageV2<AuthoritativeReviewRoundSummaryV2>> {
+    await this.requireAuthoritativeReviewTask(taskId);
+    return this.authoritativeReadService().rounds(taskId, limit, after);
+  }
+
+  async authoritativeSlotReview(taskId: string, slotId: string, snapshotCursor: SnapshotCursorV2 | null): Promise<AuthoritativeSlotReviewDetailV2> {
+    await this.requireAuthoritativeReviewTask(taskId);
+    return this.authoritativeReadService().slotReview(taskId, slotId, snapshotCursor);
+  }
+
+  async authoritativeRelationReview(taskId: string, relationId: string, snapshotCursor: SnapshotCursorV2 | null): Promise<AuthoritativeRelationReviewDetailV2> {
+    await this.requireAuthoritativeReviewTask(taskId);
+    return this.authoritativeReadService().relationReview(taskId, relationId, snapshotCursor);
+  }
+
+  async authoritativeFindings(taskId: string, limit: number, after: SnapshotCursorV2 | null): Promise<CollectionPageV2<AuthoritativeFindingSummaryV2>> {
+    await this.requireAuthoritativeReviewTask(taskId);
+    return this.authoritativeReadService().findings(taskId, limit, after);
+  }
+
+  async authoritativeSealReadiness(taskId: string): Promise<AuthoritativeSealReadinessDetailV2> {
+    await this.requireAuthoritativeReviewTask(taskId);
+    return this.authoritativeReadService().sealReadiness(taskId);
+  }
+
+  /**
+   * Legacy-compatible v2 issues projection (spec §14.1): current open Findings
+   * + deterministic validator/lifecycle issues in the v1 `StructuredIssueV1`
+   * shape. Never maps a Seal boolean to a per-slot pass.
+   */
+  async authoritativeIssues(taskId: string): Promise<StructuredIssueV1[]> {
+    await this.requireAuthoritativeReviewTask(taskId);
+    return this.authoritativeReadService().issues(taskId);
   }
 
   /** One deterministic v2 scheduling pass (the §10.4 loop; idempotent per tail). */
