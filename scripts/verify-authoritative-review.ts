@@ -382,6 +382,16 @@ export function runPromoteCapability(
     throw new VerifyError('final profile digest 与 release evidence 不一致');
   }
   const capability = readCapability(p.manifestPath);
+  // Promotion is the ONE legal disabled → enabled transition (design §17).
+  // An already-enabled manifest cannot be silently overwritten, even with a
+  // matching release evidence: any re-promotion must go through a fresh
+  // qualify cycle that produces a new release evidence and an updated
+  // capability manifest through the same scripted path.
+  if (capability.status !== 'disabled') {
+    throw new VerifyError(
+      'capability manifest must be disabled before promotion; re-promotion is rejected (one-way chain)',
+    );
+  }
   const releaseAbis = Array.isArray(release.requiredAbis) ? (release.requiredAbis as unknown[]) : [];
   if (
     releaseAbis.length !== capability.requiredAbis.length ||

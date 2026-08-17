@@ -522,6 +522,159 @@ describe('runPromoteCapability (P-fail-closed-2 schema-first)', () => {
     const path = writeRelease(ws, release);
     expect(() => runPromoteCapability(path, promotePaths(ws), { porcelain: () => ['src/server/runtime/foo.ts'] })).toThrow(/dirty\/untracked tree/);
   });
+
+  it('rejects a dirty source profile file (off-allowlist)', () => {
+    const ws = createWorkspace();
+    const release = validRelease(ws);
+    const path = writeRelease(ws, release);
+    expect(() =>
+      runPromoteCapability(path, promotePaths(ws), {
+        porcelain: () => ['src/server/structured-slots/authoritative-review-profile-v1.json', 'src/server/structured-slots/foo.ts'],
+      }),
+    ).toThrow(/dirty\/untracked tree/);
+  });
+
+  it('rejects a dirty capability manifest (off-allowlist)', () => {
+    const ws = createWorkspace();
+    const release = validRelease(ws);
+    const path = writeRelease(ws, release);
+    expect(() =>
+      runPromoteCapability(
+        path,
+        promotePaths(ws),
+        { porcelain: () => ['src/server/structured-slots/authoritative-review-capability-v1.json', 'src/server/runtime/pi-agent-runtime.ts'] },
+      ),
+    ).toThrow(/dirty\/untracked tree/);
+  });
+
+  it('rejects a release evidence that is missing checkpointCommit', () => {
+    const ws = createWorkspace();
+    const release = validRelease(ws);
+    delete (release as Record<string, unknown>)['checkpointCommit'];
+    const path = writeRelease(ws, release);
+    expect(() => runPromoteCapability(path, promotePaths(ws), { porcelain: () => [] })).toThrow(/checkpointCommit/);
+  });
+
+  it('rejects a release evidence that is missing sourceTreeDigest', () => {
+    const ws = createWorkspace();
+    const release = validRelease(ws);
+    delete (release as Record<string, unknown>)['sourceTreeDigest'];
+    const path = writeRelease(ws, release);
+    expect(() => runPromoteCapability(path, promotePaths(ws), { porcelain: () => [] })).toThrow(/sourceTreeDigest/);
+  });
+
+  it('rejects a release evidence that is missing packageLockSha256', () => {
+    const ws = createWorkspace();
+    const release = validRelease(ws);
+    delete (release as Record<string, unknown>)['packageLockSha256'];
+    const path = writeRelease(ws, release);
+    expect(() => runPromoteCapability(path, promotePaths(ws), { porcelain: () => [] })).toThrow(/packageLockSha256/);
+  });
+
+  it('rejects a release evidence that is missing finalProfileDigest', () => {
+    const ws = createWorkspace();
+    const release = validRelease(ws);
+    delete (release as Record<string, unknown>)['finalProfileDigest'];
+    const path = writeRelease(ws, release);
+    expect(() => runPromoteCapability(path, promotePaths(ws), { porcelain: () => [] })).toThrow(/finalProfileDigest/);
+  });
+
+  it('rejects a release evidence that is missing platformEvidenceDigest', () => {
+    const ws = createWorkspace();
+    const release = validRelease(ws);
+    delete (release as Record<string, unknown>)['platformEvidenceDigest'];
+    const path = writeRelease(ws, release);
+    expect(() => runPromoteCapability(path, promotePaths(ws), { porcelain: () => [] })).toThrow(/platformEvidenceDigest/);
+  });
+
+  it('rejects a release evidence whose finalProfileDigest does not match the checked-in profile', () => {
+    const ws = createWorkspace();
+    const release = validRelease(ws, { finalProfileDigest: 'f'.repeat(64) });
+    const path = writeRelease(ws, release);
+    expect(() => runPromoteCapability(path, promotePaths(ws), { porcelain: () => [] })).toThrow(/final profile digest/);
+  });
+
+  it('rejects a release evidence whose platformEvidenceDigest does not match the checked-in platform evidence', () => {
+    const ws = createWorkspace();
+    const release = validRelease(ws, { platformEvidenceDigest: 'a'.repeat(64) });
+    const path = writeRelease(ws, release);
+    expect(() => runPromoteCapability(path, promotePaths(ws), { porcelain: () => [] })).toThrow(/platform evidence digest/);
+  });
+
+  it('rejects a release evidence whose checkpointCommit does not match the current HEAD', () => {
+    const ws = createWorkspace();
+    const release = validRelease(ws, { checkpointCommit: '0'.repeat(40) });
+    const path = writeRelease(ws, release);
+    expect(() => runPromoteCapability(path, promotePaths(ws), { porcelain: () => [] })).toThrow(/checkpoint HEAD/);
+  });
+
+  it('rejects a release evidence whose sourceTreeDigest does not match the current source tree', () => {
+    const ws = createWorkspace();
+    const release = validRelease(ws, { sourceTreeDigest: 'b'.repeat(64) });
+    const path = writeRelease(ws, release);
+    expect(() => runPromoteCapability(path, promotePaths(ws), { porcelain: () => [] })).toThrow(/source-tree digest/);
+  });
+
+  it('rejects a release evidence whose packageLockSha256 does not match the current lockfile', () => {
+    const ws = createWorkspace();
+    const release = validRelease(ws, { packageLockSha256: 'c'.repeat(64) });
+    const path = writeRelease(ws, release);
+    expect(() => runPromoteCapability(path, promotePaths(ws), { porcelain: () => [] })).toThrow(/package-lock digest/);
+  });
+
+  it('writes an enabled manifest whose evidenceDigest freezes the release-evidence source/lock/checkpoint digests', () => {
+    const ws = createWorkspace();
+    const release = validRelease(ws);
+    const path = writeRelease(ws, release);
+    const realManifestPath = resolve(REPO_ROOT, 'src/server/structured-slots/authoritative-review-capability-v1.json');
+    const realManifestBefore = readFileSync(realManifestPath, 'utf8');
+    const result = runPromoteCapability(path, promotePaths(ws), { porcelain: () => [] });
+    expect(result).toBe(0);
+    const manifest = JSON.parse(readFileSync(ws.manifestPath, 'utf8')) as Record<string, unknown>;
+    expect(manifest.status).toBe('enabled');
+    expect(manifest.profileIdentity).toBe('forge-authoritative-review/v1');
+    expect(manifest.profileDigest).toBe(ws.finalProfileDigest);
+    expect(manifest.evidenceDigest).toBe(canonicalJsonSha256(release));
+    // The release evidence carries the frozen source/lock/checkpoint digests.
+    expect(release.checkpointCommit).toBe(REAL_GIT_COMMIT);
+    expect(release.sourceTreeDigest).toBe(REAL_SOURCE_DIGEST);
+    expect(release.packageLockSha256).toBe(REAL_LOCK_SHA);
+    expect(release.finalProfileDigest).toBe(ws.finalProfileDigest);
+    expect(release.platformEvidenceDigest).toBe(ws.evidenceDigest);
+    // Pin that any subsequent evidence mutation would invalidate the frozen
+    // digest captured in the capability manifest.
+    expect(manifest.evidenceDigest).not.toBe(canonicalJsonSha256({ ...release, observedAt: '2099-01-01T00:00:00.000Z' }));
+    expect(readFileSync(realManifestPath, 'utf8')).toBe(realManifestBefore);
+  });
+
+  it('promote-idempotency: a second promote leaves the already-enabled manifest byte-identical', () => {
+    const ws = createWorkspace();
+    const release = validRelease(ws);
+    const path = writeRelease(ws, release);
+    const first = runPromoteCapability(path, promotePaths(ws), { porcelain: () => [] });
+    expect(first).toBe(0);
+    const manifestAfterFirst = readFileSync(ws.manifestPath, 'utf8');
+    // Re-promotion is fail-closed (one-way chain); the second invocation must
+    // reject and leave the originally enabled manifest byte-identical.
+    expect(() => runPromoteCapability(path, promotePaths(ws), { porcelain: () => [] })).toThrow();
+    expect(readFileSync(ws.manifestPath, 'utf8')).toBe(manifestAfterFirst);
+  });
+
+  it('rejects re-promotion when the capability is already enabled (no overwrite of an already-enabled runtime)', () => {
+    const ws = createWorkspace();
+    const release = validRelease(ws);
+    const path = writeRelease(ws, release);
+    const first = runPromoteCapability(path, promotePaths(ws), { porcelain: () => [] });
+    expect(first).toBe(0);
+    const manifestAfterFirst = readFileSync(ws.manifestPath, 'utf8');
+    // A second promote with a DIFFERENT release evidence must not silently
+    // overwrite the already-enabled manifest — promotion is the ONE legal
+    // disabled→enabled transition (design §17).
+    const differentRelease = validRelease(ws, { observedAt: '2099-01-01T00:00:00.000Z' });
+    const differentPath = writeRelease(ws, differentRelease);
+    expect(() => runPromoteCapability(differentPath, promotePaths(ws), { porcelain: () => [] })).toThrow();
+    expect(readFileSync(ws.manifestPath, 'utf8')).toBe(manifestAfterFirst);
+  });
 });
 
 describe('runValidateOnly', () => {
