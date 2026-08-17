@@ -8,6 +8,7 @@ import { NodeDetailDialog } from '../components/node-detail-dialog';
 import { ProcessTraceDialog } from '../components/process-trace-dialog';
 import { StatusChip } from '../components/status-chip';
 import { StructuredSlotDrawer } from '../components/structured-slot-drawer';
+import { StructuredReviewDrawer } from '../components/structured-review/structured-review-drawer';
 import { TaskControls } from '../components/task-controls';
 import { WorkspaceCanvas } from '../components/workspace-canvas';
 import { CORE_ERROR_CODES } from '../gateway/core-errors';
@@ -193,7 +194,8 @@ function ProductionWorkspace({ workspace }: { workspace: TaskWorkspace }) {
           >
             产物
           </button>
-          {workspace.structuredSlots !== undefined ? (
+          {workspace.structuredSlots !== undefined ||
+          workspace.task.structuredProtocol === 'v2' ? (
             <button
               type="button"
               className="fc-button fc-button--secondary"
@@ -243,7 +245,11 @@ function ProductionWorkspace({ workspace }: { workspace: TaskWorkspace }) {
       ) : null}
 
       {structuredOpen ? (
-        <StructuredSlotDrawer workspace={workspace} onClose={toggleStructured} />
+        workspace.task.structuredProtocol === 'v2' ? (
+          <StructuredReviewDrawer workspace={workspace} onClose={toggleStructured} />
+        ) : (
+          <StructuredSlotDrawer workspace={workspace} onClose={toggleStructured} />
+        )
       ) : null}
 
       {selectedNode !== null ? (
