@@ -88,7 +88,11 @@ export class V2AssignmentRunner {
     if (ctx.agent === null) {
       throw new Error('assignment-runner: cannot run a session without a frozen agent');
     }
-    const tools = await this.toolProvider.toolsFor(ctx);
+    // Pi resolves the closed tool definitions through the v2Tools seam in
+    // PiAgentRuntime. Do not resolve a second, unused list here: doing so
+    // duplicates grant reads and can observe a different lease boundary from
+    // the actual session. The provider is still queried after the turn for
+    // the authoritative domain result refs.
     const input: AgentTurnInput = {
       taskId: ctx.taskId,
       turnId: `v2-${ctx.workItemId}-${ctx.attemptId}`,

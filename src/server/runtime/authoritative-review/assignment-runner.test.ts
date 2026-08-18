@@ -99,9 +99,10 @@ describe('V2AssignmentRunner', () => {
     });
     const outcome = await runner.runSession(context(), new AbortController().signal);
     expect(outcome).toMatchObject({ kind: 'committed', publicText: 'chunk output' });
-    // The tool provider received the SAME dispatch-bound context.
-    expect(toolContexts).toHaveLength(1);
-    expect(toolContexts[0].dispatchRef?.kind).toBe('assignment_dispatch');
+    // Tool definitions are resolved by PiAgentRuntime's v2Tools seam. The
+    // runner must not resolve a second unused list against a separate lease
+    // boundary; it only asks the provider for result refs after the turn.
+    expect(toolContexts).toHaveLength(0);
     // The session received the isolated namespace and NO prior chat history.
     const turn = recording.inputs[0];
     expect(turn.v2Namespace).toBe('structured/orchestrator/wi-1/att-1');

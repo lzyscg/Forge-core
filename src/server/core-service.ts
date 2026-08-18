@@ -498,6 +498,12 @@ export class CoreService {
       const raw = await readFile(file, 'utf8');
       return JSON.parse(raw) as import('./structured-slots/authoritative-review-profile').AuthoritativeReviewProfileSnapshotV1Body;
     };
+    // Pi/attempt diagnostics contain only sanitized lifecycle identities and
+    // tool names; provider payloads, credentials and hidden reasoning never
+    // enter this logger. Keep the real-mode stall observable from npm run dev.
+    const authoritativeRuntimeLog = (line: string): void => {
+      console.error(line);
+    };
     const authoritativeDomainRuntime = new ProductionV2DomainRuntimeFactory({
       paths: this.paths,
       facade: this.v2Facade,
@@ -542,6 +548,7 @@ export class CoreService {
         workspaces: this.workspaces,
         structuredSlot: structuredSlotSeam as PiStructuredSlotRuntime,
         v2Tools: authoritativeV2Tools,
+        log: authoritativeRuntimeLog,
       });
     // Structural fake-runtime wiring: the deterministic fake applies scripted
     // workspace writes through the offered sink; real runtimes own their
@@ -686,9 +693,11 @@ export class CoreService {
       runner: new V2AssignmentRunner({
         runtime: this.runtime,
         toolProvider: authoritativeV2Tools,
+        log: authoritativeRuntimeLog,
       }),
       clock: () => new Date().toISOString(),
       traces: this.traces,
+      log: authoritativeRuntimeLog,
       terminalFail: (taskId, input) => this.v2Lifecycle.terminalFailWorkItem(taskId, input),
       eventStore: this.events,
       publicationStore: this.v2PublicationStore,

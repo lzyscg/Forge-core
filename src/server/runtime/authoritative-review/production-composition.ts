@@ -287,23 +287,43 @@ export function installAuthoritativeReviewRuntime(
   // and Pi domain tools resolve the same frozen service bundle.  The direct
   // service fields remain for focused service tests and older callers.
   if (input.domainRuntimeFor !== undefined) {
-    const fallbackFor = (commandKind: string): SystemCommandHandler => {
-      const fallback = registry.resolve(commandKind);
-      if (fallback === null) throw new Error(`missing fallback SystemCommand handler '${commandKind}'`);
-      return fallback;
-    };
+    const missingProductionDomain = (
+      ctx: Parameters<SystemCommandHandler['execute']>[0],
+      code: string,
+      reason: string,
+    ): Awaited<ReturnType<SystemCommandHandler['execute']>> => ({
+      kind: 'terminal_failure',
+      failureCode: code,
+      failureDigest: canonicalJsonSha256({
+        taskId: ctx.taskId,
+        workItemId: ctx.workItemId,
+        commandKind: ctx.commandKind,
+        reason,
+      }),
+      taskFailure: true,
+    });
     const dynamicCommand = <T>(
       commandKind: 'map_finalize' | 'generation_finalize' | 'repair_finalize' | 'migration_validation_batch',
       select: (runtime: ProductionV2TaskDomainRuntime) => T | undefined,
       makeHandler: (service: T) => SystemCommandHandler,
     ): SystemCommandHandler => {
-      const fallback = fallbackFor(commandKind);
       return {
         commandKind,
         async execute(ctx) {
           const runtime = await input.domainRuntimeFor!(ctx.taskId);
-          const service = runtime === undefined ? undefined : select(runtime);
-          if (service === undefined) return fallback.execute(ctx);
+          if (runtime === undefined) {
+            return missingProductionDomain(ctx, 'AUTHORITATIVE_DOMAIN_RUNTIME_NOT_WIRED', 'task runtime unavailable');
+          }
+          const service = select(runtime);
+          if (service === undefined) {
+            return missingProductionDomain(
+              ctx,
+              commandKind === 'migration_validation_batch'
+                ? 'MIGRATION_RUNTIME_NOT_WIRED'
+                : 'AUTHORITATIVE_DOMAIN_SERVICE_NOT_WIRED',
+              `service missing for ${commandKind}`,
+            );
+          }
           await runtime.refresh();
           return makeHandler(service).execute(ctx);
         },
@@ -314,12 +334,13 @@ export function installAuthoritativeReviewRuntime(
     registry.replace(dynamicCommand('repair_finalize', (runtime) => runtime.services.repairService, createRepairFinalizeSystemCommandHandler));
     registry.replace(dynamicCommand('migration_validation_batch', (runtime) => runtime.services.migrationService, createMigrationValidationBatchSystemCommandHandler));
 
-    const reviewFallback = fallbackFor('review_settlement');
     registry.replace({
       commandKind: 'review_settlement',
       async execute(ctx) {
         const runtime = await input.domainRuntimeFor!(ctx.taskId);
-        if (runtime === undefined) return reviewFallback.execute(ctx);
+        if (runtime === undefined) {
+          return missingProductionDomain(ctx, 'AUTHORITATIVE_DOMAIN_RUNTIME_NOT_WIRED', 'task runtime unavailable');
+        }
         await runtime.refresh();
         if (ctx.payloadRef.kind === 'map_review_coverage_core') {
           return createMapReviewSettlementSystemCommandHandler(runtime.services.mapReviewService).execute(ctx);
@@ -335,7 +356,13 @@ export function installAuthoritativeReviewRuntime(
             mapHandler,
           ).execute(ctx);
         }
-        return reviewFallback.execute(ctx);
+        return missingProductionDomain(
+          ctx,
+          ctx.payloadRef.kind === 'migration_validation_plan_spec'
+            ? 'MIGRATION_RUNTIME_NOT_WIRED'
+            : 'AUTHORITATIVE_REVIEW_SETTLEMENT_PAYLOAD_UNSUPPORTED',
+          `unsupported settlement payload ${ctx.payloadRef.kind}`,
+        );
       },
     });
   } else {

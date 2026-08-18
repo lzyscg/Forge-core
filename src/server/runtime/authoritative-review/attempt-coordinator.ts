@@ -405,6 +405,14 @@ export class V2AttemptCoordinator {
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
+      try {
+        this.deps.log?.(
+          `authoritative-attempt: timeout (task=${safeAttemptLogToken(taskId)}` +
+            ` workItem=${safeAttemptLogToken(wi.workItemId)} attempt=${safeAttemptLogToken(attemptId)})`,
+        );
+      } catch {
+        // Diagnostics are best-effort and can never prevent the abort.
+      }
       signal.controller.abort();
     }, this.attemptTimeoutMs);
 
@@ -897,4 +905,8 @@ export class V2AttemptCoordinator {
       // Wakeup cleanup is best-effort; the startup scan repairs stale rows.
     }
   }
+}
+
+function safeAttemptLogToken(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_.:-]/g, '_').slice(0, 128) || '-';
 }

@@ -1747,6 +1747,8 @@ describe('authoritative v2 seam (Task 12)', () => {
     const names = harness.sessionOptions.customTools.map((tool) => tool.name);
     expect(names).toContain('read_active_map');
     expect(result.publicText).toBe('v2 output');
+    expect(harness.logs.some((line) => line.includes('v2 context ready') && line.includes('tools=1'))).toBe(true);
+    expect(harness.logs.some((line) => line.includes('prompt dispatch') && line.includes('inputChars='))).toBe(true);
   });
 
   it('FIX-M4: a structured v2 session receives ONLY its closed tools — no forge/workspace/skill/artifact tools; a generic-submitter v2 turn retains them', async () => {

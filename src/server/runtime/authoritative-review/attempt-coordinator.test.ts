@@ -142,6 +142,7 @@ interface AttemptEnv {
   attempts: V2AttemptCoordinator;
   terminalFailCalls: TerminalFailInputV2[];
   systemCommands: SystemCommandRegistry;
+  logs: string[];
   /** Prepares a §9.2 domain result carrier under the given task. */
   prepareResultRef(taskId: string): Promise<BlobRefV2>;
 }
@@ -163,6 +164,7 @@ async function makeEnv(options: {
   const innerRuntime = options.runtime ?? new FakeAgentRuntime();
   const runtime = new RecordingRuntime(innerRuntime);
   const toolCalls: import('./attempt-coordinator').V2AttemptContext[] = [];
+  const logs: string[] = [];
   const prepareResultRef = async (taskId: string): Promise<BlobRefV2> =>
     base.facade.prepareBlob(taskId, 'content_value', payloadObject(`dummy result ${taskId}`));
   const toolProvider: V2ToolProvider = {
@@ -188,6 +190,7 @@ async function makeEnv(options: {
     traces,
     clock: () => base.now.value,
     attemptTimeoutMs: options.attemptTimeoutMs ?? 10 * 60 * 1000,
+    log: (line) => logs.push(line),
     terminalFail: async (_taskId, input) => {
       terminalFailCalls.push(input);
     },
@@ -202,6 +205,7 @@ async function makeEnv(options: {
     attempts,
     terminalFailCalls,
     systemCommands,
+    logs,
     prepareResultRef,
   };
   envs.push(env);
@@ -696,6 +700,7 @@ describe('V2AttemptCoordinator namespace isolation + timeout', () => {
     const rows = await env.wakeups.read(taskId);
     expect(rows.some((row) => row.kind === 'retry_due' && row.workItemId === workItemId)).toBe(true);
     expect(rows.some((row) => row.kind === 'lease_expiry')).toBe(false);
+    expect(env.logs.some((line) => line.includes('authoritative-attempt: timeout'))).toBe(true);
   });
 
   it('aborts (records nothing) when the scheduler signal stops the attempt', async () => {

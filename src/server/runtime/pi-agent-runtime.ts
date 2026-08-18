@@ -379,6 +379,19 @@ function toPiSessionId(sessionKey: string, turnId: string): string {
   return `${sessionKey}:${turnId}`.replace(/[^a-zA-Z0-9_.-]/g, '-');
 }
 
+/** Sanitized identifiers for lifecycle diagnostics; never log model payloads. */
+function safeLogToken(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_.:-]/g, '_').slice(0, 128) || '-';
+}
+
+function turnLogContext(input: AgentTurnInput): string {
+  const namespace = input.v2Namespace ?? '';
+  const segments = namespace.split('/');
+  const attemptId = segments.at(-1) ?? '';
+  return `task=${safeLogToken(input.taskId)} workItem=${safeLogToken(input.inputNodeId)}` +
+    ` attempt=${safeLogToken(attemptId)} agent=${safeLogToken(input.agent.id)}`;
+}
+
 interface LiveSession {
   /** Null while the session is still being constructed (slot already reserved). */
   session: PiSessionHandle | null;
@@ -760,6 +773,7 @@ export class PiAgentRuntime implements AgentRuntime {
     // setup is caught up below via the signal.aborted check.
     const onAbort = () => {
       live.platformAborted = true;
+      this.#log(`pi-agent-runtime: abort requested (${turnLogContext(input)})`);
       void live.session?.abort().catch(() => undefined);
     };
     runAbortSignal.addEventListener('abort', onAbort, { once: true });
@@ -795,6 +809,12 @@ export class PiAgentRuntime implements AgentRuntime {
       }
       if (input.v2Session !== null && input.v2Session !== undefined && this.#v2Tools !== undefined) {
         v2Ctx = await this.#v2Tools.createContext(input);
+      }
+      if (v2Ctx !== null) {
+        this.#log(
+          `pi-agent-runtime: v2 context ready (${turnLogContext(input)}` +
+            ` tools=${v2Ctx.toolDefinitions.length} names=${v2Ctx.toolDefinitions.map((tool) => tool.name).join(',')})`,
+        );
       }
       const binding = await this.#resolveModelBinding(input.agent.model);
 
@@ -879,6 +899,10 @@ export class PiAgentRuntime implements AgentRuntime {
             }),
           ];
 
+      this.#log(
+        `pi-agent-runtime: session creating (${turnLogContext(input)}` +
+          ` v2Tools=${v2Ctx?.toolDefinitions.length ?? 0} forgeTools=${forgeTools.length})`,
+      );
       const session = await this.#createSession({
         cwd: this.#coreCwd,
         model: binding.model,
@@ -899,7 +923,10 @@ export class PiAgentRuntime implements AgentRuntime {
       });
       live.session = session;
       session.setAutoCompactionEnabled(true);
-      this.#log(`pi-agent-runtime: turn started (agent=${input.agent.id})`);
+      this.#log(
+        `pi-agent-runtime: turn started (${turnLogContext(input)}` +
+          ` v2Tools=${v2Ctx?.toolDefinitions.length ?? 0} forgeTools=${forgeTools.length})`,
+      );
 
       // Task 14: the raw pre-validation charging seam (forge-pi-slot-preflight
       // /v1). Pi emits tool_execution_start BEFORE tool lookup/TypeBox
@@ -908,9 +935,22 @@ export class PiAgentRuntime implements AgentRuntime {
       // non-Slot names never count. On limit closure the meter aborts the
       // composite signal (wired above) and the terminal surfaces below.
       if (structuredCtx !== null) {
-        structuredUnsubscribe = session.agentSubscribe(
-          createForgePiSlotPreflight({ meter: structuredCtx.meter }),
-        );
+        const preflight = createForgePiSlotPreflight({ meter: structuredCtx.meter });
+        structuredUnsubscribe = session.agentSubscribe(async (event, rawSignal) => {
+          try {
+            await preflight(event, rawSignal);
+          } catch (error) {
+            // The SDK awaits raw-Agent listeners before tool lookup. Surface a
+            // sanitized diagnostic when that boundary rejects, then rethrow so
+            // the existing attempt classification owns the terminal outcome.
+            this.#log(
+              `pi-agent-runtime: preflight failed (${turnLogContext(input)}` +
+                ` event=${safeLogToken(typeof event?.type === 'string' ? event.type : 'unknown')}` +
+                ` code=${safeLogToken(failureCodeOf(error))})`,
+            );
+            throw error;
+          }
+        });
       }
 
       // Holder object: closure assignment would otherwise be invisible to
@@ -928,6 +968,20 @@ export class PiAgentRuntime implements AgentRuntime {
         // steps where they happened; provider thinking never enters the trace
         // (semantic audit P0, plan 2026-08-07).
         try {
+          const eventType = typeof event?.type === 'string' ? event.type : 'unknown';
+          if (eventType === 'tool_execution_start') {
+            const toolName = typeof event.toolName === 'string' ? event.toolName : 'unknown';
+            this.#log(`pi-agent-runtime: tool started (${turnLogContext(input)} tool=${safeLogToken(toolName)})`);
+          } else if (eventType === 'tool_execution_end') {
+            const toolName = typeof event.toolName === 'string' ? event.toolName : 'unknown';
+            const isError = event.isError === true ? 'true' : 'false';
+            this.#log(`pi-agent-runtime: tool finished (${turnLogContext(input)} tool=${safeLogToken(toolName)} error=${isError})`);
+          } else if (eventType === 'message_end') {
+            const stopReason = typeof event.message?.stopReason === 'string'
+              ? event.message.stopReason
+              : 'unknown';
+            this.#log(`pi-agent-runtime: assistant message ended (${turnLogContext(input)} stop=${safeLogToken(stopReason)})`);
+          }
           if (event?.type === 'message_end' && event.message?.role === 'assistant') {
             collected.message = event.message;
             collected.ordered.push(...collectAssistantTrace(event.message).text);
@@ -947,13 +1001,22 @@ export class PiAgentRuntime implements AgentRuntime {
             });
           }
         } catch {
-          // A malformed event can never break the Turn; drop it silently.
+          // A malformed event can never break the Turn. Emit only the event
+          // kind; never stringify provider payloads or hidden reasoning.
+          this.#log(
+            `pi-agent-runtime: trace listener dropped event (${turnLogContext(input)}` +
+              ` event=${safeLogToken(typeof event?.type === 'string' ? event.type : 'unknown')})`,
+          );
         }
       });
 
       let promptError: unknown = null;
       try {
         if (!runAbortSignal.aborted && !live.platformAborted) {
+          this.#log(
+            `pi-agent-runtime: prompt dispatch (${turnLogContext(input)}` +
+              ` inputChars=${input.inputText.length})`,
+          );
           await session.prompt(input.inputText, { expandPromptTemplates: false });
         }
       } catch (error) {
