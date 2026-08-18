@@ -1,7 +1,7 @@
 # Forge Core v2 真模型集成排查报告（SDK / DeepSeek 卡死问题）
 
 > 日期：2026-08-18（复核更新）
-> 基线：`e815f10`；本次修复链当前提交为 `43fcc39`
+> 基线：`e815f10`；本次修复链当前源码提交为 `91b6f05`
 > 状态：**生产接线与无界 hang 已修复；真实 provider 失败仍按 retryable 记录**。原始 2026-08-17 现象保留为历史证据；本报告补充生产组合、真实 HTTP、运行时日志与浏览器复核结果。
 > 当前 worktree：`codex/authoritative-review-real-mode`；主 checkout 的 `authoritative_review_v1` capability/profile 未被本次实验改写。
 
@@ -142,7 +142,14 @@ tail -100 dev.log 2>/dev/null
 - preflight listener 的异常现在被记录后重新抛出；attempt timeout、provider failure、abort 均走既有 durable retry/abort 语义。
 - `V2AttemptCoordinator` 的 timeout 已由协调器自有 deadline 独立结算：即使 provider 忽略 `AbortSignal`，也会在 deadline 写入 `ATTEMPT_TIMEOUT` retryable envelope；晚到的 runtime 结果不能再提交第二个 terminal batch。`CoreService.stopTaskV2()`、结构化 stop decision 与 shutdown 会主动中断同 task 的进程内执行。
 - 结构化回合没有非空 `resultRefs` 时返回 `V2_RESULT_REFS_MISSING` retryable outcome，避免裸完成穿透到 coordinator 并变成 HTTP 500。
-- 增加了 production composition、tool runtime、runner、API、scheduler、timeout、late-result 与 commit-race 回归；当前 coordinator 29/29、生产相关集合 137/137 通过，实际 HTTP + Playwright 验收见 §2.9。
+- 增加了 production composition、tool runtime、runner、API、scheduler、timeout、late-result、commit-race 与 stop/reclaim settlement 回归；当前 coordinator 30/30、TaskScheduler 75/75、生产/API 聚焦集合 128/128 通过，实际 HTTP + Playwright 验收见 §2.9。
+
+### 2.10 并发边界复核（源码检查点 `91b6f05`）
+
+- stop 与调度注册竞态：`V2AttemptCoordinator` 现在在 setup 首次 await 前登记执行；task cancellation barrier 在登记瞬间检查，迟到登记直接带 abort signal，stop/resume 成功路径明确关闭/重新打开 barrier。
+- terminal commit 与 stop/reclaim 竞态：每个活动执行有可等待的 settlement promise；CoreService stop/shutdown 和生产 scheduler 的 lease-expiry 回收在 durable mutation 前等待它。提交进入 `committing` 后，abort 不会把公共结果改写成 `aborted`。
+- stale scheduling tick：pass 返回 `workItemId/leaseEpoch/attemptId/commandId`，`executeLeased` 校验同一 lease 身份，旧 pass 不会在回收后启动 successor lease。
+- 证据：新增真实 `stopTaskV2` 延迟 completion 测试与 lease-expiry 延迟 completion 测试；最新全量 `184 files / 4363 passed / 1 skipped`，check/build（含 HTTP mode）与 authoritative acceptance 5/5、Pi preflight 10/10 通过。
 
 ### 尚未宣称完成
 

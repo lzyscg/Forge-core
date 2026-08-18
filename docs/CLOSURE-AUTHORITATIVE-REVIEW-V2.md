@@ -2,7 +2,7 @@
 
 > 状态：✅ 已关闭生产接线与无界 real-mode hang；migration 全生命周期仍显式 fail-closed，不能宣称全部生命周期完成
 > 日期：2026-08-18（复核更新）
-> 原始收尾检查点：`e2d89f1`；real-mode 修复链：`49c4f8e` → `43fcc39`（文档更新后会产生新的文档提交）
+> 原始收尾检查点：`e2d89f1`；real-mode 修复链：`49c4f8e` → `43fcc39` → `91b6f05`（源码并发收尾检查点）
 > 范围：Task 22–29（Plan §6 Phase 7-8：系统交付→读 API→UI→模板迁移→故障矩阵→10k qualification→capability promote→真实 Case）
 
 ## 1. 结果快照
@@ -10,12 +10,12 @@
 | 维度 | 状态 |
 |---|---|
 | `npm run check` | exit 0 |
-| `npm test` | 110 files / 2016 passed / 1 skipped / 0 failed |
+| `npm test` | 184 files / 4363 passed / 1 skipped / 0 failed |
 | `npm run build` | exit 0（vite + tsc server） |
 | `npm run verify:structured-slots --capability production` | exit 0 |
 | `npx tsx scripts/verify-authoritative-review.ts --capability production` | exit 0（authoritative-pi-preflight 10/10） |
 | Capability | `authoritative_review_v1` status=**enabled**，profile digest `f4685a55...` |
-| Worktree | `/Users/lzy/Desktop/ForgeCore/.worktrees/authoritative-slot-review-v2`，`git status` 干净 |
+| Worktree | `/Users/lzy/Desktop/ForgeCore/.worktrees/codex-authoritative-review-real-mode`，branch `codex/authoritative-review-real-mode` |
 
 ## 2. 提交链（Task 22-29，12 个 commit，从 `0768a00` 起）
 
@@ -124,8 +124,16 @@ af890a4 feat: deliver sealed system artifacts to the generic submitter
 - ✅ listener/attempt timeout/provider error 具备脱敏日志和 durable retry/abort 语义；真实 provider 失败落成 `structured_agent_attempt_retryable_failed_v2` + `structured_work_item_retryable_failed`，不再无限等待。
 - ✅ timeout 不再依赖 provider 配合 abort：协调器自有 deadline 会独立落 `ATTEMPT_TIMEOUT` retryable 事件，late provider result 被 settlement guard 丢弃；`stopTaskV2`、stop decision 与 shutdown 会中断同 task 的活动执行。
 - ✅ runner 对空 `resultRefs` 返回 `V2_RESULT_REFS_MISSING` retryable outcome，协调器不再收到裸完成并抛出 HTTP 500。
-- ✅ `npm run check`、生产 build、authoritative acceptance、Playwright HTTP 页面验收和相关回归均已执行；首轮全量 184 files / 4357 passed / 1 skipped 只有一个旧 I-2 断言需要同步到新 retry 契约，后续 coordinator 29/29、生产相关集合 137/137 全绿。
+- ✅ `npm run check`、生产 build、authoritative acceptance、Playwright HTTP 页面验收和相关回归均已执行；首轮全量的旧 I-2 断言已同步到新 retry 契约，当前全量与并发边界复核结果见下方 `91b6f05` 检查点。
 - ⚠️ `MigrationServiceV2` 尚未在生产 composition 中构造。迁移 system command 在已取得 lease/attempt 后返回 `MIGRATION_RUNTIME_NOT_WIRED` terminal fail-closed，而不是 `NOT_IMPLEMENTED` retry loop；这仍不是 lease 前能力门，初始 structure/map/generation/repair/review/seal 路径的证据不覆盖 migration 全生命周期。
+
+### 2026-08-18 并发边界复核（源码检查点 `91b6f05`）
+
+- ✅ AttemptCoordinator 在第一次异步读取前注册执行；stop/reclaim 屏障会同步阻断之后注册的同任务执行，并提供 task/all settlement 等待。
+- ✅ `stopTaskV2`、stop decision、shutdown 与 lease-expiry reclaim 共享终态 settlement gate；durable stop/reclaim 不会抢在进行中的 terminal commit 之前落账。
+- ✅ 调度 pass 携带 `workItemId + leaseEpoch + attempt/command`，旧 pass 不能在 reclaim 后误执行 successor lease。
+- ✅ 新增真实 CoreService `stopTaskV2` 延迟 completion 测试和 scheduler lease-expiry 延迟 completion 测试；AttemptCoordinator 30/30、TaskScheduler 75/75、生产/API 聚焦集合 128/128 通过。
+- ✅ 最新全量回归为 184 files / 4363 passed / 1 skipped；default build、HTTP build、authoritative acceptance 5/5、Pi preflight 10/10 均退出 0。
 
 ## 6. 后续债务（非阻塞）
 

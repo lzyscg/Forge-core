@@ -45,8 +45,10 @@
 - Verification observed so far: `npm run check`, both default and
   `VITE_FORGE_CORE_MODE=http` builds, authoritative acceptance, focused
   regressions, and a 184-file full run. The first full run exposed one stale
-  I-2 test assertion; after synchronizing that assertion, the affected
-  coordinator file is 24/24 green.
+  I-2 test assertion; after synchronizing that assertion and closing the
+  stop/reclaim races, the latest full run is 184 files / 4363 passed / 1
+  skipped. The final coordinator and scheduler focused counts are 30/30 and
+  75/75 respectively.
 
 ---
 
