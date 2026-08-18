@@ -121,7 +121,8 @@ af890a4 feat: deliver sealed system artifacts to the generic submitter
 1. **N2** — 发布 recipe 未交叉校验 reviewBundle 内部 refs（执行期 resolver 兜底，不可利用）
 2. **N4** — 旧 checkpoint 的 mergedArtifactVersion 归一（v2 尚未进生产）
 3. **N5/N6** — 生产 composition 未传五个 domain services（capability 使能后非 seal system command 走 NOT_IMPLEMENTED retryable park，注释为前向依赖）
-4. **Task 29 real-mode provider** — 接 API key 后跑真实 Pi 路径，覆盖 hermetic 证据为真实证据
+4. **N7** — 真实 Pi 0.82 + DeepSeek v4-flash reasoning 模型下 Agent turn 卡在 `agent_attempt_started_v2` 之后；hermetic-only 走通但 real-mode 阻塞。详见 `docs/INVESTIGATION-AUTHORITATIVE-REVIEW-REAL-MODE.md`，需在 SDK 兼容性修复或换 non-reasoning 模型/升级 SDK 后才能让端到端真实 Case 跑通。
+4. **Task 29 real-mode provider** — 接 API key 后跑真实 Pi 路径，覆盖 hermetic 证据为真实证据。**实际接 DeepSeek v4-flash API key 后确认 SDK 卡死**：`agent_attempt_started_v2` 后无任何进展，事件不写、turn 不返回、不写 retry/terminal；SDK 直 curl OK、最小 SDK listener 路径 843ms 跑通 → 问题在 Forge 全链路 + DeepSeek reasoning 模型。详见 [`docs/INVESTIGATION-AUTHORITATIVE-REVIEW-REAL-MODE.md`](INVESTIGATION-AUTHORITATIVE-REVIEW-REAL-MODE.md)（**N7** 债务）。
 
 ## 7. 关键文件位置
 
