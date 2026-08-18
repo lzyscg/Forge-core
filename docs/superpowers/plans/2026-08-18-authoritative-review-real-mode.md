@@ -20,11 +20,11 @@
 
 ## Execution record (2026-08-18)
 
-- Tasks 1–4 are implemented and committed through `9500070`: the production
+- Tasks 1–4 are implemented and committed through `43fcc39`: the production
   tick executes all fresh leases; Pi receives the task-scoped v2 tool closure;
   structure/generation/repair/map+content review/validator/seal dependencies
   are composed; and real-mode attempts have bounded, sanitized failure paths.
-- The independent-review timeout finding is closed in `9500070`: the
+- The independent-review timeout finding is closed in `43fcc39`: the
   coordinator owns the deadline settlement, rejects late terminal commits,
   cleans composite-signal listeners/timers, and exposes task/all-execution
   aborts to stop/shutdown paths.

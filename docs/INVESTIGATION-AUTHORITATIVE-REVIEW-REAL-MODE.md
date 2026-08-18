@@ -1,7 +1,7 @@
 # Forge Core v2 真模型集成排查报告（SDK / DeepSeek 卡死问题）
 
 > 日期：2026-08-18（复核更新）
-> 基线：`e815f10`；本次修复链当前提交为 `9500070`
+> 基线：`e815f10`；本次修复链当前提交为 `43fcc39`
 > 状态：**生产接线与无界 hang 已修复；真实 provider 失败仍按 retryable 记录**。原始 2026-08-17 现象保留为历史证据；本报告补充生产组合、真实 HTTP、运行时日志与浏览器复核结果。
 > 当前 worktree：`codex/authoritative-review-real-mode`；主 checkout 的 `authoritative_review_v1` capability/profile 未被本次实验改写。
 

@@ -2,7 +2,7 @@
 
 > 状态：✅ 已关闭生产接线与无界 real-mode hang；migration 全生命周期仍显式 fail-closed，不能宣称全部生命周期完成
 > 日期：2026-08-18（复核更新）
-> 原始收尾检查点：`e2d89f1`；real-mode 修复链：`49c4f8e` → `9500070`（文档更新后会产生新的文档提交）
+> 原始收尾检查点：`e2d89f1`；real-mode 修复链：`49c4f8e` → `43fcc39`（文档更新后会产生新的文档提交）
 > 范围：Task 22–29（Plan §6 Phase 7-8：系统交付→读 API→UI→模板迁移→故障矩阵→10k qualification→capability promote→真实 Case）
 
 ## 1. 结果快照
