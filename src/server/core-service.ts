@@ -1156,6 +1156,7 @@ export class CoreService {
 
   /** V2 stop (composed envelope: abandon + reclaim + overlay in ONE batch). */
   async stopTaskV2(taskId: string): Promise<TaskSummary> {
+    this.v2Composition.attempts.abortTaskExecutions(taskId);
     await this.v2Lifecycle.stopV2(taskId, { operationId: randomUUID(), reason: 'user_stop' });
     return (await this.getWorkspace(taskId)).task;
   }
@@ -1192,6 +1193,7 @@ export class CoreService {
     // B-F1: the wire schema accepts the plain { answer } variant — the
     // decision union is only for the structured progress-guard choices.
     if ('decision' in body && body.decision === 'stop') {
+      this.v2Composition.attempts.abortTaskExecutions(taskId);
       await this.v2Lifecycle.stopV2(taskId, {
         operationId: body.operationId,
         reason: 'user_stop',
@@ -1474,6 +1476,7 @@ export class CoreService {
 
   /** Stops the scheduler (abort + bounded disposal + interruption marking). */
   shutdown(): Promise<void> {
+    this.v2Composition.attempts.abortAllExecutions();
     return this.scheduler.shutdown();
   }
 

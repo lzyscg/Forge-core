@@ -132,6 +132,42 @@ class RecordingRuntime implements AgentRuntime {
   }
 }
 
+/** A provider/runtime that ignores AbortSignal until the test releases it. */
+class StubbornRuntime implements AgentRuntime {
+  private resolveTurn: ((result: AgentTurnResult) => void) | null = null;
+  private resolveStarted: (() => void) | null = null;
+  readonly started = new Promise<void>((resolve) => {
+    this.resolveStarted = resolve;
+  });
+
+  async run(): Promise<AgentTurnResult> {
+    this.resolveStarted?.();
+    this.resolveStarted = null;
+    return new Promise<AgentTurnResult>((resolve) => {
+      this.resolveTurn = resolve;
+    });
+  }
+
+  resolveLate(): void {
+    this.resolveTurn?.({
+      turnId: 'late-turn',
+      publicText: 'late provider result',
+      actions: [],
+      usage: null,
+      trace: [],
+    });
+    this.resolveTurn = null;
+  }
+
+  async disposeAgent(): Promise<void> {
+    return undefined;
+  }
+
+  async disposeAll(): Promise<void> {
+    return undefined;
+  }
+}
+
 interface AttemptEnv {
   base: WorkItemCoordinatorEnvironment;
   wakeups: AuthoritativeWakeupIndexV1;
@@ -152,6 +188,7 @@ let envs: AttemptEnv[] = [];
 async function makeEnv(options: {
   handlers?: readonly SystemCommandHandler[];
   runtime?: FakeAgentRuntime;
+  runner?: V2AssignmentRunner;
   attemptTimeoutMs?: number;
   /** When true the tool provider returns NO domain result refs (bare gate tests). */
   bare?: boolean;
@@ -174,7 +211,7 @@ async function makeEnv(options: {
     },
     collectResultRefs: async (ctx) => (options.bare === true ? [] : [await prepareResultRef(ctx.taskId)]),
   };
-  const runner = new V2AssignmentRunner({ runtime, toolProvider });
+  const runner = options.runner ?? new V2AssignmentRunner({ runtime, toolProvider });
   const terminalFailCalls: TerminalFailInputV2[] = [];
   const systemCommands = new SystemCommandRegistry(options.handlers);
   const attempts = new V2AttemptCoordinator({
@@ -702,6 +739,60 @@ describe('V2AttemptCoordinator namespace isolation + timeout', () => {
     expect(rows.some((row) => row.kind === 'retry_due' && row.workItemId === workItemId)).toBe(true);
     expect(rows.some((row) => row.kind === 'lease_expiry')).toBe(false);
     expect(env.logs.some((line) => line.includes('authoritative-attempt: timeout'))).toBe(true);
+  });
+
+  it('settles independently when the runtime ignores abort and drops a late result', async () => {
+    const stubborn = new StubbornRuntime();
+    const runner = new V2AssignmentRunner({
+      runtime: stubborn,
+      toolProvider: {
+        toolsFor: async () => [],
+        collectResultRefs: async () => [synthRef('content_value', 9101)],
+      },
+    });
+    const env = await makeEnv({ attemptTimeoutMs: 25, runner });
+    const taskId = tid('stubborn-timeout');
+    const { workItemId } = await createWorkItem(env, taskId);
+    await env.base.coordinator.leaseNext(taskId, 'worker-a', 'pre-lease-stubborn-timeout');
+
+    const outcome = await env.attempts.executeLeased(taskId);
+    expect(outcome).toMatchObject({ kind: 'retryable_failed', workItemId, failureCode: 'ATTEMPT_TIMEOUT' });
+    const projection = await readProjection(env, taskId);
+    expect(projection.workItems[workItemId].state).toBe('retryable_failed');
+
+    // A provider can resolve after the coordinator has already settled the
+    // timeout. The late result must not create a second terminal batch.
+    stubborn.resolveLate();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const events = await env.base.eventStore.read(taskId);
+    expect(events.some((entry) => entry.event.type === 'structured_work_item_completed')).toBe(false);
+    expect((await readProjection(env, taskId)).workItems[workItemId].state).toBe('retryable_failed');
+  });
+
+  it('abortTaskExecutions interrupts a stubborn in-process turn without writing a terminal event', async () => {
+    const stubborn = new StubbornRuntime();
+    const runner = new V2AssignmentRunner({
+      runtime: stubborn,
+      toolProvider: {
+        toolsFor: async () => [],
+        collectResultRefs: async () => [synthRef('content_value', 9102)],
+      },
+    });
+    const env = await makeEnv({ attemptTimeoutMs: 5_000, runner });
+    const taskId = tid('operator-stop-stubborn');
+    const { workItemId } = await createWorkItem(env, taskId);
+    await env.base.coordinator.leaseNext(taskId, 'worker-a', 'pre-lease-operator-stop');
+
+    const runPromise = env.attempts.executeLeased(taskId);
+    await stubborn.started;
+    env.attempts.abortTaskExecutions(taskId);
+    await expect(runPromise).resolves.toMatchObject({ kind: 'aborted', workItemId });
+
+    stubborn.resolveLate();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const events = await env.base.eventStore.read(taskId);
+    expect(events.some((entry) => entry.event.type === 'structured_work_item_completed')).toBe(false);
+    expect((await readProjection(env, taskId)).activeLease?.workItemId).toBe(workItemId);
   });
 
   it('aborts (records nothing) when the scheduler signal stops the attempt', async () => {

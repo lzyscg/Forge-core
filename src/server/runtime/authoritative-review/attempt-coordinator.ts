@@ -307,10 +307,35 @@ export class V2AttemptCoordinator {
 
   private readonly attemptTimeoutMs: number;
 
+  /** Controllers for attempts currently executing in this process. */
+  private readonly activeExecutions = new Map<string, Set<AbortController>>();
+
   constructor(deps: V2AttemptCoordinatorDependencies) {
     this.deps = deps;
     this.systemCommands = deps.systemCommands ?? new SystemCommandRegistry();
     this.attemptTimeoutMs = deps.attemptTimeoutMs ?? 10 * 60 * 1000;
+  }
+
+  /** Abort in-process executions before a v2 stop/reclaim is committed. */
+  abortTaskExecutions(taskId: string): void {
+    for (const controller of this.activeExecutions.get(taskId) ?? []) controller.abort();
+  }
+
+  /** Abort every in-process authoritative execution during server shutdown. */
+  abortAllExecutions(): void {
+    for (const controllers of this.activeExecutions.values()) {
+      for (const controller of controllers) controller.abort();
+    }
+  }
+
+  private registerExecution(taskId: string, controller: AbortController): () => void {
+    const executions = this.activeExecutions.get(taskId) ?? new Set<AbortController>();
+    executions.add(controller);
+    this.activeExecutions.set(taskId, executions);
+    return () => {
+      executions.delete(controller);
+      if (executions.size === 0) this.activeExecutions.delete(taskId);
+    };
   }
 
   /* ---------------- runner entry ---------------- */
@@ -402,46 +427,107 @@ export class V2AttemptCoordinator {
     // Build the bounded attempt context (§10.2 namespace + current assignment).
     const ctx = await this.buildContext(taskId, wi, lease, family, attemptId, baseRef, leaseInfo?.dispatchRef ?? null);
     const signal = this.compositeSignal(schedulerSignal, wi.leaseExpiresAt);
+    const unregisterExecution = this.registerExecution(taskId, signal.controller);
     let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      try {
-        this.deps.log?.(
-          `authoritative-attempt: timeout (task=${safeAttemptLogToken(taskId)}` +
-            ` workItem=${safeAttemptLogToken(wi.workItemId)} attempt=${safeAttemptLogToken(attemptId)})`,
-        );
-      } catch {
-        // Diagnostics are best-effort and can never prevent the abort.
-      }
-      signal.controller.abort();
-    }, this.attemptTimeoutMs);
+    let timeoutClaimed = false;
+    let settlementClaimed = false;
+    let abortObserved = signal.signal.aborted;
+    let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
+    let abortListener: (() => void) | null = null;
+    let timeoutSettlement: Promise<V2AttemptOutcome> | null = null;
+    const aborted = (): V2AttemptOutcome => ({
+      kind: 'aborted',
+      workItemId: wi.workItemId,
+      message: 'authoritative attempt aborted before its terminal commit',
+    });
+    const claimSettlement = (allowTimeout = false): boolean => {
+      if (settlementClaimed || (abortObserved && !allowTimeout) || (timedOut && !allowTimeout)) return false;
+      settlementClaimed = true;
+      return true;
+    };
 
-    try {
-      if (family === 'command') {
-        return await this.executeCommand(taskId, wi.workItemId, attemptId, signal.controller.signal, baseRef);
-      }
-      const outcome = await this.deps.runner.runSession(ctx, signal.controller.signal);
-      return await this.commitSessionOutcome(taskId, wi.workItemId, attemptId, outcome, ctx);
-    } catch (error) {
-      if (error instanceof RuntimeAbortedError) {
-        // Provider/attempt abort: record NOTHING (spec §7.2) and leave the
-        // lease ACTIVE — the scheduler reclaims it on lease expiry via the
-        // durable lease_expiry wakeup (kept in place). If OUR timeout fired,
-        // record a durable retryable failure instead (spec §12 timeout).
-        if (timedOut) {
-          return this.recordRetryable(
+    // A provider may ignore AbortSignal forever. This promise is the
+    // coordinator-owned deadline: it settles the lease independently instead
+    // of waiting for the runtime's promise to cooperate.
+    const timeoutPromise = new Promise<V2AttemptOutcome>((resolve, reject) => {
+      timeoutTimer = setTimeout(() => {
+        timedOut = true;
+        try {
+          this.deps.log?.(
+            `authoritative-attempt: timeout (task=${safeAttemptLogToken(taskId)}` +
+              ` workItem=${safeAttemptLogToken(wi.workItemId)} attempt=${safeAttemptLogToken(attemptId)})`,
+          );
+        } catch {
+          // Diagnostics are best-effort and can never prevent the abort.
+        }
+        signal.controller.abort();
+        if (!claimSettlement(true)) return;
+        timeoutClaimed = true;
+        timeoutSettlement = this.recordRetryable(
+          taskId,
+          wi.workItemId,
+          family === 'command' ? { commandId: attemptId } : { attemptId },
+          'ATTEMPT_TIMEOUT',
+          ctx,
+        );
+        void timeoutSettlement.then(resolve, reject);
+      }, this.attemptTimeoutMs);
+    });
+
+    const abortPromise = new Promise<V2AttemptOutcome>((resolve) => {
+      abortListener = () => {
+        // The timeout path owns its own retry settlement. Do not let the
+        // synchronous AbortController event win the race with it.
+        if (timedOut) return;
+        abortObserved = true;
+        resolve(aborted());
+      };
+      if (signal.signal.aborted) abortListener();
+      else signal.signal.addEventListener('abort', abortListener, { once: true });
+    });
+
+    const executionPromise = (async (): Promise<V2AttemptOutcome> => {
+      try {
+        if (family === 'command') {
+          return await this.executeCommand(
             taskId,
             wi.workItemId,
-            family === 'command' ? { commandId: attemptId } : { attemptId },
-            'ATTEMPT_TIMEOUT',
-            ctx,
+            attemptId,
+            signal.controller.signal,
+            baseRef,
+            () => claimSettlement(),
           );
         }
-        return { kind: 'aborted', workItemId: wi.workItemId, message: error.message };
+        const outcome = await this.deps.runner.runSession(ctx, signal.controller.signal);
+        if (!claimSettlement()) return aborted();
+        return await this.commitSessionOutcome(taskId, wi.workItemId, attemptId, outcome, ctx);
+      } catch (error) {
+        // Once the deadline has won, a late runtime rejection is deliberately
+        // detached from the public attempt result. The timeout promise owns
+        // the durable retry and this late continuation must not write again.
+        if (timedOut || timeoutClaimed) return timeoutSettlement ?? aborted();
+        if (abortObserved) return aborted();
+        if (error instanceof RuntimeAbortedError) {
+          // Provider/attempt abort: record NOTHING (spec §7.2) and leave the
+          // lease ACTIVE — the scheduler reclaims it on lease expiry via the
+          // durable lease_expiry wakeup.
+          return aborted();
+        }
+        mapAttemptError(error);
       }
-      mapAttemptError(error);
+    })();
+
+    try {
+      return await Promise.race([executionPromise, timeoutPromise, abortPromise]);
     } finally {
-      clearTimeout(timer);
+      if (timeoutTimer !== null) clearTimeout(timeoutTimer);
+      if (abortListener !== null) signal.signal.removeEventListener('abort', abortListener);
+      signal.cleanup();
+      unregisterExecution();
+      // A timed-out/externally-aborted runtime can finish later. Keep its
+      // rejection observed and let its settlement guard turn late success
+      // into a no-op rather than an unhandled rejection.
+      void executionPromise.catch(() => undefined);
     }
   }
 
@@ -490,23 +576,31 @@ export class V2AttemptCoordinator {
   private compositeSignal(
     schedulerSignal?: AbortSignal,
     leaseExpiresAt?: string | null,
-  ): { controller: AbortController; signal: AbortSignal } {
+  ): { controller: AbortController; signal: AbortSignal; cleanup: () => void } {
     const controller = new AbortController();
+    let leaseTimer: ReturnType<typeof setTimeout> | null = null;
+    const onSchedulerAbort = () => controller.abort();
     if (schedulerSignal !== undefined && schedulerSignal.aborted) {
       controller.abort();
     } else if (schedulerSignal !== undefined) {
-      schedulerSignal.addEventListener('abort', () => controller.abort(), { once: true });
+      schedulerSignal.addEventListener('abort', onSchedulerAbort, { once: true });
     }
     if (leaseExpiresAt !== undefined && leaseExpiresAt !== null) {
       const remaining = Date.parse(leaseExpiresAt) - Date.parse(this.deps.clock());
       if (Number.isFinite(remaining) && remaining <= 0) {
         controller.abort();
       } else if (Number.isFinite(remaining)) {
-        const leaseTimer = setTimeout(() => controller.abort(), remaining);
-        controller.signal.addEventListener('abort', () => clearTimeout(leaseTimer), { once: true });
+        leaseTimer = setTimeout(() => controller.abort(), remaining);
       }
     }
-    return { controller, signal: controller.signal };
+    return {
+      controller,
+      signal: controller.signal,
+      cleanup: () => {
+        if (schedulerSignal !== undefined) schedulerSignal.removeEventListener('abort', onSchedulerAbort);
+        if (leaseTimer !== null) clearTimeout(leaseTimer);
+      },
+    };
   }
 
   /* ---------------- command dispatch ---------------- */
@@ -517,6 +611,7 @@ export class V2AttemptCoordinator {
     commandId: string,
     signal: AbortSignal,
     baseRef: BlobRefV2,
+    claimSettlement: () => boolean,
   ): Promise<V2AttemptOutcome> {
     if (signal.aborted) {
       throw new RuntimeAbortedError(`command ${commandId} aborted before it started`);
@@ -546,6 +641,9 @@ export class V2AttemptCoordinator {
       authorityBaseRef: baseRef,
       payloadRef: wi?.payloadRef,
     });
+    if (!claimSettlement()) {
+      return { kind: 'aborted', workItemId, message: 'authoritative command aborted before its terminal commit' };
+    }
     return this.commitCommandOutcome(taskId, workItemId, commandId, outcome);
   }
 
