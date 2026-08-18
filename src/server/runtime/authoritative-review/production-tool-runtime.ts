@@ -27,6 +27,7 @@ import {
   type V2DomainHandlers,
 } from './tool-factory';
 import type { ReviewPolicyParameters } from '../../authoritative-review/authority-types';
+import type { ProductionV2TaskDomainRuntime } from './production-domain-runtime';
 
 export interface ProductionV2ToolRuntimeDependencies {
   paths: CorePaths;
@@ -35,6 +36,8 @@ export interface ProductionV2ToolRuntimeDependencies {
   resolver(taskId: string, ref: BlobRefV2): Promise<unknown>;
   /** Reconstructs the current attempt from the persisted lease envelope. */
   contextResolver(taskId: string, workItemId: string, attemptId: string): Promise<V2AttemptContext | null>;
+  /** Resolves the same task-scoped domain services used by system commands. */
+  taskRuntimeFor?(taskId: string): Promise<ProductionV2TaskDomainRuntime | undefined>;
   /** Resolves the committed dispatch when the scheduler path has no ref inline. */
   resolveDispatch?: DispatchResolver;
   handlersFor?(taskId: string): Promise<V2DomainHandlers | undefined>;
@@ -62,7 +65,13 @@ export class ProductionV2ToolRuntime implements V2ToolProvider {
     // tool surface can be exposed before domain services are composed, but a
     // structured Agent attempt must not turn an empty/fake result into a bare
     // completion rejection that escapes the mutation driver.
-    if (ctx.sessionKind !== null && this.deps.handlersFor === undefined) {
+    const taskRuntime = this.deps.taskRuntimeFor === undefined
+      ? undefined
+      : await this.deps.taskRuntimeFor(ctx.taskId);
+    if (
+      ctx.sessionKind !== null
+      && (taskRuntime?.handlers === undefined && this.deps.handlersFor === undefined)
+    ) {
       throw RuntimeFailure.transient(
         'V2_AGENT_TOOLS_NOT_WIRED',
         'authoritative v2 domain handlers are not installed for this runtime',
@@ -114,6 +123,12 @@ export class ProductionV2ToolRuntime implements V2ToolProvider {
     const profileBody = await this.deps.profileBody(taskId);
     const profile = profileBody.runtime as AuthoritativeReviewProfile;
     const privateStore = new AuthoritativeReviewPrivateStore(this.deps.paths, taskId);
+    const taskRuntime = this.deps.taskRuntimeFor === undefined
+      ? undefined
+      : await this.deps.taskRuntimeFor(taskId);
+    const handlers = taskRuntime?.handlers ?? (this.deps.handlersFor === undefined ? undefined : await this.deps.handlersFor(taskId));
+    const resolveAssignmentTargets = taskRuntime?.resolveAssignmentTargets ?? this.deps.resolveAssignmentTargets;
+    const freezeReviewAssignment = taskRuntime?.freezeReviewAssignment ?? this.deps.freezeReviewAssignment;
     const grants = new GrantService({
       resolver: this.deps.resolver,
       readProjection: this.deps.readProjection,
@@ -128,10 +143,14 @@ export class ProductionV2ToolRuntime implements V2ToolProvider {
       resolver: this.deps.resolver,
       contextResolver: (currentTaskId, workItemId, attemptId) =>
         this.deps.contextResolver(currentTaskId, workItemId, attemptId),
-      ...(this.deps.handlersFor === undefined ? {} : { handlers: await this.deps.handlersFor(taskId) }),
-      ...(this.deps.resolveAssignmentTargets === undefined ? {} : { resolveAssignmentTargets: this.deps.resolveAssignmentTargets }),
-      ...(this.deps.freezeReviewAssignment === undefined ? {} : { freezeReviewAssignment: this.deps.freezeReviewAssignment }),
-      ...(this.deps.reviewPolicyFor === undefined ? {} : { reviewPolicy: await this.deps.reviewPolicyFor(taskId) }),
+      ...(handlers === undefined ? {} : { handlers }),
+      ...(resolveAssignmentTargets === undefined ? {} : { resolveAssignmentTargets }),
+      ...(freezeReviewAssignment === undefined ? {} : { freezeReviewAssignment }),
+      ...(taskRuntime !== undefined
+        ? { reviewPolicy: taskRuntime.reviewPolicy }
+        : this.deps.reviewPolicyFor === undefined
+          ? {}
+          : { reviewPolicy: await this.deps.reviewPolicyFor(taskId) }),
       ...(this.deps.log === undefined ? {} : { log: this.deps.log }),
     });
   }

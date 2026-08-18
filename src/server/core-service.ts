@@ -127,6 +127,7 @@ import {
 } from './runtime/authoritative-review/production-composition';
 import { V2AssignmentRunner } from './runtime/authoritative-review/assignment-runner';
 import { ProductionV2ToolRuntime } from './runtime/authoritative-review/production-tool-runtime';
+import { ProductionV2DomainRuntimeFactory } from './runtime/authoritative-review/production-domain-runtime';
 import type { BlobRefV2, AuthoritativeReviewExecutionEligibilityV1 } from '../shared/authoritative-review-v2';
 import { STORAGE_ERROR_CODES, StorageError } from './storage/atomic-file';
 import type { PublicationOperationPayloadV2 } from './authoritative-review/authority-types';
@@ -497,6 +498,26 @@ export class CoreService {
       const raw = await readFile(file, 'utf8');
       return JSON.parse(raw) as import('./structured-slots/authoritative-review-profile').AuthoritativeReviewProfileSnapshotV1Body;
     };
+    const authoritativeDomainRuntime = new ProductionV2DomainRuntimeFactory({
+      paths: this.paths,
+      facade: this.v2Facade,
+      coordinator: this.v2Coordinator,
+      profileBody: authoritativeProfileBodyForTask,
+      frozenProfile: (taskId) => this.frozenProfileV2(taskId),
+      frozenTemplate: (taskId) => this.tasks.readFrozenTemplate(taskId),
+      readProjection: (taskId) => this.v2Projection(taskId),
+      resolver: (taskId, ref) => this.v2BlobStore.readJson(taskId, ref, ref.kind),
+      tail: (taskId) => this.events.tail(taskId),
+      readEvents: async (taskId) => (await this.events.read(taskId)).map((entry) => entry.event as AuthoritativeReviewEventV2),
+      committedOperation: async (taskId, operationId) => {
+        const committed = await this.events.readBatchByCommitId(taskId, operationId);
+        return committed === null ? null : committed.map((entry) => entry.event as AuthoritativeReviewEventV2);
+      },
+      defaultAutomaticRetries: (taskId) => this.frozenAutomaticRetries(taskId),
+      resolveDispatch: (taskId, workItemId, attemptId) => this.v2DispatchForAttempt(taskId, workItemId, attemptId),
+      clock: () => new Date().toISOString(),
+    });
+    const authoritativeDomainRuntimeForTask = (taskId: string) => authoritativeDomainRuntime.for(taskId);
     const authoritativeV2Tools = new ProductionV2ToolRuntime({
       paths: this.paths,
       profileBody: authoritativeProfileBodyForTask,
@@ -504,6 +525,7 @@ export class CoreService {
       resolver: (taskId, ref) => this.v2BlobStore.readJson(taskId, ref, ref.kind),
       contextResolver: (taskId, workItemId, attemptId) =>
         this.v2Composition.attempts.contextForAttempt(taskId, workItemId, attemptId),
+      taskRuntimeFor: authoritativeDomainRuntimeForTask,
       resolveDispatch: (taskId, workItemId, attemptId) => this.v2DispatchForAttempt(taskId, workItemId, attemptId),
     });
     // Task 17: the per-turn structured slot runtime seam. The production Pi
@@ -640,11 +662,11 @@ export class CoreService {
         ? { acceptanceStopAfterCommit: options.acceptanceStopAfterCommit }
         : {}),
     });
-    // Task 21 P1#1: install the production composition — the six real
-    // system-command handlers + the attempt coordinator + the pass+execute
-    // tick. The runner's tool provider is the Task 13 V2ToolFactory seam
-    // (empty here); the seal command path never uses Agent tools, and the
-    // disabled capability keeps everything idle until qualified.
+    // Task 21 P1#1 + real-mode execution: install the production composition —
+    // the system-command handlers, task-scoped domain runtime, attempt
+    // coordinator and pass+execute tick. The same task-scoped tool factory is
+    // now used by Pi and by post-turn result-ref collection; the disabled
+    // capability still keeps the production installation idle when gated.
     this.v2Composition = installAuthoritativeReviewRuntime({
       coordinator: this.v2Coordinator,
       facade: this.v2Facade,
@@ -657,6 +679,8 @@ export class CoreService {
       frozenProfile: (taskId) => this.frozenProfileV2(taskId),
       frozenTemplate: (taskId) => this.tasks.readFrozenTemplate(taskId),
       profileBody: authoritativeProfileBodyForTask,
+      domainRuntimeFor: authoritativeDomainRuntimeForTask,
+      resolveDispatch: (taskId, workItemId, attemptId) => this.v2DispatchForAttempt(taskId, workItemId, attemptId),
       frozenAutomaticRetries: (taskId) => this.frozenAutomaticRetries(taskId),
       eligibility: (frozenProfileDigest) => this.executionEligibilityOf(frozenProfileDigest),
       runner: new V2AssignmentRunner({

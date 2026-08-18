@@ -85,6 +85,8 @@ import type { RepairService } from './repair-service';
 import type { MigrationServiceV2 } from './migration-service';
 import type { ContentReviewService } from './content-review-service';
 import type { MapReviewService } from './map-review-service';
+import type { ProductionV2TaskDomainRuntime } from './production-domain-runtime';
+import type { DispatchResolver } from './grant-service';
 import { createMapFinalizeSystemCommandHandler } from './map-build-service';
 import { createGenerationFinalizeSystemCommandHandler } from './content-plan-service';
 import { createRepairFinalizeSystemCommandHandler } from './repair-service';
@@ -246,6 +248,10 @@ export interface AuthoritativeReviewCompositionInputV2 {
   migrationService?: MigrationServiceV2;
   contentReviewService?: ContentReviewService;
   mapReviewService?: MapReviewService;
+  /** Task-scoped domain services shared with the Pi tool factory. */
+  domainRuntimeFor?(taskId: string): Promise<ProductionV2TaskDomainRuntime | undefined>;
+  /** Resolves the committed assignment dispatch for Pi context reconstruction. */
+  resolveDispatch?: DispatchResolver;
   /** Event store + publication store for the direct seal-rejection append
    * (no publication handler is registered for `structured_seal_validation_
    * rejected_v2` yet; the append is fenced + schema-validated). */
@@ -277,30 +283,87 @@ export function installAuthoritativeReviewRuntime(
   const registry = new SystemCommandRegistry();
 
   // ---- the five domain handlers (Tasks 15/16/17/19/20 services) ----
-  if (input.mapBuildService !== undefined) {
-    registry.replace(createMapFinalizeSystemCommandHandler(input.mapBuildService));
-  }
-  if (input.contentPlanService !== undefined) {
-    registry.replace(createGenerationFinalizeSystemCommandHandler(input.contentPlanService));
-  }
-  if (input.repairService !== undefined) {
-    registry.replace(createRepairFinalizeSystemCommandHandler(input.repairService));
-  }
-  if (input.migrationService !== undefined) {
-    registry.replace(createMigrationValidationBatchSystemCommandHandler(input.migrationService));
-  }
-  if (input.contentReviewService !== undefined) {
-    registry.replace(createContentReviewSettlementSystemCommandHandler(input.contentReviewService));
-  }
-  if (input.mapReviewService !== undefined) {
-    registry.replace(createMapReviewSettlementSystemCommandHandler(input.mapReviewService));
-  }
-  if (input.migrationService !== undefined) {
-    // The migration half of review_settlement only intercepts migration
-    // payloads; non-migration payloads fall through to whatever was installed
-    // before (the Map-review or content-review settlement handler above).
-    const prior = registry.resolve('review_settlement');
-    registry.replace(createMigrationReviewSettlementSystemCommandHandler(input.migrationService, input.resolver, prior));
+  // A task-scoped runtime is preferred in production: all command handlers
+  // and Pi domain tools resolve the same frozen service bundle.  The direct
+  // service fields remain for focused service tests and older callers.
+  if (input.domainRuntimeFor !== undefined) {
+    const fallbackFor = (commandKind: string): SystemCommandHandler => {
+      const fallback = registry.resolve(commandKind);
+      if (fallback === null) throw new Error(`missing fallback SystemCommand handler '${commandKind}'`);
+      return fallback;
+    };
+    const dynamicCommand = <T>(
+      commandKind: 'map_finalize' | 'generation_finalize' | 'repair_finalize' | 'migration_validation_batch',
+      select: (runtime: ProductionV2TaskDomainRuntime) => T | undefined,
+      makeHandler: (service: T) => SystemCommandHandler,
+    ): SystemCommandHandler => {
+      const fallback = fallbackFor(commandKind);
+      return {
+        commandKind,
+        async execute(ctx) {
+          const runtime = await input.domainRuntimeFor!(ctx.taskId);
+          const service = runtime === undefined ? undefined : select(runtime);
+          if (service === undefined) return fallback.execute(ctx);
+          await runtime.refresh();
+          return makeHandler(service).execute(ctx);
+        },
+      };
+    };
+    registry.replace(dynamicCommand('map_finalize', (runtime) => runtime.services.mapBuildService, createMapFinalizeSystemCommandHandler));
+    registry.replace(dynamicCommand('generation_finalize', (runtime) => runtime.services.contentPlanService, createGenerationFinalizeSystemCommandHandler));
+    registry.replace(dynamicCommand('repair_finalize', (runtime) => runtime.services.repairService, createRepairFinalizeSystemCommandHandler));
+    registry.replace(dynamicCommand('migration_validation_batch', (runtime) => runtime.services.migrationService, createMigrationValidationBatchSystemCommandHandler));
+
+    const reviewFallback = fallbackFor('review_settlement');
+    registry.replace({
+      commandKind: 'review_settlement',
+      async execute(ctx) {
+        const runtime = await input.domainRuntimeFor!(ctx.taskId);
+        if (runtime === undefined) return reviewFallback.execute(ctx);
+        await runtime.refresh();
+        if (ctx.payloadRef.kind === 'map_review_coverage_core') {
+          return createMapReviewSettlementSystemCommandHandler(runtime.services.mapReviewService).execute(ctx);
+        }
+        if (ctx.payloadRef.kind === 'content_review_coverage_core') {
+          return createContentReviewSettlementSystemCommandHandler(runtime.services.contentReviewService).execute(ctx);
+        }
+        if (ctx.payloadRef.kind === 'migration_validation_plan_spec' && runtime.services.migrationService !== undefined) {
+          const mapHandler = createMapReviewSettlementSystemCommandHandler(runtime.services.mapReviewService);
+          return createMigrationReviewSettlementSystemCommandHandler(
+            runtime.services.migrationService,
+            input.resolver,
+            mapHandler,
+          ).execute(ctx);
+        }
+        return reviewFallback.execute(ctx);
+      },
+    });
+  } else {
+    if (input.mapBuildService !== undefined) {
+      registry.replace(createMapFinalizeSystemCommandHandler(input.mapBuildService));
+    }
+    if (input.contentPlanService !== undefined) {
+      registry.replace(createGenerationFinalizeSystemCommandHandler(input.contentPlanService));
+    }
+    if (input.repairService !== undefined) {
+      registry.replace(createRepairFinalizeSystemCommandHandler(input.repairService));
+    }
+    if (input.migrationService !== undefined) {
+      registry.replace(createMigrationValidationBatchSystemCommandHandler(input.migrationService));
+    }
+    if (input.contentReviewService !== undefined) {
+      registry.replace(createContentReviewSettlementSystemCommandHandler(input.contentReviewService));
+    }
+    if (input.mapReviewService !== undefined) {
+      registry.replace(createMapReviewSettlementSystemCommandHandler(input.mapReviewService));
+    }
+    if (input.migrationService !== undefined) {
+      // The migration half of review_settlement only intercepts migration
+      // payloads; non-migration payloads fall through to whatever was installed
+      // before (the Map-review or content-review settlement handler above).
+      const prior = registry.resolve('review_settlement');
+      registry.replace(createMigrationReviewSettlementSystemCommandHandler(input.migrationService, input.resolver, prior));
+    }
   }
 
   // ---- shared cross-task infrastructure ----
@@ -660,6 +723,7 @@ export function installAuthoritativeReviewRuntime(
     },
     frozenFor: async (taskId) => input.frozenTemplate(taskId),
     wakeups: input.wakeups,
+    ...(input.resolveDispatch === undefined ? {} : { resolveDispatch: input.resolveDispatch }),
     traces: input.traces,
     terminalFail: input.terminalFail,
     // Task 22: the production final-submission validator. The FROZEN profile's

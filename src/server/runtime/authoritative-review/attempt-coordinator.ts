@@ -219,6 +219,12 @@ export interface V2AttemptCoordinatorDependencies {
   frozenFor(taskId: string): Promise<FrozenTemplate>;
   /** Durable wakeup index: persists the retry_due wakeup created here. */
   wakeups: AuthoritativeWakeupIndexV1;
+  /** Resolves the committed dispatch for the Pi context reconstruction seam. */
+  resolveDispatch?: (
+    taskId: string,
+    workItemId: string,
+    attemptId: string,
+  ) => Promise<{ dispatch: Record<string, unknown>; dispatchRef: BlobRefV2 } | null>;
   /** Best-effort PUBLIC trace persistence (never private drafts). */
   traces?: TraceStore;
   clock(): string;
@@ -460,7 +466,10 @@ export class V2AttemptCoordinator {
     const family: AttemptExecutionKindV2 =
       command !== null ? 'command' : attempt?.family ?? (lease.attemptId !== null ? 'structured' : 'command');
     const baseRef = wi.leaseBases[String(wi.leaseEpoch)] ?? wi.authorityBaseRef;
-    return this.buildContext(taskId, wi, lease, family, attemptId, baseRef, null);
+    const dispatch = this.deps.resolveDispatch === undefined
+      ? null
+      : await this.deps.resolveDispatch(taskId, workItemId, attemptId);
+    return this.buildContext(taskId, wi, lease, family, attemptId, baseRef, dispatch?.dispatchRef ?? null);
   }
 
   /**
