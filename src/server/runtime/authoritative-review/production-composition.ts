@@ -678,17 +678,12 @@ export function installAuthoritativeReviewRuntime(
     const pass = await input.scheduling.runPass(nowValue);
     const outcomes: V2AttemptOutcome[] = [];
     for (const leased of pass.leased) {
-      // Execute ONLY what the installed composition can legitimately run: the
-      // six REAL SystemCommand handlers (the seal included) through the
-      // attempt coordinator. Agent sessions need the Task 13 V2ToolFactory to
-      // produce their §9.2 domain result carriers; until it is wired they stay
-      // LEASED (the scheduler's lease_expiry reclaim covers them) — never a
-      // bare-completion rejection and never a fabricated domain result.
-      const projection = await input.readProjection(leased.taskId);
-      const workItem = projection.workItems[leased.workItemId];
-      if (workItem !== undefined && workItem.kind !== 'agent_assignment') {
-        outcomes.push(await attempts.executeLeased(leased.taskId));
-      }
+      // Every fresh lease is already classified and authorized by the
+      // coordinator. System commands and Agent assignments must both enter the
+      // AttemptCoordinator here; filtering Agent assignments at this boundary
+      // makes the production scheduler emit lease/dispatch/attempt-start facts
+      // without ever invoking the Agent runtime.
+      outcomes.push(await attempts.executeLeased(leased.taskId));
     }
     return { pass, outcomes };
   };
