@@ -20,10 +20,14 @@
 
 ## Execution record (2026-08-18)
 
-- Tasks 1–4 are implemented and committed through `22c9ea5`: the production
+- Tasks 1–4 are implemented and committed through `9500070`: the production
   tick executes all fresh leases; Pi receives the task-scoped v2 tool closure;
   structure/generation/repair/map+content review/validator/seal dependencies
   are composed; and real-mode attempts have bounded, sanitized failure paths.
+- The independent-review timeout finding is closed in `9500070`: the
+  coordinator owns the deadline settlement, rejects late terminal commits,
+  cleans composite-signal listeners/timers, and exposes task/all-execution
+  aborts to stop/shutdown paths.
 - A structured turn with no domain result carrier now returns
   `V2_RESULT_REFS_MISSING` through the durable retry envelope. This preserves
   the §9.2 coordinator invariant without exposing a bare-completion
@@ -33,9 +37,11 @@
   failure instead of hanging. The captured browser screenshots are under
   `output/playwright/` in this worktree.
 - The full `MigrationServiceV2` production factory is intentionally not
-  claimed: migration command dispatch is explicit terminal fail-closed with
-  `MIGRATION_RUNTIME_NOT_WIRED`. Completing migration composition and proving
-  a real successful provider/tool write remain follow-up gates.
+  claimed: after the scheduler has leased the migration system WorkItem,
+  command dispatch is explicit terminal fail-closed with
+  `MIGRATION_RUNTIME_NOT_WIRED`. This is bounded and non-retrying, but is not a
+  pre-lease capability gate. Completing migration composition and proving a
+  real successful provider/tool write remain follow-up gates.
 - Verification observed so far: `npm run check`, both default and
   `VITE_FORGE_CORE_MODE=http` builds, authoritative acceptance, focused
   regressions, and a 184-file full run. The first full run exposed one stale

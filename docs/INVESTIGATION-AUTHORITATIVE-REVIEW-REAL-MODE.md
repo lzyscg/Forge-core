@@ -1,7 +1,7 @@
 # Forge Core v2 真模型集成排查报告（SDK / DeepSeek 卡死问题）
 
 > 日期：2026-08-18（复核更新）
-> 基线：`e815f10`；本次修复链当前提交为 `22c9ea5`
+> 基线：`e815f10`；本次修复链当前提交为 `9500070`
 > 状态：**生产接线与无界 hang 已修复；真实 provider 失败仍按 retryable 记录**。原始 2026-08-17 现象保留为历史证据；本报告补充生产组合、真实 HTTP、运行时日志与浏览器复核结果。
 > 当前 worktree：`codex/authoritative-review-real-mode`；主 checkout 的 `authoritative_review_v1` capability/profile 未被本次实验改写。
 
@@ -140,13 +140,14 @@ tail -100 dev.log 2>/dev/null
 - 生产 `runTick()` 对每个新 lease 调用 `V2AttemptCoordinator.executeLeased()`，不再只写 lease/attempt-start 事件。
 - `CoreService` 注入 task-aware `ProductionV2ToolRuntime`，Pi 与结果收集共享同一 `V2ToolFactory` 作用域；日志记录了工具数量/名称、turn 起止、tool 起止和失败码，字段经过脱敏。
 - preflight listener 的异常现在被记录后重新抛出；attempt timeout、provider failure、abort 均走既有 durable retry/abort 语义。
+- `V2AttemptCoordinator` 的 timeout 已由协调器自有 deadline 独立结算：即使 provider 忽略 `AbortSignal`，也会在 deadline 写入 `ATTEMPT_TIMEOUT` retryable envelope；晚到的 runtime 结果不能再提交第二个 terminal batch。`CoreService.stopTaskV2()`、结构化 stop decision 与 shutdown 会主动中断同 task 的进程内执行。
 - 结构化回合没有非空 `resultRefs` 时返回 `V2_RESULT_REFS_MISSING` retryable outcome，避免裸完成穿透到 coordinator 并变成 HTTP 500。
-- 增加了 production composition、tool runtime、runner、API 和 scheduler 回归；实际 HTTP + Playwright 验收见 §2.9。
+- 增加了 production composition、tool runtime、runner、API、scheduler、timeout、late-result 与 commit-race 回归；当前 coordinator 29/29、生产相关集合 137/137 通过，实际 HTTP + Playwright 验收见 §2.9。
 
 ### 尚未宣称完成
 
 - 真实 DeepSeek/provider 在本次复核中仍返回 `PROVIDER_ERROR`，但已在有限时间内写 retryable envelope；这证明“有界失败”而不是“provider 已成功完成”。若要证明真实模型成功产出 Map，还需在 provider 可用且模型实际调用写工具后重新运行。
-- `MigrationServiceV2` 尚未完成生产构造；迁移 command 明确 terminal fail-closed (`MIGRATION_RUNTIME_NOT_WIRED`)。应单独完成 migration composition 和真实迁移 HTTP/浏览器验收，不能把当前初始结构链路证据外推为全生命周期证据。
+- `MigrationServiceV2` 尚未完成生产构造；迁移 system command 在已经取得 lease/attempt 后明确 terminal fail-closed (`MIGRATION_RUNTIME_NOT_WIRED`)。这不是“lease 前 capability gate”，因此不能把它描述为迁移已可运行；应单独完成 migration composition 和真实迁移 HTTP/浏览器验收，不能把当前初始结构链路证据外推为全生命周期证据。
 - SDK/DeepSeek reasoning 兼容性仍可独立升级研究，但不再是“无限挂死未收敛”的生产阻塞；当前应先保留已验证的超时、诊断和 retry 证据。
 
 ## 7. 已写但已删除的排查脚本
@@ -167,8 +168,8 @@ tail -100 dev.log 2>/dev/null
 - `src/server/runtime/pi-agent-runtime.ts:925-955`：`session.subscribe(trace listener)`，best-effort trace + 脱敏诊断日志
 - `src/server/runtime/pi-agent-runtime.ts:910-914`：`structuredUnsubscribe = session.agentSubscribe(createForgePiSlotPreflight(...))`
 - `src/server/runtime/pi-resource-loader.ts:79-95`：`createForgeResourceLoader` 继承 `DefaultResourceLoader` 全 noX
-- `src/server/authoritative-review/attempt-coordinator.ts:362-422`：`executeLeased`，包含 lease/timeout 复合 signal
-- `src/server/authoritative-review/assignment-runner.ts:87-143`：`runSession`，v2 turn 输入装配（`v2Session: {signal}`, `slotSession: null`）
+- `src/server/runtime/authoritative-review/attempt-coordinator.ts`：`executeLeased`，包含独立 deadline、lease/scheduler abort 与 late-result settlement guard
+- `src/server/runtime/authoritative-review/assignment-runner.ts`：`runSession`，v2 turn 输入装配（`v2Session: {signal}`, `slotSession: null`）
 - `node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js:280-292`：`_emit` 无 try/catch；listener 抛错会冒泡
 - `node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js:453-510`：`_handleAgentEvent` 内部 `await this._emitExtensionEvent(event)`（preflight listener 走这条路径，async 拒绝会成 unhandled rejection）
 - `templates/zhihu-salt-chapter-draft/agents/*.yaml`：当前 4 个 agent 都绑定 `deepseek/deepseek-v4-flash`（本地 dev 切换，commit `f5b23ff`）
@@ -179,6 +180,7 @@ tail -100 dev.log 2>/dev/null
 - [x] 暴露脱敏 stderr 生命周期日志并验证真实 HTTP 事件收敛
 - [x] 完整 Forge production composition/tool runtime integration test
 - [x] 增加缺少结果引用、timeout、provider failure、abort 的 TDD 回归
+- [x] 验证 provider 忽略 abort 时 deadline 仍能结算，并验证 stop/shutdown 中断进程内执行
 - [x] 运行 check/build、authoritative acceptance、全量回归（全量首跑仅有一个已同步的旧断言，修正后相关 24 tests 全绿）
 - [ ] 完成 `MigrationServiceV2` 的生产构造并通过真实迁移任务验收
 - [ ] 在 provider 可稳定返回时取得真实模型成功写入工具结果的证据
@@ -187,5 +189,5 @@ tail -100 dev.log 2>/dev/null
 
 - N2（发布 recipe 未交叉校验 reviewBundle 内部 refs）— 执行期 resolver 兜底，不可利用
 - N4（旧 checkpoint mergedArtifactVersion 归一）— v2 尚未进生产
-- N5/N6（公开 capability 工厂边界、migration production composition 尚未完成）— 当前非 migration 初始结构/工具路径已接通，其余缺口显式 fail-closed
+- N5/N6（公开 capability 工厂边界、migration production composition 尚未完成）— 当前非 migration 初始结构/工具路径已接通；migration 缺口在 lease 后显式 terminal fail-closed，尚未形成 lease 前能力门
 - **N7（更新）：真实 Pi 0.82 + DeepSeek reasoning provider 曾在 `agent_attempt_started_v2` 后无界停滞；当前已能记录工具调用和 `PROVIDER_ERROR` retryable envelope。剩余工作是 provider 成功写入的真实证据与 SDK 兼容性长期优化。**

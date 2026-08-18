@@ -2,7 +2,7 @@
 
 > 状态：✅ 已关闭生产接线与无界 real-mode hang；migration 全生命周期仍显式 fail-closed，不能宣称全部生命周期完成
 > 日期：2026-08-18（复核更新）
-> 原始收尾检查点：`e2d89f1`；real-mode 修复链：`49c4f8e` → `22c9ea5`（文档更新后会产生新的文档提交）
+> 原始收尾检查点：`e2d89f1`；real-mode 修复链：`49c4f8e` → `9500070`（文档更新后会产生新的文档提交）
 > 范围：Task 22–29（Plan §6 Phase 7-8：系统交付→读 API→UI→模板迁移→故障矩阵→10k qualification→capability promote→真实 Case）
 
 ## 1. 结果快照
@@ -122,15 +122,16 @@ af890a4 feat: deliver sealed system artifacts to the generic submitter
 - ✅ `production-composition.runTick()` 现在执行每一个 freshly leased WorkItem，Agent assignment 不再停在 lease/attempt-start。
 - ✅ `CoreService` → `PiAgentRuntime.v2Tools` → `ProductionV2ToolRuntime` → `V2ToolFactory` 已形成同一 task/attempt-scoped 闭包；真实 HTTP 日志确认结构回合收到 4 个工具并实际调用了前两个 read 工具。
 - ✅ listener/attempt timeout/provider error 具备脱敏日志和 durable retry/abort 语义；真实 provider 失败落成 `structured_agent_attempt_retryable_failed_v2` + `structured_work_item_retryable_failed`，不再无限等待。
+- ✅ timeout 不再依赖 provider 配合 abort：协调器自有 deadline 会独立落 `ATTEMPT_TIMEOUT` retryable 事件，late provider result 被 settlement guard 丢弃；`stopTaskV2`、stop decision 与 shutdown 会中断同 task 的活动执行。
 - ✅ runner 对空 `resultRefs` 返回 `V2_RESULT_REFS_MISSING` retryable outcome，协调器不再收到裸完成并抛出 HTTP 500。
-- ✅ `npm run check`、生产 build、authoritative acceptance、Playwright HTTP 页面验收和相关全量回归均已执行；首轮全量 184 files / 4356 tests 只有一个旧 I-2 断言需要同步到新 retry 契约，修正后该文件 24/24 全绿。
-- ⚠️ `MigrationServiceV2` 尚未在生产 composition 中构造。迁移 command 返回 `MIGRATION_RUNTIME_NOT_WIRED` terminal fail-closed，而不是 `NOT_IMPLEMENTED` retry loop；初始 structure/map/generation/repair/review/seal 路径的证据不覆盖 migration 全生命周期。
+- ✅ `npm run check`、生产 build、authoritative acceptance、Playwright HTTP 页面验收和相关回归均已执行；首轮全量 184 files / 4357 passed / 1 skipped 只有一个旧 I-2 断言需要同步到新 retry 契约，后续 coordinator 29/29、生产相关集合 137/137 全绿。
+- ⚠️ `MigrationServiceV2` 尚未在生产 composition 中构造。迁移 system command 在已取得 lease/attempt 后返回 `MIGRATION_RUNTIME_NOT_WIRED` terminal fail-closed，而不是 `NOT_IMPLEMENTED` retry loop；这仍不是 lease 前能力门，初始 structure/map/generation/repair/review/seal 路径的证据不覆盖 migration 全生命周期。
 
 ## 6. 后续债务（非阻塞）
 
 1. **N2** — 发布 recipe 未交叉校验 reviewBundle 内部 refs（执行期 resolver 兜底，不可利用）
 2. **N4** — 旧 checkpoint 的 mergedArtifactVersion 归一（v2 尚未进生产）
-3. **N5/N6** — 生产 composition 的 structure/map/generation/repair/map+content review/validator/seal 已改为真实 task-scoped services；`MigrationServiceV2` 尚未完成生产构造。迁移 command 现在返回 `MIGRATION_RUNTIME_NOT_WIRED` terminal fail-closed，不再用 `NOT_IMPLEMENTED` retryable park 掩盖能力缺口。
+3. **N5/N6** — 生产 composition 的 structure/map/generation/repair/map+content review/validator/seal 已改为真实 task-scoped services；`MigrationServiceV2` 尚未完成生产构造。迁移 command 在已 lease 后返回 `MIGRATION_RUNTIME_NOT_WIRED` terminal fail-closed，不再用 `NOT_IMPLEMENTED` retryable park 掩盖能力缺口；lease 前能力门仍是后续工作。
 4. **N7** — 原先真实 Pi 0.82 + DeepSeek v4-flash reasoning 模型会卡在 `agent_attempt_started_v2` 后无界等待；当前 v2 tool seam 已接通，真实日志已看到 4 个工具和 read 调用，provider 失败会写 retryable envelope。剩余是 provider 成功写入工具结果的真实证据及 SDK/reasoning 长期兼容性优化。详见 [`docs/INVESTIGATION-AUTHORITATIVE-REVIEW-REAL-MODE.md`](INVESTIGATION-AUTHORITATIVE-REVIEW-REAL-MODE.md)。
 5. **Task 29 real-mode provider** — hermetic-only 证据仍不能替代真实成功案例；当前真实 provider 已证明“可进入、可调用工具、可有界失败”，尚未证明 DeepSeek 在此模板上完成完整 Map。下一次 provider 稳定可用时应复跑 HTTP + persisted events + browser evidence。
 
