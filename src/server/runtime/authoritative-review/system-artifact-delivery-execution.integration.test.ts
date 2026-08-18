@@ -455,6 +455,36 @@ describe('Task 22 P1 SystemArtifactDelivery -> generic Submitter final commit', 
     expect(after.taskStatus).toBe('completed');
   }, 60_000);
 
+  it('uses the frozen submitter Agent identity when the scheduler lease owner is task_owner', async () => {
+    const fixture = await prepareDeliveryFixture();
+    const { env } = fixture;
+    const terminalFailCalls: TerminalFailInputV2[] = [];
+    const composition = installComposition(fixture, {
+      terminalFail: async (_taskId, input) => { terminalFailCalls.push(input); },
+    });
+
+    const leased = await env.coordinator.leaseNext(
+      TASK,
+      'task_owner',
+      '33333333-3333-4333-8333-333333333333',
+    );
+    expect(leased).not.toBeNull();
+    const outcome = await composition.attempts.executeLeased(TASK, undefined, {
+      dispatchRef: leased!.dispatchRef,
+      workItemId: leased!.workItemId,
+      leaseEpoch: leased!.leaseEpoch,
+      attemptId: leased!.attemptId,
+      commandId: leased!.commandId,
+    });
+
+    expect(outcome, JSON.stringify(outcome)).toMatchObject({
+      kind: 'completed',
+      workItemId: SUBMITTER_WORK_ITEM,
+    });
+    expect(terminalFailCalls).toHaveLength(0);
+    expect((await env.readProjection(TASK)).workItems[SUBMITTER_WORK_ITEM]?.state).toBe('completed');
+  }, 60_000);
+
   it('rejects a turn that did not submit (GENERIC_SUBMIT_REQUIRED) with no final commit', async () => {
     const fixture = await prepareDeliveryFixture();
     const { env } = fixture;

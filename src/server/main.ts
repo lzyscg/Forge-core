@@ -143,6 +143,7 @@ async function main(): Promise<void> {
     ...(runtimeKind === 'fake' ? { runtime: buildRuntime('fake', paths) } : {}),
     ...(acceptanceStopAfterCommit !== undefined ? { acceptanceStopAfterCommit } : {}),
     authoritativeReviewEnvironment: createProductionAuthoritativeReviewEnvironment(),
+    enableV2SchedulingDriver: true,
   });
   serviceHolder.service = coreService;
   await coreService.initialize();

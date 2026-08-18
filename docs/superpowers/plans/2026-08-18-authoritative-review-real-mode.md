@@ -44,11 +44,23 @@
   real successful provider/tool write remain follow-up gates.
 - Verification observed so far: `npm run check`, both default and
   `VITE_FORGE_CORE_MODE=http` builds, authoritative acceptance, focused
-  regressions, and a 184-file full run. The first full run exposed one stale
+  regressions, and an earlier 184-file full run. The first full run exposed one stale
   I-2 test assertion; after synchronizing that assertion and closing the
-  stop/reclaim races, the latest full run is 184 files / 4363 passed / 1
+  stop/reclaim races, the earlier full run was 184 files / 4363 passed / 1
   skipped. The final coordinator and scheduler focused counts are 30/30 and
   75/75 respectively.
+
+### Final continuation record (2026-08-18)
+
+- Added a process-local `V2SchedulingDriver` over the durable wakeup index. HTTP startup performs an immediate scan, retry-due rows are consumed in-process, and future/dormant/eligibility-blocked rows do not create a busy loop.
+- Made the structure-contract DTO safe across the Pi structured-clone boundary by exposing only declarative layout grammar; compiled matcher `Set`s and the private EOF `Symbol` never leave the server.
+- Repaired the completion boundary: ready successor WorkItems receive a runnable wakeup, planned/non-terminal Map and Content rounds are reconciled, and freeze advances the corresponding round before the scheduler continues.
+- Bound final delivery validation to the frozen Submitter Agent identity rather than the scheduler lease owner. This closes the real `delivery_submitter_agent_mismatch` failure without weakening lease authorization.
+- Fixed direct task-page navigation so the initial workspace hydration completes before `watchTask` subscribes. The regression test covers the HTTP gateway's known-task guard.
+- Fresh real Case: task `221beae1-26c1-42be-a10a-5c5683458736` reached `completed`; both review rounds settled; summary `pending=0 / pass=5 / reject=0 / stale=0 / openBlockingFinding=0`; seal `ready=true / sealed=true`; system artifact `chapter.md` was rendered in the browser and the generic submitter WorkItem completed.
+- Added startup fail-closed isolation: only confirmed task corruption is skipped after successor reconciliation, its disposable wakeups are removed, and transient I/O/lock/unknown errors remain visible; the regression includes a task with an active lease and a healthy sibling.
+- Final verification: the changed-scope suite was 7 files / 32 passed; `npm run check`, `npm run build`, structured-slots acceptance-only, and authoritative-review acceptance-only all exited 0. The historical full baseline remains 185 files / 4367 passed / 1 skipped; a latest default-parallel full attempt reached 186 files / 4361 passed / 9 fixed-timeout failures / 1 skipped, and all five failed files passed when rerun in isolation.
+- The migration boundary remains intentionally fail-closed and is not included in this completion claim.
 
 ---
 

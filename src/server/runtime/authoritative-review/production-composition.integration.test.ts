@@ -102,6 +102,7 @@ describe('production composition Agent execution', () => {
       scripts: { orchestrator: [{ kind: 'result', publicText: 'agent executed' }] },
     });
     const resultRef = await env.publishContentValue(taskId, 'domain result carrier');
+    const ensuredRounds: string[] = [];
     const runner = new V2AssignmentRunner({
       runtime,
       toolProvider: {
@@ -113,12 +114,30 @@ describe('production composition Agent execution', () => {
         },
       },
     });
+    const readProjectionWithPlannedRound = async (id: string) => {
+      const projection = await env.readProjection(id);
+      return {
+        ...projection,
+        mapRounds: {
+          ...projection.mapRounds,
+          'round-production-successor': {
+            roundId: 'round-production-successor',
+            ordinal: 1,
+            state: 'planned' as const,
+            consumedOverrideRef: null,
+            plannedAtSequence: 1,
+            assignmentCount: 1,
+          },
+        },
+      };
+    };
     const leasedScheduling = {
       async runPass() {
         const leased = await env.coordinator.leaseNext(taskId, 'task_owner', 'tick-lease-agent');
         return { leased: leased === null ? [] : [{ taskId, workItemId: leased.workItemId }] };
       },
     } as never;
+    const advancedRounds: string[] = [];
     const composition = installAuthoritativeReviewRuntime({
       coordinator: env.coordinator,
       facade: env.facade,
@@ -126,7 +145,7 @@ describe('production composition Agent execution', () => {
       wakeups: new AuthoritativeWakeupIndexV1({ paths: env.paths }),
       artifacts: new ArtifactStore(env.paths, env.eventStore, (id, ref) => env.blobStore.readJson(id, ref, ref.kind)),
       scheduling: leasedScheduling,
-      readProjection: (id) => env.readProjection(id),
+      readProjection: readProjectionWithPlannedRound,
       resolver: (id, ref) => env.blobStore.readJson(id, ref, ref.kind),
       frozenProfile: async () => ({
         profileSnapshotRef: env.profileSnapshotRef,
@@ -143,6 +162,16 @@ describe('production composition Agent execution', () => {
       traces: new TraceStore(env.paths),
       eventStore: env.eventStore,
       publicationStore: env.publicationStore,
+      mapReviewService: {
+        ensureRoundReviewWorkItems: async (_id: string, roundId: string) => {
+          ensuredRounds.push(roundId);
+          return true;
+        },
+        maybeCompleteRound: async (_id: string, roundId: string) => {
+          advancedRounds.push(roundId);
+          return false;
+        },
+      } as never,
     });
 
     const tick = await composition.runTick();
@@ -151,5 +180,7 @@ describe('production composition Agent execution', () => {
     expect(tick.outcomes).toHaveLength(1);
     expect(tick.outcomes[0]).toMatchObject({ kind: 'completed', workItemId });
     expect((await env.readProjection(taskId)).workItems[workItemId]?.state).toBe('completed');
+    expect(ensuredRounds).toEqual(['round-production-successor']);
+    expect(advancedRounds).toEqual(['round-production-successor']);
   });
 });

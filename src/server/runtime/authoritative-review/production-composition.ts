@@ -265,6 +265,8 @@ export interface AuthoritativeReviewCompositionInputV2 {
 export interface AuthoritativeReviewCompositionV2 {
   systemCommands: SystemCommandRegistry;
   attempts: V2AttemptCoordinator;
+  /** Reconciles durable domain successors that may have missed their creator. */
+  prepareSuccessors(taskId: string): Promise<void>;
   /** One deterministic scheduling tick: pass + execute every fresh lease. */
   runTick(now?: string): Promise<V2SchedulingTickResult>;
   /** The real System Seal service bound to one task (cached per task). */
@@ -742,6 +744,34 @@ export function installAuthoritativeReviewRuntime(
   registry.replace(sealCommandHandler);
 
   // ---- the attempt coordinator + scheduler tick ----
+  const prepareSuccessors = async (taskId: string): Promise<void> => {
+    const runtime = input.domainRuntimeFor === undefined
+      ? undefined
+      : await input.domainRuntimeFor(taskId);
+    const mapReviewService = runtime?.services.mapReviewService ?? input.mapReviewService;
+    const projection = await input.readProjection(taskId);
+    if (mapReviewService !== undefined) {
+      for (const round of Object.values(projection.mapRounds)) {
+        if (round.state === 'planned') {
+          await mapReviewService.ensureRoundReviewWorkItems(taskId, round.roundId);
+        }
+        // Recovery also covers a crash after the review publication but before
+        // the round-advance call in the task-scoped domain runtime.
+        if (round.state !== 'completed' && round.state !== 'settled') {
+          await mapReviewService.maybeCompleteRound(taskId, round.roundId);
+        }
+      }
+    }
+    const contentReviewService = runtime?.services.contentReviewService ?? input.contentReviewService;
+    if (contentReviewService !== undefined) {
+      for (const round of Object.values(projection.contentRounds)) {
+        if (round.state !== 'completed' && round.state !== 'settled') {
+          await contentReviewService.maybeCompleteRound(taskId, round.roundId);
+        }
+      }
+    }
+  };
+
   const attempts = new V2AttemptCoordinator({
     coordinator: input.coordinator,
     runner: input.runner,
@@ -756,6 +786,7 @@ export function installAuthoritativeReviewRuntime(
     ...(input.resolveDispatch === undefined ? {} : { resolveDispatch: input.resolveDispatch }),
     traces: input.traces,
     terminalFail: input.terminalFail,
+    prepareSuccessors,
     // Task 22: the production final-submission validator. The FROZEN profile's
     // snapshotHash is the template-snapshot identity (spec §4.1 — never the
     // catalog); the resolver fails closed on any unresolvable blob.
@@ -802,6 +833,7 @@ export function installAuthoritativeReviewRuntime(
   return {
     systemCommands: registry,
     attempts,
+    prepareSuccessors,
     runTick,
     sealServiceFor,
     sealCommandHandler,

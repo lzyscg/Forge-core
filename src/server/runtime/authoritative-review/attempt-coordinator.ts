@@ -233,6 +233,12 @@ export interface V2AttemptCoordinatorDependencies {
   /** Terminal-failure envelope seam (defaults to the lifecycle's terminalFailWorkItem). */
   terminalFail?(taskId: string, input: TerminalFailInputV2): Promise<void>;
   /**
+   * Completes crash-safe domain continuation steps that are intentionally
+   * separate from the terminal attempt envelope (for example, materializing
+   * review WorkItems after a planned Map round).
+   */
+  prepareSuccessors?(taskId: string): Promise<void>;
+  /**
    * Task 22 final-submission seam (spec §13.5, design §16.3): the delivery-bound
    * validator that proves a generic Submitter's committed turn is the exact
    * current SystemArtifactDelivery BEFORE the atomic final batch. Wired by the
@@ -902,7 +908,13 @@ export class V2AttemptCoordinator {
       taskId,
       deliveryId: ctx.inputArtifactDeliveryId,
       workItemId,
-      agentId: ctx.agentId,
+      // `ctx.agentId` is the scheduler lease owner (normally `task_owner`),
+      // which is the right principal for grant/lease authorization.  The
+      // SystemArtifactDelivery, however, binds the frozen submitter Agent
+      // selected by the template.  Validate that role identity here; using
+      // the scheduler worker identity makes every real production submitter
+      // fail closed with delivery_submitter_agent_mismatch.
+      agentId: ctx.agent?.id ?? ctx.agentId,
     });
     if (!reachability.reachable) {
       const failureCode = `FINAL_SUBMIT_UNREACHABLE:${reachability.reason}`;
@@ -935,6 +947,7 @@ export class V2AttemptCoordinator {
     const attemptId = 'attemptId' in identity ? identity.attemptId : identity.commandId;
     const operationId = attemptContinuationOperationId(taskId, workItemId, attemptId, 'complete');
     try {
+      await this.deps.prepareSuccessors?.(taskId);
       const completed = await this.deps.coordinator.completeWorkItem({
         taskId,
         operationId,
@@ -944,6 +957,7 @@ export class V2AttemptCoordinator {
         resultRefs,
       });
       await this.removeLeaseWakeup(taskId, workItemId);
+      await this.repairRunnableWakeup(taskId);
       return {
         kind: 'completed',
         workItemId: completed.workItemId,
@@ -956,6 +970,30 @@ export class V2AttemptCoordinator {
     } catch (error) {
       mapAttemptError(error);
     }
+  }
+
+  /**
+   * A successful domain completion may atomically create a ready successor
+   * WorkItem (for example, map-build finish creates the map finalizer). The
+   * successor is durable in the event projection, but its runnable wakeup is
+   * a separate accelerator/index write; repair it before returning so a live
+   * process continues the pipeline without requiring a restart recovery scan.
+   */
+  private async repairRunnableWakeup(taskId: string): Promise<void> {
+    const state = await this.deps.coordinator.readProjectionState(taskId);
+    if (state.taskStatus !== 'running' || state.suspension !== null || state.activeLease !== null) return;
+    const ready = Object.values(state.workItems)
+      .filter((workItem) => workItem.state === 'ready')
+      .sort((a, b) => a.workItemId.localeCompare(b.workItemId))[0];
+    if (ready === undefined) return;
+    await this.deps.wakeups.upsert(taskId, {
+      kind: 'runnable',
+      at: null,
+      dormant: false,
+      workItemId: ready.workItemId,
+      operationId: null,
+      eligibilityBlocked: false,
+    });
   }
 
   /** ONE batch retryable failure + durable retry_due wakeup persistence. */

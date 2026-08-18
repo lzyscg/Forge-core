@@ -19,6 +19,7 @@ import type { AuthoritativeReviewProfileSnapshotV1Body } from '../../structured-
 import type { FrozenStructuredSlotContractV2 } from '../../template/structured-slot-contract-v2';
 import type { FrozenTemplate } from '../../template/template-schema';
 import type { CorePaths } from '../../storage/core-paths';
+import type { CompiledSlotSchemaV1 } from '../../structured-slots/slot-schema';
 import { AuthoritativeReviewPrivateStore } from '../../storage/authoritative-review-private-store';
 import type { AuthoritativeAppendFacadeV2 } from '../../storage/authoritative-append-facade';
 import type { AuthoritativeReviewEventV2 } from '../../storage/authoritative-review-events';
@@ -342,8 +343,21 @@ export class ProductionV2DomainRuntimeFactory {
       },
       async freezeReviewAssignment(currentTaskId, freeze) {
         await refresh();
-        if (freeze.ledger.roundKind === 'map') return mapReviewService.freezeReviewAssignment(currentTaskId, freeze);
-        return contentReviewService.freezeReviewAssignment(currentTaskId, freeze);
+        if (freeze.ledger.roundKind === 'map') {
+          const result = await mapReviewService.freezeReviewAssignment(currentTaskId, freeze);
+          // Freezing the whole-map assignment publishes the observation closure,
+          // but the review service deliberately keeps round advancement as a
+          // separate deterministic operation.  The production tool seam is
+          // the authoritative hand-off point, so advance the round immediately
+          // after the freeze and let the scheduler execute the settlement.
+          await mapReviewService.maybeCompleteRound(currentTaskId, freeze.ledger.roundId);
+          return result;
+        }
+        const result = await contentReviewService.freezeReviewAssignment(currentTaskId, freeze);
+        // Content review has the same two-step boundary: assignment freeze,
+        // then round completion and settlement WorkItem creation.
+        await contentReviewService.maybeCompleteRound(currentTaskId, freeze.ledger.roundId);
+        return result;
       },
       reviewPolicy,
       refresh,
@@ -369,11 +383,37 @@ function slotPresenceOfType(
 }
 
 function structureContractView(contract: FrozenStructuredSlotContractV2): Record<string, unknown> {
+  // The compiled grammar contains matcher-only state (`Set`s and the private
+  // EOF sentinel).  Tool results cross the Pi agent boundary and must remain
+  // structured-cloneable, so expose only the declarative grammar that the
+  // model needs to plan a map.
+  const productions: Record<string, { children: unknown }> = {};
+  for (const [typeId, production] of Object.entries(contract.layoutGrammar.productions)) {
+    productions[typeId] = { children: production.children };
+  }
+
+  const slotTypes = contract.slotTypes.map((slotType) => ({
+    id: slotType.id,
+    name: slotType.name,
+    description: slotType.description,
+    specSchema: serializeCompiledSchema(slotType.specSchema),
+    content:
+      slotType.content.presence === 'forbidden'
+        ? { presence: 'forbidden' as const }
+        : {
+            presence: slotType.content.presence,
+            schema: serializeCompiledSchema(slotType.content.schema),
+          },
+  }));
+
   return {
     version: contract.version,
     semanticDigest: contract.semanticDigest,
-    slotTypes: contract.slotTypes,
-    layoutGrammar: contract.layoutGrammar,
+    slotTypes,
+    layoutGrammar: {
+      rootType: contract.layoutGrammar.rootType,
+      productions,
+    },
     accessProfiles: contract.accessProfiles,
     relationTypes: contract.relationTypes,
     relationshipPolicy: contract.relationshipPolicy,
@@ -383,6 +423,42 @@ function structureContractView(contract: FrozenStructuredSlotContractV2): Record
     limits: contract.limits,
     implementationIdentityClosure: contract.implementationIdentityClosure,
   };
+}
+
+/**
+ * Removes validator-only state from the compiled schema tree before the
+ * contract crosses the Pi structured-clone boundary. In particular, compiled
+ * RE2 matchers expose functions and `_enumHashes` is a Set; neither belongs in
+ * the model-facing declarative contract.
+ */
+export function serializeCompiledSchema(schema: CompiledSlotSchemaV1): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(schema)) {
+    if (key === '_enumHashes' || key === '_constHash') continue;
+    if (key === 'pattern' && value !== undefined) {
+      const compiled = value as { pattern: string; sourceLength: number };
+      out[key] = { pattern: compiled.pattern, sourceLength: compiled.sourceLength };
+      continue;
+    }
+    if (key === 'properties' && value !== undefined) {
+      const properties: Record<string, unknown> = {};
+      for (const [name, child] of Object.entries(value as Record<string, CompiledSlotSchemaV1>)) {
+        properties[name] = serializeCompiledSchema(child);
+      }
+      out[key] = properties;
+      continue;
+    }
+    if (key === 'items' && value !== undefined) {
+      out[key] = serializeCompiledSchema(value as CompiledSlotSchemaV1);
+      continue;
+    }
+    if (key === 'additionalProperties' && value !== undefined && typeof value === 'object') {
+      out[key] = serializeCompiledSchema(value as CompiledSlotSchemaV1);
+      continue;
+    }
+    if (value !== undefined) out[key] = value;
+  }
+  return out;
 }
 
 async function readMapBuildFrontier(

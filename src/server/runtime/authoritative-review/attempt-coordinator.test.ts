@@ -377,6 +377,24 @@ describe('V2AttemptCoordinator lease -> execute -> complete', () => {
     expect(await env.wakeups.read(taskId)).toEqual([]);
   });
 
+  it('repairs a runnable wakeup when completion leaves a successor workitem ready', async () => {
+    const env = await makeEnv();
+    const taskId = tid('successor-wakeup');
+    env.innerRuntime.setScript('orchestrator', [{ kind: 'result', publicText: 'successor wakeup output' }]);
+    await createWorkItem(env, taskId, { logicalAssignmentId: 'predecessor' });
+    const successor = await createWorkItem(env, taskId, { logicalAssignmentId: 'successor' });
+
+    const outcome = await env.attempts.runNext(taskId, 'worker-a');
+
+    expect(outcome.kind).toBe('completed');
+    const projection = await readProjection(env, taskId);
+    const ready = Object.values(projection.workItems).find((workItem) => workItem.state === 'ready');
+    expect(ready?.workItemId).toBe(successor.workItemId);
+    expect(await env.wakeups.read(taskId)).toEqual([
+      expect.objectContaining({ kind: 'runnable', workItemId: successor.workItemId, dormant: false }),
+    ]);
+  });
+
   it('replays the ORIGINAL completion commit on response loss (deterministic operation id)', async () => {
     const env = await makeEnv();
     const taskId = tid('replay');

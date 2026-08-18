@@ -63,6 +63,13 @@ export interface StartupRecoveryDependenciesV2 {
   index: AuthoritativeTaskIndexV1;
   deletion: AuthoritativeTaskDeletionV2;
   wakeups: AuthoritativeWakeupIndexV1;
+  /**
+   * Tasks whose startup-only domain reconciliation already failed closed.
+   * Their disposable wakeups must stay removed for this boot; retrying the
+   * same corrupt task in the generic scan would reintroduce an executable
+   * surface and could make one bad task block or churn the installation.
+   */
+  skipTaskIds?: ReadonlySet<string>;
   lifecycle: TaskLifecycleServiceV2;
   coordinator: WorkItemCoordinatorV2;
   facade: AuthoritativeAppendFacadeV2;
@@ -115,6 +122,11 @@ export async function runStartupRecoveryV2(deps: StartupRecoveryDependenciesV2):
   for (const row of await deps.index.v2Rows()) {
     if (row.state !== 'active') continue;
     const taskId = row.taskId;
+    if (deps.skipTaskIds?.has(taskId)) {
+      await deps.wakeups.removeTask(taskId);
+      result.skipped.push(taskId);
+      continue;
+    }
     if (await deps.deletion.isDeleted(taskId)) {
       result.skipped.push(taskId);
       continue;

@@ -1,6 +1,6 @@
 # ForgeCore v2 权威审核 收尾总结
 
-> 状态：✅ 已关闭生产接线与无界 real-mode hang；migration 全生命周期仍显式 fail-closed，不能宣称全部生命周期完成
+> 状态：✅ 初始 structure/map/generation/review/seal/delivery/submitter real-mode 链路已真实完成；migration 全生命周期仍显式 fail-closed，不能宣称全部生命周期完成
 > 日期：2026-08-18（复核更新）
 > 原始收尾检查点：`e2d89f1`；real-mode 修复链：`49c4f8e` → `43fcc39` → `91b6f05`（源码并发收尾检查点）
 > 范围：Task 22–29（Plan §6 Phase 7-8：系统交付→读 API→UI→模板迁移→故障矩阵→10k qualification→capability promote→真实 Case）
@@ -10,12 +10,16 @@
 | 维度 | 状态 |
 |---|---|
 | `npm run check` | exit 0 |
-| `npm test` | 184 files / 4363 passed / 1 skipped / 0 failed |
+| `npm test` 历史完整基线 | 185 files / 4367 passed / 1 skipped / 0 failed |
+| 最新变更范围回归 | 7 files / 32 passed / 0 failed（含启动隔离、调度、恢复、DTO、交付和直达任务页） |
+| 最新默认并发全量尝试 | 186 files / 4361 passed / 9 fixed-timeout failures / 1 skipped；5 个失败文件隔离复跑全部通过 |
 | `npm run build` | exit 0（vite + tsc server） |
+| 真实 HTTP + Pi + DeepSeek Case | `221beae1-26c1-42be-a10a-5c5683458736`：completed，两个 review round settled，seal ready/sealed，`chapter.md` 已交付 |
+| 真实浏览器直达任务页 | 页面显示“已完成”并可打开产物抽屉；刷新后 console **0 errors**（仅 React Router warnings） |
 | `npm run verify:structured-slots --capability production` | exit 0 |
 | `npx tsx scripts/verify-authoritative-review.ts --capability production` | exit 0（authoritative-pi-preflight 10/10） |
 | Capability | `authoritative_review_v1` status=**enabled**，profile digest `f4685a55...` |
-| Worktree | `/Users/lzy/Desktop/ForgeCore/.worktrees/codex-authoritative-review-real-mode`，branch `codex/authoritative-review-real-mode` |
+| Worktree | `/Users/lzy/Desktop/ForgeCore/.worktrees/codex-live-v2-scheduler`，branch `codex/live-v2-scheduler` |
 
 ## 2. 提交链（Task 22-29，12 个 commit，从 `0768a00` 起）
 
@@ -127,21 +131,35 @@ af890a4 feat: deliver sealed system artifacts to the generic submitter
 - ✅ `npm run check`、生产 build、authoritative acceptance、Playwright HTTP 页面验收和相关回归均已执行；首轮全量的旧 I-2 断言已同步到新 retry 契约，当前全量与并发边界复核结果见下方 `91b6f05` 检查点。
 - ⚠️ `MigrationServiceV2` 尚未在生产 composition 中构造。迁移 system command 在已取得 lease/attempt 后返回 `MIGRATION_RUNTIME_NOT_WIRED` terminal fail-closed，而不是 `NOT_IMPLEMENTED` retry loop；这仍不是 lease 前能力门，初始 structure/map/generation/repair/review/seal 路径的证据不覆盖 migration 全生命周期。
 
+### 2026-08-18 最终真实模型成功 Case
+
+- ✅ 全新临时数据根目录和真实 `runtime=pi` HTTP 服务创建任务 `221beae1-26c1-42be-a10a-5c5683458736`；真实模型完成 structure、map、Map review、content fill、Content review、system Seal、artifact delivery 和 generic submitter。
+- ✅ 持久化结果：`completed`、`latestVersion=1`、`activeTurn=null`、`diagnostic=null`；两个 review round 均 `settled`，review summary `pending=0 / pass=5 / reject=0 / stale=0 / openBlockingFinding=0`，seal `ready=true / sealed=true / unmetConditionCount=0`。
+- ✅ 产物抽屉显示系统 provenance、`chapter.md` 和真实生成正文；最终 submitter WorkItem 已完成。该证据覆盖“真实模型成功写入工具结果”，不再只是 provider 有界失败证据。
+- ✅ 最终修复了直达任务页的异步订阅竞态：先完成 workspace hydration，再调用 `watchTask`；真实浏览器刷新后 0 errors。
+
 ### 2026-08-18 并发边界复核（源码检查点 `91b6f05`）
 
 - ✅ AttemptCoordinator 在第一次异步读取前注册执行；stop/reclaim 屏障会同步阻断之后注册的同任务执行，并提供 task/all settlement 等待。
 - ✅ `stopTaskV2`、stop decision、shutdown 与 lease-expiry reclaim 共享终态 settlement gate；durable stop/reclaim 不会抢在进行中的 terminal commit 之前落账。
 - ✅ 调度 pass 携带 `workItemId + leaseEpoch + attempt/command`，旧 pass 不能在 reclaim 后误执行 successor lease。
 - ✅ 新增真实 CoreService `stopTaskV2` 延迟 completion 测试和 scheduler lease-expiry 延迟 completion 测试；AttemptCoordinator 30/30、TaskScheduler 75/75、生产/API 聚焦集合 128/128 通过。
-- ✅ 最新全量回归为 184 files / 4363 passed / 1 skipped；default build、HTTP build、authoritative acceptance 5/5、Pi preflight 10/10 均退出 0。
+- ✅ 历史完整基线为 185 files / 4367 passed / 1 skipped；本次变更范围回归 7 files / 32 passed，check/build、structured acceptance-only 10/10、authoritative acceptance-only 5/5、Pi preflight 10/10 均退出 0。
+- ⚠️ 最新默认并发全量尝试为 186 files / 4361 passed / 9 个固定 5 秒或 30 秒 timeout / 1 skipped；失败集中在 5 个已有重 I/O 测试文件，逐文件隔离复跑全部通过，未发现 assertion 或类型错误。
+
+### 2026-08-18 启动隔离与最终复核
+
+- ✅ `CoreService.initialize()` 对 successor reconciliation 只隔离已确认的任务损坏（`ProjectionCorruptionError`、`TASK_CORRUPTED`、快照 schema/JSON 损坏、缺失任务文件）；临时 I/O、锁和实现错误仍然显式失败，不会被静默吞掉。
+- ✅ 坏任务带真实 active lease 时，只移除该任务的 disposable wakeup 并跳过本次通用恢复；健康任务继续启动，日志留下脱敏的 `TASK_CORRUPTED` 诊断。对应 CoreService 回归验证了 2 个任务和真实 lease。
+- ✅ 真实 HTTP/Pi 成功任务 `221beae1-26c1-42be-a10a-5c5683458736` 仍保持 completed、两轮 settled、seal ready/sealed、`chapter.md` 已交付。
 
 ## 6. 后续债务（非阻塞）
 
 1. **N2** — 发布 recipe 未交叉校验 reviewBundle 内部 refs（执行期 resolver 兜底，不可利用）
 2. **N4** — 旧 checkpoint 的 mergedArtifactVersion 归一（v2 尚未进生产）
 3. **N5/N6** — 生产 composition 的 structure/map/generation/repair/map+content review/validator/seal 已改为真实 task-scoped services；`MigrationServiceV2` 尚未完成生产构造。迁移 command 在已 lease 后返回 `MIGRATION_RUNTIME_NOT_WIRED` terminal fail-closed，不再用 `NOT_IMPLEMENTED` retryable park 掩盖能力缺口；lease 前能力门仍是后续工作。
-4. **N7** — 原先真实 Pi 0.82 + DeepSeek v4-flash reasoning 模型会卡在 `agent_attempt_started_v2` 后无界等待；当前 v2 tool seam 已接通，真实日志已看到 4 个工具和 read 调用，provider 失败会写 retryable envelope。剩余是 provider 成功写入工具结果的真实证据及 SDK/reasoning 长期兼容性优化。详见 [`docs/INVESTIGATION-AUTHORITATIVE-REVIEW-REAL-MODE.md`](INVESTIGATION-AUTHORITATIVE-REVIEW-REAL-MODE.md)。
-5. **Task 29 real-mode provider** — hermetic-only 证据仍不能替代真实成功案例；当前真实 provider 已证明“可进入、可调用工具、可有界失败”，尚未证明 DeepSeek 在此模板上完成完整 Map。下一次 provider 稳定可用时应复跑 HTTP + persisted events + browser evidence。
+4. **N7** — 原先真实 Pi 0.82 + DeepSeek v4-flash reasoning 模型会卡在 `agent_attempt_started_v2` 后无界等待；bounded settlement、clone-safe contract、durable scheduling/recovery、round successor reconciliation、submitter identity 和真实成功 Case 已关闭该阻塞。剩余是 SDK/reasoning 长期兼容性优化。详见 [`docs/INVESTIGATION-AUTHORITATIVE-REVIEW-REAL-MODE.md`](INVESTIGATION-AUTHORITATIVE-REVIEW-REAL-MODE.md)。
+5. **Task 29 migration boundary** — 初始 structure/map/generation/review/seal/delivery/submitter 已有真实成功证据；`MigrationServiceV2` 仍需单独完成 production composition、lease 前能力门和真实迁移 Case。
 
 ## 7. 关键文件位置
 

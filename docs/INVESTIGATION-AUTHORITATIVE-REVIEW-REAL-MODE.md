@@ -1,9 +1,9 @@
 # Forge Core v2 真模型集成排查报告（SDK / DeepSeek 卡死问题）
 
 > 日期：2026-08-18（复核更新）
-> 基线：`e815f10`；本次修复链当前源码提交为 `91b6f05`
-> 状态：**生产接线与无界 hang 已修复；真实 provider 失败仍按 retryable 记录**。原始 2026-08-17 现象保留为历史证据；本报告补充生产组合、真实 HTTP、运行时日志与浏览器复核结果。
-> 当前 worktree：`codex/authoritative-review-real-mode`；主 checkout 的 `authoritative_review_v1` capability/profile 未被本次实验改写。
+> 基线：`e815f10`；本次修复链包含 `91b6f05` 之后的 real-mode continuation
+> 状态：**真实 Pi + DeepSeek 已完成一条端到端生产任务；无界 hang、续跑、审核推进、最终交付和直达任务页竞态均已修复**。Migration 全生命周期仍保持显式 fail-closed，不能外推为已完成。
+> 当前实现 worktree：`codex/live-v2-scheduler`；主 checkout 的 `authoritative_review_v1` capability/profile 未被本次实验直接改写。
 
 ## 1. 现象
 
@@ -65,6 +65,33 @@ structured_work_item_retryable_failed (retryOrdinal=1, retryNotBefore=...)
 
 
 > 历史结论（修复前）：完整 Forge 路径上 Pi turn 不返回；最小 SDK 路径能 843ms 返回。差异来自 Forge 注入的额外 seam。§2.8–§2.9 是当前复核后的结论。
+
+## 2.11 ✅ 2026-08-18 最终真实模型端到端验收
+
+在独立 worktree、全新临时数据根目录和真实 `runtime=pi` 下启动 HTTP 服务（端口 `3217`，凭据仅由环境注入；未使用 fake runtime），创建任务：
+
+```text
+taskId=221beae1-26c1-42be-a10a-5c5683458736
+template=zhihu-salt-chapter-draft
+name=真实模型生产验证-修复后
+```
+
+持久化投影和 HTTP API 的结果：
+
+- `task.status=completed`、`latestVersion=1`、`activeTurn=null`、`diagnostic=null`。
+- Map review 与 content review 两个 round 均为 `settled`。
+- review summary 为 `pending=0 / pass=5 / reject=0 / stale=0 / openBlockingFinding=0`。
+- seal readiness 为 `ready`，`sealed=true`，`unmetConditionCount=0`。
+- 事件尾部包含真实 Agent 的 map build、Map/Content review、Seal、`artifact_published_v2`、system delivery、generic submitter attempt completed 和 submitter WorkItem completed；没有新一轮失败事件。
+
+浏览器以真实 HTTP 直达 `/tasks/:taskId`：页面显示“已完成”，产物抽屉展示系统产物 provenance 和真实生成的 `chapter.md` 正文。修复 `useTaskWatch` 的初始 workspace/`watchTask` 竞态后，刷新页面的浏览器控制台为 **0 errors**；剩余 6 条是 React Router 的未来版本 warning，不影响运行。
+
+因此，当前已被真实证据覆盖的链路是：
+
+```text
+DeepSeek/Pi → structure → map → Map review → content fill → Content review
+→ system Seal → artifact delivery → generic submitter → browser artifact drawer
+```
 
 ## 3. SDK 卡死路径（已观察到 / 怀疑）
 
@@ -138,7 +165,11 @@ tail -100 dev.log 2>/dev/null
 ### 已关闭
 
 - 生产 `runTick()` 对每个新 lease 调用 `V2AttemptCoordinator.executeLeased()`，不再只写 lease/attempt-start 事件。
+- HTTP 进程安装了基于 durable wakeup index 的 v2 scheduling driver：服务启动立即扫描，retry due / runnable successor 会在当前进程继续执行，不需要重启才能推进。
 - `CoreService` 注入 task-aware `ProductionV2ToolRuntime`，Pi 与结果收集共享同一 `V2ToolFactory` 作用域；日志记录了工具数量/名称、turn 起止、tool 起止和失败码，字段经过脱敏。
+- 结构 contract 通过 Pi 边界时只暴露可 structured-clone 的声明式 grammar，移除编译器内部 `Set` 和 EOF `Symbol`，真实 provider 不再因 `DataCloneError` 失败。
+- 完成一个 WorkItem 后会修复 ready successor 的 runnable wakeup；Map/Content review 的 freeze 会推进 round，启动恢复也会补做 planned/non-terminal round reconciliation。
+- generic submitter 使用冻结 Submitter Agent identity 做 delivery 校验，和 scheduler lease owner（`task_owner`）分离，避免真实最终提交被 `delivery_submitter_agent_mismatch` 拒绝。
 - preflight listener 的异常现在被记录后重新抛出；attempt timeout、provider failure、abort 均走既有 durable retry/abort 语义。
 - `V2AttemptCoordinator` 的 timeout 已由协调器自有 deadline 独立结算：即使 provider 忽略 `AbortSignal`，也会在 deadline 写入 `ATTEMPT_TIMEOUT` retryable envelope；晚到的 runtime 结果不能再提交第二个 terminal batch。`CoreService.stopTaskV2()`、结构化 stop decision 与 shutdown 会主动中断同 task 的进程内执行。
 - 结构化回合没有非空 `resultRefs` 时返回 `V2_RESULT_REFS_MISSING` retryable outcome，避免裸完成穿透到 coordinator 并变成 HTTP 500。
@@ -149,13 +180,19 @@ tail -100 dev.log 2>/dev/null
 - stop 与调度注册竞态：`V2AttemptCoordinator` 现在在 setup 首次 await 前登记执行；task cancellation barrier 在登记瞬间检查，迟到登记直接带 abort signal，stop/resume 成功路径明确关闭/重新打开 barrier。
 - terminal commit 与 stop/reclaim 竞态：每个活动执行有可等待的 settlement promise；CoreService stop/shutdown 和生产 scheduler 的 lease-expiry 回收在 durable mutation 前等待它。提交进入 `committing` 后，abort 不会把公共结果改写成 `aborted`。
 - stale scheduling tick：pass 返回 `workItemId/leaseEpoch/attemptId/commandId`，`executeLeased` 校验同一 lease 身份，旧 pass 不会在回收后启动 successor lease。
-- 证据：新增真实 `stopTaskV2` 延迟 completion 测试与 lease-expiry 延迟 completion 测试；最新全量 `184 files / 4363 passed / 1 skipped`，check/build（含 HTTP mode）与 authoritative acceptance 5/5、Pi preflight 10/10 通过。
+- 证据：新增真实 `stopTaskV2` 延迟 completion 测试与 lease-expiry 延迟 completion 测试；历史完整基线为 `185 files / 4367 passed / 1 skipped`，本次变更范围回归为 7 files / 32 passed，check/build（含 HTTP mode）与 structured/authoritative acceptance-only、Pi preflight 均通过。
+
+### 2.12 启动恢复隔离与最终复核
+
+- `CoreService.initialize()` 的 successor reconciliation 现在只把已确认的任务损坏（投影损坏、`TASK_CORRUPTED`、快照 schema/JSON 损坏或任务文件缺失）纳入 fail-closed skip；临时 I/O、锁争用和未知实现错误继续抛出，避免错误被静默掩盖。
+- 对已带 active lease 的损坏任务，启动会删除该任务的 disposable wakeup 并跳过本次通用 recovery；不会让一个坏任务阻塞健康任务，也不会把不可信的 lease/retry 再送入执行面。日志只记录 task id 和稳定损坏原因。
+- 最新变更范围回归：7 files / 32 passed；其中 CoreService 启动隔离、retry-due 续跑、scheduler tick 串行化、structured-clone DTO、successor/recovery、submitter delivery 和直达任务页均覆盖。默认并发全量尝试虽有 9 个固定时限超时，但这 5 个失败文件逐个隔离复跑全部通过。
 
 ### 尚未宣称完成
 
-- 真实 DeepSeek/provider 在本次复核中仍返回 `PROVIDER_ERROR`，但已在有限时间内写 retryable envelope；这证明“有界失败”而不是“provider 已成功完成”。若要证明真实模型成功产出 Map，还需在 provider 可用且模型实际调用写工具后重新运行。
+- 初始 structure → map → generation → Map/Content review → Seal → delivery → generic submitter 的真实成功证据已在 §2.11 固化；这次验收证明模型不只是进入 turn，而是实际写入并完成了最终 `chapter.md`。
 - `MigrationServiceV2` 尚未完成生产构造；迁移 system command 在已经取得 lease/attempt 后明确 terminal fail-closed (`MIGRATION_RUNTIME_NOT_WIRED`)。这不是“lease 前 capability gate”，因此不能把它描述为迁移已可运行；应单独完成 migration composition 和真实迁移 HTTP/浏览器验收，不能把当前初始结构链路证据外推为全生命周期证据。
-- SDK/DeepSeek reasoning 兼容性仍可独立升级研究，但不再是“无限挂死未收敛”的生产阻塞；当前应先保留已验证的超时、诊断和 retry 证据。
+- SDK/DeepSeek reasoning 兼容性仍可独立升级研究，但不再是当前初始生产链路的阻塞；当前应保留已验证的超时、诊断、retry 和成功产出证据。
 
 ## 7. 已写但已删除的排查脚本
 
@@ -188,13 +225,15 @@ tail -100 dev.log 2>/dev/null
 - [x] 完整 Forge production composition/tool runtime integration test
 - [x] 增加缺少结果引用、timeout、provider failure、abort 的 TDD 回归
 - [x] 验证 provider 忽略 abort 时 deadline 仍能结算，并验证 stop/shutdown 中断进程内执行
-- [x] 运行 check/build、authoritative acceptance、全量回归（全量首跑仅有一个已同步的旧断言，修正后相关 24 tests 全绿）
+- [x] 运行 check/build、structured/authoritative acceptance、历史完整回归，并对本次变更范围做 7 files / 32 tests 的最终回归；最新默认并发全量尝试的固定时限争用已逐文件隔离复核
+- [x] 在 provider 可稳定返回时取得真实模型成功写入工具结果、完成审核/Seal/Submitter，并通过真实 HTTP + 浏览器验收（§2.11）
+- [x] 验证服务不重启即可消费 retry/successor durable wakeup，并验证直达任务页不再出现 `watchTask subscription failed`
+- [x] 验证启动 successor reconciliation 的任务损坏隔离和 active-lease fail-closed 行为
 - [ ] 完成 `MigrationServiceV2` 的生产构造并通过真实迁移任务验收
-- [ ] 在 provider 可稳定返回时取得真实模型成功写入工具结果的证据
 
 ## 10. 后续债务（已登记于 CLOSURE-AUTHORITATIVE-REVIEW-V2.md）
 
 - N2（发布 recipe 未交叉校验 reviewBundle 内部 refs）— 执行期 resolver 兜底，不可利用
 - N4（旧 checkpoint mergedArtifactVersion 归一）— v2 尚未进生产
 - N5/N6（公开 capability 工厂边界、migration production composition 尚未完成）— 当前非 migration 初始结构/工具路径已接通；migration 缺口在 lease 后显式 terminal fail-closed，尚未形成 lease 前能力门
-- **N7（更新）：真实 Pi 0.82 + DeepSeek reasoning provider 曾在 `agent_attempt_started_v2` 后无界停滞；当前已能记录工具调用和 `PROVIDER_ERROR` retryable envelope。剩余工作是 provider 成功写入的真实证据与 SDK 兼容性长期优化。**
+- **N7（更新）：真实 Pi 0.82 + DeepSeek reasoning provider 的无界停滞已通过 bounded attempt、clone-safe contract、durable scheduling/recovery 和真实成功 Case 关闭。剩余工作是 SDK/reasoning 长期兼容性优化，以及独立的 Migration production composition。**

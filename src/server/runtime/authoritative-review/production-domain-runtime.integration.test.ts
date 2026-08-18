@@ -8,7 +8,7 @@
  * must append the authoritative map-build event and the tool factory must
  * fold the resulting chunk ref into the attempt result.
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cpSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
@@ -18,15 +18,44 @@ import { createTestRuntimeEnvironment } from '../../structured-slots/runtime-cap
 import { createAuthoritativeReviewTestEnvironment } from '../../structured-slots/test-support/authoritative-review-test-registry';
 import { FakeAgentRuntime } from '../fake-agent-runtime';
 import { ProductionV2DomainRuntimeFactory } from './production-domain-runtime';
+import { serializeCompiledSchema } from './production-domain-runtime';
 import { ProductionV2ToolRuntime } from './production-tool-runtime';
+import { MapReviewService } from './map-review-service';
+import { ContentReviewService } from './content-review-service';
+import { compileSlotSchemaV1 } from '../../structured-slots/slot-schema';
+import type { StructuredSlotLimitsV1 } from '../../../shared/structured-slots';
 import type { BlobRefV2 } from '../../../shared/authoritative-review-v2';
 import type { AuthoritativeReviewEventV2 } from '../../storage/authoritative-review-events';
+import type { FrozenReviewAssignmentV2 } from './tool-factory';
 
 afterEach(() => disposeAllTestRoots());
 
 const TEMPLATE_ID = 'authoritative-valid';
 
+const schemaLimits = {
+  schema: { maxSchemaDepth: 8, maxSchemaNodes: 32, maxEnumItems: 8, maxPatternLength: 64 },
+} as StructuredSlotLimitsV1;
+
 describe('production v2 domain runtime', { timeout: 30_000 }, () => {
+  it('serializes compiled slot-schema matchers before they cross the Pi boundary', () => {
+    const compiled = compileSlotSchemaV1({
+      type: 'object',
+      additionalProperties: {
+        type: 'string',
+        pattern: '^chapter-[a-z]+$',
+      },
+    }, schemaLimits);
+    const publicSchema = serializeCompiledSchema(compiled);
+
+    expect(() => structuredClone(publicSchema)).not.toThrow();
+    expect(publicSchema).toMatchObject({
+      additionalProperties: {
+        type: 'string',
+        pattern: { pattern: '^chapter-[a-z]+$', sourceLength: 16 },
+      },
+    });
+  });
+
   it('executes a real task-scoped map tool and folds its authoritative result ref', async () => {
     const roots = makeTempCorePaths('forge-core-production-domain-');
     cpSync(
@@ -126,6 +155,16 @@ describe('production v2 domain runtime', { timeout: 30_000 }, () => {
     ]);
 
     const frontierTool = tools.find((tool) => tool.name === 'read_map_build_frontier')!;
+    const contractTool = tools.find((tool) => tool.name === 'read_structure_contract')!;
+    const contractResult = await contractTool.execute(
+      'contract-read',
+      {},
+      new AbortController().signal,
+      undefined,
+      {} as never,
+    );
+    expect(() => structuredClone(contractResult)).not.toThrow();
+
     const frontierResult = await frontierTool.execute(
       'frontier-read',
       { limit: 10 },
@@ -167,5 +206,52 @@ describe('production v2 domain runtime', { timeout: 30_000 }, () => {
     const events = await service.events.read(task.id);
     expect(events.some((entry) => entry.event.type === 'structured_map_chunk_committed')).toBe(true);
     await expect(runtime.collectResultRefs(context!)).resolves.toEqual([appended.data.chunkRef]);
+
+    const mapFreeze = vi.spyOn(MapReviewService.prototype, 'freezeReviewAssignment').mockResolvedValue({
+      ledgerRef: appended.data.chunkRef,
+      eventId: 'map-freeze-event',
+    });
+    const mapAdvance = vi.spyOn(MapReviewService.prototype, 'maybeCompleteRound').mockResolvedValue(true);
+    const contentFreeze = vi.spyOn(ContentReviewService.prototype, 'freezeReviewAssignment').mockResolvedValue({
+      ledgerRef: appended.data.chunkRef,
+      eventId: 'content-freeze-event',
+    });
+    const contentAdvance = vi.spyOn(ContentReviewService.prototype, 'maybeCompleteRound').mockResolvedValue(true);
+
+    const freeze = (roundKind: 'map' | 'content', roundId: string): FrozenReviewAssignmentV2 => ({
+      ledger: {
+        assignmentId: `assignment-${roundId}`,
+        workItemId: `work-item-${roundId}`,
+        reviewAssignmentId: null,
+        roundKind,
+        roundId,
+        factRefs: [],
+        findingDraftRefs: [],
+        verificationRecordRefs: [],
+        coverageTargetIds: [],
+        ledgerDigest: '0'.repeat(64),
+      },
+      facts: [],
+      verifications: [],
+      findings: [],
+      factRefs: [],
+      verificationRecordRefs: [],
+      findingDraftRefs: [],
+      wholeObservationRefs: [],
+      routingObligations: [],
+    });
+
+    await expect(domain!.freezeReviewAssignment(task.id, freeze('map', 'round-map'))).resolves.toEqual({
+      ledgerRef: appended.data.chunkRef,
+      eventId: 'map-freeze-event',
+    });
+    await expect(domain!.freezeReviewAssignment(task.id, freeze('content', 'round-content'))).resolves.toEqual({
+      ledgerRef: appended.data.chunkRef,
+      eventId: 'content-freeze-event',
+    });
+    expect(mapFreeze).toHaveBeenCalledTimes(1);
+    expect(mapAdvance).toHaveBeenCalledWith(task.id, 'round-map');
+    expect(contentFreeze).toHaveBeenCalledTimes(1);
+    expect(contentAdvance).toHaveBeenCalledWith(task.id, 'round-content');
   });
 });

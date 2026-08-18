@@ -101,6 +101,7 @@ import type { CompiledLayoutGrammarV1 } from './structured-slots/layout-grammar'
 import { AuthoritativeTaskIndexV1 } from './storage/authoritative-task-index';
 import { AuthoritativeTaskDeletionV2, type DeleteTaskRequestV2 } from './storage/authoritative-task-deletion';
 import { AuthoritativeWakeupIndexV1 } from './runtime/authoritative-review/wakeup-index';
+import { V2SchedulingDriver } from './runtime/authoritative-review/scheduling-driver';
 import { AuthoritativeReviewBlobStore } from './storage/authoritative-review-blob-store';
 import { AuthoritativePublicationStore } from './storage/authoritative-publication-store';
 import { AuthoritativeAppendFacadeV2 } from './storage/authoritative-append-facade';
@@ -131,6 +132,7 @@ import { ProductionV2DomainRuntimeFactory } from './runtime/authoritative-review
 import type { BlobRefV2, AuthoritativeReviewExecutionEligibilityV1 } from '../shared/authoritative-review-v2';
 import { STORAGE_ERROR_CODES, StorageError } from './storage/atomic-file';
 import type { PublicationOperationPayloadV2 } from './authoritative-review/authority-types';
+import { SchemaError } from './authoritative-review/authority-types';
 import type { AuthoritativeReviewProjectionV2 } from './storage/authoritative-review-state';
 import type {
   AuthoritativeCandidateDetailV2,
@@ -179,12 +181,33 @@ export interface CoreServiceOptions {
    * scheduler; production entry points leave it undefined.
    */
   acceptanceStopAfterCommit?: AcceptanceStopHook;
+  /**
+   * Production HTTP services keep consuming durable v2 wakeups after the
+   * lifecycle request returns. Tests leave this disabled and drive ticks
+   * explicitly for deterministic assertions.
+   */
+  enableV2SchedulingDriver?: boolean;
 }
 
 /** Clone display name suffix and its code-point bound (plan Phase E Task 3). */
 const CLONE_NAME_SUFFIX = '（重跑）';
 
 const CLONE_NAME_MAX_CODE_POINTS = 120;
+
+/**
+ * Startup successor reconciliation is task-scoped. Only errors that prove
+ * the task's durable snapshot/history is unusable may be isolated; transient
+ * I/O, lock and implementation errors must still fail the boot visibly.
+ */
+function isConfirmedStartupTaskCorruption(error: unknown): boolean {
+  if (error instanceof ProjectionCorruptionError || error instanceof SchemaError || error instanceof SyntaxError) {
+    return true;
+  }
+  if (error instanceof StorageError) {
+    return error.code === STORAGE_ERROR_CODES.TASK_CORRUPTED;
+  }
+  return (error as { code?: unknown } | null)?.code === 'ENOENT';
+}
 
 /** `<source name>（重跑）` truncated to 120 code points. */
 function buildCloneName(sourceName: string): string {
@@ -347,12 +370,20 @@ export class CoreService {
    */
   readonly v2Composition: AuthoritativeReviewCompositionV2;
 
+  /** Process-local accelerator over the durable v2 wakeup index. */
+  private readonly v2SchedulingDriver: V2SchedulingDriver;
+
+  private readonly enableV2SchedulingDriver: boolean;
+
+  private readonly authoritativeRuntimeLog: (line: string) => void;
+
   private readonly v2PublicationStore: AuthoritativePublicationStore;
 
   readonly v2BlobStore: AuthoritativeReviewBlobStore;
 
   constructor(paths: CorePaths, options: CoreServiceOptions = {}) {
     this.paths = paths;
+    this.enableV2SchedulingDriver = options.enableV2SchedulingDriver === true;
     // The catalog owns ONE structured runtime environment; TaskStore derives
     // it from the catalog and the Scheduler/Runner reuse the same reference
     // (design O05). The authoritative review environment follows the exact
@@ -504,6 +535,7 @@ export class CoreService {
     const authoritativeRuntimeLog = (line: string): void => {
       console.error(line);
     };
+    this.authoritativeRuntimeLog = authoritativeRuntimeLog;
     const authoritativeDomainRuntime = new ProductionV2DomainRuntimeFactory({
       paths: this.paths,
       facade: this.v2Facade,
@@ -702,6 +734,12 @@ export class CoreService {
       eventStore: this.events,
       publicationStore: this.v2PublicationStore,
     });
+    this.v2SchedulingDriver = new V2SchedulingDriver({
+      wakeups: this.v2Wakeups,
+      tick: (now) => this.v2Composition.runTick(now),
+      clock: () => new Date().toISOString(),
+      log: authoritativeRuntimeLog,
+    });
   }
 
   async initialize(): Promise<void> {
@@ -720,10 +758,31 @@ export class CoreService {
     await this.v2Deletion.runStartupRecovery();
     await this.v2Facade.startupRecovery();
     await this.quarantineUnindexedDirectories();
+    // Domain publications can intentionally separate a planned review round
+    // from its review WorkItem creation. Reconcile that crash window before
+    // startup recovery evaluates RUNNING_WITHOUT_WORK, so a valid planned
+    // round is not mistaken for a terminally broken task.
+    const startupSuccessorFailures = new Set<string>();
+    for (const row of await this.v2Index.v2Rows()) {
+      if (row.state !== 'active') continue;
+      try {
+        await this.v2Composition.prepareSuccessors(row.taskId);
+      } catch (error) {
+        if (!isConfirmedStartupTaskCorruption(error)) throw error;
+        // One damaged task must not prevent the installation from serving its
+        // healthy siblings. Remove only this task's disposable execution
+        // surface and keep it out of the generic recovery scan for this boot;
+        // the next boot will retry the same fail-closed check after repair.
+        startupSuccessorFailures.add(row.taskId);
+        await this.v2Wakeups.removeTask(row.taskId);
+        this.authoritativeRuntimeLog(`v2 startup successor reconciliation fail-closed task=${row.taskId} reason=TASK_CORRUPTED`);
+      }
+    }
     await runStartupRecoveryV2({
       index: this.v2Index,
       deletion: this.v2Deletion,
       wakeups: this.v2Wakeups,
+      skipTaskIds: startupSuccessorFailures,
       lifecycle: this.v2Lifecycle,
       coordinator: this.v2Coordinator,
       facade: this.v2Facade,
@@ -740,6 +799,9 @@ export class CoreService {
       eligibility: (frozenProfileDigest) => this.executionEligibilityOf(frozenProfileDigest),
       frozenProfileDigest: async (taskId) => (await this.frozenProfileV2(taskId)).profileDigest,
     });
+    if (this.enableV2SchedulingDriver) {
+      this.v2SchedulingDriver.start();
+    }
   }
 
   /**
@@ -1382,7 +1444,9 @@ export class CoreService {
    * capability disabled the pass leases nothing and the tick is a no-op.
    */
   runV2SchedulingTick(now?: string): Promise<import('./runtime/authoritative-review/attempt-coordinator').V2SchedulingTickResult> {
-    return this.v2Composition.runTick(now);
+    return this.enableV2SchedulingDriver
+      ? this.v2SchedulingDriver.runNow(now)
+      : this.v2Composition.runTick(now);
   }
 
   /** The current v2 projection of one task (corrupt histories fail closed). */
@@ -1495,8 +1559,10 @@ export class CoreService {
 
   /** Stops the scheduler (abort + bounded disposal + interruption marking). */
   async shutdown(): Promise<void> {
+    const driverDrain = this.v2SchedulingDriver.stop();
     this.v2Composition.attempts.abortAllExecutions();
     await this.v2Composition.attempts.awaitAllSettlements();
+    await driverDrain;
     await this.scheduler.shutdown();
   }
 

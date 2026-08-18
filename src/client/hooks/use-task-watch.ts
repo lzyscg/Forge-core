@@ -61,8 +61,8 @@ export function useTaskWatch(taskId: string): TaskWatchState {
   const mountedRef = useRef(true);
 
   const load = useCallback(
-    (keepWorkspace: boolean) => {
-      if (!mountedRef.current) return;
+    (keepWorkspace: boolean): Promise<boolean> => {
+      if (!mountedRef.current) return Promise.resolve(false);
       tokenRef.current += 1;
       const token = tokenRef.current;
       pendingRef.current = true;
@@ -72,22 +72,24 @@ export function useTaskWatch(taskId: string): TaskWatchState {
         workspace: keepWorkspace ? previous.workspace : null,
         error: null,
       }));
-      gatewayRef.current.getWorkspace(taskId).then(
+      return gatewayRef.current.getWorkspace(taskId).then(
         (workspace) => {
-          if (tokenRef.current !== token) return;
+          if (tokenRef.current !== token) return false;
           pendingRef.current = false;
           setState({ status: 'success', workspace, error: null });
-          if (dirtyRef.current) load(true);
+          if (dirtyRef.current) void load(true);
+          return true;
         },
         (error: unknown) => {
-          if (tokenRef.current !== token) return;
+          if (tokenRef.current !== token) return false;
           pendingRef.current = false;
           setState((previous) => ({
             status: 'error',
             workspace: keepWorkspace ? previous.workspace : null,
             error: toPublicCoreError(error),
           }));
-          if (dirtyRef.current) load(true);
+          if (dirtyRef.current) void load(true);
+          return false;
         },
       );
     },
@@ -109,16 +111,24 @@ export function useTaskWatch(taskId: string): TaskWatchState {
 
   useEffect(() => {
     mountedRef.current = true;
-    loadRef.current(false);
+    let disposed = false;
     let unsubscribe: (() => void) | null = null;
-    try {
-      unsubscribe = gatewayRef.current.watchTask(taskId, () => onNotifyRef.current());
-    } catch (error) {
-      // Watching failed; the page still works from the initial load and its
-      // public error path. Keep a loud local trace (phase A has no telemetry).
-      console.error('[forge-core] watchTask subscription failed', error);
-    }
+    void loadRef.current(false).then((loaded) => {
+      // Direct navigation must hydrate the gateway before watchTask is
+      // allowed to subscribe. The HTTP gateway uses that hydration as its
+      // known-task guard, so subscribing in the same effect as the first
+      // request races the initial workspace load.
+      if (!loaded || disposed || !mountedRef.current) return;
+      try {
+        unsubscribe = gatewayRef.current.watchTask(taskId, () => onNotifyRef.current());
+      } catch (error) {
+        // Watching failed; the page still works from the initial load and its
+        // public error path. Keep a loud local trace (phase A has no telemetry).
+        console.error('[forge-core] watchTask subscription failed', error);
+      }
+    });
     return () => {
+      disposed = true;
       mountedRef.current = false;
       tokenRef.current += 1;
       pendingRef.current = false;

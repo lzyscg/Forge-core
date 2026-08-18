@@ -48,6 +48,39 @@ describe('useTaskWatch', () => {
     expect(unsubscribe).not.toHaveBeenCalled();
   });
 
+  it('waits for the initial workspace load before subscribing on direct navigation', async () => {
+    const ws = workspaceNamed('task-direct');
+    let loaded = false;
+    const unsubscribe = vi.fn();
+    const getWorkspace = vi.fn(async () => {
+      await Promise.resolve();
+      loaded = true;
+      return ws;
+    });
+    const watchTask = vi.fn(() => {
+      if (!loaded) {
+        throw new CoreError(
+          CORE_ERROR_CODES.TASK_NOT_FOUND,
+          '未找到任务 task-direct。',
+          'MockGateway.watchTask',
+          '返回任务列表刷新后重试。',
+        );
+      }
+      return unsubscribe;
+    });
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const gateway = stubGateway({ getWorkspace, watchTask });
+
+    const { result } = renderHook(() => useTaskWatch('task-direct'), {
+      wrapper: watchWrapper(gateway),
+    });
+
+    await waitFor(() => expect(result.current.status).toBe('success'));
+    expect(watchTask).toHaveBeenCalledTimes(1);
+    expect(consoleError).not.toHaveBeenCalled();
+    expect(unsubscribe).not.toHaveBeenCalled();
+  });
+
   it('reloads after each watch notification', async () => {
     const ws1 = workspaceNamed('task-a');
     const ws2: TaskWorkspace = {
