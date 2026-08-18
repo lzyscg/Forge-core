@@ -28,9 +28,18 @@ structured_agent_attempt_started_v2   <-- orchestrator Agent turn 已开始
 | `ModelRuntime.create()` 解析 deepseek | `getModel('deepseek','deepseek-v4-flash')` 返回 model；`hasConfiguredAuth('deepseek')` = true | `scripts/_test-dep.mjs` |
 | SDK 默认 listener 路径（Forge 测试 fixture 外的最小复现） | 843ms 跑完 14 个 event，包括 `agent_end` / `agent_settled` | `scripts/_test-dep5.mjs` |
 
-## 3. SDK 卡死路径（已观察到 / 怀疑）
+### 2.8 ✅ **已确认的 Forge 衔接缺口：生产 PiAgentRuntime 没注入 v2Tools**
+
+生产 `CoreService` 在 `src/server/core-service.ts:502-506` 创建 `new PiAgentRuntime({ coreCwd, workspaces, structuredSlot })`，但没有传入 `v2Tools`。`PiAgentRuntime.run()` 在 `src/server/runtime/pi-agent-runtime.ts:796-798` 只有当 `this.#v2Tools !== undefined` 时才调用 `createContext(input)`；因此真实 v2 `AssignmentRunner`（`assignment-runner.ts:102-104` 设置 `v2Session`）在生产路径里拿不到 `read_map_build_frontier`、`append_map_candidate_chunk`、`finish_map_build` 等封闭 v2 工具。
+
+这与测试路径不同：`pi-agent-runtime.test.ts:1715-1842` 显式注入 `v2Tools`，所以测试 green 不证明生产 v2 tool seam 已接通。Task 21 `production-composition.ts` 的注释也明确 Task 13 tool factory 尚未 wiring，当前 production `toolProvider` 返回空集合；这不是 DeepSeek API 或 SDK 单独问题，而是 Forge composition 的已确认前向依赖/衔接缺口。它解释了为什么 `structured_agent_attempt_started_v2` 已落盘后没有合法 Map chunk/result 继续事件；但 Agent turn 本身仍需 instrument 证明是否因空工具集合而挂起。
+
+**结论更新**：在修改 SDK 前，必须先把生产 `PiAgentRuntime.v2Tools` 注入真实 `V2ToolFactory`/`ToolProvider`，并写一条 production composition integration test；随后再复现，才能隔离剩余 SDK/DeepSeek listener 问题。
+
 
 完整 Forge 路径上 Pi turn 不返回；最小 SDK 路径能 843ms 返回。差异来自 Forge 注入的额外 seam。
+
+## 3. SDK 卡死路径（已观察到 / 怀疑）
 
 Forge 实际传给 `createAgentSession` 的关键选项（`src/server/runtime/pi-agent-runtime.ts:882-898`）：
 
