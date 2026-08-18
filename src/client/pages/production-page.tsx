@@ -222,11 +222,22 @@ function ProductionWorkspace({ workspace }: { workspace: TaskWorkspace }) {
       ) : null}
 
       <div className="fc-production__center">
-        {workspace.task.structuredProtocol === 'v2' && workspace.authoritativeReview?.activity !== undefined ? (
-          <AuthoritativeProcessPanel
-            activity={workspace.authoritativeReview.activity}
-            agents={workspace.agents}
-          />
+        {workspace.task.structuredProtocol === 'v2' ? (
+          workspace.authoritativeReview?.activity === undefined ? (
+            <section
+              className="fc-authoritative-process fc-authoritative-process--unavailable"
+              role="alert"
+              aria-label="权威生产过程不可用"
+            >
+              <h2 className="fc-authoritative-process__title">权威生产过程不可用</h2>
+              <p>当前 v2 workspace 没有返回权威 WorkItem 过程投影，请刷新后重试。</p>
+            </section>
+          ) : (
+            <AuthoritativeProcessPanel
+              activity={workspace.authoritativeReview.activity}
+              agents={workspace.agents}
+            />
+          )
         ) : (
           <WorkspaceCanvas
             workspace={workspace}

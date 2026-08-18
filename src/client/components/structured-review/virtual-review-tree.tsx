@@ -6,6 +6,7 @@ import type {
   SnapshotCursorV2,
 } from '../../../shared/authoritative-review-v2';
 import type { ReviewSnapshot } from './structured-review-drawer';
+import { toPublicCoreError } from '../../hooks/use-gateway-query';
 
 /**
  * Virtual slot tree (design §20 view 2): per-parent lazy-load, fixed
@@ -22,8 +23,8 @@ interface VirtualReviewTreeProps {
     parentId: string | null,
     after: SnapshotCursorV2 | null,
   ) => Promise<AuthoritativeTreePageV2>;
-  locateSlot: (slotId: string) => Promise<AuthoritativeLocateResultV2 | null>;
-  getSlotReview: (slotId: string) => Promise<AuthoritativeSlotReviewDetailV2>;
+  locateSlot: (slotId: string, snapshotCursor: SnapshotCursorV2 | null) => Promise<AuthoritativeLocateResultV2 | null>;
+  getSlotReview: (slotId: string, snapshotCursor: SnapshotCursorV2 | null) => Promise<AuthoritativeSlotReviewDetailV2>;
   /** Slot id requested from outside (findings → locate primary). */
   requestedLocate?: string | null;
   /** Notifies parent that a requested locate has been consumed. */
@@ -41,7 +42,7 @@ interface FlatRow {
   contentState: string;
 }
 
-const ROW_HEIGHT_PX = 32;
+const ROW_HEIGHT_PX = 52;
 const VIEWPORT_HEIGHT_PX = 320;
 
 function flatten(
@@ -62,6 +63,24 @@ function flatten(
   }));
 }
 
+function mergeTreePage(
+  previous: AuthoritativeTreePageV2 | null,
+  incoming: AuthoritativeTreePageV2,
+): AuthoritativeTreePageV2 {
+  const itemsById = new Map<string, AuthoritativeTreePageV2['items'][number]>();
+  for (const item of previous?.items ?? []) itemsById.set(item.slotId, item);
+  for (const item of incoming.items) itemsById.set(item.slotId, item);
+  return {
+    parentId: previous?.parentId ?? incoming.parentId,
+    hasMoreChildren: previous?.hasMoreChildren === true || incoming.hasMoreChildren,
+    items: [...itemsById.values()].sort(
+      (a, b) => a.siblingOrder - b.siblingOrder || a.slotId.localeCompare(b.slotId),
+    ),
+    snapshotCursor: previous?.snapshotCursor ?? incoming.snapshotCursor,
+    nextCursor: previous?.nextCursor ?? incoming.nextCursor,
+  };
+}
+
 export function VirtualReviewTree({
   map,
   listTree,
@@ -74,14 +93,16 @@ export function VirtualReviewTree({
   const [rootPage, setRootPage] = useState<AuthoritativeTreePageV2 | null>(null);
   const [childrenPages, setChildrenPages] = useState<Record<string, AuthoritativeTreePageV2>>({});
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const [loadedSnapshotCursor] = useState<SnapshotCursorV2 | null>(null);
+  const [snapshotCursor, setSnapshotCursor] = useState<SnapshotCursorV2 | null>(null);
   const [locateValue, setLocateValue] = useState('');
   const [locateStatus, setLocateStatus] = useState<{ kind: 'idle' | 'located'; slotId: string }>({
     kind: 'idle',
     slotId: '',
   });
+  const [locateError, setLocateError] = useState<string | null>(null);
   const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
   const [slotReview, setSlotReview] = useState<AuthoritativeSlotReviewDetailV2 | null>(null);
+  const [slotReviewError, setSlotReviewError] = useState<string | null>(null);
   const reviewRequestRef = useRef(0);
   const consumedLocateRequestRef = useRef<string | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -89,14 +110,17 @@ export function VirtualReviewTree({
 
   /** Root page loaded once and frozen until user accepts "newer events". */
   useEffect(() => {
+    if (rootSlot === null) return;
     let active = true;
-    listTree(rootSlot, loadedSnapshotCursor).then((page) => {
-      if (active) setRootPage(page);
+    void listTree(rootSlot, null).then((page) => {
+      if (!active) return;
+      setRootPage(page);
+      setSnapshotCursor(page.snapshotCursor);
     });
     return () => {
       active = false;
     };
-  }, [listTree, rootSlot, loadedSnapshotCursor]);
+  }, [listTree, rootSlot]);
 
   const toggleExpand = useCallback(
     async (slotId: string) => {
@@ -109,11 +133,11 @@ export function VirtualReviewTree({
       next.add(slotId);
       setExpanded(next);
       if (childrenPages[slotId] === undefined) {
-        const page = await listTree(slotId, null);
+        const page = await listTree(slotId, snapshotCursor);
         setChildrenPages((prev) => ({ ...prev, [slotId]: page }));
       }
     },
-    [childrenPages, expanded, listTree],
+    [childrenPages, expanded, listTree, snapshotCursor],
   );
 
   /** Flatten the visible window in fixed snapshot order (spec §15). */
@@ -151,28 +175,110 @@ export function VirtualReviewTree({
   const topPadding = startIndex * ROW_HEIGHT_PX;
   const bottomPadding = Math.max(0, (flatRows.length - startIndex - visibleCount) * ROW_HEIGHT_PX);
 
-  const selectSlot = useCallback(async (slotId: string) => {
+  const selectSlot = useCallback(async (slotId: string, cursor: SnapshotCursorV2 | null) => {
     const requestId = reviewRequestRef.current + 1;
     reviewRequestRef.current = requestId;
     setSelectedSlotId(slotId);
-    const review = await getSlotReview(slotId);
-    if (reviewRequestRef.current === requestId) {
-      setSlotReview(review);
+    setSlotReview(null);
+    setSlotReviewError(null);
+    try {
+      const review = await getSlotReview(slotId, cursor);
+      if (reviewRequestRef.current === requestId) {
+        setSlotReview(review);
+      }
+    } catch (error) {
+      if (reviewRequestRef.current === requestId) {
+        setSlotReviewError(toPublicCoreError(error).message);
+      }
     }
   }, [getSlotReview]);
 
+  /**
+   * Materializes every ancestor page returned by Locate. Each ancestor has a
+   * seek cursor for its own parent page, so a deep target never walks prior
+   * siblings. The target is merged as a one-row page to keep even a target
+   * beyond the normal page limit visible after the jump.
+   */
+  const revealLocatedPath = useCallback(
+    async (result: AuthoritativeLocateResultV2): Promise<boolean> => {
+      if (rootSlot === null) {
+        setLocateError('当前没有可用的 Map 槽位树。');
+        return false;
+      }
+      let parentId = rootSlot;
+      let anchor = snapshotCursor;
+      const ancestors = result.ancestors.filter(
+        (ancestor) => ancestor.slotId !== rootSlot && ancestor.slotId !== result.target.slotId,
+      );
+
+      if (anchor === null) {
+        const initialPage = await listTree(rootSlot, null);
+        anchor = initialPage.snapshotCursor;
+        setRootPage((previous) => mergeTreePage(previous, initialPage));
+      }
+
+      for (const ancestor of ancestors) {
+        const page = await listTree(parentId, ancestor.seekCursor);
+        anchor ??= page.snapshotCursor;
+        if (parentId === rootSlot) {
+          setRootPage((previous) => mergeTreePage(previous, page));
+        } else {
+          setChildrenPages((previous) => ({
+            ...previous,
+            [parentId]: mergeTreePage(previous[parentId] ?? null, page),
+          }));
+          setExpanded((previous) => {
+            if (previous.has(parentId)) return previous;
+            const next = new Set(previous);
+            next.add(parentId);
+            return next;
+          });
+        }
+        parentId = ancestor.slotId;
+      }
+
+      const targetPage: AuthoritativeTreePageV2 = {
+        parentId,
+        hasMoreChildren: false,
+        items: [result.target],
+        snapshotCursor: anchor!,
+        nextCursor: null,
+      };
+      if (parentId === rootSlot) {
+        setRootPage((previous) => mergeTreePage(previous, targetPage));
+      } else {
+        setChildrenPages((previous) => ({
+          ...previous,
+          [parentId]: mergeTreePage(previous[parentId] ?? null, targetPage),
+        }));
+        setExpanded((previous) => {
+          if (previous.has(parentId)) return previous;
+          const next = new Set(previous);
+          next.add(parentId);
+          return next;
+        });
+      }
+      return true;
+    },
+    [listTree, rootSlot, snapshotCursor],
+  );
+
   const handleLocate = useCallback(async () => {
     if (locateValue.trim() === '') return;
-    const result = await locateSlot(locateValue.trim());
-    if (result === null) return;
-    const next = new Set(expanded);
-    for (const ancestor of result.ancestors) {
-      if (ancestor.slotId !== result.target.slotId) next.add(ancestor.slotId);
+    setLocateError(null);
+    try {
+      const result = await locateSlot(locateValue.trim(), snapshotCursor);
+      if (result === null) {
+        setLocateError('定位失败，请刷新审核视图后重试。');
+        return;
+      }
+      if (!await revealLocatedPath(result)) return;
+      setLocateStatus({ kind: 'located', slotId: result.target.slotId });
+      await selectSlot(result.target.slotId, snapshotCursor);
+    } catch (error) {
+      setLocateError(toPublicCoreError(error).message);
     }
-    setExpanded(next);
-    setLocateStatus({ kind: 'located', slotId: result.target.slotId });
-    await selectSlot(result.target.slotId);
-  }, [expanded, locateSlot, locateValue, selectSlot]);
+  }, [locateSlot, locateValue, revealLocatedPath, selectSlot, snapshotCursor]);
 
   /** React to a locate request coming from outside the tree (findings → locate primary). */
   useEffect(() => {
@@ -184,25 +290,28 @@ export function VirtualReviewTree({
     consumedLocateRequestRef.current = requestedLocate;
     let active = true;
     void (async () => {
-      const result = await locateSlot(requestedLocate);
-      if (!active || result === null) return;
-      setExpanded((previous) => {
-        const next = new Set(previous);
-        for (const ancestor of result.ancestors) {
-          if (ancestor.slotId !== result.target.slotId) next.add(ancestor.slotId);
+      try {
+        setLocateError(null);
+        const result = await locateSlot(requestedLocate, snapshotCursor);
+        if (!active || result === null) {
+          if (active) setLocateError('定位失败，请刷新审核视图后重试。');
+          return;
         }
-        return next.size === previous.size ? previous : next;
-      });
-      setLocateStatus({ kind: 'located', slotId: result.target.slotId });
-      await selectSlot(result.target.slotId);
-      if (active) {
-        onLocateConsumed();
+        if (!await revealLocatedPath(result)) return;
+        setLocateStatus({ kind: 'located', slotId: result.target.slotId });
+        await selectSlot(result.target.slotId, snapshotCursor);
+      } catch (error) {
+        if (active) setLocateError(toPublicCoreError(error).message);
+      } finally {
+        if (active) {
+          onLocateConsumed();
+        }
       }
     })();
     return () => {
       active = false;
     };
-  }, [requestedLocate, locateSlot, onLocateConsumed, selectSlot]);
+  }, [requestedLocate, locateSlot, onLocateConsumed, revealLocatedPath, selectSlot, snapshotCursor]);
 
   return (
     <div className="fc-review-tree" aria-label="槽位树">
@@ -227,6 +336,12 @@ export function VirtualReviewTree({
           定位
         </button>
       </div>
+
+      {locateError !== null ? (
+        <p className="fc-review-error" role="alert" aria-label="定位失败">
+          {locateError}
+        </p>
+      ) : null}
 
       {locateStatus.kind === 'located' ? (
         <p className="fc-review-tree__locate-status" role="status" aria-label={`已定位 ${locateStatus.slotId}`}>
@@ -260,11 +375,11 @@ export function VirtualReviewTree({
                 className={`fc-review-tree__row${selectedSlotId === row.slotId ? ' fc-review-tree__row--selected' : ''}`}
                 style={{ paddingLeft: `${row.depth * 1.25}rem` }}
                 aria-label={`${row.slotId} ${row.typeId} map=${row.mapPreReview} content=${row.contentState}`}
-                onClick={() => void selectSlot(row.slotId)}
+                onClick={() => void selectSlot(row.slotId, snapshotCursor)}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' || event.key === ' ') {
                     event.preventDefault();
-                    void selectSlot(row.slotId);
+                    void selectSlot(row.slotId, snapshotCursor);
                   }
                 }}
               >
@@ -295,6 +410,12 @@ export function VirtualReviewTree({
         </ul>
         <div style={{ height: bottomPadding }} aria-hidden="true" />
       </div>
+
+      {slotReviewError !== null ? (
+        <p className="fc-review-error" role="alert" aria-label="槽位详情加载失败">
+          {slotReviewError}
+        </p>
+      ) : null}
 
       {slotReview !== null ? (
         <section className="fc-review-tree__detail" aria-label={`槽位 ${slotReview.slotId}`}>
@@ -366,12 +487,7 @@ export function VirtualReviewTree({
                 ) : null}
                 {slotReview.contentDetail.text !== null ? (
                   <pre className="fc-review-tree__content-preview" data-testid="slot-content-preview">
-                    {slotReview.contentDetail.text.split('\n').map((line, index, lines) => (
-                      <span key={`${index}-${line}`}>
-                        {line}
-                        {index < lines.length - 1 ? '\n' : null}
-                      </span>
-                    ))}
+                    {slotReview.contentDetail.text}
                   </pre>
                 ) : (
                   <p className="fc-review-tree__detail-line fc-review-tree__detail-line--muted">

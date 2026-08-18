@@ -12,6 +12,7 @@ import type {
   AuthoritativeTreePageV2,
   BlobRefV2,
   CollectionPageV2,
+  SnapshotCursorV2,
 } from '../../../shared/authoritative-review-v2';
 import type { PublicCoreError } from '../../../shared/errors';
 import type { TaskWorkspace } from '../../../shared/contracts';
@@ -84,6 +85,8 @@ export function StructuredReviewDrawer({
   const [snapshot, setSnapshot] = useState<ReviewSnapshot | null>(null);
   const [loadError, setLoadError] = useState<PublicCoreError | null>(null);
   const [requestedLocate, setRequestedLocate] = useState<string | null>(null);
+  const [requestedRelationId, setRequestedRelationId] = useState<string | null>(null);
+  const [locateNotice, setLocateNotice] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -115,30 +118,26 @@ export function StructuredReviewDrawer({
 
   /**
    * Locates a slot by id — used by the tree view (jump) and the findings
-   * view (locate the primary target). Always returns a structured result;
-   * never throws to the caller.
+   * view (locate the primary target). Errors stay with the tree so its
+   * snapshot-bound retry state can consume and retry the same request.
    */
   const locateSlot = useCallback(
-    async (slotId: string): Promise<AuthoritativeLocateResultV2 | null> => {
-      try {
-        return await gateway.locateAuthoritativeSlot(taskId, slotId);
-      } catch (error) {
-        setLoadError(toPublicCoreError(error));
-        return null;
-      }
+    async (slotId: string, snapshotCursor: SnapshotCursorV2 | null): Promise<AuthoritativeLocateResultV2 | null> => {
+      return gateway.locateAuthoritativeSlot(taskId, slotId, snapshotCursor);
     },
     [gateway, taskId],
   );
 
   /** Lazy-loaded children page for one parent in the tree view. */
   const listTree = useCallback(
-    async (parentId: string | null, after: import('../../../shared/authoritative-review-v2').SnapshotCursorV2 | null) =>
+    async (parentId: string | null, after: SnapshotCursorV2 | null) =>
       gateway.listAuthoritativeTree(taskId, parentId, 100, after),
     [gateway, taskId],
   );
 
   const getSlotReview = useCallback(
-    async (slotId: string) => gateway.getAuthoritativeSlotReview(taskId, slotId),
+    async (slotId: string, snapshotCursor: SnapshotCursorV2 | null) =>
+      gateway.getAuthoritativeSlotReview(taskId, slotId, snapshotCursor),
     [gateway, taskId],
   );
 
@@ -192,6 +191,12 @@ export function StructuredReviewDrawer({
         </p>
       ) : null}
 
+      {locateNotice !== null ? (
+        <p className="fc-review-tree__locate-status" role="status" aria-label="定位结果">
+          {locateNotice}
+        </p>
+      ) : null}
+
       {snapshot === null && loadError === null ? (
         <p className="fc-loading-note" role="status">
           正在加载审核…
@@ -231,7 +236,11 @@ export function StructuredReviewDrawer({
             aria-labelledby="fc-review-tab-relations"
             hidden={activeTab !== 'relations'}
           >
-            <RelationshipView map={snapshot.map} getRelationReview={getRelationReview} />
+            <RelationshipView
+              map={snapshot.map}
+              getRelationReview={getRelationReview}
+              requestedRelationId={requestedRelationId}
+            />
           </section>
 
           <section
@@ -256,9 +265,22 @@ export function StructuredReviewDrawer({
             <FindingsView
               findings={snapshot.findings}
               onLocatePrimary={(primary) => {
+                setLocateNotice(null);
+                setRequestedLocate(null);
+                setRequestedRelationId(null);
                 if (primary.kind === 'slot') {
                   setRequestedLocate(primary.id);
                   setActiveTab('tree');
+                } else if (primary.kind === 'relation') {
+                  setRequestedRelationId(primary.id);
+                  setLocateNotice(`已定位关系 ${primary.id}。`);
+                  setActiveTab('relations');
+                } else if (primary.kind === 'map_node') {
+                  setLocateNotice(`已定位 Map 节点 ${primary.id}；当前 Map 概览已打开。`);
+                  setActiveTab('overview');
+                } else {
+                  setLocateNotice(`已定位 Map ${primary.id}；当前 Map 概览已打开。`);
+                  setActiveTab('overview');
                 }
               }}
             />

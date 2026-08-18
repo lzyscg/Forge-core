@@ -28,6 +28,7 @@ import {
   authoritativeReviewWorkspaceV2Schema,
   authoritativeSealReadinessSummaryV2Schema,
   authoritativeSlotReviewDetailV2Schema,
+  authoritativeTreePageV2Schema,
   blobRefV2Schema,
   deleteTaskBodyV2Schema,
   deleteTaskResultV2Schema,
@@ -745,6 +746,18 @@ describe('SnapshotCursorV2 and collection pages (spec §14.2 / design §19.2)', 
       items: [{ ...finding, findingId: 7 }],
       nextCursor: null,
     })).toBe(false);
+  });
+
+  it('requires a snapshot anchor on every authoritative tree page', () => {
+    const page = {
+      parentId: null,
+      hasMoreChildren: false,
+      items: [],
+      snapshotCursor: { version: 2, keyId: 'key-1', token: 'opaque-token' },
+      nextCursor: null,
+    };
+    expect(check(authoritativeTreePageV2Schema, page)).toBe(true);
+    expect(check(authoritativeTreePageV2Schema, { ...page, snapshotCursor: undefined })).toBe(false);
   });
 });
 

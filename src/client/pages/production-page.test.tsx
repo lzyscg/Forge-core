@@ -70,6 +70,27 @@ describe('ProductionPage', () => {
     expect(screen.queryByTestId('workspace-canvas')).toBeNull();
   });
 
+  it('does not silently fall back to the legacy canvas when v2 activity is absent', async () => {
+    const ws = workspaceWithReturnLoop();
+    const v2WithoutActivity: TaskWorkspace = {
+      ...ws,
+      task: { ...ws.task, structuredProtocol: 'v2' },
+      authoritativeReview: {
+        version: 2,
+        executionEligibility: {
+          state: 'eligible',
+          frozenProfileDigest: 'a'.repeat(64),
+          currentProfileDigest: 'a'.repeat(64),
+        },
+        pendingQuestion: null,
+      },
+    };
+    renderProductionPage(v2WithoutActivity);
+
+    expect(await screen.findByRole('alert', { name: '权威生产过程不可用' })).toBeVisible();
+    expect(screen.queryByTestId('workspace-canvas')).toBeNull();
+  });
+
   it('starts with both drawers closed and opens them as overlays on demand', async () => {
     renderProductionPage(workspaceWithReturnLoop());
     await screen.findByTestId('workspace-canvas');

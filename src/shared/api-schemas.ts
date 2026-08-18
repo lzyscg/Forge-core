@@ -847,6 +847,7 @@ export const authoritativeTreePageV2Schema = Type.Object(
     parentId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
     hasMoreChildren: Type.Boolean(),
     items: Type.Array(authoritativeTreeEntryV2Schema),
+    snapshotCursor: snapshotCursorV2Schema,
     nextCursor: Type.Union([snapshotCursorV2Schema, Type.Null()]),
   },
   { additionalProperties: false },

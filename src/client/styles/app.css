@@ -766,6 +766,15 @@
   border-radius: var(--fc-radius-sm);
 }
 
+.fc-authoritative-process--unavailable {
+  border-color: var(--fc-danger);
+}
+
+.fc-authoritative-process--unavailable p {
+  margin: 0;
+  color: var(--fc-danger);
+}
+
 .fc-status-chip[data-state='completed'] {
   color: var(--fc-success);
   border-color: var(--fc-success);
@@ -2437,11 +2446,13 @@
 .fc-review-tree__row {
   display: grid;
   grid-template-columns: 1.5rem minmax(9rem, 1.5fr) minmax(6rem, 0.8fr) minmax(7rem, 0.8fr) minmax(7rem, 0.8fr);
-  align-items: start;
+  align-items: center;
   gap: 0.5rem;
-  min-height: 3.25rem;
-  height: auto;
-  padding: 0.55rem 0.5rem;
+  min-height: 52px;
+  height: 52px;
+  max-height: 52px;
+  box-sizing: border-box;
+  padding: 0.35rem 0.5rem;
   font-size: 0.8125rem;
   border-bottom: 1px solid var(--fc-border);
   cursor: pointer;
@@ -2474,13 +2485,17 @@
   min-width: 0;
   font-weight: 600;
   color: var(--fc-text);
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .fc-review-tree__type {
   min-width: 0;
   color: var(--fc-muted);
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .fc-review-tree__map,
@@ -2488,7 +2503,9 @@
   min-width: 0;
   color: var(--fc-muted);
   font-size: 0.75rem;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .fc-review-tree__detail {
@@ -2601,13 +2618,24 @@
 }
 
 .fc-review-relations__item {
+  min-width: 0;
   display: grid;
-  grid-template-columns: 6rem 1fr 8rem;
+  grid-template-columns: minmax(0, 6rem) minmax(0, 1fr) minmax(0, 8rem);
   gap: 0.5rem;
   padding: 0.5rem 0.75rem;
   background-color: var(--fc-surface-strong);
   border-radius: var(--fc-radius-sm);
   font-size: 0.8125rem;
+}
+
+.fc-review-relations__item > * {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.fc-review-relations__item--selected {
+  outline: 2px solid var(--fc-accent);
+  outline-offset: -2px;
 }
 
 /* Rounds */
@@ -2877,15 +2905,37 @@
   }
 
   .fc-review-tree__row {
-    grid-template-columns: 1.5rem minmax(0, 1fr);
-    min-height: 0;
+    grid-template-columns: 1.5rem minmax(0, 1.35fr) minmax(0, 0.7fr) minmax(0, 0.8fr) minmax(0, 0.9fr);
+    grid-template-rows: 1fr;
+    min-height: 52px;
+    height: 52px;
+    max-height: 52px;
+    padding-top: 0.35rem;
+    padding-bottom: 0.35rem;
   }
 
-  .fc-review-tree__slotid,
-  .fc-review-tree__type,
-  .fc-review-tree__map,
-  .fc-review-tree__content {
+  .fc-review-tree__slotid {
     grid-column: 2;
+    grid-row: 1;
+  }
+
+  .fc-review-tree__type {
+    grid-column: 3;
+    grid-row: 1;
+  }
+
+  .fc-review-tree__map {
+    grid-column: 4;
+    grid-row: 1;
+  }
+
+  .fc-review-tree__content {
+    grid-column: 5;
+    grid-row: 1;
+  }
+
+  .fc-review-relations__item {
+    grid-template-columns: 1fr;
   }
 
   .fc-review-findings__header {

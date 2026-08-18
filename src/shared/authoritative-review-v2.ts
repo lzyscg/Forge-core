@@ -510,6 +510,8 @@ export interface AuthoritativeTreePageV2 {
   /** This parent has more children beyond the current page (never silent truncation). */
   hasMoreChildren: boolean;
   items: AuthoritativeTreeEntryV2[];
+  /** Authenticated snapshot anchor for detail/locate and other parent pages. */
+  snapshotCursor: SnapshotCursorV2;
   nextCursor: SnapshotCursorV2 | null;
 }
 

@@ -307,6 +307,59 @@ describe('createHttpGateway', () => {
     unsubscribe();
   });
 
+  it('fires when only the authoritative v2 activity projection changes', async () => {
+    vi.useFakeTimers();
+    const activityWorkspace = (completedWorkItems: number, activeWorkItemId: string | null): TaskWorkspace => ({
+      ...stubWorkspace('task-1', 'running', '2026-08-03T00:00:00.000Z'),
+      authoritativeReview: {
+        version: 2,
+        executionEligibility: {
+          state: 'eligible',
+          frozenProfileDigest: 'a'.repeat(64),
+          currentProfileDigest: 'a'.repeat(64),
+        },
+        pendingQuestion: null,
+        activity: {
+          totalWorkItems: 2,
+          completedWorkItems,
+          activeWorkItemId,
+          steps: [
+            {
+              workItemId: 'wi-1',
+              kind: 'agent_assignment',
+              roleBinding: 'writer',
+              agentExecutionKind: 'structured_session',
+              sessionKind: 'generation_batch',
+              state: completedWorkItems === 0 ? 'running' : 'completed',
+              attemptCount: 1,
+              latestAttemptState: completedWorkItems === 0 ? 'started' : 'completed',
+              failureCode: null,
+              retryNotBefore: null,
+            },
+          ],
+        },
+      },
+    });
+    let workspace = activityWorkspace(0, 'wi-1');
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith('/api/tasks')) return jsonResponse(200, [stubSummary('task-1', { status: 'running' })]);
+      return jsonResponse(200, workspace);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const gateway = createHttpGateway({ apiBase: 'http://forge.test' });
+    await gateway.listTasks();
+
+    const listener = vi.fn();
+    const unsubscribe = gateway.watchTask('task-1', listener);
+    await vi.advanceTimersByTimeAsync(750);
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    workspace = activityWorkspace(1, null);
+    await vi.advanceTimersByTimeAsync(750);
+    expect(listener).toHaveBeenCalledTimes(2);
+    unsubscribe();
+  });
+
   it('polls every 3000ms while the document is hidden', async () => {
     vi.useFakeTimers();
     vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');

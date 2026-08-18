@@ -13,9 +13,10 @@ import type {
 interface RelationshipViewProps {
   map: AuthoritativeMapDetailV2;
   getRelationReview: (relationId: string) => Promise<AuthoritativeRelationReviewDetailV2>;
+  requestedRelationId?: string | null;
 }
 
-export function RelationshipView({ map, getRelationReview }: RelationshipViewProps) {
+export function RelationshipView({ map, getRelationReview, requestedRelationId = null }: RelationshipViewProps) {
   const [reviews, setReviews] = useState<AuthoritativeRelationReviewDetailV2[] | null>(null);
 
   useEffect(() => {
@@ -67,12 +68,22 @@ export function RelationshipView({ map, getRelationReview }: RelationshipViewPro
   return (
     <div className="fc-review-relations" aria-label="关系网">
       <h3 className="fc-review-heading">关系网</h3>
+      {requestedRelationId !== null ? (
+        <p className="fc-review-tree__locate-status" role="status" aria-label={`已定位关系 ${requestedRelationId}`}>
+          已定位关系 {requestedRelationId}
+        </p>
+      ) : null}
       <ul className="fc-review-relations__list">
         {reviews.map((relation) => (
           <li
             key={relation.relationId}
-            className="fc-review-relations__item"
+            className={
+              relation.relationId === requestedRelationId
+                ? 'fc-review-relations__item fc-review-relations__item--selected'
+                : 'fc-review-relations__item'
+            }
             aria-label={`${relation.relationId} ${relation.typeId}`}
+            aria-current={relation.relationId === requestedRelationId ? 'location' : undefined}
           >
             <span className="fc-review-relations__type">{relation.typeId}</span>
             <span className="fc-review-relations__direction">

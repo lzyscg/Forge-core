@@ -102,6 +102,31 @@ export class AuthoritativeReviewReadError extends Error {
   }
 }
 
+function sameBlobRef(a: BlobRefV2 | null | undefined, b: BlobRefV2 | null | undefined): boolean {
+  return a !== null && a !== undefined && b !== null && b !== undefined && a.kind === b.kind && a.digest === b.digest;
+}
+
+function corruptContentChain(message: string): never {
+  throw new AuthoritativeReviewReadError(
+    'TASK_CORRUPTED',
+    message,
+    'AuthoritativeReviewProjectionService.slotContentDetail',
+    '修复任务内容版本链后重试。',
+  );
+}
+
+async function resolveContentBlob<T>(
+  resolve: () => Promise<T>,
+  label: string,
+): Promise<T> {
+  try {
+    return await resolve();
+  } catch (error) {
+    if (error instanceof AuthoritativeReviewReadError) throw error;
+    corruptContentChain(`${label} 无法通过内容版本链解析。`);
+  }
+}
+
 /** A frozen projection snapshot (either the current tail or a replayed sequence). */
 export interface AuthoritativeProjectionSnapshotV2 {
   throughSequence: number;
@@ -301,13 +326,21 @@ export class AuthoritativeReviewProjectionService {
       sort,
     });
     const { projection, throughSequence } = resolved.snapshot;
+    const snapshotCursor = this.issueCursor(taskId, {
+      route: 'tree',
+      throughSequence,
+      baselineDigest: resolved.snapshotBaseline,
+      filtersDigest,
+      sort,
+      lastKey: null,
+    });
     const map = projection.currentMap;
     if (map === null) {
-      return { parentId, hasMoreChildren: false, items: [], nextCursor: null };
+      return { parentId, hasMoreChildren: false, items: [], snapshotCursor, nextCursor: null };
     }
     const snapshot = await this.resolveMapSnapshot(taskId, map.mapSnapshotRef);
     if (snapshot === null) {
-      return { parentId, hasMoreChildren: false, items: [], nextCursor: null };
+      return { parentId, hasMoreChildren: false, items: [], snapshotCursor, nextCursor: null };
     }
     const childrenByParent = new Map<string, { node: MapSnapshotV2['nodes'][number]; key: string }[]>();
     for (const node of snapshot.nodes) {
@@ -342,7 +375,7 @@ export class AuthoritativeReviewProjectionService {
       sort,
       lastKey,
     }) : null;
-    return { parentId, hasMoreChildren, items, nextCursor };
+    return { parentId, hasMoreChildren, items, snapshotCursor, nextCursor };
   }
 
   async locate(taskId: string, slotId: string, snapshotCursor: SnapshotCursorV2 | null): Promise<AuthoritativeLocateResultV2> {
@@ -476,7 +509,7 @@ export class AuthoritativeReviewProjectionService {
       contentBearing: node.contentBearing,
       review: this.slotReviewState(snapshot.projection, node.slotId),
       openBlockingFindingIds: this.openBlockingFindingIdsAt(snapshot.projection, ['slot'], node.slotId),
-      contentDetail: await this.slotContentDetail(taskId, snapshot.projection, node.slotId),
+      contentDetail: await this.slotContentDetail(taskId, snapshot.projection, node.slotId, node.contentBearing),
     };
   }
 
@@ -626,22 +659,67 @@ export class AuthoritativeReviewProjectionService {
     taskId: string,
     projection: AuthoritativeReviewProjectionV2,
     slotId: string,
+    contentBearing: boolean,
   ): Promise<AuthoritativeSlotContentDetailV2 | null> {
+    if (!contentBearing) return null;
     const currentManifest = projection.currentManifest;
     if (currentManifest === null) return null;
-    const manifest = await this.deps.resolveBlob<ContentRevisionManifestV2>(
-      taskId,
-      currentManifest.contentRevisionManifestRef,
-      'content_revision_manifest',
+    if (currentManifest.manifestPhase === 'baseline_unset') return null;
+    const manifest = await resolveContentBlob(
+      () => this.deps.resolveBlob<ContentRevisionManifestV2>(
+        taskId,
+        currentManifest.contentRevisionManifestRef,
+        'content_revision_manifest',
+      ),
+      '内容 manifest',
     );
-    const entry = manifest.entries.find((candidate) => candidate.slotId === slotId);
-    if (entry === undefined) return null;
-    const version = await this.deps.resolveBlob<SlotContentVersionV2>(taskId, entry.versionRef, 'content_version');
+    if (manifest.taskId !== taskId) corruptContentChain('内容 manifest 不属于当前任务。');
+    if (projection.currentMap === null) corruptContentChain('内容 manifest 没有对应的当前 Map。');
+    if (!sameBlobRef(manifest.mapRef, projection.currentMap.mapSnapshotRef)) {
+      corruptContentChain('内容 manifest 与当前 Map 引用不一致。');
+    }
+    if (manifest.mapSemanticDigest !== projection.currentMap.mapSemanticDigest) {
+      corruptContentChain('内容 manifest 与当前 Map 语义摘要不一致。');
+    }
+    if (manifest.taskContentRevision !== currentManifest.taskContentRevision || manifest.manifestPhase !== currentManifest.manifestPhase) {
+      corruptContentChain('内容 manifest 与投影中的当前版本不一致。');
+    }
+    const { manifestDigest, ...manifestBody } = manifest;
+    if (manifestDigest !== canonicalJsonSha256(manifestBody)) {
+      corruptContentChain('内容 manifest 摘要校验失败。');
+    }
+    const matchingEntries = manifest.entries.filter((candidate) => candidate.slotId === slotId);
+    if (matchingEntries.length !== 1) corruptContentChain('当前内容 manifest 缺少唯一的目标槽位版本。');
+    const entry = matchingEntries[0]!;
+    const version = await resolveContentBlob(
+      () => this.deps.resolveBlob<SlotContentVersionV2>(taskId, entry.versionRef, 'content_version'),
+      '槽位内容版本',
+    );
+    if (
+      version.slotId !== slotId ||
+      version.taskContentRevision !== manifest.taskContentRevision ||
+      !sameBlobRef(version.mapRef, manifest.mapRef) ||
+      version.mapSemanticDigest !== manifest.mapSemanticDigest
+    ) {
+      corruptContentChain('槽位内容版本与 manifest 绑定不一致。');
+    }
     let contentValue: ContentValueV2 | null = null;
     if (version.state === 'set') {
-      contentValue = await this.deps.resolveBlob<ContentValueV2>(taskId, version.blobRef, 'content_value');
-      if (contentValue.slotId !== slotId) {
-        throw new Error(`content value slot mismatch for ${slotId}`);
+      contentValue = await resolveContentBlob(
+        () => this.deps.resolveBlob<ContentValueV2>(taskId, version.blobRef, 'content_value'),
+        '内容值',
+      );
+      if (
+        contentValue.slotId !== slotId ||
+        contentValue.taskContentRevision !== version.taskContentRevision ||
+        contentValue.contentSchemaDigest !== version.contentSchemaDigest ||
+        version.contentDigest !== version.blobRef.digest
+      ) {
+        corruptContentChain('内容值与槽位内容版本绑定不一致。');
+      }
+      const { selfDigest, ...contentBody } = contentValue;
+      if (selfDigest !== canonicalJsonSha256(contentBody)) {
+        corruptContentChain('内容值摘要校验失败。');
       }
     }
     return publicSlotContentDetail({
@@ -677,14 +755,15 @@ export class AuthoritativeReviewProjectionService {
     if (payload.route !== input.route) {
       throw stale(CURSOR_STALE_REASON_QUERY_IDENTITY, 'cursor 绑定到不同的只读端点。');
     }
-    if (payload.filtersDigest !== input.filtersDigest || payload.sort !== input.sort) {
+    const isTreeSnapshotAnchor = input.route === 'tree' && payload.route === 'tree' && payload.lastKey === null;
+    if ((!isTreeSnapshotAnchor && payload.filtersDigest !== input.filtersDigest) || payload.sort !== input.sort) {
       throw stale(CURSOR_STALE_REASON_QUERY_IDENTITY, '查询参数（过滤器/排序）与 cursor 不一致。');
     }
     const snapshot = await this.deps.readSnapshot(input.taskId, payload.throughSequence);
     if (baselineDigestOf(snapshot.projection) !== payload.baselineDigest) {
       throw stale(CURSOR_STALE_REASON_QUERY_IDENTITY, '该快照的权威基线已变化。');
     }
-    return { snapshot, snapshotBaseline: payload.baselineDigest, lastKey: payload.lastKey };
+    return { snapshot, snapshotBaseline: payload.baselineDigest, lastKey: isTreeSnapshotAnchor ? null : payload.lastKey };
   }
 
   private async detailSnapshot(taskId: string, snapshotCursor: SnapshotCursorV2 | null): Promise<AuthoritativeProjectionSnapshotV2> {

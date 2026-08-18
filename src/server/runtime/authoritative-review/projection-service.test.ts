@@ -445,6 +445,7 @@ describe('AuthoritativeReviewProjectionService', () => {
       expect(rootPage.items.map((entry) => entry.slotId)).toEqual(['root']);
       expect(rootPage.items[0]?.childCount).toBe(2);
       expect(rootPage.hasMoreChildren).toBe(false);
+      expect(rootPage.snapshotCursor).toBeDefined();
       expect(rootPage.nextCursor).toBeNull();
       expect(rootPage.items[0]?.review).toEqual({ mapPreReview: 'pass', content: 'pending' });
 
@@ -453,6 +454,7 @@ describe('AuthoritativeReviewProjectionService', () => {
       expect(page.items.map((entry) => entry.slotId)).toEqual(['a']);
       expect(page.items[0]?.childCount).toBe(2);
       expect(page.hasMoreChildren).toBe(true);
+      expect(page.snapshotCursor).toBeDefined();
       expect(page.nextCursor).not.toBeNull();
       expect(page.items[0]?.review).toEqual({ mapPreReview: 'pass', content: 'pending' });
 
@@ -595,6 +597,9 @@ describe('AuthoritativeReviewProjectionService', () => {
       const { service, source } = await makeHarness(fixture);
       const tailBefore = source.events.length;
       const page1 = await service.tree(TASK, 'root', 1, null);
+      expect(page1.snapshotCursor).toBeDefined();
+      const anchoredChildPage = await service.tree(TASK, 'a', 10, page1.snapshotCursor);
+      expect(anchoredChildPage.items.map((entry) => entry.slotId)).toEqual(['a1', 'a2']);
       expect(page1.nextCursor).not.toBeNull();
       // Cursor pages must NOT see newly appended events (they replay the
       // frozen throughSequence).
@@ -734,7 +739,7 @@ describe('AuthoritativeReviewProjectionService', () => {
         finalizerValidatorAggregateRefs: [refOf('validator_aggregate', 'content-detail-finalizer')],
         resolvedVersions: new Map([['root', version]]),
       });
-      const manifestRef = fixture.blobs.put('content_revision_manifest', manifest);
+      let manifestRef = fixture.blobs.put('content_revision_manifest', manifest);
       const projected = projectAuthoritativeReviewStateSync(fixture.events);
       if (!projected.ok) throw new Error('test fixture projection failed');
       const service = new AuthoritativeReviewProjectionService({
@@ -765,6 +770,20 @@ describe('AuthoritativeReviewProjectionService', () => {
         text: '# Root content',
         textLength: '# Root content'.length,
         truncated: false,
+      });
+
+      const { manifestDigest: _manifestDigest, ...manifestWithoutDigest } = manifest;
+      const corruptManifestBody = {
+        ...manifestWithoutDigest,
+        mapSemanticDigest: digestFor('content-detail-wrong-map', 1),
+      };
+      const corruptManifest = {
+        ...corruptManifestBody,
+        manifestDigest: canonicalJsonSha256(corruptManifestBody),
+      };
+      manifestRef = fixture.blobs.put('content_revision_manifest', corruptManifest);
+      await expect(service.slotReview(TASK, 'root', null)).rejects.toMatchObject({
+        code: 'TASK_CORRUPTED',
       });
     });
 

@@ -103,6 +103,7 @@ const TREE_ROOT: AuthoritativeTreePageV2 = {
     { slotId: 'intro', slotType: 'paragraph', documentOrder: 0, siblingOrder: 0, contentBearing: true, childCount: 1, review: { mapPreReview: 'pass', content: 'pass' } },
     { slotId: 'body', slotType: 'paragraph', documentOrder: 1, siblingOrder: 1, contentBearing: true, childCount: 0, review: { mapPreReview: 'pass', content: 'reject' } },
   ],
+  snapshotCursor: SNAPSHOT_CURSOR,
   nextCursor: null,
 };
 
@@ -112,6 +113,7 @@ const TREE_INTRO_CHILDREN: AuthoritativeTreePageV2 = {
   items: [
     { slotId: 'quote', slotType: 'paragraph', documentOrder: 0, siblingOrder: 0, contentBearing: true, childCount: 0, review: { mapPreReview: 'pass', content: 'pass' } },
   ],
+  snapshotCursor: SNAPSHOT_CURSOR,
   nextCursor: null,
 };
 
@@ -313,6 +315,26 @@ describe('ProductionPage version dispatch (Task 24)', () => {
     expect(within(drawer).getByText('blocking Finding：1')).toBeVisible();
   });
 
+  it('clears stale slot detail and surfaces a public error when the detail request fails', async () => {
+    const gateway = buildGateway({
+      getAuthoritativeSlotReview: async (_taskId, slotId) => {
+        if (slotId === 'body') return SLOT_REVIEW;
+        throw new Error('slot detail unavailable');
+      },
+    });
+    renderProductionPage(v2Workspace(), gateway);
+    await userEvent.click(await screen.findByRole('button', { name: '结构' }));
+    const drawer = await screen.findByRole('complementary', { name: '结构' });
+    await userEvent.click(within(drawer).getByRole('tab', { name: '槽位树' }));
+
+    await userEvent.click(await within(drawer).findByRole('treeitem', { name: /body/ }));
+    expect(await within(drawer).findByText(/当前槽位的真实内容。/)).toBeVisible();
+    await userEvent.click(await within(drawer).findByRole('treeitem', { name: /intro/ }));
+
+    expect(await within(drawer).findByRole('alert', { name: '槽位详情加载失败' })).toBeVisible();
+    expect(within(drawer).queryByText(/当前槽位的真实内容。/)).toBeNull();
+  });
+
   it('relationship tab shows "本 Map 未使用关系网" when disabled or zero relations', async () => {
     const mapNoRelations: AuthoritativeMapDetailV2 = {
       ...MAP_DETAIL,
@@ -373,6 +395,64 @@ describe('ProductionPage version dispatch (Task 24)', () => {
     expect(treeStatus).toBeVisible();
     await new Promise((resolve) => setTimeout(resolve, 25));
     expect(locateAuthoritativeSlot).toHaveBeenCalledTimes(1);
+  });
+
+  it('consumes a failed external locate so the same finding can be retried', async () => {
+    const locateAuthoritativeSlot = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('locate unavailable'))
+      .mockResolvedValueOnce(LOCATE_RESULT);
+    const listTree = vi.fn(async (_taskId: string, parentId: string | null, _limit: number, after: SnapshotCursorV2 | null): Promise<AuthoritativeTreePageV2> => {
+      if (parentId === 'middle') {
+        return { ...TREE_INTRO_CHILDREN, parentId: 'middle', items: [LOCATE_RESULT.target] };
+      }
+      if (after !== null) {
+        return {
+          ...TREE_ROOT,
+          items: [
+            ...TREE_ROOT.items,
+            { slotId: 'middle', slotType: 'section', documentOrder: 2, siblingOrder: 2, contentBearing: false, childCount: 1, review: { mapPreReview: 'pass' as const, content: 'pass' as const } },
+          ],
+        };
+      }
+      return TREE_ROOT;
+    });
+    const gateway = buildGateway({ locateAuthoritativeSlot, listAuthoritativeTree: listTree });
+    renderProductionPage(v2Workspace(), gateway);
+    await userEvent.click(await screen.findByRole('button', { name: '结构' }));
+    const drawer = await screen.findByRole('complementary', { name: '结构' });
+    await userEvent.click(within(drawer).getByRole('tab', { name: 'Findings' }));
+    const locateButton = await within(drawer).findByRole('button', { name: /定位 finding 主体 body/ });
+
+    await userEvent.click(locateButton);
+    expect(await within(drawer).findByRole('alert')).toBeVisible();
+    await userEvent.click(within(drawer).getByRole('tab', { name: 'Findings' }));
+    await userEvent.click(within(drawer).getByRole('button', { name: /定位 finding 主体 body/ }));
+
+    expect(await within(drawer).findByRole('status', { name: /已定位 slot-1500/ })).toBeVisible();
+    expect(await within(drawer).findByRole('treeitem', { name: /slot-1500/ })).toBeVisible();
+    expect(locateAuthoritativeSlot).toHaveBeenCalledTimes(2);
+  });
+
+  it('locates a relation Finding in the relationship view instead of doing nothing', async () => {
+    const relationFinding: AuthoritativeFindingSummaryV2 = {
+      ...FINDINGS.items[0]!,
+      findingId: 'f-rel-1',
+      primaryLocation: { kind: 'relation', id: 'rel-1' },
+    };
+    const gateway = buildGateway({
+      listAuthoritativeFindings: async () => ({ items: [relationFinding], nextCursor: null }),
+    });
+    renderProductionPage(v2Workspace(), gateway);
+    await userEvent.click(await screen.findByRole('button', { name: '结构' }));
+    const drawer = await screen.findByRole('complementary', { name: '结构' });
+    await userEvent.click(within(drawer).getByRole('tab', { name: 'Findings' }));
+    await userEvent.click(await within(drawer).findByRole('button', { name: /定位 finding 主体 rel-1/ }));
+
+    expect(await within(drawer).findByRole('status', { name: '定位结果' })).toHaveTextContent('已定位关系 rel-1');
+    const relations = await within(drawer).findAllByRole('listitem', { name: /rel-1/ });
+    expect(relations.length).toBeGreaterThan(0);
+    expect(relations.every((relation) => relation.getAttribute('aria-current') === 'location')).toBe(true);
   });
 
   it('seal readiness tab lists per-condition gate and shows sealed custody when sealed', async () => {
