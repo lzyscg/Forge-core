@@ -432,6 +432,38 @@ export class V2AttemptCoordinator {
   }
 
   /**
+   * Rebuilds the exact context of the currently leased attempt for the Pi
+   * v2-tool seam. The caller-supplied Agent id is deliberately not part of
+   * this lookup: the frozen role Agent identifies the model configuration,
+   * while the persisted lease owner is the authoritative grant principal.
+   * This keeps tool authorization bound to the same identity used by the
+   * coordinator's lease envelope.
+   */
+  async contextForAttempt(
+    taskId: string,
+    workItemId: string,
+    attemptId: string,
+  ): Promise<V2AttemptContext | null> {
+    const state = await this.readProjection(taskId);
+    const lease = state.activeLease;
+    if (
+      lease === null ||
+      lease.workItemId !== workItemId ||
+      (lease.attemptId ?? lease.commandId) !== attemptId
+    ) {
+      return null;
+    }
+    const wi = state.workItems[workItemId];
+    if (wi === undefined || wi.state !== 'leased') return null;
+    const attempt = lease.attemptId !== null ? (state.attempts[lease.attemptId] ?? null) : null;
+    const command = lease.commandId !== null ? (state.attempts[lease.commandId] ?? null) : null;
+    const family: AttemptExecutionKindV2 =
+      command !== null ? 'command' : attempt?.family ?? (lease.attemptId !== null ? 'structured' : 'command');
+    const baseRef = wi.leaseBases[String(wi.leaseEpoch)] ?? wi.authorityBaseRef;
+    return this.buildContext(taskId, wi, lease, family, attemptId, baseRef, null);
+  }
+
+  /**
    * Composite attempt signal: the scheduler stop ∪ our timeout controller ∪
    * LEASE EXPIRY (M-8). The lease-expiry term aborts a session that runs past
    * its lease (even when the timeout is longer or the provider ignores the

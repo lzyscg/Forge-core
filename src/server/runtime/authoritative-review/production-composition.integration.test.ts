@@ -8,7 +8,7 @@
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import type { FrozenTemplate } from '../../template/template-schema';
-import type { BlobRefV2 } from '../../../../shared/authoritative-review-v2';
+import type { BlobRefV2 } from '../../../shared/authoritative-review-v2';
 import { ArtifactStore } from '../../storage/artifact-store';
 import { AuthoritativeWakeupIndexV1 } from './wakeup-index';
 import { TraceStore } from '../../storage/trace-store';

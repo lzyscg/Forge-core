@@ -730,6 +730,20 @@ describe('V2AttemptCoordinator namespace isolation + timeout', () => {
 });
 
 describe('runV2SchedulingTick periodicity seam', () => {
+  it('reconstructs a Pi context with the persisted lease owner, not the frozen role agent id', async () => {
+    const env = await makeEnv();
+    const taskId = tid('context-identity');
+    const { workItemId } = await createWorkItem(env, taskId, { roleBinding: 'orchestrator' });
+    const leased = await env.base.coordinator.leaseNext(taskId, 'task_owner', 'context-identity-lease');
+    expect(leased?.attemptId).toBeTruthy();
+
+    const context = await env.attempts.contextForAttempt(taskId, workItemId, leased!.attemptId!);
+
+    expect(context?.agentId).toBe('task_owner');
+    expect(context?.agent?.id).toBe('orchestrator');
+    expect(context?.roleBinding).toBe('orchestrator');
+  });
+
   it('leases a ready workitem through the scheduling pass and executes it (mutation-driven periodicity)', async () => {
     const env = await makeEnv();
     env.systemCommands.replace({

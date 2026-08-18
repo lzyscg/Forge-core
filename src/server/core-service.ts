@@ -62,7 +62,7 @@ import {
   requiredAuthoritativeReviewAbiAvailable,
   type AuthoritativeReviewRuntimeEnvironmentV1,
 } from './structured-slots/authoritative-review-capability';
-import { RuntimeFailure, type AgentRuntime, type AgentTurnInput } from './runtime/agent-runtime';
+import { type AgentRuntime, type AgentTurnInput } from './runtime/agent-runtime';
 import type { AcceptanceStopHook } from './acceptance-boundary';
 import {
   PiAgentRuntime,
@@ -126,6 +126,7 @@ import {
   type AuthoritativeReviewCompositionV2,
 } from './runtime/authoritative-review/production-composition';
 import { V2AssignmentRunner } from './runtime/authoritative-review/assignment-runner';
+import { ProductionV2ToolRuntime } from './runtime/authoritative-review/production-tool-runtime';
 import type { BlobRefV2, AuthoritativeReviewExecutionEligibilityV1 } from '../shared/authoritative-review-v2';
 import { STORAGE_ERROR_CODES, StorageError } from './storage/atomic-file';
 import type { PublicationOperationPayloadV2 } from './authoritative-review/authority-types';
@@ -490,6 +491,21 @@ export class CoreService {
     // the same derivation (plan Task E3).
     this.workspaces = new WorkspaceStore(paths);
     this.traces = new TraceStore(paths);
+    const authoritativeProfileBodyForTask = async (taskId: string) => {
+      const profile = await this.frozenProfileV2(taskId);
+      const file = this.paths.taskStructuredV2BlobFile(taskId, 'profile_snapshot', profile.profileSnapshotRef.digest);
+      const raw = await readFile(file, 'utf8');
+      return JSON.parse(raw) as import('./structured-slots/authoritative-review-profile').AuthoritativeReviewProfileSnapshotV1Body;
+    };
+    const authoritativeV2Tools = new ProductionV2ToolRuntime({
+      paths: this.paths,
+      profileBody: authoritativeProfileBodyForTask,
+      readProjection: (taskId) => this.v2Projection(taskId),
+      resolver: (taskId, ref) => this.v2BlobStore.readJson(taskId, ref, ref.kind),
+      contextResolver: (taskId, workItemId, attemptId) =>
+        this.v2Composition.attempts.contextForAttempt(taskId, workItemId, attemptId),
+      resolveDispatch: (taskId, workItemId, attemptId) => this.v2DispatchForAttempt(taskId, workItemId, attemptId),
+    });
     // Task 17: the per-turn structured slot runtime seam. The production Pi
     // adapter resolves it after the runner exists (the runner owns the
     // coordinator/session bundle); the mutable holder is filled below so the
@@ -503,6 +519,7 @@ export class CoreService {
         coreCwd: paths.dataRoot,
         workspaces: this.workspaces,
         structuredSlot: structuredSlotSeam as PiStructuredSlotRuntime,
+        v2Tools: authoritativeV2Tools,
       });
     // Structural fake-runtime wiring: the deterministic fake applies scripted
     // workspace writes through the offered sink; real runtimes own their
@@ -639,35 +656,12 @@ export class CoreService {
       resolver: (taskId, ref) => this.v2BlobStore.readJson(taskId, ref, ref.kind),
       frozenProfile: (taskId) => this.frozenProfileV2(taskId),
       frozenTemplate: (taskId) => this.tasks.readFrozenTemplate(taskId),
-      profileBody: async (taskId) => {
-        // The profile_snapshot blob parser strips the limit/installed-handler
-        // groups, so the FULL body (the validator registry resolves against its
-        // budgetProfiles/installedHandlers) is read from the raw snapshot file.
-        const profile = await this.frozenProfileV2(taskId);
-        const file = this.paths.taskStructuredV2BlobFile(taskId, 'profile_snapshot', profile.profileSnapshotRef.digest);
-        const raw = await readFile(file, 'utf8');
-        return JSON.parse(raw) as never;
-      },
+      profileBody: authoritativeProfileBodyForTask,
       frozenAutomaticRetries: (taskId) => this.frozenAutomaticRetries(taskId),
       eligibility: (frozenProfileDigest) => this.executionEligibilityOf(frozenProfileDigest),
       runner: new V2AssignmentRunner({
         runtime: this.runtime,
-        // Task 13 wires the real V2ToolFactory here. Until then an Agent
-        // session has no domain tools and therefore cannot produce its §9.2
-        // domain result carriers — `collectResultRefs` fails RETRYABLE (the
-        // runner classifies RuntimeFailure.transient as retryable), so the
-        // leased work item parks on a durable retry_due wakeup instead of
-        // crashing the mutation driver with a bare-completion rejection. The
-        // System Command (seal) path never touches the runner.
-        toolProvider: {
-          async toolsFor() { return []; },
-          async collectResultRefs() {
-            throw RuntimeFailure.transient(
-              'V2_AGENT_TOOLS_NOT_WIRED',
-              'v2 Agent tool factory is not wired; the session cannot produce domain result refs',
-            );
-          },
-        },
+        toolProvider: authoritativeV2Tools,
       }),
       clock: () => new Date().toISOString(),
       traces: this.traces,
@@ -1347,6 +1341,31 @@ export class CoreService {
       }
       throw error;
     }
+  }
+
+  /** Resolves the committed AssignmentDispatch for the scheduler-created lease. */
+  private async v2DispatchForAttempt(
+    taskId: string,
+    workItemId: string,
+    attemptId: string,
+  ): Promise<{ dispatch: Record<string, unknown>; dispatchRef: BlobRefV2 } | null> {
+    const entries = await this.events.read(taskId);
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      const event = entries[index]?.event;
+      if (
+        event?.type !== 'structured_assignment_dispatched' ||
+        event.workItemId !== workItemId ||
+        event.attemptId !== attemptId
+      ) {
+        continue;
+      }
+      const dispatch = await this.v2BlobStore.readJson(taskId, event.dispatchRef, event.dispatchRef.kind);
+      if (dispatch === null || typeof dispatch !== 'object' || Array.isArray(dispatch)) {
+        throw new StorageError(STORAGE_ERROR_CODES.TASK_CORRUPTED, 'AssignmentDispatch blob 无法解析。', null, '联系平台检查任务权威账本。');
+      }
+      return { dispatch: dispatch as Record<string, unknown>, dispatchRef: event.dispatchRef };
+    }
+    return null;
   }
 
   /** The task-FROZEN profile carrier (constraint B: row refs + frozen digest). */
