@@ -415,6 +415,54 @@ export const workItemKindV2Schema = Type.Union([
   Type.Literal('system_seal'),
 ]);
 
+const authoritativeActivityStepStateV2Schema = Type.Union([
+  Type.Literal('queued'),
+  Type.Literal('running'),
+  Type.Literal('retrying'),
+  Type.Literal('completed'),
+  Type.Literal('failed'),
+  Type.Literal('parked'),
+  Type.Literal('superseded'),
+]);
+
+const authoritativeActivityAttemptStateV2Schema = Type.Union([
+  Type.Literal('started'),
+  Type.Literal('completed'),
+  Type.Literal('retryable_failed'),
+  Type.Literal('terminal_failed'),
+  Type.Literal('abandoned'),
+]);
+
+const authoritativeActivityStepV2Schema = Type.Object(
+  {
+    workItemId: Type.String({ minLength: 1 }),
+    kind: workItemKindV2Schema,
+    roleBinding: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
+    agentExecutionKind: Type.Union([
+      Type.Literal('structured_session'),
+      Type.Literal('generic_turn'),
+      Type.Null(),
+    ]),
+    sessionKind: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
+    state: authoritativeActivityStepStateV2Schema,
+    attemptCount: Type.Integer({ minimum: 0 }),
+    latestAttemptState: Type.Union([authoritativeActivityAttemptStateV2Schema, Type.Null()]),
+    failureCode: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
+    retryNotBefore: Type.Union([Type.String(), Type.Null()]),
+  },
+  { additionalProperties: false },
+);
+
+const authoritativeReviewActivityV2Schema = Type.Object(
+  {
+    totalWorkItems: Type.Integer({ minimum: 0 }),
+    completedWorkItems: Type.Integer({ minimum: 0 }),
+    activeWorkItemId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
+    steps: Type.Array(authoritativeActivityStepV2Schema),
+  },
+  { additionalProperties: false },
+);
+
 /** The pending v2 human question (spec §10.6). */
 export const pendingQuestionV2Schema = Type.Object(
   {
@@ -751,6 +799,35 @@ const slotReviewStateV2Schema = Type.Object(
   { additionalProperties: false },
 );
 
+const authoritativeSlotContentDetailV2Schema = Type.Object(
+  {
+    state: Type.Union([
+      Type.Literal('unset'),
+      Type.Literal('rewrite_required'),
+      Type.Literal('set'),
+    ]),
+    slotRevision: Type.Integer({ minimum: 0 }),
+    taskContentRevision: Type.Integer({ minimum: 0 }),
+    manifestPhase: Type.Union([
+      Type.Literal('baseline_unset'),
+      Type.Literal('provisional'),
+      Type.Literal('finalized'),
+    ]),
+    versionRef: blobRefV2Schema,
+    contentValueRef: Type.Union([blobRefV2Schema, Type.Null()]),
+    contentDigest: Type.Union([sha256HexSchema, Type.Null()]),
+    mediaType: Type.Union([
+      Type.Literal('text/markdown'),
+      Type.Literal('text/plain'),
+      Type.Null(),
+    ]),
+    text: Type.Union([Type.String(), Type.Null()]),
+    textLength: Type.Integer({ minimum: 0 }),
+    truncated: Type.Boolean(),
+  },
+  { additionalProperties: false },
+);
+
 /** One child row of a non-recursive tree parent page (spec §14.2). */
 export const authoritativeTreeEntryV2Schema = Type.Object(
   {
@@ -831,6 +908,7 @@ export const authoritativeSlotReviewDetailV2Schema = Type.Object(
     contentBearing: Type.Boolean(),
     review: slotReviewStateV2Schema,
     openBlockingFindingIds: Type.Array(Type.String({ minLength: 1 })),
+    contentDetail: Type.Optional(Type.Union([authoritativeSlotContentDetailV2Schema, Type.Null()])),
   },
   { additionalProperties: false },
 );
@@ -926,6 +1004,7 @@ export const authoritativeReviewWorkspaceV2Schema = Type.Object(
     version: Type.Literal(2),
     executionEligibility: authoritativeReviewExecutionEligibilityV1Schema,
     pendingQuestion: Type.Union([pendingQuestionV2Schema, Type.Null()]),
+    activity: Type.Optional(authoritativeReviewActivityV2Schema),
   },
   { additionalProperties: false },
 );

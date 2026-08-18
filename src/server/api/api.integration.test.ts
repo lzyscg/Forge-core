@@ -1117,6 +1117,12 @@ describe('v2 lifecycle HTTP dispatch (Task 11, spec §14.3)', { timeout: 30_000 
       expect(workspace.authoritativeReview?.version).toBe(2);
       expect(workspace.authoritativeReview?.executionEligibility.state).toBe('eligible');
       expect(workspace.authoritativeReview?.pendingQuestion).toBeNull();
+      expect(workspace.authoritativeReview?.activity).toEqual({
+        totalWorkItems: 0,
+        completedWorkItems: 0,
+        activeWorkItemId: null,
+        steps: [],
+      });
       const listed = (await (await fetch(`${baseUrl}/api/tasks`)).json()) as TaskSummary[];
       expect(listed.find((summary) => summary.id === task.id)?.structuredProtocol).toBe('v2');
     } finally {

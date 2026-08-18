@@ -22,11 +22,13 @@ export function SealReadinessView({ seal }: { seal: AuthoritativeSealReadinessDe
                   : 'fc-review-seal__condition fc-review-seal__condition--unmet'
               }
             >
-              <span className="fc-review-seal__condition-code">{condition.code}</span>
-              <span className="fc-review-seal__condition-detail">{condition.detail}</span>
-              <span className="fc-review-seal__condition-state">
-                {condition.satisfied ? '通过' : '未满足'}
-              </span>
+              <div className="fc-review-seal__condition-header">
+                <code className="fc-review-seal__condition-code">{condition.code}</code>
+                <span className="fc-review-seal__condition-state">
+                  {condition.satisfied ? '通过' : '未满足'}
+                </span>
+              </div>
+              <p className="fc-review-seal__condition-detail">{condition.detail}</p>
             </li>
           ))}
         </ul>
@@ -34,20 +36,27 @@ export function SealReadinessView({ seal }: { seal: AuthoritativeSealReadinessDe
 
       <section aria-label="封存状态" className="fc-review-seal__block">
         <h3 className="fc-review-heading">封存状态</h3>
-        <p className="fc-review-seal__line">
-          readiness: {seal.readiness}
-        </p>
-        <p className="fc-review-seal__line">
-          未满足条件数: {seal.unmetConditionCount}
-        </p>
-        <p className="fc-review-seal__line">
-          sealed: {seal.sealed ? '已封存' : '未封存'}
-        </p>
+        <dl className="fc-review-seal__summary">
+          <div>
+            <dt>readiness</dt>
+            <dd>{seal.readiness}</dd>
+          </div>
+          <div>
+            <dt>未满足条件数</dt>
+            <dd>{seal.unmetConditionCount}</dd>
+          </div>
+          <div>
+            <dt>sealed</dt>
+            <dd>{seal.sealed ? '已封存' : '未封存'}</dd>
+          </div>
+        </dl>
         {seal.sealed ? (
           <dl className="fc-review-seal__custody">
             <div className="fc-review-seal__custody-row">
               <dt>SealRecord</dt>
-              <dd>{refLabel(seal.sealRecordRef)}</dd>
+              <dd>
+                <code title={seal.sealRecordRef?.digest ?? undefined}>{refLabel(seal.sealRecordRef)}</code>
+              </dd>
             </div>
             <p className="fc-review-seal__custody-note">系统 Seal 产物，无源节点定位。</p>
           </dl>

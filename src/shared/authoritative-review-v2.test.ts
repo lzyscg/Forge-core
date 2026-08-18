@@ -27,6 +27,7 @@ import {
   authoritativeReviewSummaryV2Schema,
   authoritativeReviewWorkspaceV2Schema,
   authoritativeSealReadinessSummaryV2Schema,
+  authoritativeSlotReviewDetailV2Schema,
   blobRefV2Schema,
   deleteTaskBodyV2Schema,
   deleteTaskResultV2Schema,
@@ -925,6 +926,79 @@ describe('authoritative review workspace summary v2', () => {
       version: 2,
       executionEligibility: { state: 'blocked', reason: 'profile_digest_mismatch', frozenProfileDigest: 'c5'.repeat(32), currentProfileDigest: null },
       pendingQuestion: null,
+    })).toBe(true);
+  });
+
+  it('accepts the authoritative process activity and keeps it closed', () => {
+    const activity = {
+      totalWorkItems: 2,
+      completedWorkItems: 1,
+      activeWorkItemId: 'wi-2',
+      steps: [
+        {
+          workItemId: 'wi-1',
+          kind: 'agent_assignment',
+          roleBinding: 'writer',
+          agentExecutionKind: 'structured_session',
+          sessionKind: 'generation_batch',
+          state: 'completed',
+          attemptCount: 1,
+          latestAttemptState: 'completed',
+          failureCode: null,
+          retryNotBefore: null,
+        },
+        {
+          workItemId: 'wi-2',
+          kind: 'system_seal',
+          roleBinding: null,
+          agentExecutionKind: null,
+          sessionKind: null,
+          state: 'running',
+          attemptCount: 1,
+          latestAttemptState: 'started',
+          failureCode: null,
+          retryNotBefore: null,
+        },
+      ],
+    };
+    expect(check(authoritativeReviewWorkspaceV2Schema, { ...V2_WORKSPACE, activity })).toBe(true);
+    expect(check(authoritativeReviewWorkspaceV2Schema, {
+      ...V2_WORKSPACE,
+      activity: { ...activity, steps: [{ ...activity.steps[0], leakedProviderOutput: 'secret' }] },
+    })).toBe(false);
+  });
+
+  it('accepts a slot detail with bounded public content metadata', () => {
+    const ref = {
+      kind: 'content_version',
+      digest: 'a'.repeat(64),
+      byteLength: 10,
+      mediaType: 'application/json',
+      schemaVersion: 1,
+    };
+    const valueRef = { ...ref, kind: 'content_value', digest: 'b'.repeat(64) };
+    expect(check(authoritativeSlotReviewDetailV2Schema, {
+      slotId: 'slot-1',
+      slotType: 'body',
+      parentSlotId: null,
+      documentOrder: 1,
+      siblingOrder: 0,
+      contentBearing: true,
+      review: { mapPreReview: 'pass', content: 'pass' },
+      openBlockingFindingIds: [],
+      contentDetail: {
+        state: 'set',
+        slotRevision: 1,
+        taskContentRevision: 3,
+        manifestPhase: 'finalized',
+        versionRef: ref,
+        contentValueRef: valueRef,
+        contentDigest: 'c'.repeat(64),
+        mediaType: 'text/markdown',
+        text: '# 正文',
+        textLength: 4,
+        truncated: false,
+      },
     })).toBe(true);
   });
 });

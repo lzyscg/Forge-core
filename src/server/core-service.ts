@@ -121,6 +121,7 @@ import {
   type FrozenTaskProfileV2,
   type ReopenRequestV2,
 } from './runtime/authoritative-review/task-lifecycle';
+import { projectAuthoritativeReviewActivity } from './runtime/authoritative-review/public-activity';
 import { WorkItemCoordinatorV2 } from './runtime/authoritative-review/work-item-coordinator';
 import {
   installAuthoritativeReviewRuntime,
@@ -1667,6 +1668,7 @@ export class CoreService {
                   source: 'agent_request',
                   text: questionText,
                 },
+          activity: projectAuthoritativeReviewActivity(projected.state),
         };
         if (projected.state.taskStatus === 'failed') {
           // B-F3: the TRACK-EXACT summary — the recorded track is resolved

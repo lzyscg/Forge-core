@@ -44,7 +44,7 @@ const SNAPSHOT_CURSOR: SnapshotCursorV2 = {
   token: 'token-1',
 };
 
-function makeRef(kind: 'map_snapshot' | 'map_review_bundle' | 'seal_record' | 'artifact' | 'artifact_custody', tag: string): import('../../../shared/authoritative-review-v2').BlobRefV2 {
+function makeRef(kind: 'map_snapshot' | 'map_review_bundle' | 'seal_record' | 'artifact' | 'artifact_custody' | 'content_version' | 'content_value', tag: string): import('../../../shared/authoritative-review-v2').BlobRefV2 {
   return {
     kind,
     digest: 'a'.repeat(64),
@@ -160,6 +160,19 @@ const SLOT_REVIEW: AuthoritativeSlotReviewDetailV2 = {
   contentBearing: true,
   review: { mapPreReview: 'pass', content: 'reject' },
   openBlockingFindingIds: ['f-body-1'],
+  contentDetail: {
+    state: 'set',
+    slotRevision: 2,
+    taskContentRevision: 3,
+    manifestPhase: 'finalized',
+    versionRef: makeRef('content_version', 'body-version'),
+    contentValueRef: makeRef('content_value', 'body-value'),
+    contentDigest: 'b'.repeat(64),
+    mediaType: 'text/markdown',
+    text: '# Body 正文\n\n这里是当前槽位的真实内容。',
+    textLength: 25,
+    truncated: false,
+  },
 };
 
 const RELATION_REVIEW: AuthoritativeRelationReviewDetailV2 = {
@@ -287,6 +300,19 @@ describe('ProductionPage version dispatch (Task 24)', () => {
     expect(within(drawer).getByRole('status', { name: /已定位 slot-1500/ })).toBeVisible();
   });
 
+  it('shows the selected slot content and review facts below the tree', async () => {
+    renderProductionPage(v2Workspace(), buildGateway());
+    await userEvent.click(await screen.findByRole('button', { name: '结构' }));
+    const drawer = await screen.findByRole('complementary', { name: '结构' });
+    await userEvent.click(within(drawer).getByRole('tab', { name: '槽位树' }));
+
+    await userEvent.click(await within(drawer).findByRole('treeitem', { name: /body/ }));
+    expect(await within(drawer).findByText(/当前槽位的真实内容。/)).toBeVisible();
+    expect(within(drawer).getByText('内容版本')).toBeVisible();
+    expect(within(drawer).getByText('content review: reject')).toBeVisible();
+    expect(within(drawer).getByText('blocking Finding：1')).toBeVisible();
+  });
+
   it('relationship tab shows "本 Map 未使用关系网" when disabled or zero relations', async () => {
     const mapNoRelations: AuthoritativeMapDetailV2 = {
       ...MAP_DETAIL,
@@ -329,7 +355,8 @@ describe('ProductionPage version dispatch (Task 24)', () => {
 
   it('findings tab shows defect class, owner context, lifecycle and locate action', async () => {
     const locateBody = { ...LOCATE_RESULT, target: { ...LOCATE_RESULT.target, slotId: 'body' } };
-    const gateway = buildGateway({ locateAuthoritativeSlot: async () => locateBody });
+    const locateAuthoritativeSlot = vi.fn(async () => locateBody);
+    const gateway = buildGateway({ locateAuthoritativeSlot });
     renderProductionPage(v2Workspace(), gateway);
     await userEvent.click(await screen.findByRole('button', { name: '结构' }));
     const drawer = await screen.findByRole('complementary', { name: '结构' });
@@ -337,13 +364,15 @@ describe('ProductionPage version dispatch (Task 24)', () => {
     const findingsPanel = await within(drawer).findByRole('tabpanel', { hidden: false });
     expect(within(findingsPanel).getByText('f-body-1')).toBeVisible();
     expect(within(findingsPanel).getByText(/defect: content/)).toBeVisible();
-    expect(within(findingsPanel).getByText(/owner: reviewer/)).toBeVisible();
+    expect(within(findingsPanel).getByText(/来源: reviewer/)).toBeVisible();
     expect(within(findingsPanel).getByText(/status: open/)).toBeVisible();
     const locateBtn = within(findingsPanel).getByRole('button', { name: /定位 finding 主体 body/ });
     await userEvent.click(locateBtn);
     // Locate switches to tree tab and announces status.
     const treeStatus = await within(drawer).findByRole('status', { name: /已定位 body/ });
     expect(treeStatus).toBeVisible();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(locateAuthoritativeSlot).toHaveBeenCalledTimes(1);
   });
 
   it('seal readiness tab lists per-condition gate and shows sealed custody when sealed', async () => {

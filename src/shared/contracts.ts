@@ -26,6 +26,9 @@ export type { SealRecord } from './structured-slots';
  */
 export type {
   AnswerTaskBodyV2,
+  AuthoritativeActivityAttemptStateV2,
+  AuthoritativeActivityStepStateV2,
+  AuthoritativeActivityStepV2,
   ArtifactProvenanceV2,
   AuthoritativeBlobKindV2,
   AuthoritativeCandidateDetailV2,
@@ -41,6 +44,7 @@ export type {
   AuthoritativeRelationReviewStateV2,
   AuthoritativeRelationSummaryV2,
   AuthoritativeReviewExecutionEligibilityV1,
+  AuthoritativeReviewActivityV2,
   AuthoritativeReviewProfileSnapshotV1,
   AuthoritativeReviewRoundSummaryV2,
   AuthoritativeReviewSummaryV2,
@@ -49,6 +53,7 @@ export type {
   AuthoritativeSealReadinessDetailV2,
   AuthoritativeSealReadinessSummaryV2,
   AuthoritativeSlotReviewDetailV2,
+  AuthoritativeSlotContentDetailV2,
   AuthoritativeSlotReviewStateV2,
   AuthoritativeTreeEntryV2,
   AuthoritativeTreePageV2,

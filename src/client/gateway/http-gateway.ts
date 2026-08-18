@@ -123,6 +123,7 @@ function currentPollInterval(): number {
 
 /** Change detector: cheap fields only, never full body comparisons. */
 function workspaceDigest(workspace: TaskWorkspace): string {
+  const activity = workspace.authoritativeReview?.activity;
   return [
     workspace.task.status,
     workspace.task.updatedAt,
@@ -131,6 +132,12 @@ function workspaceDigest(workspace: TaskWorkspace): string {
     workspace.executedRoutes.length,
     workspace.artifacts.length,
     workspace.pendingHumanQuestion ?? '',
+    activity?.totalWorkItems ?? '',
+    activity?.completedWorkItems ?? '',
+    activity?.activeWorkItemId ?? '',
+    activity?.steps
+      .map((step) => `${step.workItemId}:${step.state}:${step.attemptCount}:${step.latestAttemptState ?? ''}`)
+      .join(',') ?? '',
   ].join('|');
 }
 

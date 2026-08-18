@@ -42,6 +42,7 @@ import type {
   AuthoritativeReviewSummaryV2,
   AuthoritativeSealReadinessConditionV2,
   AuthoritativeSealReadinessDetailV2,
+  AuthoritativeSlotContentDetailV2,
   AuthoritativeSlotReviewDetailV2,
   AuthoritativeTreeEntryV2,
   AuthoritativeTreePageV2,
@@ -56,7 +57,13 @@ import type { AuthoritativeReviewProjectionV2 } from '../../storage/authoritativ
 import { ProjectionCorruptionError } from '../../storage/authoritative-review-state';
 import { parseBlob } from '../../authoritative-review/object-registry';
 import { sealConditionCodes } from '../../authoritative-review/seal-gate';
-import type { MapSnapshotV2 } from '../../authoritative-review/authority-types';
+import type {
+  ContentRevisionManifestV2,
+  ContentValueV2,
+  MapSnapshotV2,
+  SlotContentVersionV2,
+} from '../../authoritative-review/authority-types';
+import { publicSlotContentDetail } from './public-slot-content';
 
 /** Stable diagnostics for the read API (spec §14.2) — never internals. */
 export const CURSOR_STALE_REASON_SIGNING_KEY_RETIRED = 'signing_key_retired';
@@ -469,6 +476,7 @@ export class AuthoritativeReviewProjectionService {
       contentBearing: node.contentBearing,
       review: this.slotReviewState(snapshot.projection, node.slotId),
       openBlockingFindingIds: this.openBlockingFindingIdsAt(snapshot.projection, ['slot'], node.slotId),
+      contentDetail: await this.slotContentDetail(taskId, snapshot.projection, node.slotId),
     };
   }
 
@@ -607,6 +615,41 @@ export class AuthoritativeReviewProjectionService {
       sealRecordRef: null,
       conditions,
     };
+  }
+
+  /**
+   * Resolves only the selected slot's current public content chain. Tree pages
+   * intentionally remain O(limit); this path is called by the detail endpoint
+   * after the owner explicitly selects a slot.
+   */
+  private async slotContentDetail(
+    taskId: string,
+    projection: AuthoritativeReviewProjectionV2,
+    slotId: string,
+  ): Promise<AuthoritativeSlotContentDetailV2 | null> {
+    const currentManifest = projection.currentManifest;
+    if (currentManifest === null) return null;
+    const manifest = await this.deps.resolveBlob<ContentRevisionManifestV2>(
+      taskId,
+      currentManifest.contentRevisionManifestRef,
+      'content_revision_manifest',
+    );
+    const entry = manifest.entries.find((candidate) => candidate.slotId === slotId);
+    if (entry === undefined) return null;
+    const version = await this.deps.resolveBlob<SlotContentVersionV2>(taskId, entry.versionRef, 'content_version');
+    let contentValue: ContentValueV2 | null = null;
+    if (version.state === 'set') {
+      contentValue = await this.deps.resolveBlob<ContentValueV2>(taskId, version.blobRef, 'content_value');
+      if (contentValue.slotId !== slotId) {
+        throw new Error(`content value slot mismatch for ${slotId}`);
+      }
+    }
+    return publicSlotContentDetail({
+      manifestPhase: manifest.manifestPhase,
+      versionRef: entry.versionRef,
+      version,
+      contentValue,
+    });
   }
 
   /* ----------------------------- cursor plumbing ----------------------------- */

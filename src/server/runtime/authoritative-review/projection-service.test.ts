@@ -23,8 +23,11 @@ import {
   type ValidatedEventSource,
 } from '../../storage/authoritative-review-checkpoint-store';
 import { LegalHistory, digestFor } from '../../storage/authoritative-review-state.test';
+import { projectAuthoritativeReviewStateSync, type AuthoritativeReviewProjectionV2 } from '../../storage/authoritative-review-state';
 import { parseBlob, refOfBlob } from '../../authoritative-review/object-registry';
-import type { MapPositionNodeV2, MapRelationV2, MapSnapshotV2 } from '../../authoritative-review/authority-types';
+import type { ContentValueV2, MapPositionNodeV2, MapRelationV2, MapSnapshotV2, SlotContentVersionV2 } from '../../authoritative-review/authority-types';
+import { computeProvisionalOrFinalizedManifest } from '../../authoritative-review/content-domain';
+import { canonicalJsonSha256 } from '../../structured-slots/canonical-json';
 import { ReviewCursorKeyring } from '../../storage/review-cursor-keyring';
 import { makeTempCorePaths, disposeAllTestRoots } from '../../test-support';
 import { AuthoritativeReviewProjectionService } from './projection-service';
@@ -287,7 +290,11 @@ interface ServiceHarness {
   append(events: AuthoritativeReviewEventV2[]): void;
 }
 
-async function makeHarness(fixture: V2ReadFixture, clock: () => string = () => '2026-08-14T00:00:00.000Z'): Promise<ServiceHarness> {
+async function makeHarness(
+  fixture: V2ReadFixture,
+  clock: () => string = () => '2026-08-14T00:00:00.000Z',
+  projectState: (projection: AuthoritativeReviewProjectionV2) => AuthoritativeReviewProjectionV2 = (projection) => projection,
+): Promise<ServiceHarness> {
   const { paths } = makeTempCorePaths();
   const state = { events: [...fixture.events] };
   // A source that re-reads the MUTABLE array so later appends are visible on
@@ -315,8 +322,8 @@ async function makeHarness(fixture: V2ReadFixture, clock: () => string = () => '
     service: new AuthoritativeReviewProjectionService({
       readSnapshot: (taskId, throughSequence) =>
         throughSequence === undefined
-          ? checkpointStore.readState(taskId, (ref) => fixture.blobs.resolve(taskId, ref, ref.kind)).then((result) => ({ throughSequence: result.throughSequence, projection: result.projection }))
-          : checkpointStore.rebuild(taskId, (ref) => fixture.blobs.resolve(taskId, ref, ref.kind), throughSequence).then((result) => ({ throughSequence: result.throughSequence, projection: result.projection })),
+          ? checkpointStore.readState(taskId, (ref) => fixture.blobs.resolve(taskId, ref, ref.kind)).then((result) => ({ throughSequence: result.throughSequence, projection: projectState(result.projection) }))
+          : checkpointStore.rebuild(taskId, (ref) => fixture.blobs.resolve(taskId, ref, ref.kind), throughSequence).then((result) => ({ throughSequence: result.throughSequence, projection: projectState(result.projection) })),
       resolveBlob: <T>(taskId: string, ref: BlobRefV2, kind: BlobRefV2['kind']) =>
         Promise.resolve(fixture.blobs.resolve(taskId, ref, kind) as T),
       keyring,
@@ -669,12 +676,96 @@ describe('AuthoritativeReviewProjectionService', () => {
   describe('slot / relation detail', () => {
     it('reads one slot review detail', async () => {
       const fixture = buildFixture({ seed: 'd1', nodes: smallTreeNodes(), settleContent: true, openBlockingFindingSlots: ['a1'] });
-      const { service } = await makeHarness(fixture);
+      const { service } = await makeHarness(
+        fixture,
+        () => '2026-08-14T00:00:00.000Z',
+        (projection) => ({ ...projection, currentManifest: null }),
+      );
       const detail = await service.slotReview(TASK, 'a1', null);
       expect(detail.slotId).toBe('a1');
       expect(detail.parentSlotId).toBe('a');
       expect(detail.review.content).toBe('reject');
       expect(detail.openBlockingFindingIds).toEqual(['finding-block-d1-a1']);
+    });
+
+    it('projects the current manifest content into the selected slot detail', async () => {
+      const fixture = buildFixture({ seed: 'content-detail', nodes: smallTreeNodes(), settleContent: true });
+      const harness = await makeHarness(fixture);
+      const contentBody = {
+        slotId: 'root',
+        contentSchemaDigest: 'schema-root',
+        taskContentRevision: 3,
+        mediaType: 'text/markdown' as const,
+        text: '# Root content',
+      };
+      const contentValue: ContentValueV2 = {
+        ...contentBody,
+        selfDigest: canonicalJsonSha256(contentBody),
+      };
+      const contentValueRef = fixture.blobs.put('content_value', contentValue);
+      const version: SlotContentVersionV2 = {
+        state: 'set',
+        slotId: 'root',
+        slotRevision: 1,
+        contentDigest: contentValueRef.digest,
+        taskContentRevision: 3,
+        mapRef: fixture.mapSnapshotRef,
+        mapSemanticDigest: digestFor('content-detail-semantic', 1),
+        contentSchemaDigest: 'schema-root',
+        blobRef: contentValueRef,
+        provenance: {
+          kind: 'generated',
+          producer: { kind: 'generation_batch', planRevisionId: 'gp-1', batchOrdinal: 1, attemptId: 'attempt-root' },
+          contentRevisionCommitCoreRef: refOf('content_revision_commit_core', 'content-detail-core'),
+          contentCommitValidatorAggregateRef: refOf('validator_aggregate', 'content-detail-validator'),
+          contentCommitWarningRootRef: refOf('validation_warning_custody_root', 'content-detail-warning'),
+          committedByAttemptId: 'attempt-root',
+        },
+      };
+      const versionRef = fixture.blobs.put('content_version', version);
+      const manifest = computeProvisionalOrFinalizedManifest({
+        taskId: TASK,
+        mapRef: fixture.mapSnapshotRef,
+        mapSemanticDigest: digestFor('content-detail-semantic', 1),
+        taskContentRevision: 3,
+        manifestPhase: 'finalized',
+        entries: [{ slotId: 'root', versionRef }],
+        producerPlanSpecRef: null,
+        finalizerValidatorAggregateRefs: [refOf('validator_aggregate', 'content-detail-finalizer')],
+        resolvedVersions: new Map([['root', version]]),
+      });
+      const manifestRef = fixture.blobs.put('content_revision_manifest', manifest);
+      const projected = projectAuthoritativeReviewStateSync(fixture.events);
+      if (!projected.ok) throw new Error('test fixture projection failed');
+      const service = new AuthoritativeReviewProjectionService({
+        readSnapshot: async () => ({
+          throughSequence: fixture.events.length,
+          projection: {
+            ...projected.state,
+            currentManifest: {
+              contentRevisionManifestRef: manifestRef,
+              taskContentRevision: 3,
+              manifestPhase: 'finalized',
+            },
+          },
+        }),
+        resolveBlob: <T>(taskId: string, ref: BlobRefV2, kind: BlobRefV2['kind']) =>
+          Promise.resolve(fixture.blobs.resolve(taskId, ref, kind) as T),
+        keyring: harness.keyring,
+      });
+
+      const detail = await service.slotReview(TASK, 'root', null);
+
+      expect(detail.contentDetail).toMatchObject({
+        state: 'set',
+        manifestPhase: 'finalized',
+        versionRef,
+        contentValueRef,
+        mediaType: 'text/markdown',
+        text: '# Root content',
+        textLength: '# Root content'.length,
+        truncated: false,
+      });
     });
 
     it('returns SLOT_NOT_VISIBLE for a slot outside the current Map', async () => {

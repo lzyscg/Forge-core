@@ -31,6 +31,45 @@ describe('ProductionPage', () => {
     expect(screen.queryByText('Agent 1')).toBeNull();
   });
 
+  it('uses the authoritative v2 activity projection instead of an empty legacy canvas', async () => {
+    const ws = workspaceWithReturnLoop();
+    const v2: TaskWorkspace = {
+      ...ws,
+      task: { ...ws.task, structuredProtocol: 'v2' },
+      authoritativeReview: {
+        version: 2,
+        executionEligibility: {
+          state: 'eligible',
+          frozenProfileDigest: 'a'.repeat(64),
+          currentProfileDigest: 'a'.repeat(64),
+        },
+        pendingQuestion: null,
+        activity: {
+          totalWorkItems: 1,
+          completedWorkItems: 1,
+          activeWorkItemId: null,
+          steps: [{
+            workItemId: 'wi-v2-1',
+            kind: 'agent_assignment',
+            roleBinding: ws.agents[0]?.id ?? 'writer',
+            agentExecutionKind: 'structured_session',
+            sessionKind: 'generation_batch',
+            state: 'completed',
+            attemptCount: 1,
+            latestAttemptState: 'completed',
+            failureCode: null,
+            retryNotBefore: null,
+          }],
+        },
+      },
+    };
+    renderProductionPage(v2);
+
+    expect(await screen.findByRole('heading', { name: '权威生产过程' })).toBeVisible();
+    expect(screen.getByText('wi-v2-1')).toBeVisible();
+    expect(screen.queryByTestId('workspace-canvas')).toBeNull();
+  });
+
   it('starts with both drawers closed and opens them as overlays on demand', async () => {
     renderProductionPage(workspaceWithReturnLoop());
     await screen.findByTestId('workspace-canvas');

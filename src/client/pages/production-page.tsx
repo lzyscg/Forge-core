@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { ArtifactVersion, TaskStatus, TaskWorkspace } from '../../shared/contracts';
 import type { PublicCoreError } from '../../shared/errors';
 import { ArtifactDrawer } from '../components/artifact-drawer';
+import { AuthoritativeProcessPanel } from '../components/authoritative-process-panel';
 import { ConfigDrawer } from '../components/config-drawer';
 import { NodeDetailDialog } from '../components/node-detail-dialog';
 import { ProcessTraceDialog } from '../components/process-trace-dialog';
@@ -221,13 +222,20 @@ function ProductionWorkspace({ workspace }: { workspace: TaskWorkspace }) {
       ) : null}
 
       <div className="fc-production__center">
-        <WorkspaceCanvas
-          workspace={workspace}
-          selectedNodeId={selectedNodeId}
-          highlightedNodeId={highlightedNodeId}
-          onSelectNode={handleSelectNode}
-          drawerRevision={drawerRevision}
-        />
+        {workspace.task.structuredProtocol === 'v2' && workspace.authoritativeReview?.activity !== undefined ? (
+          <AuthoritativeProcessPanel
+            activity={workspace.authoritativeReview.activity}
+            agents={workspace.agents}
+          />
+        ) : (
+          <WorkspaceCanvas
+            workspace={workspace}
+            selectedNodeId={selectedNodeId}
+            highlightedNodeId={highlightedNodeId}
+            onSelectNode={handleSelectNode}
+            drawerRevision={drawerRevision}
+          />
+        )}
         <TaskControls
           task={workspace.task}
           pendingHumanQuestion={workspace.pendingHumanQuestion}

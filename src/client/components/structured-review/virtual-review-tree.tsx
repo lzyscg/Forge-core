@@ -80,7 +80,10 @@ export function VirtualReviewTree({
     kind: 'idle',
     slotId: '',
   });
+  const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
   const [slotReview, setSlotReview] = useState<AuthoritativeSlotReviewDetailV2 | null>(null);
+  const reviewRequestRef = useRef(0);
+  const consumedLocateRequestRef = useRef<string | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
 
@@ -148,6 +151,16 @@ export function VirtualReviewTree({
   const topPadding = startIndex * ROW_HEIGHT_PX;
   const bottomPadding = Math.max(0, (flatRows.length - startIndex - visibleCount) * ROW_HEIGHT_PX);
 
+  const selectSlot = useCallback(async (slotId: string) => {
+    const requestId = reviewRequestRef.current + 1;
+    reviewRequestRef.current = requestId;
+    setSelectedSlotId(slotId);
+    const review = await getSlotReview(slotId);
+    if (reviewRequestRef.current === requestId) {
+      setSlotReview(review);
+    }
+  }, [getSlotReview]);
+
   const handleLocate = useCallback(async () => {
     if (locateValue.trim() === '') return;
     const result = await locateSlot(locateValue.trim());
@@ -158,31 +171,38 @@ export function VirtualReviewTree({
     }
     setExpanded(next);
     setLocateStatus({ kind: 'located', slotId: result.target.slotId });
-    const review = await getSlotReview(result.target.slotId);
-    setSlotReview(review);
-  }, [expanded, getSlotReview, listTree, locateSlot, locateValue]);
+    await selectSlot(result.target.slotId);
+  }, [expanded, locateSlot, locateValue, selectSlot]);
 
   /** React to a locate request coming from outside the tree (findings → locate primary). */
   useEffect(() => {
-    if (requestedLocate === null) return;
+    if (requestedLocate === null) {
+      consumedLocateRequestRef.current = null;
+      return;
+    }
+    if (consumedLocateRequestRef.current === requestedLocate) return;
+    consumedLocateRequestRef.current = requestedLocate;
     let active = true;
     void (async () => {
       const result = await locateSlot(requestedLocate);
       if (!active || result === null) return;
-      const next = new Set(expanded);
-      for (const ancestor of result.ancestors) {
-        if (ancestor.slotId !== result.target.slotId) next.add(ancestor.slotId);
-      }
-      setExpanded(next);
+      setExpanded((previous) => {
+        const next = new Set(previous);
+        for (const ancestor of result.ancestors) {
+          if (ancestor.slotId !== result.target.slotId) next.add(ancestor.slotId);
+        }
+        return next.size === previous.size ? previous : next;
+      });
       setLocateStatus({ kind: 'located', slotId: result.target.slotId });
-      const review = await getSlotReview(result.target.slotId);
-      if (active) setSlotReview(review);
-      onLocateConsumed();
+      await selectSlot(result.target.slotId);
+      if (active) {
+        onLocateConsumed();
+      }
     })();
     return () => {
       active = false;
     };
-  }, [requestedLocate, locateSlot, getSlotReview, onLocateConsumed, expanded]);
+  }, [requestedLocate, locateSlot, onLocateConsumed, selectSlot]);
 
   return (
     <div className="fc-review-tree" aria-label="槽位树">
@@ -235,16 +255,28 @@ export function VirtualReviewTree({
                 role="treeitem"
                 aria-level={row.depth + 1}
                 aria-expanded={row.childCount > 0 ? expandedHere : undefined}
-                className="fc-review-tree__row"
+                aria-selected={selectedSlotId === row.slotId}
+                tabIndex={0}
+                className={`fc-review-tree__row${selectedSlotId === row.slotId ? ' fc-review-tree__row--selected' : ''}`}
                 style={{ paddingLeft: `${row.depth * 1.25}rem` }}
                 aria-label={`${row.slotId} ${row.typeId} map=${row.mapPreReview} content=${row.contentState}`}
+                onClick={() => void selectSlot(row.slotId)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    void selectSlot(row.slotId);
+                  }
+                }}
               >
                 {row.childCount > 0 ? (
                   <button
                     type="button"
                     className="fc-review-tree__toggle"
                     aria-label={`展开 ${row.slotId}`}
-                    onClick={() => void toggleExpand(row.slotId)}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void toggleExpand(row.slotId);
+                    }}
                   >
                     {expandedHere ? '▾' : '▸'}
                   </button>
@@ -267,12 +299,93 @@ export function VirtualReviewTree({
       {slotReview !== null ? (
         <section className="fc-review-tree__detail" aria-label={`槽位 ${slotReview.slotId}`}>
           <h4 className="fc-review-heading">槽位 {slotReview.slotId} 详情</h4>
-          <p className="fc-review-tree__detail-line">
-            contentBearing: {String(slotReview.contentBearing)}
-          </p>
-          <p className="fc-review-tree__detail-line">
-            blocking Finding 数：{slotReview.openBlockingFindingIds.length}
-          </p>
+          <dl className="fc-review-tree__detail-meta">
+            <div>
+              <dt>槽位类型</dt>
+              <dd>{slotReview.slotType}</dd>
+            </div>
+            <div>
+              <dt>父槽位</dt>
+              <dd>{slotReview.parentSlotId ?? '—'}</dd>
+            </div>
+            <div>
+              <dt>文档顺序</dt>
+              <dd>{slotReview.documentOrder}</dd>
+            </div>
+            <div>
+              <dt>可承载内容</dt>
+              <dd>{slotReview.contentBearing ? '是' : '否'}</dd>
+            </div>
+          </dl>
+          <div className="fc-review-tree__detail-review">
+            <p className="fc-review-tree__detail-line">
+              map pre-review: {slotReview.review.mapPreReview}
+            </p>
+            <p className="fc-review-tree__detail-line">
+              content review: {slotReview.review.content}
+            </p>
+            <p className="fc-review-tree__detail-line">
+              blocking Finding：{slotReview.openBlockingFindingIds.length}
+            </p>
+            {slotReview.openBlockingFindingIds.length > 0 ? (
+              <p className="fc-review-tree__detail-line fc-review-tree__detail-line--muted">
+                Finding：{slotReview.openBlockingFindingIds.join('、')}
+              </p>
+            ) : null}
+          </div>
+          <section className="fc-review-tree__content-detail" aria-label="内容版本">
+            <h5 className="fc-review-heading">内容版本</h5>
+            {slotReview.contentDetail === null || slotReview.contentDetail === undefined ? (
+              <p className="fc-review-tree__detail-line fc-review-tree__detail-line--muted">
+                当前没有可读内容版本。
+              </p>
+            ) : (
+              <>
+                <dl className="fc-review-tree__detail-meta">
+                  <div>
+                    <dt>状态</dt>
+                    <dd>{slotReview.contentDetail.state}</dd>
+                  </div>
+                  <div>
+                    <dt>内容修订</dt>
+                    <dd>{slotReview.contentDetail.taskContentRevision}</dd>
+                  </div>
+                  <div>
+                    <dt>槽位修订</dt>
+                    <dd>{slotReview.contentDetail.slotRevision}</dd>
+                  </div>
+                  <div>
+                    <dt>Manifest</dt>
+                    <dd>{slotReview.contentDetail.manifestPhase}</dd>
+                  </div>
+                </dl>
+                {slotReview.contentDetail.contentDigest !== null ? (
+                  <p className="fc-review-tree__detail-line fc-review-tree__detail-line--muted">
+                    contentDigest: {slotReview.contentDetail.contentDigest.slice(0, 16)}…
+                  </p>
+                ) : null}
+                {slotReview.contentDetail.text !== null ? (
+                  <pre className="fc-review-tree__content-preview" data-testid="slot-content-preview">
+                    {slotReview.contentDetail.text.split('\n').map((line, index, lines) => (
+                      <span key={`${index}-${line}`}>
+                        {line}
+                        {index < lines.length - 1 ? '\n' : null}
+                      </span>
+                    ))}
+                  </pre>
+                ) : (
+                  <p className="fc-review-tree__detail-line fc-review-tree__detail-line--muted">
+                    当前版本没有可预览文本。
+                  </p>
+                )}
+                {slotReview.contentDetail.truncated ? (
+                  <p className="fc-review-tree__detail-line fc-review-tree__detail-line--muted">
+                    内容过长，仅展示前 20,000 个字符。
+                  </p>
+                ) : null}
+              </>
+            )}
+          </section>
         </section>
       ) : null}
 

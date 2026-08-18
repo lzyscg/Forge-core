@@ -48,16 +48,35 @@ export function FindingsView({ findings, onLocatePrimary }: FindingsViewProps) {
             className="fc-review-findings__item"
             aria-label={`finding ${finding.findingId}`}
           >
-            <span className="fc-review-findings__id">{finding.findingId}</span>
-            <span className="fc-review-findings__defect">defect: {finding.defectClass}</span>
-            <span className="fc-review-findings__location">
-              主位置：{locationLabel(finding.primaryLocation)}
-            </span>
-            <span className="fc-review-findings__owner">
-              owner: reviewer
-            </span>
-            <span className="fc-review-findings__status">status: {finding.status}</span>
-            <span className="fc-review-findings__severity">severity: {finding.severity}</span>
+            <header className="fc-review-findings__header">
+              <code className="fc-review-findings__id" title={finding.findingId}>
+                {finding.findingId}
+              </code>
+              <div className="fc-review-findings__badges">
+                <span className="fc-review-findings__severity">severity: {finding.severity}</span>
+                <span className="fc-review-findings__status">status: {finding.status}</span>
+              </div>
+            </header>
+            <dl className="fc-review-findings__details">
+              <div>
+                <dt>缺陷类型</dt>
+                <dd className="fc-review-findings__defect">defect: {finding.defectClass}</dd>
+              </div>
+              <div>
+                <dt>审核范围</dt>
+                <dd>{finding.reviewContext.kind} · {finding.reviewContext.roundId}</dd>
+              </div>
+              <div>
+                <dt>主位置</dt>
+                <dd className="fc-review-findings__location">
+                  {locationLabel(finding.primaryLocation)}
+                </dd>
+              </div>
+              <div>
+                <dt>来源</dt>
+                <dd className="fc-review-findings__owner">来源: {finding.source}</dd>
+              </div>
+            </dl>
             <button
               type="button"
               className="fc-button fc-button--secondary fc-review-findings__locate"

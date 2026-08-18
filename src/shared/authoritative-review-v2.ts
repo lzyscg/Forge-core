@@ -229,6 +229,47 @@ export type WorkItemKindV2 =
   | 'system_review_settlement'
   | 'system_seal';
 
+/** Display-only lifecycle state for a v2 WorkItem in the production page. */
+export type AuthoritativeActivityStepStateV2 =
+  | 'queued'
+  | 'running'
+  | 'retrying'
+  | 'completed'
+  | 'failed'
+  | 'parked'
+  | 'superseded';
+
+/** Public attempt state used by the display projection; never a gate. */
+export type AuthoritativeActivityAttemptStateV2 =
+  | 'started'
+  | 'completed'
+  | 'retryable_failed'
+  | 'terminal_failed'
+  | 'abandoned';
+
+/** One public, read-only WorkItem row for the v2 production process. */
+export interface AuthoritativeActivityStepV2 {
+  workItemId: string;
+  kind: WorkItemKindV2;
+  roleBinding: string | null;
+  agentExecutionKind: 'structured_session' | 'generic_turn' | null;
+  sessionKind: string | null;
+  state: AuthoritativeActivityStepStateV2;
+  attemptCount: number;
+  latestAttemptState: AuthoritativeActivityAttemptStateV2 | null;
+  /** Stable lifecycle failure code only; provider output never crosses this DTO. */
+  failureCode: string | null;
+  retryNotBefore: string | null;
+}
+
+/** Public activity projection attached to an authoritative v2 workspace. */
+export interface AuthoritativeReviewActivityV2 {
+  totalWorkItems: number;
+  completedWorkItems: number;
+  activeWorkItemId: string | null;
+  steps: readonly AuthoritativeActivityStepV2[];
+}
+
 /* ----------------------------- §10.6 human questions ----------------------------- */
 
 export type PendingQuestionSourceV2 = 'agent_request' | 'progress_guard';
@@ -513,6 +554,21 @@ export interface AuthoritativeCandidateDetailV2 {
   relationCount: number | null;
 }
 
+/** Public current content version detail for one selected slot. */
+export interface AuthoritativeSlotContentDetailV2 {
+  state: 'unset' | 'rewrite_required' | 'set';
+  slotRevision: number;
+  taskContentRevision: number;
+  manifestPhase: 'baseline_unset' | 'provisional' | 'finalized';
+  versionRef: BlobRefV2;
+  contentValueRef: BlobRefV2 | null;
+  contentDigest: string | null;
+  mediaType: 'text/markdown' | 'text/plain' | null;
+  text: string | null;
+  textLength: number;
+  truncated: boolean;
+}
+
 /** One slot's review detail (spec §14.1 review/slots/:id). */
 export interface AuthoritativeSlotReviewDetailV2 {
   slotId: string;
@@ -523,6 +579,8 @@ export interface AuthoritativeSlotReviewDetailV2 {
   contentBearing: boolean;
   review: AuthoritativeSlotReviewStateV2;
   openBlockingFindingIds: string[];
+  /** Optional for compatibility with historical read responses. */
+  contentDetail?: AuthoritativeSlotContentDetailV2 | null;
 }
 
 export type AuthoritativeRelationReviewStateV2 = 'pending' | 'satisfied' | 'violated' | 'stale';
@@ -705,4 +763,6 @@ export interface AuthoritativeReviewWorkspaceV2 {
   version: 2;
   executionEligibility: AuthoritativeReviewExecutionEligibilityV1;
   pendingQuestion: PendingQuestionV2 | null;
+  /** Display-only projection; authoritative status remains TaskStatus/projection. */
+  activity?: AuthoritativeReviewActivityV2;
 }
