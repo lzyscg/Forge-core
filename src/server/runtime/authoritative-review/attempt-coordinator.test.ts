@@ -136,11 +136,13 @@ class RecordingRuntime implements AgentRuntime {
 class StubbornRuntime implements AgentRuntime {
   private resolveTurn: ((result: AgentTurnResult) => void) | null = null;
   private resolveStarted: (() => void) | null = null;
+  runStarted = false;
   readonly started = new Promise<void>((resolve) => {
     this.resolveStarted = resolve;
   });
 
   async run(): Promise<AgentTurnResult> {
+    this.runStarted = true;
     this.resolveStarted?.();
     this.resolveStarted = null;
     return new Promise<AgentTurnResult>((resolve) => {
@@ -767,6 +769,88 @@ describe('V2AttemptCoordinator namespace isolation + timeout', () => {
     const events = await env.base.eventStore.read(taskId);
     expect(events.some((entry) => entry.event.type === 'structured_work_item_completed')).toBe(false);
     expect((await readProjection(env, taskId)).workItems[workItemId].state).toBe('retryable_failed');
+  });
+
+  it('lets an in-flight terminal commit finish before accepting a concurrent abort', async () => {
+    const env = await makeEnv();
+    const taskId = tid('abort-during-commit');
+    const { workItemId } = await createWorkItem(env, taskId);
+    await env.base.coordinator.leaseNext(taskId, 'worker-a', 'pre-lease-abort-during-commit');
+
+    let releaseCommit = (): void => undefined;
+    const commitGate = new Promise<void>((resolve) => {
+      releaseCommit = resolve;
+    });
+    let commitStarted: (() => void) | null = null;
+    const commitStartedPromise = new Promise<void>((resolve) => {
+      commitStarted = resolve;
+    });
+    const originalComplete = env.base.coordinator.completeWorkItem.bind(env.base.coordinator);
+    const complete = vi.spyOn(env.base.coordinator, 'completeWorkItem');
+    complete.mockImplementation(async (input) => {
+      commitStarted?.();
+      await commitGate;
+      return await originalComplete(input);
+    });
+
+    const runPromise = env.attempts.executeLeased(taskId);
+    await commitStartedPromise;
+    env.attempts.abortTaskExecutions(taskId);
+    releaseCommit();
+
+    await expect(runPromise).resolves.toMatchObject({ kind: 'completed', workItemId });
+    expect((await readProjection(env, taskId)).workItems[workItemId].state).toBe('completed');
+  });
+
+  it('does not turn a delayed terminal commit error into an aborted result', async () => {
+    const env = await makeEnv();
+    const taskId = tid('abort-during-commit-error');
+    await createWorkItem(env, taskId);
+    await env.base.coordinator.leaseNext(taskId, 'worker-a', 'pre-lease-abort-during-commit-error');
+
+    let releaseCommit = (): void => undefined;
+    const commitGate = new Promise<void>((resolve) => {
+      releaseCommit = resolve;
+    });
+    let commitStarted: (() => void) | null = null;
+    const commitStartedPromise = new Promise<void>((resolve) => {
+      commitStarted = resolve;
+    });
+    const complete = vi.spyOn(env.base.coordinator, 'completeWorkItem');
+    complete.mockImplementation(async () => {
+      commitStarted?.();
+      await commitGate;
+      throw new Error('delayed completion commit failed');
+    });
+
+    const runPromise = env.attempts.executeLeased(taskId);
+    await commitStartedPromise;
+    env.attempts.abortTaskExecutions(taskId);
+    releaseCommit();
+
+    await expect(runPromise).rejects.toThrow('delayed completion commit failed');
+  });
+
+  it('registers the execution before setup reads so shutdown cannot start a late Agent turn', async () => {
+    const stubborn = new StubbornRuntime();
+    const runner = new V2AssignmentRunner({
+      runtime: stubborn,
+      toolProvider: {
+        toolsFor: async () => [],
+        collectResultRefs: async () => [synthRef('content_value', 9103)],
+      },
+    });
+    const env = await makeEnv({ attemptTimeoutMs: 5_000, runner });
+    const taskId = tid('shutdown-during-setup');
+    const { workItemId } = await createWorkItem(env, taskId);
+    await env.base.coordinator.leaseNext(taskId, 'worker-a', 'pre-lease-shutdown-during-setup');
+
+    const runPromise = env.attempts.executeLeased(taskId);
+    env.attempts.abortAllExecutions();
+
+    await expect(runPromise).resolves.toMatchObject({ kind: 'idle' });
+    expect(stubborn.runStarted).toBe(false);
+    expect((await readProjection(env, taskId)).activeLease?.workItemId).toBe(workItemId);
   });
 
   it('abortTaskExecutions interrupts a stubborn in-process turn without writing a terminal event', async () => {
