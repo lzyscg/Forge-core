@@ -28,7 +28,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { canonicalJsonSha256 } from '../structured-slots/canonical-json';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RuntimeFailure } from './agent-runtime';
 import type { AgentRuntime } from './agent-runtime';
 import { FakeAgentRuntime, type FakeScriptStep } from './fake-agent-runtime';
@@ -2219,6 +2219,153 @@ describe('v2 scheduling loop (Task 11, spec §10.4)', { timeout: 30_000 }, () =>
     expect(leasePass.leased.some((entry) => entry.taskId === task.id)).toBe(true);
     const afterLease = await service.v2Wakeups.read(task.id);
     expect(afterLease.filter((row) => row.kind === 'lease_expiry')).toHaveLength(1);
+  });
+
+  it('stopTaskV2 waits for a terminal completion commit before writing the stop envelope', async () => {
+    const { service } = await v2ServiceHarness();
+    const task = await service.createTask(v2Request());
+    await service.v2Lifecycle.startV2(task.id, { operationId: 'op-stop-commit-start', userInputText: '' });
+    const leasedPass = await service.runV2SchedulingPass('2026-08-14T10:00:00.000Z');
+    const leased = leasedPass.leased[0];
+    expect(leased).toBeDefined();
+
+    // Use the real production coordinator/lifecycle but replace only its
+    // runner seam with a deterministic committed result. This keeps the test
+    // focused on CoreService.stopTaskV2's settlement ordering rather than on
+    // a model/tool script.
+    const attemptInternals = service.v2Composition.attempts as unknown as {
+      deps: {
+        runner: {
+          runSession(ctx: { authorityBaseRef: BlobRefV2 }, signal: AbortSignal): Promise<unknown>;
+        };
+      };
+    };
+    const originalRunner = attemptInternals.deps.runner;
+    attemptInternals.deps.runner = {
+      async runSession(ctx) {
+        return {
+          kind: 'committed',
+          publicText: 'deterministic completion',
+          trace: [],
+          resultRefs: [ctx.authorityBaseRef],
+        };
+      },
+    };
+
+    let releaseCommit = (): void => undefined;
+    const commitGate = new Promise<void>((resolve) => {
+      releaseCommit = resolve;
+    });
+    let commitStarted: (() => void) | null = null;
+    const commitStartedPromise = new Promise<void>((resolve) => {
+      commitStarted = resolve;
+    });
+    const originalComplete = service.v2Coordinator.completeWorkItem.bind(service.v2Coordinator);
+    const complete = vi.spyOn(service.v2Coordinator, 'completeWorkItem');
+    complete.mockImplementation(async (input) => {
+      commitStarted?.();
+      await commitGate;
+      return originalComplete(input);
+    });
+
+    try {
+      const executePromise = service.v2Composition.attempts.executeLeased(task.id, undefined, {
+        dispatchRef: null,
+        workItemId: leased!.workItemId,
+        leaseEpoch: leased!.leaseEpoch,
+        attemptId: leased!.attemptId,
+        commandId: leased!.commandId,
+      });
+      await commitStartedPromise;
+
+      let stopFinished = false;
+      const stopPromise = service.stopTaskV2(task.id).then((summary) => {
+        stopFinished = true;
+        return summary;
+      });
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      expect(stopFinished).toBe(false);
+
+      releaseCommit();
+      await expect(executePromise).resolves.toMatchObject({ kind: 'completed', workItemId: leased!.workItemId });
+      await expect(stopPromise).resolves.toMatchObject({ status: 'stopped' });
+      expect(stopFinished).toBe(true);
+    } finally {
+      attemptInternals.deps.runner = originalRunner;
+      complete.mockRestore();
+    }
+  });
+
+  it('lease-expiry reclaim waits for the same in-flight terminal settlement', async () => {
+    const { service } = await v2ServiceHarness();
+    const task = await service.createTask(v2Request());
+    await service.v2Lifecycle.startV2(task.id, { operationId: 'op-reclaim-commit-start', userInputText: '' });
+    const leasedPass = await service.runV2SchedulingPass('2026-08-14T10:00:00.000Z');
+    const leased = leasedPass.leased[0];
+    expect(leased).toBeDefined();
+
+    const attemptInternals = service.v2Composition.attempts as unknown as {
+      deps: {
+        runner: {
+          runSession(ctx: { authorityBaseRef: BlobRefV2 }, signal: AbortSignal): Promise<unknown>;
+        };
+      };
+    };
+    const originalRunner = attemptInternals.deps.runner;
+    attemptInternals.deps.runner = {
+      async runSession(ctx) {
+        return { kind: 'committed', publicText: 'deterministic completion', trace: [], resultRefs: [ctx.authorityBaseRef] };
+      },
+    };
+
+    let releaseCommit = (): void => undefined;
+    const commitGate = new Promise<void>((resolve) => {
+      releaseCommit = resolve;
+    });
+    let commitStarted: (() => void) | null = null;
+    const commitStartedPromise = new Promise<void>((resolve) => {
+      commitStarted = resolve;
+    });
+    const originalComplete = service.v2Coordinator.completeWorkItem.bind(service.v2Coordinator);
+    const complete = vi.spyOn(service.v2Coordinator, 'completeWorkItem');
+    complete.mockImplementation(async (input) => {
+      commitStarted?.();
+      await commitGate;
+      return originalComplete(input);
+    });
+
+    try {
+      const executePromise = service.v2Composition.attempts.executeLeased(task.id, undefined, {
+        dispatchRef: null,
+        workItemId: leased!.workItemId,
+        leaseEpoch: leased!.leaseEpoch,
+        attemptId: leased!.attemptId,
+        commandId: leased!.commandId,
+      });
+      await commitStartedPromise;
+      const readProjection = async () =>
+        (await service.v2CheckpointStore.readState(task.id, (ref) => service.v2BlobStore.readJson(task.id, ref, ref.kind))).projection;
+      const projection = await readProjection();
+      const leaseExpiresAt = projection.workItems[leased!.workItemId]?.leaseExpiresAt;
+      expect(leaseExpiresAt).toBeTruthy();
+      const expiredNow = new Date(new Date(leaseExpiresAt as string).getTime() + 1).toISOString();
+
+      let passFinished = false;
+      const reclaimPass = service.runV2SchedulingPass(expiredNow).then((pass) => {
+        passFinished = true;
+        return pass;
+      });
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      expect(passFinished).toBe(false);
+
+      releaseCommit();
+      await expect(executePromise).resolves.toMatchObject({ kind: 'completed', workItemId: leased!.workItemId });
+      await expect(reclaimPass).resolves.toMatchObject({ reclaimed: [] });
+      expect((await readProjection()).workItems[leased!.workItemId]?.state).toBe('completed');
+    } finally {
+      attemptInternals.deps.runner = originalRunner;
+      complete.mockRestore();
+    }
   });
 
   it('a blocked deployment keeps its wakeup (no busy loop) and reactivates when the exact profile returns', async () => {

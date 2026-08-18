@@ -1150,6 +1150,7 @@ export class CoreService {
   /** V2 start: one atomic batch, then the v2 scheduling pass. */
   async startTaskV2(taskId: string): Promise<TaskSummary> {
     await this.v2Lifecycle.startV2(taskId, { operationId: randomUUID(), userInputText: '' });
+    this.v2Composition.attempts.allowTaskExecutions(taskId);
     await this.runV2SchedulingTick();
     return (await this.getWorkspace(taskId)).task;
   }
@@ -1157,13 +1158,22 @@ export class CoreService {
   /** V2 stop (composed envelope: abandon + reclaim + overlay in ONE batch). */
   async stopTaskV2(taskId: string): Promise<TaskSummary> {
     this.v2Composition.attempts.abortTaskExecutions(taskId);
-    await this.v2Lifecycle.stopV2(taskId, { operationId: randomUUID(), reason: 'user_stop' });
+    await this.v2Composition.attempts.awaitTaskSettlements(taskId);
+    try {
+      await this.v2Lifecycle.stopV2(taskId, { operationId: randomUUID(), reason: 'user_stop' });
+    } catch (error) {
+      // A failed durable stop must not strand the task behind an in-memory
+      // barrier; the next valid lifecycle command can try again.
+      this.v2Composition.attempts.allowTaskExecutions(taskId);
+      throw error;
+    }
     return (await this.getWorkspace(taskId)).task;
   }
 
   /** V2 resume (clears the exact suspension overlay, reactivates wakeups). */
   async resumeTaskV2(taskId: string): Promise<TaskSummary> {
     await this.v2Lifecycle.resumeV2(taskId, { operationId: randomUUID() });
+    this.v2Composition.attempts.allowTaskExecutions(taskId);
     await this.runV2SchedulingTick();
     return (await this.getWorkspace(taskId)).task;
   }
@@ -1184,6 +1194,7 @@ export class CoreService {
       );
     }
     await this.v2Lifecycle.manualRetryV2(taskId, { operationId: randomUUID(), workItemId });
+    this.v2Composition.attempts.allowTaskExecutions(taskId);
     await this.runV2SchedulingTick();
     return (await this.getWorkspace(taskId)).task;
   }
@@ -1194,10 +1205,16 @@ export class CoreService {
     // decision union is only for the structured progress-guard choices.
     if ('decision' in body && body.decision === 'stop') {
       this.v2Composition.attempts.abortTaskExecutions(taskId);
-      await this.v2Lifecycle.stopV2(taskId, {
-        operationId: body.operationId,
-        reason: 'user_stop',
-      });
+      await this.v2Composition.attempts.awaitTaskSettlements(taskId);
+      try {
+        await this.v2Lifecycle.stopV2(taskId, {
+          operationId: body.operationId,
+          reason: 'user_stop',
+        });
+      } catch (error) {
+        this.v2Composition.attempts.allowTaskExecutions(taskId);
+        throw error;
+      }
     } else {
       await this.v2Lifecycle.answerV2(taskId, {
         operationId: body.operationId,
@@ -1205,6 +1222,7 @@ export class CoreService {
         questionVersion: body.questionVersion,
         answer: 'answer' in body ? body.answer : body.text,
       });
+      this.v2Composition.attempts.allowTaskExecutions(taskId);
     }
     await this.runV2SchedulingTick();
     return (await this.getWorkspace(taskId)).task;
@@ -1230,6 +1248,7 @@ export class CoreService {
       // Unreadable identity: let the lifecycle path fail closed as corruption.
     }
     await this.v2Lifecycle.reopenFailed(taskId, request as unknown as ReopenRequestV2);
+    this.v2Composition.attempts.allowTaskExecutions(taskId);
     await this.runV2SchedulingTick();
     return (await this.getWorkspace(taskId)).task;
   }
@@ -1475,9 +1494,10 @@ export class CoreService {
   }
 
   /** Stops the scheduler (abort + bounded disposal + interruption marking). */
-  shutdown(): Promise<void> {
+  async shutdown(): Promise<void> {
     this.v2Composition.attempts.abortAllExecutions();
-    return this.scheduler.shutdown();
+    await this.v2Composition.attempts.awaitAllSettlements();
+    await this.scheduler.shutdown();
   }
 
   /** Test-only: appends one canonical event (Phase C committer owns real appends). */

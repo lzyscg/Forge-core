@@ -272,4 +272,31 @@
   ```bash
   git add docs/CLOSURE-AUTHORITATIVE-REVIEW-V2.md docs/evidence
   git commit -m "docs: close authoritative real-mode acceptance"
-  ```
+```
+
+### Task 6: Close stop/reclaim settlement races
+
+**Files:**
+- Modify: `src/server/runtime/authoritative-review/attempt-coordinator.ts`
+- Modify: `src/server/runtime/task-scheduler.ts`
+- Modify: `src/server/runtime/authoritative-review/production-composition.ts`
+- Modify: `src/server/core-service.ts`
+- Test: `src/server/runtime/authoritative-review/attempt-coordinator.test.ts`
+- Test: `src/server/runtime/task-scheduler.test.ts`
+
+**Interfaces:**
+- Consumes: the in-process attempt controller registry, durable lease-expiry
+  scheduler, and v2 lifecycle API.
+- Produces: a task-scoped cancellation barrier, awaitable terminal settlement,
+  lease identity fencing for stale ticks, and a stop/reclaim ordering that
+  cannot overwrite an in-flight terminal commit.
+
+- [x] Register executions before setup reads and abort registrations that arrive
+  after a task stop/reclaim barrier.
+- [x] Make stop, answer-stop, shutdown, and lease-expiry reclaim wait for the
+  same coordinator settlement promise before durable mutation.
+- [x] Pass the claimed lease identity into execution so an old scheduling tick
+  cannot execute a reclaimed successor lease.
+- [x] Add actual CoreService stop and scheduler lease-expiry delayed-commit
+  tests, then run focused tests, check, both builds, and authoritative
+  acceptance.

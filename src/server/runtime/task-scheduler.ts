@@ -1987,7 +1987,13 @@ export interface V2SchedulingPassResult {
   scanned: number;
   reclaimed: string[];
   requeued: string[];
-  leased: Array<{ taskId: string; workItemId: string }>;
+  leased: Array<{
+    taskId: string;
+    workItemId: string;
+    leaseEpoch?: number;
+    attemptId?: string | null;
+    commandId?: string | null;
+  }>;
   /** Eligibility-blocked tasks whose wakeups were RETAINED (never busy-loop). */
   blocked: string[];
   skipped: string[];
@@ -2004,8 +2010,19 @@ export interface V2SchedulingPassResult {
 export class AuthoritativeV2SchedulingEngine {
   private readonly deps: V2SchedulingDependencies;
 
+  /** Installed by the production composition after the attempt coordinator exists. */
+  private executionSettlementGate: ((taskId: string) => Promise<() => void>) | null = null;
+
   constructor(deps: V2SchedulingDependencies) {
     this.deps = deps;
+  }
+
+  /**
+   * Installs the shared task settlement gate. Lease-expiry reclaim must wait
+   * for an in-process attempt's public settlement before its durable CAS.
+   */
+  setExecutionSettlementGate(gate: (taskId: string) => Promise<() => void>): void {
+    this.executionSettlementGate = gate;
   }
 
   async runPass(now?: string): Promise<V2SchedulingPassResult> {
@@ -2091,88 +2108,121 @@ export class AuthoritativeV2SchedulingEngine {
         continue;
       }
       // 5. lease ONE WorkItem: expiry reclaim -> due requeue -> ready claim.
-      const leases = projection.activeLease;
+      let leases = projection.activeLease;
       const taskRows = due
         .filter((wakeup) => wakeup.taskId === taskId)
         .sort((a, b) => (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0));
-      for (const wakeup of taskRows) {
-        const workItemId = wakeup.workItemId;
-        if (wakeup.kind === 'lease_expiry') {
-          if (workItemId === null) {
-            await this.deps.wakeups.remove(taskId, 'lease_expiry', null);
-            continue;
-          }
-          const leased = projection.workItems[workItemId];
-          if (leased !== undefined && leased !== null && leased.state === 'leased' && leaseExpiryDue(nowValue, leased)) {
-            await this.deps.lifecycle.reclaimLeaseV2(taskId, {
-              operationId: schedulerLeaseOperationId(taskId, projection.lastSequence + ':' + workItemId),
-              workItemId,
-              reason: 'lease_expired',
-            });
-            await this.deps.wakeups.remove(taskId, 'lease_expiry', workItemId);
-            result.reclaimed.push(taskId);
-          } else if (leased === undefined || leased === null) {
-            await this.deps.wakeups.remove(taskId, 'lease_expiry', workItemId);
-          }
-          continue;
-        }
-        if (wakeup.kind === 'retry_due') {
-          if (workItemId === null) {
-            await this.deps.wakeups.remove(taskId, 'retry_due', null);
-            continue;
-          }
-          const retryable = projection.workItems[workItemId];
-          if (retryable !== undefined && retryable !== null && retryable.state === 'retryable_failed') {
-            if (retryable.retryNotBefore !== null && nowValue < retryable.retryNotBefore) {
-              continue; // Not due yet: the durable timer row is already exact.
+      let releaseExecutionBarrier: (() => void) | null = null;
+      try {
+        for (const wakeup of taskRows) {
+          const workItemId = wakeup.workItemId;
+          if (wakeup.kind === 'lease_expiry') {
+            if (workItemId === null) {
+              await this.deps.wakeups.remove(taskId, 'lease_expiry', null);
+              continue;
             }
-            await this.deps.lifecycle.requeueDueV2(taskId, {
-              operationId: schedulerLeaseOperationId(taskId, projection.lastSequence + ':' + workItemId),
-              workItemId,
-            });
-            await this.deps.wakeups.remove(taskId, 'retry_due', workItemId);
-            result.requeued.push(taskId);
-          } else {
-            await this.deps.wakeups.remove(taskId, 'retry_due', workItemId);
+            // The gate aborts active provider work, waits for any in-flight
+            // terminal commit, and blocks a concurrent tick from registering
+            // a new execution until this reclaim decision is complete.
+            if (releaseExecutionBarrier === null && this.executionSettlementGate !== null) {
+              releaseExecutionBarrier = await this.executionSettlementGate(taskId);
+              try {
+                projection = (await this.deps.checkpointStore.readState(taskId, (ref) => this.deps.resolver(taskId, ref))).projection;
+              } catch (error) {
+                if (error instanceof ProjectionCorruptionError) {
+                  await this.deps.wakeups.removeTask(taskId);
+                  result.corrupt.push(taskId);
+                  break;
+                }
+                throw error;
+              }
+              leases = projection.activeLease;
+              if (projection.taskStatus !== 'running') {
+                result.skipped.push(taskId);
+                break;
+              }
+            }
+            const leased = projection.workItems[workItemId];
+            if (leased !== undefined && leased !== null && leased.state === 'leased' && leaseExpiryDue(nowValue, leased)) {
+              await this.deps.lifecycle.reclaimLeaseV2(taskId, {
+                operationId: schedulerLeaseOperationId(taskId, projection.lastSequence + ':' + workItemId),
+                workItemId,
+                reason: 'lease_expired',
+              });
+              await this.deps.wakeups.remove(taskId, 'lease_expiry', workItemId);
+              leases = null;
+              result.reclaimed.push(taskId);
+            } else if (leased === undefined || leased === null) {
+              await this.deps.wakeups.remove(taskId, 'lease_expiry', workItemId);
+            }
+            continue;
           }
-          continue;
-        }
-        // runnable: lease ONE workitem through the coordinator. If a lease is
-        // already active (its expiry row was lost), repair the expiry wakeup
-        // from the projection instead of claiming — deterministic, never a
-        // second lease (maxActiveLeasesPerTask = 1).
-        if (leases !== null && leases !== undefined) {
-          const activeWi = projection.workItems[leases.workItemId];
-          if (activeWi !== undefined && activeWi.state === 'leased') {
+          if (wakeup.kind === 'retry_due') {
+            if (workItemId === null) {
+              await this.deps.wakeups.remove(taskId, 'retry_due', null);
+              continue;
+            }
+            const retryable = projection.workItems[workItemId];
+            if (retryable !== undefined && retryable !== null && retryable.state === 'retryable_failed') {
+              if (retryable.retryNotBefore !== null && nowValue < retryable.retryNotBefore) {
+                continue; // Not due yet: the durable timer row is already exact.
+              }
+              await this.deps.lifecycle.requeueDueV2(taskId, {
+                operationId: schedulerLeaseOperationId(taskId, projection.lastSequence + ':' + workItemId),
+                workItemId,
+              });
+              await this.deps.wakeups.remove(taskId, 'retry_due', workItemId);
+              result.requeued.push(taskId);
+            } else {
+              await this.deps.wakeups.remove(taskId, 'retry_due', workItemId);
+            }
+            continue;
+          }
+          // runnable: lease ONE workitem through the coordinator. If a lease is
+          // already active (its expiry row was lost), repair the expiry wakeup
+          // from the projection instead of claiming — deterministic, never a
+          // second lease (maxActiveLeasesPerTask = 1).
+          if (leases !== null && leases !== undefined) {
+            const activeWi = projection.workItems[leases.workItemId];
+            if (activeWi !== undefined && activeWi.state === 'leased') {
+              await this.deps.wakeups.upsert(taskId, {
+                kind: 'lease_expiry',
+                at: activeWi.leaseExpiresAt,
+                dormant: false,
+                workItemId: leases.workItemId,
+                operationId: null,
+                eligibilityBlocked: false,
+              });
+              continue;
+            }
+          }
+          const claimed = await this.deps.coordinator.leaseNext(
+            taskId,
+            this.deps.leaseOwner,
+            schedulerLeaseOperationId(taskId, projection.lastSequence + ':claim'),
+          );
+          if (claimed !== null) {
             await this.deps.wakeups.upsert(taskId, {
               kind: 'lease_expiry',
-              at: activeWi.leaseExpiresAt,
+              at: claimed.wakeup.at,
               dormant: false,
-              workItemId: leases.workItemId,
-              operationId: null,
+              workItemId: claimed.workItemId,
+              operationId: schedulerLeaseOperationId(taskId, projection.lastSequence + ':' + claimed.workItemId),
               eligibilityBlocked: false,
             });
-            continue;
+            await this.deps.wakeups.remove(taskId, 'runnable', claimed.workItemId);
+            result.leased.push({
+              taskId,
+              workItemId: claimed.workItemId,
+              leaseEpoch: claimed.leaseEpoch,
+              attemptId: claimed.attemptId,
+              commandId: claimed.commandId,
+            });
           }
+          // A null claim keeps the runnable row (the coordinator is the gate).
         }
-        const claimed = await this.deps.coordinator.leaseNext(
-          taskId,
-          this.deps.leaseOwner,
-          schedulerLeaseOperationId(taskId, projection.lastSequence + ':claim'),
-        );
-        if (claimed !== null) {
-          await this.deps.wakeups.upsert(taskId, {
-            kind: 'lease_expiry',
-            at: claimed.wakeup.at,
-            dormant: false,
-            workItemId: claimed.workItemId,
-            operationId: schedulerLeaseOperationId(taskId, projection.lastSequence + ':' + claimed.workItemId),
-            eligibilityBlocked: false,
-          });
-          await this.deps.wakeups.remove(taskId, 'runnable', claimed.workItemId);
-          result.leased.push({ taskId, workItemId: claimed.workItemId });
-        }
-        // A null claim keeps the runnable row (the coordinator is the gate).
+      } finally {
+        releaseExecutionBarrier?.();
       }
     }
     return result;

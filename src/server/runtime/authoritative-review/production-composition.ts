@@ -767,6 +767,15 @@ export function installAuthoritativeReviewRuntime(
     clock: input.clock,
   });
 
+  // Lease expiry and operator stop share the same in-process settlement gate:
+  // reclaim never races a terminal commit, and a pass that has already leased
+  // work cannot register a fresh execution after the reclaim barrier starts.
+  if (typeof input.scheduling.setExecutionSettlementGate === 'function') {
+    input.scheduling.setExecutionSettlementGate((taskId) =>
+      attempts.cancelTaskAndAwaitSettlements(taskId),
+    );
+  }
+
   const runTick = async (now?: string): Promise<V2SchedulingTickResult> => {
     const nowValue = now ?? input.clock();
     const pass = await input.scheduling.runPass(nowValue);
@@ -777,7 +786,15 @@ export function installAuthoritativeReviewRuntime(
       // AttemptCoordinator here; filtering Agent assignments at this boundary
       // would emit lease/dispatch/attempt-start facts without invoking the
       // Agent runtime.
-      outcomes.push(await attempts.executeLeased(leased.taskId));
+      outcomes.push(
+        await attempts.executeLeased(leased.taskId, undefined, {
+          dispatchRef: null,
+          workItemId: leased.workItemId,
+          leaseEpoch: leased.leaseEpoch,
+          attemptId: leased.attemptId,
+          commandId: leased.commandId,
+        }),
+      );
     }
     return { pass, outcomes };
   };

@@ -796,9 +796,17 @@ describe('V2AttemptCoordinator namespace isolation + timeout', () => {
     const runPromise = env.attempts.executeLeased(taskId);
     await commitStartedPromise;
     env.attempts.abortTaskExecutions(taskId);
+    let settlementFinished = false;
+    const settlement = env.attempts.awaitTaskSettlements(taskId).then(() => {
+      settlementFinished = true;
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(settlementFinished).toBe(false);
     releaseCommit();
 
     await expect(runPromise).resolves.toMatchObject({ kind: 'completed', workItemId });
+    await settlement;
+    expect(settlementFinished).toBe(true);
     expect((await readProjection(env, taskId)).workItems[workItemId].state).toBe('completed');
   });
 
@@ -851,6 +859,30 @@ describe('V2AttemptCoordinator namespace isolation + timeout', () => {
     await expect(runPromise).resolves.toMatchObject({ kind: 'idle' });
     expect(stubborn.runStarted).toBe(false);
     expect((await readProjection(env, taskId)).activeLease?.workItemId).toBe(workItemId);
+  });
+
+  it('keeps a task stop barrier active for an execution registered after the abort call', async () => {
+    const stubborn = new StubbornRuntime();
+    const runner = new V2AssignmentRunner({
+      runtime: stubborn,
+      toolProvider: {
+        toolsFor: async () => [],
+        collectResultRefs: async () => [synthRef('content_value', 9104)],
+      },
+    });
+    const env = await makeEnv({ attemptTimeoutMs: 5_000, runner });
+    const taskId = tid('stop-before-registration');
+    const { workItemId } = await createWorkItem(env, taskId);
+    await env.base.coordinator.leaseNext(taskId, 'worker-a', 'pre-lease-stop-before-registration');
+
+    env.attempts.abortTaskExecutions(taskId);
+    await expect(env.attempts.executeLeased(taskId)).resolves.toEqual({ kind: 'idle' });
+    expect(stubborn.runStarted).toBe(false);
+    expect((await readProjection(env, taskId)).activeLease?.workItemId).toBe(workItemId);
+
+    // The barrier is task-scoped, not permanent: a successful resume/start
+    // path explicitly reopens it for a later lease.
+    env.attempts.allowTaskExecutions(taskId);
   });
 
   it('abortTaskExecutions interrupts a stubborn in-process turn without writing a terminal event', async () => {

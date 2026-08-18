@@ -248,6 +248,10 @@ export interface V2AttemptCoordinatorDependencies {
 export interface V2LeasedEntryV2 {
   taskId: string;
   workItemId: string;
+  /** Lease identity captured by the scheduling pass; stale ticks cannot execute a successor lease. */
+  leaseEpoch?: number;
+  attemptId?: string | null;
+  commandId?: string | null;
 }
 
 /** Result of the periodic driver tick (scheduling pass + executed leases). */
@@ -300,6 +304,14 @@ function mapAttemptError(error: unknown): never {
   throw error;
 }
 
+interface ActiveExecution {
+  controller: AbortController;
+  settled: Promise<void>;
+  settle(): void;
+}
+
+type ActiveExecutionRegistration = () => void;
+
 export class V2AttemptCoordinator {
   private readonly deps: V2AttemptCoordinatorDependencies;
 
@@ -307,8 +319,15 @@ export class V2AttemptCoordinator {
 
   private readonly attemptTimeoutMs: number;
 
-  /** Controllers for attempts currently executing in this process. */
-  private readonly activeExecutions = new Map<string, Set<AbortController>>();
+  /** One in-process execution plus a promise for its public settlement. */
+  private readonly activeExecutions = new Map<string, Set<ActiveExecution>>();
+
+  /**
+   * Per-task execution barrier. A stop/reclaim sets it before aborting so a
+   * scheduling pass that is still between lease and execute cannot register a
+   * new attempt after the durable transition has begun.
+   */
+  private readonly cancelledTasks = new Set<string>();
 
   /** Closed lifetime gate shared by every execution started by this coordinator. */
   private readonly shutdownController = new AbortController();
@@ -321,24 +340,83 @@ export class V2AttemptCoordinator {
 
   /** Abort in-process executions before a v2 stop/reclaim is committed. */
   abortTaskExecutions(taskId: string): void {
-    for (const controller of this.activeExecutions.get(taskId) ?? []) controller.abort();
+    this.cancelledTasks.add(taskId);
+    for (const execution of this.activeExecutions.get(taskId) ?? []) execution.controller.abort();
   }
 
   /** Abort every in-process authoritative execution during server shutdown. */
   abortAllExecutions(): void {
     this.shutdownController.abort();
-    for (const controllers of this.activeExecutions.values()) {
-      for (const controller of controllers) controller.abort();
+    for (const executions of this.activeExecutions.values()) {
+      for (const execution of executions) execution.controller.abort();
     }
   }
 
-  private registerExecution(taskId: string, controller: AbortController): () => void {
-    const executions = this.activeExecutions.get(taskId) ?? new Set<AbortController>();
-    executions.add(controller);
-    this.activeExecutions.set(taskId, executions);
+  /** Reopens a task after a successful lifecycle transition back to runnable. */
+  allowTaskExecutions(taskId: string): void {
+    this.cancelledTasks.delete(taskId);
+  }
+
+  /** Waits until every currently registered execution has publicly settled. */
+  async awaitTaskSettlements(taskId: string): Promise<void> {
+    while (true) {
+      const executions = Array.from(this.activeExecutions.get(taskId) ?? []);
+      if (executions.length === 0) return;
+      await Promise.all(executions.map((execution) => execution.settled));
+    }
+  }
+
+  /** Waits for all registered executions during process shutdown. */
+  async awaitAllSettlements(): Promise<void> {
+    while (true) {
+      const executions = Array.from(this.activeExecutions.values()).flatMap((entries) => Array.from(entries));
+      if (executions.length === 0) return;
+      await Promise.all(executions.map((execution) => execution.settled));
+    }
+  }
+
+  /**
+   * Starts a temporary reclaim barrier, aborts active work, and returns a
+   * release function for the scheduler to call after its fresh projection and
+   * reclaim decision have committed.
+   */
+  async cancelTaskAndAwaitSettlements(taskId: string): Promise<() => void> {
+    this.abortTaskExecutions(taskId);
+    await this.awaitTaskSettlements(taskId);
+    let released = false;
     return () => {
-      executions.delete(controller);
+      if (released) return;
+      released = true;
+      this.allowTaskExecutions(taskId);
+    };
+  }
+
+  private registerExecution(taskId: string, controller: AbortController): ActiveExecutionRegistration {
+    let resolveSettled: (() => void) | null = null;
+    const settled = new Promise<void>((resolve) => {
+      resolveSettled = resolve;
+    });
+    const execution: ActiveExecution = {
+      controller,
+      settled,
+      settle: () => {
+        resolveSettled?.();
+        resolveSettled = null;
+      },
+    };
+    const executions = this.activeExecutions.get(taskId) ?? new Set<ActiveExecution>();
+    executions.add(execution);
+    this.activeExecutions.set(taskId, executions);
+    // This check is deliberately synchronous with registration: a stop can
+    // win immediately before or after this call, but never leave a setup
+    // window in which an execution starts without its stop signal.
+    if (this.shutdownController.signal.aborted || this.cancelledTasks.has(taskId)) {
+      controller.abort();
+    }
+    return () => {
+      if (!executions.delete(execution)) return;
       if (executions.size === 0) this.activeExecutions.delete(taskId);
+      execution.settle();
     };
   }
 
@@ -377,7 +455,13 @@ export class V2AttemptCoordinator {
       operationId: attemptLeaseOperationId(taskId, String(state.lastSequence), workerId),
       eligibilityBlocked: false,
     });
-    return this.executeLeased(taskId, schedulerSignal, { dispatchRef: leased.dispatchRef });
+    return this.executeLeased(taskId, schedulerSignal, {
+      dispatchRef: leased.dispatchRef,
+      workItemId: leased.workItemId,
+      leaseEpoch: leased.leaseEpoch,
+      attemptId: leased.attemptId,
+      commandId: leased.commandId,
+    });
   }
 
   /** The lease step: claim the deterministic next ready workitem (spec §10.2). */
@@ -407,7 +491,13 @@ export class V2AttemptCoordinator {
   async executeLeased(
     taskId: string,
     schedulerSignal?: AbortSignal,
-    leaseInfo?: { dispatchRef: BlobRefV2 | null },
+    leaseInfo?: {
+      dispatchRef: BlobRefV2 | null;
+      workItemId?: string;
+      leaseEpoch?: number;
+      attemptId?: string | null;
+      commandId?: string | null;
+    },
   ): Promise<V2AttemptOutcome> {
     // Register before the first asynchronous projection/context read so a
     // concurrent stop or shutdown cannot miss this execution in its setup
@@ -426,6 +516,17 @@ export class V2AttemptCoordinator {
       if (executionController.signal.aborted) return { kind: 'idle' };
       const lease = state.activeLease;
       if (lease === null) return { kind: 'idle' };
+      if (
+        (leaseInfo?.workItemId !== undefined && lease.workItemId !== leaseInfo.workItemId) ||
+        (leaseInfo?.leaseEpoch !== undefined && lease.leaseEpoch !== leaseInfo.leaseEpoch) ||
+        (leaseInfo?.attemptId !== undefined && lease.attemptId !== leaseInfo.attemptId) ||
+        (leaseInfo?.commandId !== undefined && lease.commandId !== leaseInfo.commandId)
+      ) {
+        // A concurrently running scheduling tick may have reclaimed and
+        // re-leased the same task. Never let an old pass execute the successor
+        // lease just because executeLeased receives only the task id.
+        return { kind: 'idle' };
+      }
       const wi = state.workItems[lease.workItemId];
       if (wi === undefined) {
         throw new AttemptError('WORK_ITEM_NOT_FOUND', `no workitem '${lease.workItemId}'`);
