@@ -18,6 +18,30 @@
 - Any source change invalidates captured qualification evidence; re-run check/build/qualification/promotion before claiming production readiness.
 - Existing untracked `.workbuddy/memory/*` files in the main checkout are user data and must not be changed or removed.
 
+## Execution record (2026-08-18)
+
+- Tasks 1–4 are implemented and committed through `22c9ea5`: the production
+  tick executes all fresh leases; Pi receives the task-scoped v2 tool closure;
+  structure/generation/repair/map+content review/validator/seal dependencies
+  are composed; and real-mode attempts have bounded, sanitized failure paths.
+- A structured turn with no domain result carrier now returns
+  `V2_RESULT_REFS_MISSING` through the durable retry envelope. This preserves
+  the §9.2 coordinator invariant without exposing a bare-completion
+  `INVALID_INPUT` as an HTTP 500.
+- Fresh HTTP + browser evidence confirms a production Pi turn received four
+  v2 tools and made read-tool calls, then persisted a retryable provider
+  failure instead of hanging. The captured browser screenshots are under
+  `output/playwright/` in this worktree.
+- The full `MigrationServiceV2` production factory is intentionally not
+  claimed: migration command dispatch is explicit terminal fail-closed with
+  `MIGRATION_RUNTIME_NOT_WIRED`. Completing migration composition and proving
+  a real successful provider/tool write remain follow-up gates.
+- Verification observed so far: `npm run check`, both default and
+  `VITE_FORGE_CORE_MODE=http` builds, authoritative acceptance, focused
+  regressions, and a 184-file full run. The first full run exposed one stale
+  I-2 test assertion; after synchronizing that assertion, the affected
+  coordinator file is 24/24 green.
+
 ---
 
 ### Task 1: Establish the current production execution regression
@@ -243,4 +267,3 @@
   git add docs/CLOSURE-AUTHORITATIVE-REVIEW-V2.md docs/evidence
   git commit -m "docs: close authoritative real-mode acceptance"
   ```
-

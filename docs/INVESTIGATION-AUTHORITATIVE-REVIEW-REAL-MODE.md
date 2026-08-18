@@ -1,9 +1,9 @@
 # Forge Core v2 真模型集成排查报告（SDK / DeepSeek 卡死问题）
 
-> 日期：2026-08-17
-> HEAD：e815f10
-> 状态：**未修复**，已暂停排查（API 配额用尽）；本报告记录事实、根因怀疑、已排除项、复现命令与下一步计划。
-> 接手者：`codex/authoritative-review-v2` worktree（已合并回 main），分支 `main` 当前已 enable `authoritative_review_v1`，profile digest `f4685a55...`。
+> 日期：2026-08-18（复核更新）
+> 基线：`e815f10`；本次修复链当前提交为 `22c9ea5`
+> 状态：**生产接线与无界 hang 已修复；真实 provider 失败仍按 retryable 记录**。原始 2026-08-17 现象保留为历史证据；本报告补充生产组合、真实 HTTP、运行时日志与浏览器复核结果。
+> 当前 worktree：`codex/authoritative-review-real-mode`；主 checkout 的 `authoritative_review_v1` capability/profile 未被本次实验改写。
 
 ## 1. 现象
 
@@ -28,16 +28,43 @@ structured_agent_attempt_started_v2   <-- orchestrator Agent turn 已开始
 | `ModelRuntime.create()` 解析 deepseek | `getModel('deepseek','deepseek-v4-flash')` 返回 model；`hasConfiguredAuth('deepseek')` = true | `scripts/_test-dep.mjs` |
 | SDK 默认 listener 路径（Forge 测试 fixture 外的最小复现） | 843ms 跑完 14 个 event，包括 `agent_end` / `agent_settled` | `scripts/_test-dep5.mjs` |
 
-### 2.8 ✅ **已确认的 Forge 衔接缺口：生产 PiAgentRuntime 没注入 v2Tools**
+### 2.8 ✅ **已关闭的 Forge 衔接缺口：生产 PiAgentRuntime 已注入 v2Tools**
 
-生产 `CoreService` 在 `src/server/core-service.ts:502-506` 创建 `new PiAgentRuntime({ coreCwd, workspaces, structuredSlot })`，但没有传入 `v2Tools`。`PiAgentRuntime.run()` 在 `src/server/runtime/pi-agent-runtime.ts:796-798` 只有当 `this.#v2Tools !== undefined` 时才调用 `createContext(input)`；因此真实 v2 `AssignmentRunner`（`assignment-runner.ts:102-104` 设置 `v2Session`）在生产路径里拿不到 `read_map_build_frontier`、`append_map_candidate_chunk`、`finish_map_build` 等封闭 v2 工具。
+生产 `CoreService` 现在把 task-aware `ProductionV2ToolRuntime` 通过 `v2Tools` 传给 `PiAgentRuntime`。`PiAgentRuntime.run()` 的 `createContext(input)` 会从当前持久化 lease/attempt 重建上下文，工具由 `V2ToolFactory` 按 session kind 关闭绑定；`V2AssignmentRunner` 不再预取一份与 Pi 无关的工具列表，结果引用则从同一个 task-scoped factory 收集。
 
-这与测试路径不同：`pi-agent-runtime.test.ts:1715-1842` 显式注入 `v2Tools`，所以测试 green 不证明生产 v2 tool seam 已接通。Task 21 `production-composition.ts` 的注释也明确 Task 13 tool factory 尚未 wiring，当前 production `toolProvider` 返回空集合；这不是 DeepSeek API 或 SDK 单独问题，而是 Forge composition 的已确认前向依赖/衔接缺口。它解释了为什么 `structured_agent_attempt_started_v2` 已落盘后没有合法 Map chunk/result 继续事件；但 Agent turn 本身仍需 instrument 证明是否因空工具集合而挂起。
+这与旧测试路径的差异已经由 `production-composition.integration.test.ts`、`production-tool-runtime.test.ts` 和真实 HTTP 证据覆盖：生产结构回合实际暴露 `read_structure_contract`、`read_map_build_frontier`、`append_map_candidate_chunk`、`finish_map_build` 四个工具，并使用 lease owner 作为 authority identity，而不是冻结 Agent 的 role id。
 
-**结论更新**：在修改 SDK 前，必须先把生产 `PiAgentRuntime.v2Tools` 注入真实 `V2ToolFactory`/`ToolProvider`，并写一条 production composition integration test；随后再复现，才能隔离剩余 SDK/DeepSeek listener 问题。
+因此，原先“生产没有 v2Tools”已不再是当前根因。剩余 provider/SDK 行为必须用真实运行日志判断，不能再从旧的 `agent_attempt_started_v2` 停滞现象推断为空工具导致。
+
+## 2.9 ✅ 2026-08-18 真实生产复核结果
+
+在独立 worktree、全新临时数据根目录、`FORGE_CORE_MODE=production`、`VITE_FORGE_CORE_MODE=http` 下启动实际 HTTP 服务，并通过 HTTP 创建/启动 `zhihu-salt-chapter-draft` 任务。观察到的生产日志顺序为：
+
+```text
+v2 context ready (... tools=4 names=read_structure_contract,read_map_build_frontier,append_map_candidate_chunk,finish_map_build)
+session creating (... v2Tools=4 forgeTools=0)
+turn started (... v2Tools=4 forgeTools=0)
+prompt dispatch (... inputChars=201)
+tool started read_structure_contract / finished error=false
+tool started read_map_build_frontier / finished error=false
+turn failed code=PROVIDER_ERROR
+```
+
+对应事件已经从“只停在 `structured_agent_attempt_started_v2`”变为完整的 retryable envelope：
+
+```text
+structured_agent_attempt_retryable_failed_v2 (failureCode=PROVIDER_ERROR)
+structured_work_item_retryable_failed (retryOrdinal=1, retryNotBefore=...)
+```
+
+这证明真实 Pi turn 已经进入并调用封闭 v2 工具，provider 错误会在有限时间内释放 lease 并写入重试状态，而不是无限等待或让 HTTP 请求抛裸协调器异常。另一个无领域结果载体的路径由 runner 归类为 `V2_RESULT_REFS_MISSING`，同样通过 retryable envelope 结束，不会把 §9.2 的 `INVALID_INPUT` 直接暴露成 500。
+
+浏览器以同一 HTTP build 打开 `/tasks` 与任务详情页，能看到真实创建的任务、`running` 状态、四个 agent region 和停止操作；截图保存在 `output/playwright/real-mode-tasks-http.png`、`output/playwright/real-mode-task-detail.png`（这些是本次 worktree 的临时验收产物）。浏览器没有运行时 error，只有 React Router future warnings。
+
+当前仍需明确的边界：`ProductionV2DomainRuntimeFactory` 已真实组合 structure/map build、generation、repair、map/content review、validator 与 seal 依赖，但 `MigrationServiceV2` 的完整生产构造尚未完成。迁移 command 现在显式返回 `MIGRATION_RUNTIME_NOT_WIRED` 的 terminal fail-closed 结果，不再使用 `NOT_IMPLEMENTED` retryable stub 假装可运行；因此“初始结构任务真实可运行”已被证明，而“包含 migration 的全生命周期”仍不能宣称完成。
 
 
-完整 Forge 路径上 Pi turn 不返回；最小 SDK 路径能 843ms 返回。差异来自 Forge 注入的额外 seam。
+> 历史结论（修复前）：完整 Forge 路径上 Pi turn 不返回；最小 SDK 路径能 843ms 返回。差异来自 Forge 注入的额外 seam。§2.8–§2.9 是当前复核后的结论。
 
 ## 3. SDK 卡死路径（已观察到 / 怀疑）
 
@@ -72,7 +99,7 @@ session.subscribe(...)                                    // <-- session-level t
 - **ModelRuntime 解析**：deepseek v4-flash/v4-pro 都被正确解析；`deepseek-chat` 在 SDK 中**未注册**（这是 SDK 0.82 的限制，不是我们的）。
 - **deepseek v4-flash 本身卡死**：直 curl 2 秒返回；SDK 最小路径 843ms 完成。
 - **Forge v2 capability gate**：`authoritative_review_v1` status=enabled、profile digest 匹配、executionEligibility=eligible、事件流正确发出 task_started → agent_attempt_started_v2。
-- **worktree / git / capability promote**：HEAD `e815f10`，origin/main 同步，干净。
+- **worktree / capability promote**：本次修复在隔离 worktree 完成；主 checkout 的 capability/profile 未被改写。修复前的 `e815f10` 事实保留，当前生产接线证据见 §2.9。
 
 ## 5. 复现命令（接手者直接跑）
 
@@ -97,7 +124,7 @@ TID=$(curl -s -X POST http://127.0.0.1:3210/api/tasks -H 'Content-Type: applicat
 # 3) start
 curl -X POST http://127.0.0.1:3210/api/tasks/$TID/start
 
-# 4) 等 30s 看 events（orchestrator Agent turn 应当完成 / 失败，但实际卡住）
+# 4) 等 30s 看 events（应出现 completed / retryable_failed / terminal_failed，而不是无界停在 attempt_started）
 ls -la data/tasks/$TID/events/
 
 # 5) 看 server stderr（dev 模式下 stderr 暴露 SDK 内部错误）
@@ -106,42 +133,25 @@ tail -100 dev.log 2>/dev/null
 
 期望（修复后）：事件流在 30 秒内出现 `structured_agent_attempt_completed_v2` 或 `structured_agent_attempt_terminal_failed_v2` / `structured_agent_attempt_retryable_failed_v2`。
 
-## 6. 下一步计划（按优先级，建议接手者直接执行）
+## 6. 已执行的修复与剩余验证
 
-### 优先级 1：在 listener 里加日志暴露 SDK 内部错误
-Forge `session.subscribe` 的 listener 用 `try { ... } catch { drop silently }` 吞掉异常；这是设计选择（trace 收集防御性），但当 SDK 在 emit 时同步抛错（preflight listener 的 async 拒绝）会冒泡到 `agent_session.js:289` 的 `l(event)`，让 turn 卡住。
+### 已关闭
 
-建议：在 `session.subscribe` 的 catch 里 `console.error` 一行（dev 模式可见），并把 SDK `_handleAgentEvent` 处的 unhandled promise rejection 也暴露——用 `process.on('unhandledRejection', ...)` 临时打印。
+- 生产 `runTick()` 对每个新 lease 调用 `V2AttemptCoordinator.executeLeased()`，不再只写 lease/attempt-start 事件。
+- `CoreService` 注入 task-aware `ProductionV2ToolRuntime`，Pi 与结果收集共享同一 `V2ToolFactory` 作用域；日志记录了工具数量/名称、turn 起止、tool 起止和失败码，字段经过脱敏。
+- preflight listener 的异常现在被记录后重新抛出；attempt timeout、provider failure、abort 均走既有 durable retry/abort 语义。
+- 结构化回合没有非空 `resultRefs` 时返回 `V2_RESULT_REFS_MISSING` retryable outcome，避免裸完成穿透到 coordinator 并变成 HTTP 500。
+- 增加了 production composition、tool runtime、runner、API 和 scheduler 回归；实际 HTTP + Playwright 验收见 §2.9。
 
-```ts
-// src/server/runtime/pi-agent-runtime.ts:925 的 listener
-} catch (err) {
-  console.error('[forge] listener threw:', err instanceof Error ? err.message : String(err));
-}
-```
+### 尚未宣称完成
 
-跑一遍上面的复现命令，看 stderr 里打印出什么。
-
-### 优先级 2：测试 v2 真实链路（不只是最小 SDK）
-写一个完整 Forge 路径的集成测试，包含 `DefaultResourceLoader({cwd, agentDir, noX:true})` + `customTools: [forgeTools]` + `agentSubscribe(preflight)` + `session.subscribe(trace)`。验证：
-- (a) 不带 `customTools` 843ms 完成（baseline 已通过）
-- (b) 带 `customTools: []` 同样 843ms
-- (c) 带 `customTools: [forgeTools]` **是否卡死** → 如果卡死，问题在 forge tools 注入
-- (d) 加 `agentSubscribe` listener（async preflight） → 如果卡死，问题在 preflight listener 形状
-
-### 优先级 3：DeepSeek reasoning 模型兼容
-Forge 默认模板 `deepseek/deepseek-v4-flash` 是 `reasoning: true` + `requiresReasoningContentOnAssistantMessages: true`。SDK 0.82 的 `DefaultResourceLoader`/`AgentEvent` 处理路径可能假设 non-reasoning。
-
-短期方案：模板 agent model 切回 `opencode/claude-haiku-4-5`（或任何 non-reasoning 模型），验证 Pi turn 跑通——已用 deepseek 在小测试里能跑，所以模型本身没问题；如果切回 opencode 跑通，差异就在 reasoning 通道。
-
-长期方案：要么换 SDK 版本，要么在 Forge listener 里显式处理 `assistantMessageEvent.reasoning_content`。
-
-### 优先级 4：SDK 升级可能性
-检查 `@earendil-works/pi-coding-agent` 后续版本是否修复了 `agent.subscribe` listener 形状与 reasoning 模型的兼容问题。
+- 真实 DeepSeek/provider 在本次复核中仍返回 `PROVIDER_ERROR`，但已在有限时间内写 retryable envelope；这证明“有界失败”而不是“provider 已成功完成”。若要证明真实模型成功产出 Map，还需在 provider 可用且模型实际调用写工具后重新运行。
+- `MigrationServiceV2` 尚未完成生产构造；迁移 command 明确 terminal fail-closed (`MIGRATION_RUNTIME_NOT_WIRED`)。应单独完成 migration composition 和真实迁移 HTTP/浏览器验收，不能把当前初始结构链路证据外推为全生命周期证据。
+- SDK/DeepSeek reasoning 兼容性仍可独立升级研究，但不再是“无限挂死未收敛”的生产阻塞；当前应先保留已验证的超时、诊断和 retry 证据。
 
 ## 7. 已写但已删除的排查脚本
 
-为了避免污染仓库，下列临时测试文件**已删除**（git 状态干净，HEAD `e815f10`）：
+为了避免污染仓库，下列临时测试文件**已删除**（不属于产品实现）：
 
 - `scripts/_test-dep.mjs` — ModelRuntime 直测（deepseek 解析 OK）
 - `scripts/_test-dep2.mjs` — `hasConfiguredAuth` / `getAuth(deepseek)` 验证（keyLen=35，来源 stored credential 实为 env fallback）
@@ -154,7 +164,7 @@ Forge 默认模板 `deepseek/deepseek-v4-flash` 是 `reasoning: true` + `require
 ## 8. 关键文件参考
 
 - `src/server/runtime/pi-agent-runtime.ts:782-1080`：`run()` 主路径，含 listener 注册、prompt 调用、错误捕获
-- `src/server/runtime/pi-agent-runtime.ts:925-955`：`session.subscribe(trace listener)`，try/catch 静默吞掉
+- `src/server/runtime/pi-agent-runtime.ts:925-955`：`session.subscribe(trace listener)`，best-effort trace + 脱敏诊断日志
 - `src/server/runtime/pi-agent-runtime.ts:910-914`：`structuredUnsubscribe = session.agentSubscribe(createForgePiSlotPreflight(...))`
 - `src/server/runtime/pi-resource-loader.ts:79-95`：`createForgeResourceLoader` 继承 `DefaultResourceLoader` 全 noX
 - `src/server/authoritative-review/attempt-coordinator.ts:362-422`：`executeLeased`，包含 lease/timeout 复合 signal
@@ -165,18 +175,17 @@ Forge 默认模板 `deepseek/deepseek-v4-flash` 是 `reasoning: true` + `require
 
 ## 9. 接手者 Checklist
 
-- [ ] 读本文 + `src/server/runtime/pi-agent-runtime.ts:782-1080` + `node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js:280-510`
-- [ ] 应用优先级 1（暴露 stderr），重跑复现命令，记录 SDK 实际抛错
-- [ ] 应用优先级 2（完整 Forge listener 集成测试），定位卡死点
-- [ ] 优先级 3（切回 non-reasoning 模型）作为短期绕路
-- [ ] 找到 root cause 后修复并新增针对性 TDD 测试
-- [ ] 跑 `npm run check && npm test -- --reporter=dot` 全绿
-- [ ] 写收尾 fix commit + push
-- [ ] 更新本文件 "状态" 字段并把发现加入 `docs/CLOSURE-AUTHORITATIVE-REVIEW-V2.md` 后续债务清单
+- [x] 读本文 + `src/server/runtime/pi-agent-runtime.ts` + Pi SDK event path
+- [x] 暴露脱敏 stderr 生命周期日志并验证真实 HTTP 事件收敛
+- [x] 完整 Forge production composition/tool runtime integration test
+- [x] 增加缺少结果引用、timeout、provider failure、abort 的 TDD 回归
+- [x] 运行 check/build、authoritative acceptance、全量回归（全量首跑仅有一个已同步的旧断言，修正后相关 24 tests 全绿）
+- [ ] 完成 `MigrationServiceV2` 的生产构造并通过真实迁移任务验收
+- [ ] 在 provider 可稳定返回时取得真实模型成功写入工具结果的证据
 
 ## 10. 后续债务（已登记于 CLOSURE-AUTHORITATIVE-REVIEW-V2.md）
 
 - N2（发布 recipe 未交叉校验 reviewBundle 内部 refs）— 执行期 resolver 兜底，不可利用
 - N4（旧 checkpoint mergedArtifactVersion 归一）— v2 尚未进生产
-- N5/N6（公开 capability 工厂边界、生产未接五个 domain services）— 前向依赖
-- **N7（本报告新增）：真实 Pi 0.82 + DeepSeek reasoning 模型下 Agent turn 卡在 `agent_attempt_started_v2` 之后、`agent_attempt_terminal_failed_v2` 之前；hermetic-only 路径走通但 real-mode 阻塞**
+- N5/N6（公开 capability 工厂边界、migration production composition 尚未完成）— 当前非 migration 初始结构/工具路径已接通，其余缺口显式 fail-closed
+- **N7（更新）：真实 Pi 0.82 + DeepSeek reasoning provider 曾在 `agent_attempt_started_v2` 后无界停滞；当前已能记录工具调用和 `PROVIDER_ERROR` retryable envelope。剩余工作是 provider 成功写入的真实证据与 SDK 兼容性长期优化。**

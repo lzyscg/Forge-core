@@ -1,8 +1,8 @@
 /**
- * Task 21 P1#1 production composition root (design §17.2, spec §9.2/§10.2):
- * the ONE installation path that turns the Task 12 `SystemCommandRegistry`
- * default NOT_IMPLEMENTED doubles into the REAL closed six-handler allowlist
- * and binds a `V2AttemptCoordinator` + `runV2SchedulingTick` driver to it.
+ * Production composition root (design §17.2, spec §9.2/§10.2): the ONE
+ * installation path that binds the closed SystemCommand allowlist, the
+ * task-scoped v2 domain services, and a `V2AttemptCoordinator` + scheduling
+ * tick driver to the authoritative runtime.
  *
  * This module is the P1#1 correction: before it existed, `SystemCommandRegistry`
  * was only ever constructed with `createDefaultSystemCommandHandlers()` (six
@@ -12,7 +12,9 @@
  * installs the real handlers, constructs the System Seal service (per task, so
  * the task-agnostic `validate(stage, artifactRef)` / `blobs.prepare` /
  * `resolveTemplateIdentity` dep signatures still bind the exact task authority),
- * and wires the scheduler tick that executes freshly leased work items.
+ * and wires the scheduler tick that executes freshly leased work items. A
+ * service that is not composed is represented by an explicit terminal
+ * fail-closed outcome; it is never silently left as a retrying stub.
  *
  * Execution discipline (the Task 20 production precedent): every domain command
  * handler that completes publishes the WHOLE terminal batch — including
@@ -239,9 +241,9 @@ export interface AuthoritativeReviewCompositionInputV2 {
    * the seal_output blocking path commits `ARTIFACT_VALIDATION_FAILED` through
    * it. Absent, the coordinator's terminal-fail path fails loud (no seam). */
   terminalFail?(taskId: string, input: TerminalFailInputV2): Promise<void>;
-  /** The five domain services whose handlers this root replaces the
-   * NOT_IMPLEMENTED doubles with. Absent services keep the closed retryable
-   * double (fail-closed — never a fabricated domain result). */
+  /** The task-scoped domain services shared by command and Pi-tool bridges.
+   * Missing services are surfaced as explicit fail-closed outcomes rather
+   * than hidden behind a retrying stub. */
   mapBuildService?: MapBuildService;
   contentPlanService?: ContentPlanService;
   repairService?: RepairService;
@@ -272,10 +274,11 @@ export interface AuthoritativeReviewCompositionV2 {
 }
 
 /**
- * The P1#1 production installation. All deps are real store/facade/frozen
- * surfaces — no call-String fabrication, no test doubles. With the five domain
- * services absent the five non-seal kinds keep their closed NOT_IMPLEMENTED
- * doubles; the seal kind is ALWAYS the real SystemSealServiceV2.
+ * The production installation. All deps are real store/facade/frozen surfaces
+ * — no call-string fabrication and no test doubles. The initial structure,
+ * generation, repair, map/content review, validator, and seal paths are
+ * task-scoped real services. A not-yet-composed migration service is reported
+ * explicitly as `MIGRATION_RUNTIME_NOT_WIRED` rather than parked forever.
  */
 export function installAuthoritativeReviewRuntime(
   input: AuthoritativeReviewCompositionInputV2,
@@ -772,8 +775,8 @@ export function installAuthoritativeReviewRuntime(
       // Every fresh lease is already classified and authorized by the
       // coordinator. System commands and Agent assignments must both enter the
       // AttemptCoordinator here; filtering Agent assignments at this boundary
-      // makes the production scheduler emit lease/dispatch/attempt-start facts
-      // without ever invoking the Agent runtime.
+      // would emit lease/dispatch/attempt-start facts without invoking the
+      // Agent runtime.
       outcomes.push(await attempts.executeLeased(leased.taskId));
     }
     return { pass, outcomes };
