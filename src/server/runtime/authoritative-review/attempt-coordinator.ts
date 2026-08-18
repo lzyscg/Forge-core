@@ -517,7 +517,7 @@ export class V2AttemptCoordinator {
         try {
           if (family === 'command') {
             try {
-              return await this.executeCommand(
+              const commandOutcome = await this.executeCommand(
                 taskId,
                 wi.workItemId,
                 attemptId,
@@ -525,12 +525,20 @@ export class V2AttemptCoordinator {
                 baseRef,
                 claimCommit,
               );
+              // A handler can return after the coordinator-owned timeout has
+              // already started its durable retry. Do not let this late
+              // `aborted` continuation beat the timeout settlement in the
+              // outer race.
+              if (commandOutcome.kind === 'aborted' && (timedOut || timeoutClaimed)) {
+                return timeoutSettlement ?? commandOutcome;
+              }
+              return commandOutcome;
             } finally {
               settlementPhase = 'settled';
             }
           }
           const outcome = await this.deps.runner.runSession(ctx, signal.controller.signal);
-          if (!claimCommit()) return aborted();
+          if (!claimCommit()) return timeoutSettlement ?? aborted();
           try {
             return await this.commitSessionOutcome(taskId, wi.workItemId, attemptId, outcome, ctx);
           } finally {
