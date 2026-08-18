@@ -408,21 +408,22 @@ describe('V2AttemptCoordinator lease -> execute -> complete', () => {
     expect(projection.activeLease?.attemptId).toBe(attemptB);
   });
 
-  it('I-2: rejects a BARE completion of a gated sessionKind workitem with ZERO writes (§9.2)', async () => {
+  it('I-2: converts a BARE structured completion into a durable retryable failure (§9.2)', async () => {
     const env = await makeEnv({ bare: true }); // the tool provider returns NO domain result refs
     const taskId = tid('bare');
     const { workItemId } = await createWorkItem(env, taskId); // structure_chunk is gated
-    await expect(env.attempts.runNext(taskId, 'worker-a')).rejects.toMatchObject({ code: 'INVALID_INPUT' });
-    // ZERO terminal writes: no completion/retryable/terminal events; the lease
-    // (itself legal) stays active with the attempt still started.
+    const outcome = await env.attempts.runNext(taskId, 'worker-a');
+    expect(outcome).toMatchObject({ kind: 'retryable_failed', workItemId, failureCode: 'V2_RESULT_REFS_MISSING' });
+    // The runner must settle the lease through the normal retry envelope; it
+    // must never leak the coordinator's bare-completion INVALID_INPUT as an
+    // HTTP/runtime exception.
     const events = await env.base.eventStore.read(taskId);
     expect(events.some((e) => e.event.type === 'structured_work_item_completed')).toBe(false);
-    expect(events.some((e) => e.event.type === 'structured_work_item_retryable_failed')).toBe(false);
+    expect(events.some((e) => e.event.type === 'structured_work_item_retryable_failed')).toBe(true);
     expect(events.some((e) => e.event.type === 'structured_work_item_terminal_failed')).toBe(false);
     const projection = await readProjection(env, taskId);
-    expect(projection.workItems[workItemId].state).toBe('leased');
-    expect(projection.activeLease?.attemptId).toBeTruthy();
-    expect(projection.attempts[String(projection.activeLease?.attemptId)].state).toBe('started');
+    expect(projection.workItems[workItemId].state).toBe('retryable_failed');
+    expect(projection.activeLease).toBeNull();
   });
 
   it('I-1/I-2: a stale-epoch retryable failure is rejected with ZERO writes', async () => {

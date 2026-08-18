@@ -95,6 +95,7 @@ describe('V2AssignmentRunner', () => {
           toolContexts.push(ctx);
           return [];
         },
+        collectResultRefs: async () => [ref('content_value', 101)],
       },
     });
     const outcome = await runner.runSession(context(), new AbortController().signal);
@@ -217,6 +218,23 @@ describe('V2AssignmentRunner', () => {
     if (outcome.kind === 'committed') {
       expect(outcome.resultRefs).toEqual([resultRef]);
     }
+  });
+
+  it('returns a retryable failure instead of a bare structured completion when no result refs were committed', async () => {
+    const inner = new FakeAgentRuntime();
+    inner.setScript('orchestrator', [{ kind: 'result', publicText: 'text only' }]);
+    const runner = new V2AssignmentRunner({
+      runtime: inner,
+      toolProvider: {
+        toolsFor: async () => [],
+        collectResultRefs: async () => [],
+      },
+    });
+
+    await expect(runner.runSession(context(), new AbortController().signal)).resolves.toMatchObject({
+      kind: 'retryable_failure',
+      failureCode: 'V2_RESULT_REFS_MISSING',
+    });
   });
 
   it('fails closed when no frozen agent is resolved for the role', async () => {

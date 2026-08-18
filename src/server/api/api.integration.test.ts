@@ -1272,10 +1272,14 @@ describe('v2 lifecycle HTTP dispatch (Task 11, spec §14.3)', { timeout: 30_000 
 
   it('B-F1: the spec-legal { answer } variant answers a LIVE pending question (and A-M6 mints a replacement grant naming the replacement)', async () => {
     const roots = await v2Roots();
-    const { baseUrl, service, close } = await bootV2Server(roots, createAuthoritativeReviewTestEnvironment());
+      const { baseUrl, service, close } = await bootV2Server(roots, createAuthoritativeReviewTestEnvironment());
     try {
       const task = await service.createTask(v2Request() as Parameters<CoreService['createTask']>[0]);
-      await service.startTaskV2(task.id);
+      // This scenario needs to open a question while the Agent lease is
+      // still live. Keep setup at the lifecycle/scheduling boundary instead
+      // of running the production tick, which intentionally executes a
+      // freshly leased Agent assignment before returning.
+      await service.v2Lifecycle.startV2(task.id, { operationId: 'op-live-question-start', userInputText: '' });
       await service.runV2SchedulingPass('2026-08-14T10:00:00.000Z');
       // Open a live question from the active structured attempt.
       const opened = await service.v2Lifecycle.openQuestionV2(task.id, {

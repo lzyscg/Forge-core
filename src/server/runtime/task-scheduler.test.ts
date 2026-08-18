@@ -2326,7 +2326,11 @@ describe('v2 scheduling loop (Task 11, spec §10.4)', { timeout: 30_000 }, () =>
   it('deleted tasks are never scheduled (tombstone gate before anything else)', async () => {
     const { service } = await v2ServiceHarness();
     const task = await service.createTask(v2Request());
-    await service.startTaskV2(task.id);
+    // Keep this test at the scheduling-pass boundary. The public CoreService
+    // start path now runs the real production tick, so it would also execute
+    // the leased Agent assignment; this test only needs a durable runnable
+    // task before deleting it.
+    await service.v2Lifecycle.startV2(task.id, { operationId: 'op-delete-start', userInputText: '' });
     await service.runV2SchedulingPass('2026-08-14T10:00:00.000Z');
     await service.deleteTask(task.id, { operationId: '33333333-3333-4333-8333-333333333333', reason: '清理' });
     const pass = await service.runV2SchedulingPass('2026-08-14T10:00:00.000Z');
@@ -2362,7 +2366,7 @@ describe('v1 boot recovery v2 gate (review A-F1) + blocked startup (review A-F2)
   it('A-F1: the v1 boot recovery never touches a v2 task (no v1 interruption/incompatible events)', async () => {
     const { service } = await v2ServiceHarness();
     const task = await service.createTask(v2Request());
-    await service.startTaskV2(task.id);
+    await service.v2Lifecycle.startV2(task.id, { operationId: 'op-recovery-start', userInputText: '' });
     await service.runV2SchedulingPass('2026-08-14T10:00:00.000Z');
     const before = await service.events.read(task.id);
     const recovered = await service.scheduler.recoverInterruptedTasks();
@@ -2378,7 +2382,7 @@ describe('v1 boot recovery v2 gate (review A-F1) + blocked startup (review A-F2)
   it('A-F1: a v2 task under a temporarily disabled authoritative runtime stays non-terminal (never task_incompatible)', async () => {
     const harnessA = await v2ServiceHarness();
     const task = await harnessA.service.createTask(v2Request());
-    await harnessA.service.startTaskV2(task.id);
+    await harnessA.service.v2Lifecycle.startV2(task.id, { operationId: 'op-disabled-start', userInputText: '' });
     const disabledService = new CoreService(
       CorePaths.create({ dataRoot: harnessA.dataRoot, templateRoot: harnessA.templateRoot }),
       {

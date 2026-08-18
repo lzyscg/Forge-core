@@ -127,6 +127,19 @@ export class V2AssignmentRunner {
         }
       }
       const resultRefs = await this.toolProvider.collectResultRefs?.(ctx) ?? [];
+      // Every structured Agent session is a gated v2 completion. If the
+      // model produced only text (or the domain tool surface failed to leave
+      // a committed carrier), do not let the coordinator receive a bare
+      // completion and turn the HTTP request into a 500. Return through the
+      // normal retry path so the lease is durably settled and the next
+      // attempt can continue from the committed checkpoint.
+      if (ctx.executionKind === 'structured' && resultRefs.length === 0) {
+        return {
+          kind: 'retryable_failure',
+          failureCode: 'V2_RESULT_REFS_MISSING',
+          message: '结构化回合没有提交领域结果载体，当前尝试可重试。',
+        };
+      }
       return {
         kind: 'committed',
         publicText: result.publicText,
